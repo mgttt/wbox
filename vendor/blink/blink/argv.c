@@ -113,7 +113,15 @@ void LoadArgv(struct Machine *m, char *execfn, char *prog, char **args,
   while ((sp - nall * sizeof(i64)) & (STACKALIGN - 1)) --sp;
   sp -= nall * sizeof(i64);
   Write64(m->sp, sp);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: pass rdx=0 like the real linux kernel does at entry.
+  // glibc's __libc_start_main registers any non-null rtld_fini via
+  // __cxa_atexit(); handing it the prog-name string (upstream behavior)
+  // makes static glibc binaries jump into the stack at exit.
+  Write64(m->dx, 0);
+#else
   Write64(m->dx, dx);
+#endif
   Write64(m->di, 0); /* or ape detects freebsd */
   bytes = (u8 *)malloc(nall * 8);
   for (i = 0; i < nall; ++i) {
