@@ -1,0 +1,52 @@
+[package]
+name = "wbox"
+version = "0.1.0"
+edition = "2021"
+description = "Portable Windows 进程容器（AppContainer + Job Object，无需 VT-x / 管理员权限）"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+
+# ---- OCI 镜像拉取（src/oci/）----
+# 全部选用纯 Rust / 无 tokio 的小依赖，保证 windows-msvc 可编译。
+# 阻塞式 HTTP(S)。TLS 用 native-tls：Windows 走 schannel（纯 FFI，无需 MSVC lib.exe，
+# cargo check --target windows-msvc 在 Linux 沙箱也能过）；Linux 走系统 OpenSSL。
+# （rustls/ring 路线需要 lib.exe 汇编，无法在无 MSVC 的沙箱完成 windows-msvc check。）
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"   # ureq 需显式注入 TlsConnector（Windows=schannel，Linux=OpenSSL）
+tar = "0.4"          # tar 层解包
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] } # gzip 解压（miniz_oxide 纯 Rust）
+sha2 = "0.10"        # blob digest 校验（sha256）
+serde_json = "1"     # manifest / config JSON 解析（用 Value，不引入 serde derive）
+base64 = "0.22"      # 认证 token 请求等编码辅助
+
+# windows-sys 只启用用到的 feature，保持编译快、二进制小。
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    # 基础类型：HANDLE、BOOL、PSID、CloseHandle 等
+    "Win32_Foundation",
+    # 令牌 / SID / 完整性级别 / SECURITY_CAPABILITIES / 命名管道安全属性
+    "Win32_Security",
+    # AppContainer profile API（CreateAppContainerProfile 等）位于 Isolation 命名空间
+    "Win32_Security_Isolation",
+    "Win32_Security_Authorization",
+    # 进程创建、attribute list、等待、退出码
+    "Win32_System_Threading",
+    # Job Object API
+    "Win32_System_JobObjects",
+    # GetCurrentProcessId 等内核辅助
+    "Win32_System_Kernel",
+    # GetComputerNameExW 用不到；保留最小集合
+    "Win32_System_SystemInformation",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+]
+
+[profile.release]
+opt-level = "z"     # 优先小体积（portable 单文件）
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
