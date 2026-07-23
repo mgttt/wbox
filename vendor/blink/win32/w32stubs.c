@@ -167,9 +167,22 @@ struct __wbox_DIR {
   HANDLE h;
   WIN32_FIND_DATAW data;
   int first;
+  long pos;  // entries returned so far; backs telldir()/d_off
   wchar_t wpath[520];
   struct dirent ent;
 };
+
+// glibc's readdir skips getdents64 records whose d_ino is zero, so
+// synthesize a stable non-zero inode from the file name (FNV-1a).
+static ino_t WboxDirentIno(const char *name) {
+  uint64_t h = 1469598103934665603ULL;
+  for (const unsigned char *p = (const unsigned char *)name; *p; ++p) {
+    h ^= *p;
+    h *= 1099511628211ULL;
+  }
+  h &= 0x7fffffffffffffffULL;
+  return (ino_t)(h ? h : 1);
+}
 
 static DIR *OpendirW(const wchar_t *wpath, const char *path) {
   DIR *d = calloc(1, sizeof(DIR));
@@ -242,7 +255,8 @@ struct dirent *readdir(DIR *d) {
   d->ent.d_type = (d->data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                       ? DT_DIR
                       : DT_REG;
-  d->ent.d_ino = 0;
+  d->ent.d_ino = WboxDirentIno(d->ent.d_name);
+  d->ent.d_off = ++d->pos;
   d->ent.d_reclen = sizeof(d->ent);
   return &d->ent;
 }
@@ -252,10 +266,18 @@ void rewinddir(DIR *d) {
   FindClose(d->h);
   d->h = FindFirstFileW(d->wpath, &d->data);
   d->first = 1;
+  d->pos = 0;
 }
 
-void seekdir(DIR *d, long pos) {}
-long telldir(DIR *d) { return 0; }
+void seekdir(DIR *d, long pos) {
+  if (!d) return;
+  if (pos < 0) return;
+  rewinddir(d);
+  while (d->pos < pos && readdir(d))
+    ;
+}
+
+long telldir(DIR *d) { return d ? d->pos : -1; }
 int dirfd(DIR *d) { return -1; }
 
 int alphasort(const struct dirent **a, const struct dirent **b) {
