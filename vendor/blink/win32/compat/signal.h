@@ -147,7 +147,8 @@ int sighold(int);
 int sigrelse(int);
 int sigignore(int);
 int pthread_sigmask(int, const sigset_t *, sigset_t *);
-int pthread_kill(uintptr_t, int);
+#define pthread_kill wbox_pthread_kill
+int wbox_pthread_kill(uintptr_t, int);
 #include <setjmp.h>
 typedef jmp_buf sigjmp_buf;
 #define sigsetjmp(env, save) setjmp(env)
