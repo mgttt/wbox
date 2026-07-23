@@ -167,20 +167,23 @@ struct __wbox_DIR {
   HANDLE h;
   WIN32_FIND_DATAW data;
   int first;
-  char path[260 * 3];
+  wchar_t wpath[520];
   struct dirent ent;
 };
 
-DIR *opendir(const char *path) {
+static DIR *OpendirW(const wchar_t *wpath, const char *path) {
   DIR *d = calloc(1, sizeof(DIR));
   if (!d) return NULL;
-  snprintf(d->path, sizeof(d->path), "%s\\*", path);
   wchar_t wbuf[520];
-  if (MultiByteToWideChar(CP_UTF8, 0, d->path, -1, wbuf, 520) <= 0) {
+  if (wcslen(wpath) + 3 >= 520) {
     free(d);
-    errno = ENOENT;
+    errno = ENAMETOOLONG;
     return NULL;
   }
+  wcscpy(wbuf, wpath);
+  wcscat(wbuf, L"\\*");
+  wcscpy(d->wpath, wbuf);
+  (void)path;
   d->h = FindFirstFileW(wbuf, &d->data);
   if (d->h == INVALID_HANDLE_VALUE) {
     free(d);
@@ -191,9 +194,34 @@ DIR *opendir(const char *path) {
   return d;
 }
 
+DIR *opendir(const char *path) {
+  wchar_t wbuf[520];
+  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, 520) <= 0) {
+    errno = ENOENT;
+    return NULL;
+  }
+  // strip trailing "\\*" not present here; OpendirW appends it
+  return OpendirW(wbuf, path);
+}
+
 DIR *fdopendir(int fd) {
-  errno = ENOSYS;
-  return NULL;
+  // blink's getdents64 opens the dir with open(O_DIRECTORY) and then
+  // fdopendir()s the fd; recover the path from the handle.
+  HANDLE h = (HANDLE)_get_osfhandle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return NULL;
+  }
+  wchar_t wbuf[520];
+  DWORD n = GetFinalPathNameByHandleW(h, wbuf, 520, 0);
+  if (!n || n >= 520) {
+    errno = ENOENT;
+    return NULL;
+  }
+  // wine returns "\\?\Z:\path"; strip the "\\?\" prefix
+  wchar_t *p = wbuf;
+  if (!wcsncmp(p, L"\\\\?\\", 4)) p += 4;
+  return OpendirW(p, NULL);
 }
 
 int closedir(DIR *d) {
@@ -222,9 +250,7 @@ struct dirent *readdir(DIR *d) {
 void rewinddir(DIR *d) {
   if (!d) return;
   FindClose(d->h);
-  wchar_t wbuf[520];
-  MultiByteToWideChar(CP_UTF8, 0, d->path, -1, wbuf, 520);
-  d->h = FindFirstFileW(wbuf, &d->data);
+  d->h = FindFirstFileW(d->wpath, &d->data);
   d->first = 1;
 }
 
