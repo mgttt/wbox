@@ -40,9 +40,22 @@ wbox run --memory 256 --cpu-pct 50 --max-procs 32 -- cmd.exe /c echo hello
 # 指定"镜像根"目录并允许网络
 wbox run --name web --workdir C:\images\webapp --allow-network -- webapp.exe --port 8080
 
-# 查看隔离配置
-wbox run -V --keep-profile -- notepad.exe
+# 查看隔离配置（GUI 程序在 AppContainer 下行为受限，调试建议用控制台程序）
+wbox run -V --keep-profile -- cmd.exe /c whoami /all
 ```
+
+**当前能 / 不能**（避免踩坑先看这里）：
+
+| 场景 | 状态 |
+|---|---|
+| 控制台程序（cmd/powershell/node/python 等 CLI） | ✅ 设计目标场景 |
+| 资源限额（内存/CPU/进程数）+ 进程树收割 | ✅ |
+| 默认断网、`--allow-network` 放行 | ✅ |
+| 拉取 OCI 镜像 rootfs（`wbox image pull ubuntu:24.04`） | ✅ |
+| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 进行中（win32-port 分支，wbox-linux 运行时移植中） |
+| GUI 桌面程序（notepad 等） | ⚠️ AppContainer 对 GUI 有天然限制，多数会失败或异常，非目标场景 |
+| Windows 服务 / COM / 驱动类程序 | ❌ 超出进程级容器边界 |
+| 容器生命周期管理（ps/stop/rm/logs/exec） | 📐 未实现（v1 为前台一次性运行） |
 
 **退出码**：子进程退出码原样转发；wbox 自身错误：`1`=参数错误、`2`=AppContainer profile 错误、`3`=Job Object 错误、`4`=进程创建错误、`5`=Registry/镜像错误。
 
