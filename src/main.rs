@@ -3,13 +3,21 @@
 //! 隔离单元 = AppContainer（令牌隔离 + Low IL）+ Job Object（资源限额 + 生命周期收割）。
 //! 默认不需要管理员权限、不需要 VT-x、不需要启用任何 Windows 可选功能。
 //!
+//! `wbox run` 有两类目标（见 backend/mod.rs）：
+//! - 本地 Windows 可执行路径 → NativeBackend（AppContainer + Job 直接运行）；
+//! - 已 pull 的 OCI 镜像引用（或带 `--pull`）→ BlinkBackend（wbox-linux 模拟，
+//!   骨架；config.json 的 Env/Cmd/Entrypoint/WorkingDir 在此消费）。
+//!
 //! 退出码约定（SPEC §2 + OCI 扩展）：
 //!   子进程退出码原样转发；wbox 自身错误：1=参数 2=profile 3=job 4=进程创建 5=registry/镜像。
 
+mod backend;
 mod error;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod oci;
 // 以下模块直接调用 Win32 API，仅 Windows 可编译。
+#[cfg(windows)]
+mod acl;
 #[cfg(windows)]
 mod job;
 #[cfg(windows)]
@@ -17,18 +25,17 @@ mod sandbox;
 #[cfg(windows)]
 mod token;
 
+use backend::{Backend, BlinkBackend, Limits, RunSpec, RunTarget};
 use error::WboxError;
-#[cfg(windows)]
-use error::ErrKind;
-#[cfg(windows)]
-use job::JobLimits;
 
 const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer + Job Object）
 
 用法:
-  wbox run [OPTIONS] -- <CMD> [ARGS...]
+  wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本地 Windows 程序
+  wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Linux 后端骨架）
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list
+  wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox --help | -h
   wbox --version
 
@@ -39,26 +46,39 @@ const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer + J
   --max-procs <N>   最大进程数，默认 0 = 不限
   --allow-network   授予 INTERNET_CLIENT capability（默认不授予任何网络能力）
   --no-network      显式声明不授予网络（默认行为，预留）
-  --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录
+  --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --interactive     连接 stdio（当前默认且唯一支持的模式；--detach 预留）
+  --pull            run 目标为镜像时，本地无缓存则先 pull
   -V, --verbose     打印隔离配置摘要
+
+镜像模式说明:
+  位置参数能解析为镜像引用（如 ubuntu:24.04）且已在本地缓存（或带 --pull）时，
+  视为镜像目标：自动按 docker 规则合并 config.json 的 Entrypoint/Cmd，
+  注入 Env，rootfs 作为工作目录。镜像经 wbox-linux（blink 移植，开发中）
+  模拟执行，未就绪时会得到明确错误。
 
 示例:
   wbox run --memory 256 --cpu-pct 50 -- cmd.exe /c echo hello
   wbox run --name test1 --workdir C:\img\app --allow-network -- myapp.exe
+  wbox run ubuntu:24.04 -- bash
+  wbox run --pull alpine:3.20 -- sh -c "echo hi"
 "#;
 
-/// `run` 子命令的全部参数。
-#[cfg(windows)]
+/// `run` 子命令的全部参数（跨平台结构，纯逻辑可在 Linux 沙箱单测）。
 #[derive(Debug)]
 struct RunOptions {
     name: Option<String>,
-    limits: JobLimits,
+    limits: Limits,
     allow_network: bool,
     keep_profile: bool,
     workdir: Option<String>,
     verbose: bool,
+    /// 本地无缓存时先 pull（镜像模式）
+    pull: bool,
+    /// 第一个位置参数：镜像引用候选 或 本地命令首词
+    positional: Option<String>,
+    /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
     cmd: Vec<String>,
 }
 
@@ -93,21 +113,23 @@ fn real_main() -> error::Result<u32> {
         ))),
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args("缺少子命令（run）"))
+            Err(WboxError::args("缺少子命令（run / image）"))
         }
     }
 }
 
-/// 手写参数解析：支持 `--opt value`、`--flag` 与 `--` 分隔的命令行。
-#[cfg(windows)]
+/// 手写参数解析：支持 `--opt value`、`--flag`、至多一个位置参数（镜像引用
+/// 候选 / 本地命令首词）与 `--` 分隔的命令行。
 fn parse_run_args(args: &[String]) -> error::Result<RunOptions> {
     let mut opts = RunOptions {
         name: None,
-        limits: JobLimits::default(),
+        limits: Limits::default(),
         allow_network: false,
         keep_profile: false,
         workdir: None,
         verbose: false,
+        pull: false,
+        positional: None,
         cmd: Vec::new(),
     };
 
@@ -151,6 +173,7 @@ fn parse_run_args(args: &[String]) -> error::Result<RunOptions> {
             "--no-network" => opts.allow_network = false, // 显式默认，预留
             "--keep-profile" => opts.keep_profile = true,
             "--interactive" => {} // v1 唯一支持的模式，接受并忽略
+            "--pull" => opts.pull = true,
             "--workdir" => {
                 opts.workdir = Some(take_value(args, &mut i, "--workdir")?);
             }
@@ -158,18 +181,19 @@ fn parse_run_args(args: &[String]) -> error::Result<RunOptions> {
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!("未知选项 '{}'", other)));
             }
-            // 容错：未写 "--" 时，第一个非选项参数起视为命令
+            // 第一个非选项参数 = 位置参数（镜像引用候选 / 本地命令首词）；
+            // 其后未写 "--" 的非选项参数容错并入命令（兼容 v1 写法）。
             _ => {
-                saw_dashdash = true;
-                opts.cmd.push(a.clone());
+                if opts.positional.is_none() {
+                    opts.positional = Some(a.clone());
+                } else {
+                    opts.cmd.push(a.clone());
+                }
             }
         }
         i += 1;
     }
 
-    if opts.cmd.is_empty() {
-        return Err(WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
-    }
     Ok(opts)
 }
 
@@ -182,108 +206,198 @@ fn take_value(args: &[String], i: &mut usize, opt: &str) -> error::Result<String
     Ok(args[*i].clone())
 }
 
-/// 非 Windows 平台：run 不可用（隔离原语为 Win32 API）。
-#[cfg(not(windows))]
-fn cmd_run(_args: &[String]) -> error::Result<u32> {
-    Err(WboxError::args(
-        "run 子命令仅在 Windows 上可用（AppContainer/Job Object 为 Win32 原语）",
-    ))
+/// 由 RunOptions 组装 RunSpec 的公共部分。
+fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, env: Vec<(String, String)>) -> RunSpec {
+    RunSpec {
+        name: opts
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("wbox-{}", std::process::id())),
+        limits: opts.limits,
+        allow_network: opts.allow_network,
+        keep_profile: opts.keep_profile,
+        workdir,
+        cmd,
+        env,
+        verbose: opts.verbose,
+    }
 }
 
-#[cfg(windows)]
 fn cmd_run(args: &[String]) -> error::Result<u32> {
     let opts = parse_run_args(args)?;
 
-    // 容器名：默认 wbox-<pid>
-    let name = opts
-        .name
-        .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
+    // 判别目标：镜像引用（已 pull 或 --pull）vs 本地可执行路径。
+    let target = backend::classify_target(opts.positional.as_deref(), opts.pull, |iref| {
+        oci::image_dir(iref)
+            .map(|d| d.join("rootfs").is_dir())
+            .unwrap_or(false)
+    })?;
 
-    // 工作目录：默认当前目录；必须是已存在的目录
+    match target {
+        RunTarget::Native => {
+            // 本地命令 = 位置参数（若有）+ `--` 后参数
+            let mut cmd: Vec<String> = Vec::new();
+            if let Some(p) = opts.positional.clone() {
+                cmd.push(p);
+            }
+            cmd.extend(opts.cmd.iter().cloned());
+            if cmd.is_empty() {
+                return Err(WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
+            }
+            run_native(&opts, cmd)
+        }
+        RunTarget::Image(iref) => run_image(&opts, iref),
+    }
+}
+
+/// 原生模式：本地 Windows 程序（仅 Windows 可执行）。
+#[cfg(windows)]
+fn run_native(opts: &RunOptions, cmd: Vec<String>) -> error::Result<u32> {
     let workdir = match &opts.workdir {
         Some(d) => std::path::PathBuf::from(d),
         None => std::env::current_dir()
-            .map_err(|e| WboxError::new(ErrKind::Args, anyhow::anyhow!(e).context("获取当前目录失败")))?,
+            .map_err(|e| WboxError::new(error::ErrKind::Args, anyhow::anyhow!(e).context("获取当前目录失败")))?,
     };
-    // 只做存在性校验，不 canonicalize：std 的 canonicalize 会产生 `\\?\` 前缀
-    // 的扩展路径，而 CreateProcessW 的 lpCurrentDirectory 不接受该前缀。
-    if !workdir.is_dir() {
-        return Err(WboxError::args(format!(
-            "工作目录 '{}' 不存在或不是目录",
-            workdir.display()
-        )));
-    }
-    let workdir = workdir.to_string_lossy().into_owned();
-    // 防御：若用户传入的 workdir 本身带 `\\?\` 前缀，去掉之。
-    let workdir = workdir
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&workdir)
-        .to_string();
-
-    // ---- 1. capability 集合（v1：仅 INTERNET_CLIENT）----
-    let mut caps: Vec<token::CapabilitySid> = Vec::new();
-    if opts.allow_network {
-        caps.push(token::CapabilitySid::internet_client()?);
-    }
-
-    // ---- 2. AppContainer profile ----
-    let mut profile = token::AppContainerProfile::create(&name, &caps)?;
-    if opts.keep_profile {
-        profile.keep();
-    }
-
-    // ---- 3. Job Object ----
-    let job = job::Job::create(opts.limits)?;
-
-    // ---- 4. verbose 摘要 ----
-    if opts.verbose {
-        println!("wbox 隔离配置:");
-        println!("  profile 名   : {}", profile.name());
-        println!("  AppContainer SID: {}", profile.sid_string()?);
-        println!("  完整性级别   : Low（AppContainer 派生令牌内核强制）");
-        println!(
-            "  capabilities : {}",
-            if caps.is_empty() {
-                "（无，无网络能力）".to_string()
-            } else {
-                caps.iter().map(|c| c.desc()).collect::<Vec<_>>().join(", ")
-            }
-        );
-        println!(
-            "  Job 限额     : KILL_ON_JOB_CLOSE=on, memory={}MB, cpu={}%, max-procs={}",
-            opts.limits.memory_mb, opts.limits.cpu_pct, opts.limits.max_procs
-        );
-        println!("  工作目录     : {}", workdir);
-        println!("  keep-profile : {}", opts.keep_profile);
-    }
-
-    // ---- 5. 启动并等待 ----
-    let cmdline = sandbox::build_cmdline(&opts.cmd)?;
-    let code = sandbox::run_container(
-        &profile,
-        &caps,
-        &cmdline,
-        &workdir,
-        &job,
-    )?;
-
-    if opts.verbose {
-        println!("wbox: 子进程退出，退出码 = {}", code);
-    }
-    Ok(code)
+    let spec = make_spec(opts, workdir, cmd, Vec::new());
+    let backend = backend::NativeBackend;
+    let prepared = backend.prepare(&spec)?;
+    backend.spawn(&spec, &prepared)
 }
 
-/// `wbox image` 子命令：pull / list。
+/// 非 Windows 平台：原生模式不可用（隔离原语为 Win32 API）。
+#[cfg(not(windows))]
+fn run_native(_opts: &RunOptions, _cmd: Vec<String>) -> error::Result<u32> {
+    Err(WboxError::args(
+        "run 原生模式仅在 Windows 上可用（AppContainer/Job Object 为 Win32 原语）",
+    ))
+}
+
+/// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
+fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> error::Result<u32> {
+    let dir = oci::image_dir(&iref)?;
+    if !dir.join("rootfs").is_dir() {
+        // classify 保证要么已缓存、要么带 --pull；走到这里必然是 --pull 未命中
+        oci::pull(&iref.repo_tag(), "linux", "amd64", None, opts.verbose)?;
+        if !dir.join("rootfs").is_dir() {
+            return Err(WboxError::registry(format!(
+                "pull 后仍未找到镜像缓存 '{}'，无法运行",
+                dir.display()
+            )));
+        }
+    }
+
+    // 消费 image config：Env 注入、Entrypoint/Cmd 按 docker 规则合并、
+    // WorkingDir 记录（guest 路径映射由 wbox-linux 侧落地，当前仅展示）。
+    let img_cfg = oci::config::ImageConfig::load(&dir)?;
+    let (merged, env) = match &img_cfg {
+        Some(c) => (c.merged_command(&opts.cmd), c.env.clone()),
+        None => (opts.cmd.clone(), Vec::new()),
+    };
+    if merged.is_empty() {
+        return Err(WboxError::args(format!(
+            "镜像 '{}' 未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
+            iref.repo_tag()
+        )));
+    }
+    if opts.verbose {
+        if let Some(c) = &img_cfg {
+            if let Some(wd) = &c.working_dir {
+                println!("wbox: 镜像 WorkingDir = {}（guest 路径，由 wbox-linux 映射）", wd);
+            }
+        }
+    }
+
+    let spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    let backend = BlinkBackend;
+    let prepared = backend.prepare(&spec)?;
+    backend.spawn(&spec, &prepared)
+}
+
+/// `wbox image` 子命令：pull / list / show。
 fn cmd_image(args: &[String]) -> error::Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("pull") => cmd_image_pull(&args[1..]),
         Some("list") | Some("ls") => oci::list(),
+        Some("show") => cmd_image_show(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 image 子命令 '{}'（支持 pull / list）",
+            "未知 image 子命令 '{}'（支持 pull / list / show）",
             other
         ))),
-        None => Err(WboxError::args("image 缺少子命令（pull / list）")),
+        None => Err(WboxError::args("image 缺少子命令（pull / list / show）")),
     }
+}
+
+/// `wbox image show <REF>`：打印已 pull 镜像的 config.json 摘要。
+fn cmd_image_show(args: &[String]) -> error::Result<u32> {
+    let mut image_ref: Option<String> = None;
+    for a in args {
+        if a.starts_with('-') {
+            return Err(WboxError::args(format!("未知选项 '{}'", a)));
+        }
+        if image_ref.is_some() {
+            return Err(WboxError::args(format!("多余的参数 '{}'", a)));
+        }
+        image_ref = Some(a.clone());
+    }
+    let image_ref = image_ref.ok_or_else(|| WboxError::args("image show 缺少镜像引用"))?;
+
+    let iref = oci::ImageRef::parse(&image_ref, None)?;
+    let dir = oci::image_dir(&iref)?;
+    if !dir.is_dir() {
+        return Err(WboxError::registry(format!(
+            "镜像 '{}' 未 pull（缓存目录 '{}' 不存在）",
+            iref.repo_tag(),
+            dir.display()
+        )));
+    }
+
+    println!("镜像      : {}", iref.repo_tag());
+    println!("registry  : {}", iref.registry);
+    println!("缓存目录  : {}", dir.display());
+    println!(
+        "rootfs    : {}",
+        if dir.join("rootfs").is_dir() {
+            "已解包"
+        } else {
+            "缺失（缓存不完整，请重新 pull）"
+        }
+    );
+
+    match oci::config::ImageConfig::load(&dir)? {
+        Some(c) => {
+            println!("config.json 摘要:");
+            println!(
+                "  Entrypoint : {}",
+                if c.entrypoint.is_empty() {
+                    "（未设置）".to_string()
+                } else {
+                    format!("{:?}", c.entrypoint)
+                }
+            );
+            println!(
+                "  Cmd        : {}",
+                if c.cmd.is_empty() {
+                    "（未设置）".to_string()
+                } else {
+                    format!("{:?}", c.cmd)
+                }
+            );
+            println!(
+                "  WorkingDir : {}",
+                c.working_dir.as_deref().unwrap_or("（未设置，默认 /）")
+            );
+            if c.env.is_empty() {
+                println!("  Env        : （未设置）");
+            } else {
+                println!("  Env        :");
+                for (k, v) in &c.env {
+                    println!("    {}={}", k, v);
+                }
+            }
+        }
+        None => println!("config.json : 不存在（缓存不完整）"),
+    }
+    Ok(0)
 }
 
 /// 解析并执行 `image pull <ref> [--os ..] [--arch ..] [--registry ..] [-V]`。
@@ -318,4 +432,79 @@ fn cmd_image_pull(args: &[String]) -> error::Result<u32> {
     let image_ref = image_ref.ok_or_else(|| WboxError::args("image pull 缺少镜像引用"))?;
     oci::pull(&image_ref, &os, &arch, registry.as_deref(), verbose)?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> error::Result<RunOptions> {
+        let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        parse_run_args(&v)
+    }
+
+    // ---- 基础解析 ----
+
+    #[test]
+    fn parse_native_dashdash_command() {
+        let o = parse(&["--memory", "256", "--cpu-pct", "50", "--", "cmd.exe", "/c", "echo"]).unwrap();
+        assert_eq!(o.limits.memory_mb, 256);
+        assert_eq!(o.limits.cpu_pct, 50);
+        assert_eq!(o.positional, None);
+        assert_eq!(o.cmd, vec!["cmd.exe", "/c", "echo"]);
+        assert!(!o.pull);
+    }
+
+    #[test]
+    fn parse_positional_and_dashdash() {
+        let o = parse(&["ubuntu:24.04", "--", "bash", "-l"]).unwrap();
+        assert_eq!(o.positional.as_deref(), Some("ubuntu:24.04"));
+        assert_eq!(o.cmd, vec!["bash", "-l"]);
+    }
+
+    #[test]
+    fn parse_positional_without_dashdash_collects_command() {
+        // docker 风格：镜像后直接跟 cmd（容错并入，不写 -- 也行）
+        let o = parse(&["ubuntu:24.04", "bash"]).unwrap();
+        assert_eq!(o.positional.as_deref(), Some("ubuntu:24.04"));
+        assert_eq!(o.cmd, vec!["bash"]);
+        // v1 风格：无 -- 的本地命令
+        let o = parse(&["cmd.exe", "/c", "echo"]).unwrap();
+        assert_eq!(o.positional.as_deref(), Some("cmd.exe"));
+        assert_eq!(o.cmd, vec!["/c", "echo"]);
+    }
+
+    #[test]
+    fn parse_pull_flag_and_misc() {
+        let o = parse(&["--pull", "-V", "--name", "t1", "--keep-profile", "alpine:3.20"]).unwrap();
+        assert!(o.pull && o.verbose && o.keep_profile);
+        assert_eq!(o.name.as_deref(), Some("t1"));
+        assert_eq!(o.positional.as_deref(), Some("alpine:3.20"));
+    }
+
+    #[test]
+    fn parse_errors() {
+        // 缺值
+        assert!(parse(&["--memory"]).is_err());
+        // 非法数字
+        assert!(parse(&["--memory", "-1", "--", "x"]).is_err());
+        assert!(parse(&["--cpu-pct", "101", "--", "x"]).is_err());
+        // 未知选项
+        assert!(parse(&["--bogus", "--", "x"]).is_err());
+    }
+
+    // ---- 目标判别后的命令组装（Native 分支）----
+
+    #[test]
+    fn native_command_combines_positional_and_dashdash() {
+        // 未 pull 的字符串全部回退 Native：positional 必须并入 cmd，
+        // 否则 `wbox run cmd.exe /c echo` 会丢掉 cmd.exe
+        let o = parse(&["cmd.exe", "/c", "echo", "hi"]).unwrap();
+        let mut cmd: Vec<String> = Vec::new();
+        if let Some(p) = o.positional.clone() {
+            cmd.push(p);
+        }
+        cmd.extend(o.cmd.iter().cloned());
+        assert_eq!(cmd, vec!["cmd.exe", "/c", "echo", "hi"]);
+    }
 }

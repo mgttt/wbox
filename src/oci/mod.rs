@@ -17,6 +17,7 @@
 //! （如 `library_ubuntu`）；路径段中的 `:`（registry 端口、digest 引用
 //! `sha256:...`）一律替换为 `_`，避免 Windows 非法目录名（M4）。
 
+pub mod config;
 pub mod image;
 pub mod registry;
 
@@ -113,12 +114,22 @@ impl ImageRef {
     pub fn cache_name(&self) -> String {
         self.repo.replace('/', "_")
     }
+
+    /// 供展示的 `repo:tag`（digest 引用为 `repo@digest`）形式。
+    pub fn repo_tag(&self) -> String {
+        if self.reference.starts_with("sha256:") {
+            format!("{}@{}", self.repo, self.reference)
+        } else {
+            format!("{}:{}", self.repo, self.reference)
+        }
+    }
 }
 
 /// 本地缓存根目录：Windows 用 %USERPROFILE%，其余用 $HOME。
 pub fn cache_root() -> crate::error::Result<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
         .ok_or_else(|| WboxError::registry("无法确定用户主目录（USERPROFILE/HOME 均未设置）"))?;
     Ok(PathBuf::from(home).join(".wbox").join("images"))
 }
@@ -156,6 +167,20 @@ pub fn pull(
 
     let client = registry::RegistryClient::new(&iref.registry);
     let summary = image::pull_image(&client, &iref, os, arch, &dest, verbose)?;
+
+    // 双层隔离衔接：rootfs 默认 ACL 不含 AppContainer SID，
+    // 需授予 ALL APPLICATION PACKAGES 读取权，容器内才能读到 rootfs（S2）。
+    // 授权失败不否决已成功的 pull，但明确告警。
+    #[cfg(windows)]
+    if let Err(e) = crate::acl::grant_read_recursive(&dest.join("rootfs")) {
+        eprintln!(
+            "wbox: 警告: rootfs ACL 授权失败（{}）。\
+             容器内可能读不到 rootfs；可手工执行：\
+             icacls \"{}\" /grant \"*S-1-15-2-1:(OI)(CI)(RX)\" /T",
+            e,
+            dest.join("rootfs").display()
+        );
+    }
 
     println!("wbox: 完成 —— {} 层已解包到 {}", summary.layers, dest.join("rootfs").display());
     println!("wbox: manifest digest: {}", summary.manifest_digest);

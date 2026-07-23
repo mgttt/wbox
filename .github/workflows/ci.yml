@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ① Linux 单测：oci/config/backend 纯逻辑在 Linux 即可跑（当前测试主体）
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  # ② Windows 目标编译检查：Win32 专属代码（job/token/sandbox/acl/backend native）
+  #    只能在 windows target 下编译，作为 Windows 代码的编译期门禁
+  check-windows-msvc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --target x86_64-pc-windows-msvc
+
+  # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
+  smoke-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: 冒烟 —— --help / --version / image list
+        shell: cmd
+        run: |
+          .\target\debug\wbox.exe --help
+          .\target\debug\wbox.exe --version
+          .\target\debug\wbox.exe image list
+      - name: 冒烟 —— AppContainer 内跑 cmd.exe（隔离链路真机验证）
+        shell: cmd
+        run: .\target\debug\wbox.exe run --memory 256 -V -- cmd.exe /c echo wbox-smoke-ok
+
+  # ④ tag 发布：打包 portable 单 exe 上传 GitHub Release
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-linux, check-windows-msvc, smoke-windows]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release
+      - name: 上传 wbox.exe 到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/wbox.exe
