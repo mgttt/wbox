@@ -19,6 +19,14 @@
 
 #if CAN_64BIT && defined(__APPLE__)
 #define kSkew 0x088800000000
+#elif CAN_64BIT && defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: guest VA window is reserved at [kSkew, kSkew+vaspace).
+// kSkew is a RUNTIME value on win32: WboxMemInit() reserves the window
+// with a system-chosen base (VirtualAlloc NULL + ZeroBits semantics) and
+// stores the base here, because probing TB-sized fixed-address reserves
+// is unreliable under Wine (and conflicts with host mappings).
+// Defined in win32/w32mem.c; initialized before any ToHost() use.
+extern uint64_t kSkew;
 #else
 #define kSkew 0x000000000000
 #endif

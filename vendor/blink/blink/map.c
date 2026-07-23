@@ -35,6 +35,10 @@
 #include "blink/types.h"
 #include "blink/util.h"
 #include "blink/vfs.h"
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "blink/log.h"
+#include "win32.h"
+#endif
 
 static long GetSystemPageSize(void) {
 #ifdef __EMSCRIPTEN__
@@ -147,8 +151,18 @@ static u64 ScaleAddress(u64 address) {
 // but we can't do that on systems like rasberry pi, since they'll
 // assign addresses greater than 2**47 which won't fit with x86_64
 void InitMap(void) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: one big reservation at kSkew, self-managed commit
+  FLAG_pagesize = 4096;
+  if (WboxMemInit() == -1) {
+    WriteErrorString("error: failed to reserve guest address space\n");
+    exit(EXIT_FAILURE);
+  }
+  FLAG_vabits = WboxMemVabits();
+#else
   FLAG_pagesize = GetSystemPageSize();
   FLAG_vabits = GetBitsInAddressSpace();
+#endif
   FLAG_vaspace = GetVirtualAddressSpace(FLAG_vabits, FLAG_pagesize);
   FLAG_aslrmask = ScaleAddress(kAslrMask);
   FLAG_imagestart = ScaleAddress(kImageStart);
