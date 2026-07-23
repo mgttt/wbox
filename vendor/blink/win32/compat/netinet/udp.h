@@ -1,0 +1,3 @@
+#ifndef WBOX_COMPAT_NETINET_UDP_H
+#define WBOX_COMPAT_NETINET_UDP_H
+#endif
