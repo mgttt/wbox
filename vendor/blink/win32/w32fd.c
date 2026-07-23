@@ -622,7 +622,7 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
     st->st_mode = S_IFCHR | 0666;
   } else if (ft == FILE_TYPE_PIPE) {
     st->st_mode = S_IFIFO | 0666;
-  } else if (wpath && (attr != INVALID_FILE_ATTRIBUTES) &&
+  } else if ((attr != INVALID_FILE_ATTRIBUTES) &&
              (attr & FILE_ATTRIBUTE_DIRECTORY)) {
     st->st_mode = S_IFDIR | 0755;
     st->st_nlink = 2;
