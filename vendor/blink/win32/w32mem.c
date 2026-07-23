@@ -4,6 +4,7 @@
 // the unix mmap MAP_FIXED / partial-munmap semantics blink relies on.
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -158,10 +159,10 @@ int WboxMemInit(void) {
   return -1;
 ok:
   kSkew = (uint64_t)g_base;
-  if (getenv("WBOX_DEBUG_MEM"))
-    fprintf(stderr, "dbg meminit base=%p limit=%p bits=%d\n", (void *)g_base,
-            (void *)g_limit, bits);
   g_limit = g_base + ((1ULL << bits) - 0x10000);
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mem: window [%p,%p) bits=%d\n", (void *)g_base,
+            (void *)g_limit, bits);
   g_vabits = bits;
   g_hinttop = g_base + 0x10000000;  // 256MB: above typical images
   return 0;
@@ -252,13 +253,17 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = ENOMEM;
     return MAP_FAILED;
   }
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mmap: a=%p len=%#zx prot=%d flags=%#x fd=%d off=%lld\n",
+            (void *)a, len, prot, flags, fd, (long long)off);
   ReleaseSRWLockExclusive(&g_lock);
   // file-backed: populate by reading (MAP_PRIVATE copy semantics)
   if (!(flags & MAP_ANONYMOUS) && fd >= 0) {
     size_t done = 0;
     unsigned char *p = (unsigned char *)r;
-    if (prot & PROT_WRITE) {
-      // need writable to populate; assume RW already or reprotect
+    // pages were committed with the final protection; pread() needs them
+    // writable, so always drop to RW first and restore afterwards.
+    if (!(prot & PROT_WRITE)) {
       DWORD old;
       VirtualProtect((LPVOID)r, len, PAGE_READWRITE, &old);
     }
