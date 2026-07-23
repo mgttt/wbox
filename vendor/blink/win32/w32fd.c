@@ -590,8 +590,10 @@ int lockf(int fd, int cmd, off_t len) {
 static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
   FILETIME ct, at, wt;
   BY_HANDLE_FILE_INFORMATION info;
+  int have_info = 0;
   memset(st, 0, sizeof(*st));
   if (h && GetFileInformationByHandle(h, &info)) {
+    have_info = 1;
     st->st_nlink = info.nNumberOfLinks;
     st->st_ino = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
     st->st_size =
@@ -612,7 +614,9 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
     memset(&ct, 0, sizeof(ct));
     at = wt = ct;
   }
-  DWORD attr = wpath ? GetFileAttributesW(wpath) : 0;
+  DWORD attr = wpath ? GetFileAttributesW(wpath)
+           : have_info ? info.dwFileAttributes
+                       : 0;
   DWORD ft = h ? GetFileType(h) : FILE_TYPE_DISK;
   if (ft == FILE_TYPE_CHAR) {
     st->st_mode = S_IFCHR | 0666;
