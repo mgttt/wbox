@@ -51,7 +51,12 @@
 #define READ32(p) Read32((const u8 *)(p))
 
 #ifndef __COSMOPOLITAN__
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: host fs has no exec bits; skip the +x requirement
+#define IsWindows() 1
+#else
 #define IsWindows() 0
+#endif
 #endif
 
 static bool CanEmulateImpl(struct Machine *, char **, char ***, bool);
@@ -798,9 +803,16 @@ error: unsupported executable; we need:\n\
     } else {
       unassert(!"impossible condition");
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // wbox win32: kSkew is a runtime base, kStackTop would fall outside
+    // the reserved window; virt=0 lets ReserveVirtual pick in-window.
+    stack = HasLinearMapping() && FLAG_vabits <= 47 ? 0
+                                                    : kStackTop - kStackSize;
+#else
     stack = HasLinearMapping() && FLAG_vabits <= 47 && !kSkew
                 ? 0
                 : kStackTop - kStackSize;
+#endif
     if ((stack = ReserveVirtual(
              m->system, stack, kStackSize,
              PAGE_FILE | PAGE_U | PAGE_RW | (execstack ? 0 : PAGE_XD), -1, 0, 0,
