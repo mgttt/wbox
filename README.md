@@ -52,7 +52,7 @@ wbox run -V --keep-profile -- cmd.exe /c whoami /all
 | 资源限额（内存/CPU/进程数）+ 进程树收割 | ✅ |
 | 默认断网、`--allow-network` 放行 | ✅ |
 | 拉取 OCI 镜像 rootfs（`wbox image pull ubuntu:24.04`） | ✅ |
-| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 进行中（win32-port 分支，wbox-linux 运行时移植中） |
+| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 wbox-linux.exe 已可在 Windows 运行 busybox 级 Linux 程序（L1，wine 验证通过，见 vendor/blink/WIN32-PORT.md）；ubuntu rootfs 与后端串联进行中（L2） |
 | GUI 桌面程序（notepad 等） | ⚠️ AppContainer 对 GUI 有天然限制，多数会失败或异常，非目标场景 |
 | Windows 服务 / COM / 驱动类程序 | ❌ 超出进程级容器边界 |
 | 容器生命周期管理（ps/stop/rm/logs/exec） | 📐 未实现（v1 为前台一次性运行） |
