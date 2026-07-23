@@ -20,6 +20,7 @@ extern "C" {
 #define _SC_VERSION 29
 #define _SC_JOB_CONTROL 7
 #define _SC_SAVED_IDS 8
+#define _SC_NGROUPS_MAX 9
 #define _PC_NAME_MAX 3
 #define _PC_PATH_MAX 4
 #define _PC_SYMLINK_MAX 0x100
@@ -58,6 +59,7 @@ int symlinkat(const char *, int, const char *);
 ssize_t readlink(const char *, char *, size_t);
 ssize_t readlinkat(int, const char *, char *, size_t);
 int unlink(const char *);
+int unlinkat(int, const char *, int);
 int rmdir(const char *);
 int rename(const char *, const char *);
 int chdir(const char *);

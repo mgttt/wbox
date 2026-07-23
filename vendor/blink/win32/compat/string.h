@@ -1,6 +1,7 @@
 #ifndef WBOX_COMPAT_STRING_H
 #define WBOX_COMPAT_STRING_H
 #include_next <string.h>
+char *strndup(const char *, size_t);
 char *stpcpy(char *, const char *);
 char *stpncpy(char *, const char *, size_t);
 char *strchrnul(const char *, int);

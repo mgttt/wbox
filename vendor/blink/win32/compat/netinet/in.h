@@ -2,6 +2,12 @@
 #define WBOX_COMPAT_NETINET_IN_H
 #include <stdint.h>
 #include <sys/socket.h>
+static __inline uint16_t wbox_htons(uint16_t x) { return (x >> 8) | (x << 8); }
+static __inline uint32_t wbox_htonl(uint32_t x) { return __builtin_bswap32(x); }
+#define htons wbox_htons
+#define ntohs wbox_htons
+#define htonl wbox_htonl
+#define ntohl wbox_htonl
 typedef uint32_t in_addr_t;
 typedef uint16_t in_port_t;
 struct in_addr { in_addr_t s_addr; };

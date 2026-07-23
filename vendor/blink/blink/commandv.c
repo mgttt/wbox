@@ -17,6 +17,10 @@
 │ PERFORMANCE OF THIS SOFTWARE.                                                │
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include <ctype.h>
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// windows.h (pulled in via config) macros SearchPath -> SearchPathA
+#undef SearchPath
+#endif
 #include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>

@@ -1,5 +1,6 @@
 #ifndef WBOX_COMPAT_NET_IF_H
 #define WBOX_COMPAT_NET_IF_H
+#include <sys/socket.h>
 #define IFNAMSIZ 16
 #define IFF_UP 0x1
 #define IFF_BROADCAST 0x2

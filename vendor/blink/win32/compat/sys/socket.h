@@ -1,6 +1,8 @@
 #ifndef WBOX_COMPAT_SYS_SOCKET_H
 #define WBOX_COMPAT_SYS_SOCKET_H
 #include <sys/types.h>
+#include <stddef.h>
+#include <sys/uio.h>
 #include <stdint.h>
 
 typedef uint32_t socklen_t;
@@ -47,6 +49,15 @@ struct sockaddr_storage {
 #define SO_RCVTIMEO 20
 #define SO_SNDTIMEO 21
 #define SO_ACCEPTCONN 30
+#define SO_DEBUG 1
+#define SO_DONTROUTE 5
+#define SO_REUSEPORT 15
+#define SO_RCVLOWAT 18
+#define SO_SNDLOWAT 19
+#define SO_TIMESTAMP 29
+#define SO_TIMESTAMPNS 35
+#define SO_PASSCRED 16
+#define SO_PEERCRED 17
 
 #define MSG_OOB 1
 #define MSG_PEEK 2

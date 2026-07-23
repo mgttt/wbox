@@ -1,6 +1,8 @@
 #ifndef WBOX_COMPAT_ERRNO_H
 #define WBOX_COMPAT_ERRNO_H
 #include_next <errno.h>
+#undef EWOULDBLOCK
+#define EWOULDBLOCK EAGAIN
 #ifndef ENOTSUP
 #define ENOTSUP EOPNOTSUPP
 #endif
