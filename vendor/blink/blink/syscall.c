@@ -543,6 +543,7 @@ static int W32Fork(struct Machine *m) {
   if (!(rec = W32ChildAlloc())) {
     return eagain();
   }
+  W32ChildSetParent(rec, m);  // for SIGCHLD enqueue on child exit
   vpid = W32ChildVpid(rec);
   srcwin = WboxMemCurrentWindow();
   dstwin = 0;
@@ -651,6 +652,15 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   uintptr_t hi = WboxMemLimit();
   W32ForkDbg("child exit", rc, 0);
   W32ChildSignalExit(rec, rc);
+  // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
+  // into the parent's guest signal set (busybox ash's wait loop depends on
+  // it). The parent Machine is necessarily alive here in the supported
+  // model: a System only exits after its own children (wait/ECHILD), and
+  // the main System outlives every snapshot child.
+  {
+    struct Machine *pm = (struct Machine *)W32ChildParent(rec);
+    if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
+  }
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
   // recycled host pages handed out from the child's window must not be
   // reused by other Systems once the reservation is gone
@@ -4366,7 +4376,16 @@ static int SigsuspendPolyfill(struct Machine *m, u64 mask) {
   oldmask = m->sigmask;
   m->sigmask = mask;
   nanos = 1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: host sigsuspend() is a bare Sleep(INFINITE) with no async
+  // signal delivery, so always poll; additionally wake as soon as any
+  // snapshot child has exited (SIGCHLD enqueue normally beats this, but
+  // the guest may have SIGCHLD blocked/ignored while still wanting to
+  // re-run its wait4(WNOHANG) loop).
+  while (!CheckInterrupt(m, false) && !W32AnyChildExited()) {
+#else
   while (!CheckInterrupt(m, false)) {
+#endif
     if (nanos > 256) {
       if (nanos < 10 * 1000) {
 #ifdef HAVE_SCHED_YIELD
@@ -4392,7 +4411,9 @@ static int SysSigsuspend(struct Machine *m, i64 maskaddr, i64 sigsetsize) {
   u8 word[8];
   if (sigsetsize != 8) return einval();
   if (CopyFromUserRead(m, word, maskaddr, 8) == -1) return -1;
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || (defined(_WIN32) && !defined(__CYGWIN__))
+  // win32: no host async signals (sigsuspend shim is Sleep(INFINITE)),
+  // so use the guest-signal polling polyfill
   return SigsuspendPolyfill(m, Read64(word));
 #else
   return SigsuspendActual(m, Read64(word));
@@ -5821,10 +5842,12 @@ void OpSyscall(P) {
     u64 sn = Get64(m->ax) & 0xfff;
     if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 || sn == 435)
       W32ForkDbg("syscall", (int)sn, 0);
-    else if (m->system->w32child && getenv("WBOX_DEBUG_FORK")) {
+    else if ((m->system->w32child || getenv("WBOX_DEBUG_PARENT")) &&
+             getenv("WBOX_DEBUG_FORK")) {
       char buf[160];
-      int n = snprintf(buf, sizeof(buf), "[w32fork] child sys=%d di=%#llx\n",
-                       (int)sn, (unsigned long long)Get64(m->di));
+      int n = snprintf(buf, sizeof(buf), "[w32fork] pid=%d sys=%d di=%#llx\n",
+                       m->system->pid, (int)sn,
+                       (unsigned long long)Get64(m->di));
       DWORD nw;
       WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
     }
@@ -6118,10 +6141,11 @@ void OpSyscall(P) {
     Put64(m->ax, ax != -1 ? ax : -(XlatErrno(errno) & 0xfff));
   }
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if (m->system->w32child && getenv("WBOX_DEBUG_FORK") && !m->interrupted) {
+  if ((m->system->w32child || getenv("WBOX_DEBUG_PARENT")) &&
+      getenv("WBOX_DEBUG_FORK") && !m->interrupted) {
     char buf[200];
-    int n = snprintf(buf, sizeof(buf), "[w32fork] child ret ax=%lld\n",
-                     (long long)(i64)Get64(m->ax));
+    int n = snprintf(buf, sizeof(buf), "[w32fork] pid=%d ret ax=%lld\n",
+                     m->system->pid, (long long)(i64)Get64(m->ax));
     DWORD nw;
     WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
   }

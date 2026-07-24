@@ -91,6 +91,7 @@ struct W32Child {
   volatile LONG exited;
   volatile LONG status;  // raw guest exit code (0..255)
   int reaped;
+  void *parent_machine;  // parent's struct Machine (for SIGCHLD enqueue)
   struct W32Child *next;
 };
 
@@ -155,6 +156,28 @@ void W32ChildPublish(struct W32Child *c, void *thread_handle) {
   c->next = g_children;
   g_children = c;
   W32ChildrenUnlock();
+}
+
+void W32ChildSetParent(struct W32Child *c, void *parent_machine) {
+  c->parent_machine = parent_machine;
+}
+
+void *W32ChildParent(struct W32Child *c) {
+  return c->parent_machine;
+}
+
+int W32AnyChildExited(void) {
+  struct W32Child *c;
+  int r = 0;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped && c->exited) {
+      r = 1;
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+  return r;
 }
 
 // Child reached execve(): its new System is loaded, parent may resume.

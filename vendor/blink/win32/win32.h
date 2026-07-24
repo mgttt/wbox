@@ -35,6 +35,13 @@ int W32ChildExited(struct W32Child *);
 void W32ChildSignalExec(struct W32Child *);
 void W32ChildSignalExit(struct W32Child *, int status);
 void W32VforkWaitParent(struct W32Child *);
+// SIGCHLD delivery: the child record remembers the parent's Machine (as an
+// opaque pointer) so the exit path can enqueue SIGCHLD into the parent's
+// guest signal set; W32AnyChildExited lets the win32 sigsuspend polyfill
+// wake even when no handler catches the signal.
+void W32ChildSetParent(struct W32Child *, void *parent_machine);
+void *W32ChildParent(struct W32Child *);
+int W32AnyChildExited(void);
 
 // w32sock.c (feat/net): hooks used by w32fd.c. Types kept opaque here so
 // win32.h stays includable without compat socket/poll headers.
