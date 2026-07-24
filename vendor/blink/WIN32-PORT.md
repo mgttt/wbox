@@ -72,7 +72,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 |---|---|---|
 | 1 | fork/vfork | ⚠️ vfork 式特判：fork/vfork 以阻塞语义进程内实现（子 Machine 共享 System 线程，父阻塞至子 exec/exit；exec 时子切独立 VA 窗口，fd 表 host-dup 隔离）；`sh -c ':'; sh fork+exec 外部命令`多数可用；真 COW fork 不支持；命令替换/管道为已知 COW 级限制（见 §7.4） |
 | 2 | 管道组合命令（`a \| b`） | ❌ 仍失败：fork 子进程在 exec 前退出（`child exit noexec rc=1`，bash/busybox 同现），属 fork+exec 共享堆问题（COW 级，见 §7.4）；匿名管道本身（pipe2→CreatePipe）已实现 |
-| 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS；已知 wine 怪癖：wine 进程无法 connect wbox 进程创建的 listener（宿主侧互通正常，独立 issue 跟进） |
+| 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS。feat/listener 已修复“wine 进程 connect wbox listener 必 ECONNREFUSED”：根因非 socket 层——wine 11.11 对 N 字节 MEM_RESERVE 额外提交并清零 N/4096 字节匿名区（每保留页 1 字节状态图），8TB guest 窗口 → 每 wbox 进程 ~2GB RSS，两个 wbox 进程超 3GiB CI memcg 触发 OOM 杀掉 listener（dmesg oom-kill 实锤），客户端遂得 ECONNREFUSED；修法 w32mem.c 窗口 43→40 位（~256MB phantom，真 Windows 无此开销，记为 wine 怪癖）。另修 w32fd.c poll()：wine 无法 PeekNamedPipe 包装 unix fifo 的 stdio 句柄（ERROR_NOT_SUPPORTED），原 POLLERR 使 busybox nc 在空 fifo 上 read 阻塞、socket 数据无人服务，改为按错误码区分（断管→POLLHUP，其余→WaitForSingleObject 回退） |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |

@@ -1021,7 +1021,28 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
               if (avail) p->revents |= p->events & POLLIN;
               p->revents |= p->events & POLLOUT;
             } else {
-              p->revents = POLLERR;
+              // feat/listener: wine cannot PeekNamedPipe stdio handles that
+              // wrap a unix fifo/socketpair (ERROR_NOT_SUPPORTED). Reporting
+              // POLLERR made guests (busybox nc) read(0) and block forever
+              // on an empty fifo while socket data went unserviced. Fall
+              // back to the handle wait state: wine pipes/fifos are signaled
+              // when data is available or the writer is gone.
+              DWORD werr = GetLastError();
+              if (werr == ERROR_PIPE_NOT_CONNECTED ||
+                  werr == ERROR_BAD_PIPE || werr == ERROR_BROKEN_PIPE ||
+                  werr == ERROR_NO_DATA) {
+                p->revents = POLLHUP;
+              } else {
+                DWORD wrc = WaitForSingleObject(h, 0);
+                if (wrc == WAIT_OBJECT_0) {
+                  // readable or hung up; read() disambiguates (0 == EOF)
+                  p->revents |= p->events & (POLLIN | POLLOUT);
+                } else if (wrc == WAIT_TIMEOUT) {
+                  p->revents = 0;
+                } else {
+                  p->revents = POLLERR;
+                }
+              }
             }
           } else {
             p->revents = p->events & (POLLIN | POLLOUT);

@@ -214,7 +214,13 @@ ok:
 int WboxMemInit(void) {
   struct WboxWindow *w;
   if (g_windows[0]) return 0;
-  if (!(w = WboxWindowReserve(43))) return -1;
+  // feat/listener: cap the guest window at 40 bits (1TB). Under wine 11.11,
+  // an N-byte MEM_RESERVE costs an extra N/4096-byte committed+zeroed
+  // anonymous region (one status byte per reserved page): 43 bits cost ~2GB
+  // RSS per wbox process, so two wbox processes exceeded the 3GiB CI memcg
+  // and the OOM killer SIGKILLed the listener (clients then saw
+  // ECONNREFUSED). 40 bits costs ~256MB. Real Windows has no such overhead.
+  if (!(w = WboxWindowReserve(40))) return -1;
   g_win = w;
   kSkew = (uint64_t)w->base;
   g_vabits = w->bits;
