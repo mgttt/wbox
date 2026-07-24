@@ -439,6 +439,19 @@ _Noreturn void SysExit(struct Machine *m, int rc) {
 // A true concurrent COW fork is intentionally NOT attempted here.
 #include "win32.h"
 
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+static void W32ForkDbg(const char *msg, int a, int b) {
+  if (getenv("WBOX_DEBUG_FORK")) {
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "[w32fork] %s a=%d b=%#x\n", msg, a,
+                     b);
+    DWORD nw;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
+  }
+}
+#endif
+
 struct W32VforkArgs {
   struct Machine *m;
   void *win;  // parent's guest VA window handle (w32mem.c)
@@ -447,18 +460,52 @@ struct W32VforkArgs {
 static DWORD WINAPI W32VforkThreadMain(LPVOID argp) {
   struct W32VforkArgs *a = (struct W32VforkArgs *)argp;
   struct Machine *m = a->m;
+  W32ForkDbg("child thread enter", 0, 0);
   WboxMemSetWindow(a->win);  // share parent's guest address space
   free(a);
   m->thread = pthread_self();
+  W32ForkDbg("child thread blink", m->w32vpid, 0);
   Blink(m);  // noreturn; guest exit/exec intercepted in the syscall layer
   return 0;
+}
+
+// Deep-copy the System's fd table for the child (host-dup every fd so
+// the child's close/dup2 calls cannot corrupt the parent's table — real
+// vfork shares the table, but real shells use fork() and depend on the
+// copy). The parent's original list is detached and restored when the
+// parent resumes (child exec'd or exited).
+static struct Dll *W32ForkFds(struct System *s) {
+  struct Dll *e, *saved;
+  LOCK(&s->fds.lock);
+  saved = s->fds.list;
+  s->fds.list = 0;
+  for (e = dll_first(saved); e; e = dll_next(saved, e)) {
+    struct Fd *fd = FD_CONTAINER(e);
+    int nf;
+    if ((nf = dup(fd->fildes)) == -1) continue;  // best effort
+    ForkFd(&s->fds, fd, nf, fd->oflags);
+  }
+  UNLOCK(&s->fds.lock);
+  return saved;
+}
+
+static void W32UnforkFds(struct System *s, struct Dll *saved) {
+  struct Fds tmp;
+  LOCK(&s->fds.lock);
+  InitFds(&tmp);
+  tmp.list = s->fds.list;  // child's leftover table
+  s->fds.list = saved;
+  UNLOCK(&s->fds.lock);
+  DestroyFds(&tmp);  // closes child's dup'd host fds
 }
 
 static int W32Fork(struct Machine *m) {
   struct Machine *m2;
   struct W32Child *rec;
   struct W32VforkArgs *a;
+  struct Dll *saved_fds;
   HANDLE thr;
+  W32ForkDbg("fork enter", 0, 0);
   m->threaded = true;
   if (!(m2 = NewMachine(m->system, m))) {
     return eagain();
@@ -477,9 +524,12 @@ static int W32Fork(struct Machine *m) {
   }
   a->m = m2;
   a->win = WboxMemCurrentWindow();
+  // give the child its own fd table (see W32ForkFds comment)
+  saved_fds = W32ForkFds(m->system);
   // suspended: the child must not run before its vpid/record are set
   thr = CreateThread(NULL, 0, W32VforkThreadMain, a, CREATE_SUSPENDED, NULL);
   if (!thr) {
+    W32UnforkFds(m->system, saved_fds);
     free(a);
     W32ChildAbandon(rec);
     FreeMachine(m2);
@@ -491,8 +541,13 @@ static int W32Fork(struct Machine *m) {
   W32ChildPublish(rec, thr);
   ResumeThread(thr);
   THR_LOGF("pid=%d W32Fork -> vpid=%d", m->system->pid, m2->w32vpid);
+  W32ForkDbg("fork spawn", m2->w32vpid, 0);
   // vfork semantics: parent sleeps until the child execve()s or exits
   W32VforkWaitParent(rec);
+  W32ForkDbg("parent resumed", rec->vpid, rec->exited);
+  // take back the fd table; the child either has its own System now
+  // (exec) or is gone (exit)
+  W32UnforkFds(m->system, saved_fds);
   return W32ChildVpid(rec);
 }
 
@@ -553,12 +608,14 @@ static int W32VforkExec(struct Machine *m, char *execfn, char *prog,
   }
   m->w32vfork = 0;
   m->w32vpid = 0;
+  W32ForkDbg("child exec", vpid, 0);
   // LoadProgram is point-of-no-return (exits on failure like upstream).
   LoadProgram(m2, execfn, prog, argv, envp, NULL);
   // LoadProgram may leave elf.prog/execfn pointing at the old machine's
   // freelist; make them heap-owned so FreeSystem(s2) at exit is clean.
   s2->elf.prog = strdup(s2->elf.prog);
   s2->elf.execfn = strdup(s2->elf.execfn);
+  W32ForkDbg("child exec loaded", vpid, 0);
   // release the old system's execve() lock (SysExecve holds it), wake
   // the parent, abandon the pre-exec machine, and run the new program
   UNLOCK(&m->system->exec_lock);
@@ -578,6 +635,7 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   struct W32Child *rec = m->system->w32child;
   uintptr_t lo = WboxMemWindowBase();
   uintptr_t hi = WboxMemLimit();
+  W32ForkDbg("child exit", rc, 0);
   W32ChildSignalExit(rec, rc);
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
   // recycled host pages handed out from the child's window must not be
@@ -594,6 +652,7 @@ _Noreturn static void W32VforkChildExitNoExec(struct Machine *m, int rc) {
   struct W32Child *rec = m->w32vfork;
   m->w32vfork = 0;
   m->w32vpid = 0;
+  W32ForkDbg("child exit noexec", rc, 0);
   W32ChildSignalExit(rec, rc);
   FreeMachine(m);  // parent machine remains; System survives
   ExitThread(0);
@@ -802,6 +861,9 @@ static bool IsForkOrVfork(u64 flags) {
 
 static int SysClone(struct Machine *m, u64 flags, u64 stack, u64 ptid, u64 ctid,
                     u64 tls, u64 func) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  W32ForkDbg("clone", (int)flags, 0);
+#endif
   if (IsForkOrVfork(flags)) {
 #if defined(HAVE_FORK) || (defined(_WIN32) && !defined(__CYGWIN__))
     return Fork(m, flags, stack, ctid);
@@ -5667,6 +5729,13 @@ static int SysEpollWait(struct Machine *m, i32 epfd, i64 eventsaddr,
 #endif /* HAVE_EPOLL_PWAIT1 */
 
 void OpSyscall(P) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  {
+    u64 sn = Get64(m->ax) & 0xfff;
+    if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 || sn == 435)
+      W32ForkDbg("syscall", (int)sn, 0);
+  }
+#endif
   size_t mark;
   u64 ax, di, si, dx, r0, r8, r9;
   unassert(!m->nofault);
