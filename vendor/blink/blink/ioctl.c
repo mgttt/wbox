@@ -321,17 +321,17 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
   if (!fd) return -1;
   switch (request) {
     case TIOCGWINSZ_LINUX:
-      return IoctlTiocgwinsz(m, fildes, addr, tcgetwinsize_impl);
+      return IoctlTiocgwinsz(m, fd->hostfd, addr, tcgetwinsize_impl);
     case TIOCSWINSZ_LINUX:
-      return IoctlTiocswinsz(m, fildes, addr, tcsetwinsize_impl);
+      return IoctlTiocswinsz(m, fd->hostfd, addr, tcsetwinsize_impl);
     case TCGETS_LINUX:
-      return IoctlTcgets(m, fildes, addr, tcgetattr_impl);
+      return IoctlTcgets(m, fd->hostfd, addr, tcgetattr_impl);
     case TCSETS_LINUX:
-      return IoctlTcsets(m, fildes, TCSANOW, addr, tcsetattr_impl);
+      return IoctlTcsets(m, fd->hostfd, TCSANOW, addr, tcsetattr_impl);
     case TCSETSW_LINUX:
-      return IoctlTcsets(m, fildes, TCSADRAIN, addr, tcsetattr_impl);
+      return IoctlTcsets(m, fd->hostfd, TCSADRAIN, addr, tcsetattr_impl);
     case TCSETSF_LINUX:
-      return IoctlTcsets(m, fildes, TCSAFLUSH, addr, tcsetattr_impl);
+      return IoctlTcsets(m, fd->hostfd, TCSAFLUSH, addr, tcsetattr_impl);
     case TIOCGPGRP_LINUX:
       return IoctlTiocgpgrp(m, fildes, addr);
     case TIOCSPGRP_LINUX:

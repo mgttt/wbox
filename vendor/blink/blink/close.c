@@ -39,7 +39,7 @@ static int CloseFd(struct Fd *fd) {
   if (fd->dirstream) {
     rc = VfsClosedir(fd->dirstream);
   } else {
-    rc = fd->cb->close(fd->fildes);
+    rc = fd->cb->close(fd->hostfd);
   }
   FreeFd(fd);
   return rc;
@@ -100,7 +100,7 @@ static int SysCloseRangeCloexec(struct Machine *m, u32 first, u32 last) {
     if (first <= (u32)fd->fildes && (u32)fd->fildes <= last) {
       if (~fd->oflags & O_CLOEXEC) {
         fd->oflags |= O_CLOEXEC;
-        VfsFcntl(fd->fildes, F_SETFD, FD_CLOEXEC);
+        VfsFcntl(fd->hostfd, F_SETFD, FD_CLOEXEC);
       }
     }
   }

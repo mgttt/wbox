@@ -29,7 +29,13 @@ struct FdCb {
 };
 
 struct Fd {
-  int fildes;      // file descriptor
+  int fildes;      // file descriptor (guest-visible number)
+  // wbox win32: host-side descriptor. Normally identical to fildes (the
+  // upstream invariant guest fd == host fd). In a vfork child's copied
+  // fd table the guest numbers are preserved while the host descriptors
+  // are dup'd copies, so hostfd != fildes there. All host syscalls must
+  // use hostfd; guest lookups use fildes.
+  int hostfd;
   int oflags;      // host O_XXX constants
   int socktype;    // host SOCK_XXX constants
   bool norestart;  // is SO_RCVTIMEO in play?
@@ -55,6 +61,7 @@ extern const struct FdCb kFdCbHost;
 void InitFds(struct Fds *);
 struct Fd *AddFd(struct Fds *, int, int);
 struct Fd *ForkFd(struct Fds *, struct Fd *, int, int);
+int AllocGuestFd(struct Fds *, int);
 struct Fd *GetFd(struct Fds *, int);
 void LockFd(struct Fd *);
 void UnlockFd(struct Fd *);

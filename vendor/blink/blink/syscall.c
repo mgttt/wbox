@@ -423,6 +423,18 @@ _Noreturn void SysExit(struct Machine *m, int rc) {
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: translate a guest fd to its host descriptor (the two
+// diverge in a vfork child's copied fd table; identical elsewhere).
+// Falls back to the guest number when the fd is not tracked.
+static int HostFdOf(struct System *s, int fildes) {
+  struct Fd *fd;
+  int h = fildes;
+  LOCK(&s->fds.lock);
+  if ((fd = GetFd(&s->fds, fildes))) h = fd->hostfd;
+  UNLOCK(&s->fds.lock);
+  return h;
+}
+
 // ---------------------------------------------------------------------
 // wbox win32: vfork-style fork (see win32/WIN32-PORT.md).
 //
@@ -476,14 +488,22 @@ static DWORD WINAPI W32VforkThreadMain(LPVOID argp) {
 // parent resumes (child exec'd or exited).
 static struct Dll *W32ForkFds(struct System *s) {
   struct Dll *e, *saved;
+  struct Fd *fd2;
   LOCK(&s->fds.lock);
   saved = s->fds.list;
   s->fds.list = 0;
   for (e = dll_first(saved); e; e = dll_next(saved, e)) {
     struct Fd *fd = FD_CONTAINER(e);
     int nf;
-    if ((nf = dup(fd->fildes)) == -1) continue;  // best effort
-    ForkFd(&s->fds, fd, nf, fd->oflags);
+    if ((nf = dup(fd->hostfd)) == -1) continue;  // best effort
+    if (getenv("WBOX_DEBUG_FORK"))
+      fprintf(stderr, "[w32fork] fd copy guest=%d host=%d\n", fd->fildes, nf);
+    // key by the GUEST number and record the dup'd host descriptor
+    // separately (fd->hostfd): the child must see the parent's fd
+    // numbering, while its closes/dup2s only affect its own host copies.
+    if ((fd2 = ForkFd(&s->fds, fd, fd->fildes, fd->oflags))) {
+      fd2->hostfd = nf;
+    }
   }
   UNLOCK(&s->fds.lock);
   return saved;
@@ -491,12 +511,17 @@ static struct Dll *W32ForkFds(struct System *s) {
 
 static void W32UnforkFds(struct System *s, struct Dll *saved) {
   struct Fds tmp;
+  struct Dll *e;
   LOCK(&s->fds.lock);
   InitFds(&tmp);
   tmp.list = s->fds.list;  // child's leftover table
   s->fds.list = saved;
   UNLOCK(&s->fds.lock);
-  DestroyFds(&tmp);  // closes child's dup'd host fds
+  // close the child's dup'd host descriptors (DestroyFds only frees)
+  for (e = dll_first(tmp.list); e; e = dll_next(tmp.list, e)) {
+    close(FD_CONTAINER(e)->hostfd);
+  }
+  DestroyFds(&tmp);
 }
 
 static int W32Fork(struct Machine *m) {
@@ -561,6 +586,7 @@ static int W32VforkExec(struct Machine *m, char *execfn, char *prog,
   int i;
   int vpid;
   struct Dll *e;
+  struct Fd *fd2;
   struct System *s2;
   struct Machine *m2;
   struct W32Child *rec = m->w32vfork;
@@ -588,8 +614,11 @@ static int W32VforkExec(struct Machine *m, char *execfn, char *prog,
     struct Fd *fd = FD_CONTAINER(e);
     int nf;
     if (fd->oflags & O_CLOEXEC) continue;
-    if ((nf = dup(fd->fildes)) == -1) continue;  // best effort
-    ForkFd(&s2->fds, fd, nf, fd->oflags & ~O_CLOEXEC);
+    if ((nf = dup(fd->hostfd)) == -1) continue;  // best effort
+    // keep the guest numbering; the host side is the child's own dup
+    if ((fd2 = ForkFd(&s2->fds, fd, fd->fildes, fd->oflags & ~O_CLOEXEC))) {
+      fd2->hostfd = nf;
+    }
   }
   UNLOCK(&m->system->fds.lock);
   // the child record (vpid, thread handle, exit status) follows the exec
@@ -1578,20 +1607,33 @@ static int SysDup1(struct Machine *m, i32 fildes) {
   int lim;
   int oflags;
   int newfildes;
+  int hostfd;
   struct Fd *fd;
   if (fildes < 0) return ebadf();
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((newfildes = VfsDup(fildes)) != -1) {
-    if (newfildes >= lim) {
-      VfsClose(newfildes);
-      return emfile();
-    }
-    LOCK(&m->system->fds.lock);
-    unassert(fd = GetFd(&m->system->fds, fildes));
-    oflags = fd->oflags & ~O_CLOEXEC;
-    unassert(ForkFd(&m->system->fds, fd, newfildes, oflags));
+  // wbox win32: table-driven dup. The host descriptor is dup'd off the
+  // table's hostfd; the guest number is allocated from the guest table.
+  // In the normal case (guest == host numbering) this behaves exactly
+  // like upstream's dup() + ForkFd.
+  LOCK(&m->system->fds.lock);
+  if (!(fd = GetFd(&m->system->fds, fildes))) {
     UNLOCK(&m->system->fds.lock);
+    return -1;
   }
+  if ((hostfd = dup(fd->hostfd)) == -1) {
+    UNLOCK(&m->system->fds.lock);
+    return -1;
+  }
+  newfildes = AllocGuestFd(&m->system->fds, 0);
+  if (newfildes >= lim) {
+    UNLOCK(&m->system->fds.lock);
+    VfsClose(hostfd);
+    return emfile();
+  }
+  oflags = fd->oflags & ~O_CLOEXEC;
+  unassert(fd = ForkFd(&m->system->fds, fd, newfildes, oflags));
+  fd->hostfd = hostfd;
+  UNLOCK(&m->system->fds.lock);
   return newfildes;
 }
 
@@ -1615,7 +1657,7 @@ static int Dup3(struct Machine *m, int fildes, int newfildes, int flags) {
 
 static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
   int rc, oflags;
-  struct Fd *fd;
+  struct Fd *fd, *fd2;
   if (newfildes < 0) {
     LOGF("dup2() ebadf");
     return ebadf();
@@ -1631,70 +1673,100 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
     UNLOCK(&m->system->fds.lock);
   } else if (newfildes >= GetFileDescriptorLimit(m->system)) {
     return ebadf();
-  } else if ((rc = Dup2(m, fildes, newfildes)) != -1) {
+  } else {
+    // wbox win32: table-driven dup2 (see SysDup1). Host-side we dup2
+    // onto the target's own host descriptor (or a fresh dup if the
+    // target guest number was not open), never onto a bare guest number
+    // — in a vfork child guest numbers are not valid host descriptors.
     LOCK(&m->system->fds.lock);
-    if ((fd = GetFd(&m->system->fds, newfildes))) {
-      dll_remove(&m->system->fds.list, &fd->elem);
-      FreeFd(fd);
+    if (!(fd = GetFd(&m->system->fds, fildes))) {
+      UNLOCK(&m->system->fds.lock);
+      return ebadf();
     }
-    unassert(fd = GetFd(&m->system->fds, fildes));
     oflags = fd->oflags & ~O_CLOEXEC;
-    unassert(ForkFd(&m->system->fds, fd, newfildes, oflags));
+    if ((fd2 = GetFd(&m->system->fds, newfildes))) {
+      if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+        UNLOCK(&m->system->fds.lock);
+        return -1;
+      }
+      fd2->oflags = oflags;
+    } else {
+      int hostfd = dup(fd->hostfd);
+      if (hostfd == -1) {
+        UNLOCK(&m->system->fds.lock);
+        return -1;
+      }
+      unassert(fd2 = ForkFd(&m->system->fds, fd, newfildes, oflags));
+      fd2->hostfd = hostfd;
+    }
     UNLOCK(&m->system->fds.lock);
+    return newfildes;
   }
-  return rc;
 }
 
 static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
-  int rc;
   int oflags;
-  struct Fd *fd;
+  struct Fd *fd, *fd2;
   if (newfildes < 0) return ebadf();
   if (fildes == newfildes) return einval();
   if (flags & ~O_CLOEXEC_LINUX) return einval();
   if (newfildes >= GetFileDescriptorLimit(m->system)) return ebadf();
-#ifdef HAVE_DUP3
-  if ((rc = Dup3(m, fildes, newfildes, XlatOpenFlags(flags))) != -1) {
-#else
-  if ((rc = Dup2(m, fildes, newfildes)) != -1) {
-    if (flags & O_CLOEXEC_LINUX) {
-      unassert(!VfsFcntl(newfildes, F_SETFD, FD_CLOEXEC));
-    }
-#endif
-    LOCK(&m->system->fds.lock);
-    if ((fd = GetFd(&m->system->fds, newfildes))) {
-      dll_remove(&m->system->fds.list, &fd->elem);
-      FreeFd(fd);
-    }
-    unassert(fd = GetFd(&m->system->fds, fildes));
-    oflags = fd->oflags & ~O_CLOEXEC;
-    if (flags & O_CLOEXEC_LINUX) {
-      oflags |= O_CLOEXEC;
-    }
-    unassert(ForkFd(&m->system->fds, fd, newfildes, oflags));
+  // wbox win32: table-driven dup3 (see SysDup1/SysDup2)
+  LOCK(&m->system->fds.lock);
+  if (!(fd = GetFd(&m->system->fds, fildes))) {
     UNLOCK(&m->system->fds.lock);
+    return ebadf();
   }
-  return rc;
+  oflags = fd->oflags & ~O_CLOEXEC;
+  if (flags & O_CLOEXEC_LINUX) {
+    oflags |= O_CLOEXEC;
+  }
+  if ((fd2 = GetFd(&m->system->fds, newfildes))) {
+    if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+      UNLOCK(&m->system->fds.lock);
+      return -1;
+    }
+    fd2->oflags = oflags;
+  } else {
+    int hostfd = dup(fd->hostfd);
+    if (hostfd == -1) {
+      UNLOCK(&m->system->fds.lock);
+      return -1;
+    }
+    unassert(fd2 = ForkFd(&m->system->fds, fd, newfildes, oflags));
+    fd2->hostfd = hostfd;
+  }
+  UNLOCK(&m->system->fds.lock);
+  return newfildes;
 }
 
 static int SysDupf(struct Machine *m, i32 fildes, i32 minfildes, int cmd) {
   struct Fd *fd;
-  int lim, oflags, newfildes;
+  int lim, oflags, newfildes, hostfd;
   if (minfildes >= (lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((newfildes = VfsFcntl(fildes, cmd, minfildes)) != -1) {
-    if (newfildes >= lim) {
-      VfsClose(newfildes);
-      return emfile();
-    }
-    LOCK(&m->system->fds.lock);
-    unassert(fd = GetFd(&m->system->fds, fildes));
-    oflags = fd->oflags & ~O_CLOEXEC;
-    if (cmd == F_DUPFD_CLOEXEC) {
-      oflags |= O_CLOEXEC;
-    }
-    unassert(ForkFd(&m->system->fds, fd, newfildes, oflags));
+  // wbox win32: table-driven F_DUPFD (see SysDup1)
+  LOCK(&m->system->fds.lock);
+  if (!(fd = GetFd(&m->system->fds, fildes))) {
     UNLOCK(&m->system->fds.lock);
+    return ebadf();
   }
+  if ((hostfd = dup(fd->hostfd)) == -1) {
+    UNLOCK(&m->system->fds.lock);
+    return -1;
+  }
+  newfildes = AllocGuestFd(&m->system->fds, minfildes);
+  if (newfildes >= lim) {
+    UNLOCK(&m->system->fds.lock);
+    VfsClose(hostfd);
+    return emfile();
+  }
+  oflags = fd->oflags & ~O_CLOEXEC;
+  if (cmd == F_DUPFD_CLOEXEC) {
+    oflags |= O_CLOEXEC;
+  }
+  unassert(fd = ForkFd(&m->system->fds, fd, newfildes, oflags));
+  fd->hostfd = hostfd;
+  UNLOCK(&m->system->fds.lock);
   return newfildes;
 }
 
@@ -1937,7 +2009,7 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   addrlen = sizeof(addr);
   INTERRUPTIBLE(restartable,
-                newfd = VfsAccept(fildes, (struct sockaddr *)&addr, &addrlen));
+                newfd = VfsAccept(fd->hostfd, (struct sockaddr *)&addr, &addrlen));
   if (newfd != -1) {
     if (newfd >= lim) {
       VfsClose(newfd);
@@ -2176,7 +2248,7 @@ static i64 SysSendto(struct Machine *m,  //
   if ((rc = AppendIovsReal(m, &iv, bufaddr, buflen, PROT_READ)) != -1) {
     msg.msg_iov = iv.p;
     msg.msg_iovlen = iv.i;
-    INTERRUPTIBLE(!norestart, rc = VfsSendmsg(fildes, &msg, hostflags));
+    INTERRUPTIBLE(!norestart, rc = VfsSendmsg(HostFdOf(m->system, fildes), &msg, hostflags));
   }
   FreeIovs(&iv);
   return HandleSigpipe(m, rc, flags);
@@ -2207,7 +2279,7 @@ static i64 SysRecvfrom(struct Machine *m,  //
   if ((rc = AppendIovsReal(m, &iv, bufaddr, buflen, PROT_WRITE)) != -1) {
     msg.msg_iov = iv.p;
     msg.msg_iovlen = iv.i;
-    INTERRUPTIBLE(!norestart, rc = VfsRecvmsg(fildes, &msg, hostflags));
+    INTERRUPTIBLE(!norestart, rc = VfsRecvmsg(HostFdOf(m->system, fildes), &msg, hostflags));
     if (rc != -1) {
       StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
                     (struct sockaddr *)msg.msg_name, msg.msg_namelen);
@@ -2272,7 +2344,7 @@ static i64 SysSendmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
   if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_READ)) != -1) {
     msg.msg_iov = iv.p;
     msg.msg_iovlen = iv.i;
-    INTERRUPTIBLE(!norestart, rc = VfsSendmsg(fildes, &msg, flags));
+    INTERRUPTIBLE(!norestart, rc = VfsSendmsg(HostFdOf(m->system, fildes), &msg, flags));
   }
   FreeIovs(&iv);
   return HandleSigpipe(m, rc, flags);
@@ -2315,7 +2387,7 @@ static i64 SysRecvmsg(struct Machine *m, i32 fildes, i64 msgaddr, i32 flags) {
       msg.msg_name = &addr;
       msg.msg_namelen = sizeof(addr);
     }
-    INTERRUPTIBLE(!norestart, rc = VfsRecvmsg(fildes, &msg, flags));
+    INTERRUPTIBLE(!norestart, rc = VfsRecvmsg(HostFdOf(m->system, fildes), &msg, flags));
     if (rc != -1) {
       Write32(gm.flags, UnXlatMsgFlags(msg.msg_flags));
       unassert(CopyToUserWrite(m, msgaddr, &gm, sizeof(gm)) != -1);
@@ -2505,7 +2577,7 @@ static int SetsockoptLinger(struct Machine *m, i32 fildes, i64 optvaladdr,
   }
   hl.l_onoff = (i32)Read32(gl->onoff);
   hl.l_linger = (i32)Read32(gl->linger);
-  return VfsSetsockopt(fildes, SOL_SOCKET, SO_LINGER_, &hl, sizeof(hl));
+  return VfsSetsockopt(HostFdOf(m->system, fildes), SOL_SOCKET, SO_LINGER_, &hl, sizeof(hl));
 }
 
 static int GetsockoptLinger(struct Machine *m, i32 fd, i64 optvaladdr,
@@ -2552,7 +2624,7 @@ static int SysSetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   if (XlatSocketLevel(level, &syslevel) == -1) return -1;
   if ((sysoptname = XlatSocketOptname(level, optname)) == -1) return -1;
   if (!(optval = SchlepR(m, optvaladdr, optvalsize))) return -1;
-  rc = VfsSetsockopt(fildes, syslevel, sysoptname, optval, optvalsize);
+  rc = VfsSetsockopt(HostFdOf(m->system, fildes), syslevel, sysoptname, optval, optvalsize);
   if (rc != -1 &&                      //
       level == SOL_SOCKET_LINUX &&     //
       optname == SO_RCVTIMEO_LINUX &&  //
@@ -2600,7 +2672,7 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   optvalsize = Read32(optvalsize_linux);
   if (optvalsize > 256) return einval();
   if (!(optval = AddToFreeList(m, calloc(1, optvalsize)))) return -1;
-  rc = VfsGetsockopt(fildes, syslevel, sysoptname, optval, &optvalsize);
+  rc = VfsGetsockopt(HostFdOf(m->system, fildes), syslevel, sysoptname, optval, &optvalsize);
   Write32(optvalsize_linux, optvalsize);
   CopyToUserWrite(m, optvaladdr, optval, optvalsize);
   CopyToUserWrite(m, optvalsizeaddr, optvalsize_linux,
@@ -2630,7 +2702,7 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
-      RESTARTABLE(rc = readv_impl(fildes, iv.p, iv.i));
+      RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
       if (rc != -1) SetWriteAddr(m, addr, rc);
     }
     FreeIovs(&iv);
@@ -2662,7 +2734,7 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_READ)) != -1) {
-      RESTARTABLE(rc = writev_impl(fildes, iv.p, iv.i));
+      RESTARTABLE(rc = writev_impl(fd->hostfd, iv.p, iv.i));
       if (rc != -1) SetReadAddr(m, addr, rc);
     }
     FreeIovs(&iv);
@@ -2761,7 +2833,7 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_WRITE)) != -1) {
       if (iv.i) {
         if (offset == -1) {
-          RESTARTABLE(rc = readv_impl(fildes, iv.p, iv.i));
+          RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
         } else if (offset < 0) {
           return einval();
         } else if (offset > NUMERIC_MAX(off_t)) {
@@ -2809,7 +2881,7 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_READ)) != -1) {
       if (iv.i) {
         if (offset == -1) {
-          RESTARTABLE(rc = writev_impl(fildes, iv.p, iv.i));
+          RESTARTABLE(rc = writev_impl(fd->hostfd, iv.p, iv.i));
           rc = HandleSigpipe(m, rc, 0);
         } else if (offset < 0) {
           return einval();
@@ -2926,7 +2998,7 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
   if ((fd->oflags & O_DIRECTORY) != O_DIRECTORY) return enotdir();
   if (!IsValidMemory(m, addr, size, PROT_WRITE)) return -1;
   if (VfsFstat(fildes, &st) || !st.st_nlink) return enoent();
-  if (!fd->dirstream && !(fd->dirstream = VfsOpendir(fd->fildes))) {
+  if (!fd->dirstream && !(fd->dirstream = VfsOpendir(fd->hostfd))) {
     return -1;
   }
   for (i = 0; i + sizeof(rec) <= size; i += reclen) {
@@ -2951,7 +3023,7 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
     type = UnXlatDt(ent->d_type);
 #else
     struct stat st;
-    if (fstatat(fd->fildes, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
+    if (fstatat(fd->hostfd, ent->d_name, &st, AT_SYMLINK_NOFOLLOW) == -1) {
       LOGF("getdents() fstatat(%d, %s) failed: %s", fd->fildes, ent->d_name,
            DescribeHostErrno(errno));
       type = DT_UNKNOWN_LINUX;
@@ -3014,7 +3086,7 @@ static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
   if (offset < -NUMERIC_MAX(off_t) - 1) return eoverflow();
   if (!(fd = GetAndLockFd(m, fildes))) return -1;
   if (!fd->dirstream) {
-    rc = VfsSeek(fd->fildes, offset, XlatWhence(whence));
+    rc = VfsSeek(fd->hostfd, offset, XlatWhence(whence));
   } else if (whence == SEEK_SET_LINUX) {
     if (!offset) {
       VfsRewinddir(fd->dirstream);
@@ -3338,11 +3410,11 @@ static int SysFlock(struct Machine *m, i32 fd, i32 lock) {
 }
 
 static int SysShutdown(struct Machine *m, i32 fd, i32 how) {
-  return VfsShutdown(fd, XlatShutdown(how));
+  return VfsShutdown(HostFdOf(m->system, fd), XlatShutdown(how));
 }
 
 static int SysListen(struct Machine *m, i32 fd, i32 backlog) {
-  return VfsListen(fd, backlog);
+  return VfsListen(HostFdOf(m->system, fd), backlog);
 }
 
 static int SysMkdirat(struct Machine *m, i32 dirfd, i64 path, i32 mode) {
@@ -3524,7 +3596,7 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
     rc = UnXlatOpenFlags(fd->oflags);
   } else if (cmd == F_SETFD_LINUX) {
     if (!(arg & ~FD_CLOEXEC_LINUX)) {
-      if (VfsFcntl(fd->fildes, F_SETFD, arg ? FD_CLOEXEC : 0) != -1) {
+      if (VfsFcntl(fd->hostfd, F_SETFD, arg ? FD_CLOEXEC : 0) != -1) {
         fd->oflags &= ~O_CLOEXEC;
         if (arg) fd->oflags |= O_CLOEXEC;
         rc = 0;
@@ -3537,7 +3609,7 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
   } else if (cmd == F_SETFL_LINUX) {
     fl = XlatOpenFlags(arg & (O_APPEND_LINUX | O_ASYNC_LINUX | O_DIRECT_LINUX |
                               O_NOATIME_LINUX | O_NDELAY_LINUX));
-    if (VfsFcntl(fd->fildes, F_SETFL, fl) != -1) {
+    if (VfsFcntl(fd->hostfd, F_SETFL, fl) != -1) {
       fd->oflags &= ~SETFL_FLAGS;
       fd->oflags |= fl;
       rc = 0;
@@ -3551,20 +3623,20 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
     return SysFcntlLock(m, fildes, cmd, arg);
 #ifdef F_SETOWN
   } else if (cmd == F_SETOWN_LINUX) {
-    rc = VfsFcntl(fd->fildes, F_SETOWN, arg);
+    rc = VfsFcntl(fd->hostfd, F_SETOWN, arg);
 #endif
 #ifdef F_GETOWN
   } else if (cmd == F_GETOWN_LINUX) {
-    rc = VfsFcntl(fd->fildes, F_GETOWN);
+    rc = VfsFcntl(fd->hostfd, F_GETOWN);
 #endif
 #ifndef DISABLE_NONPOSIX
 #ifdef HAVE_F_GETOWN_EX
   } else if (cmd == F_SETOWN_EX_LINUX) {
-    rc = SysFcntlSetownEx(m, fd->fildes, arg);
+    rc = SysFcntlSetownEx(m, fd->hostfd, arg);
 #endif
 #ifdef HAVE_F_GETOWN_EX
   } else if (cmd == F_GETOWN_EX_LINUX) {
-    rc = SysFcntlGetownEx(m, fd->fildes, arg);
+    rc = SysFcntlGetownEx(m, fd->hostfd, arg);
 #endif
 #endif
   } else {
@@ -4773,7 +4845,7 @@ static i32 Select(struct Machine *m,          //
       }
       UNLOCK(&m->system->fds.lock);
       if (fd) {
-        hfds[0].fd = fildes;
+        hfds[0].fd = fd->hostfd;
         hfds[0].events = ((FD_ISSET(fildes, &readfds) ? POLLIN : 0) |
                           (FD_ISSET(fildes, &writefds) ? POLLOUT : 0) |
                           (FD_ISSET(fildes, &exceptfds) ? POLLPRI : 0));
@@ -4976,7 +5048,7 @@ static int Poll(struct Machine *m, i64 fdsaddr, u64 nfds,
           }
           UNLOCK(&m->system->fds.lock);
           if (fd) {
-            hfds[0].fd = fildes;
+            hfds[0].fd = fd->hostfd;
             ev = Read16(gfds[i].events);
             hfds[0].events = (((ev & POLLIN_LINUX) ? POLLIN : 0) |
                               ((ev & POLLOUT_LINUX) ? POLLOUT : 0) |

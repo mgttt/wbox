@@ -48,6 +48,7 @@ struct Fd *AddFd(struct Fds *fds, int fildes, int oflags) {
       dll_init(&fd->elem);
       fd->cb = &kFdCbHost;
       fd->fildes = fildes;
+      fd->hostfd = fildes;  // wbox: default keeps guest == host invariant
       fd->oflags = oflags;
       unassert(!pthread_mutex_init(&fd->lock, 0));
       dll_make_first(&fds->list, &fd->elem);
@@ -57,6 +58,27 @@ struct Fd *AddFd(struct Fds *fds, int fildes, int oflags) {
     einval();
     return 0;
   }
+}
+
+// wbox win32: return the lowest guest fd number >= minfd not present in
+// the table. Caller must hold fds->lock. Used by the dup/pipe family so
+// that guest numbering stays coherent even when host descriptor numbers
+// diverge (vfork child fd copies, see syscall.c W32ForkFds).
+int AllocGuestFd(struct Fds *fds, int minfd) {
+  struct Dll *e;
+  int n = minfd;
+  bool again;
+  do {
+    again = false;
+    for (e = dll_first(fds->list); e; e = dll_next(fds->list, e)) {
+      if (FD_CONTAINER(e)->fildes == n) {
+        ++n;
+        again = true;
+        break;
+      }
+    }
+  } while (again);
+  return n;
 }
 
 struct Fd *ForkFd(struct Fds *fds, struct Fd *fd, int fildes, int oflags) {
@@ -144,10 +166,10 @@ void InheritFd(struct Fd *fd) {
 #ifndef DISABLE_SOCKETS
   socklen_t addrlen;
   if (!fd) return;
-  if (!GetFdSocketType(fd->fildes, &fd->socktype)) {
-    fd->norestart = IsNoRestartSocket(fd->fildes);
+  if (!GetFdSocketType(fd->hostfd, &fd->socktype)) {
+    fd->norestart = IsNoRestartSocket(fd->hostfd);
     addrlen = sizeof(fd->saddr);
-    VfsGetsockname(fd->fildes, (struct sockaddr *)&fd->saddr, &addrlen);
+    VfsGetsockname(fd->hostfd, (struct sockaddr *)&fd->saddr, &addrlen);
   }
 #endif
 }
