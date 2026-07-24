@@ -5,8 +5,9 @@
 /* feat/net: sockets now map to Winsock2 (win32/w32sock.c) */
 /* #undef DISABLE_SOCKETS */
 #define HAVE_EPOLL_PWAIT1
-#define DISABLE_VFS
-#define DISABLE_OVERLAYS
+/* L2: VFS/ overlays enabled for BLINK_PREFIX rootfs */
+/* #undef DISABLE_VFS */
+/* #undef DISABLE_OVERLAYS */
 #define DISABLE_ANCILLARY
 #define DISABLE_DISASSEMBLER
 #define DISABLE_BACKTRACE

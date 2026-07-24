@@ -9,4 +9,5 @@ int mkostemp(char *, int);
 int clearenv(void);
 int setenv(const char *, const char *, int);
 int unsetenv(const char *);
+char *realpath(const char *, char *);
 #endif

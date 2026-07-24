@@ -431,6 +431,37 @@ char *ctime_r(const time_t *t, char *buf) {
   return asctime_r(&tm, buf);
 }
 
+// realpath(3) for VFS (BLINK_PREFIX rootfs 解析): UTF-8 -> wide ->
+// GetFullPathNameW -> UTF-8。Windows 不解析 symlink，L2 接受该差异。
+char *realpath(const char *path, char *resolved) {
+  wchar_t wsrc[520], wfull[520];
+  if (!path || MultiByteToWideChar(CP_UTF8, 0, path, -1, wsrc, 520) <= 0) {
+    errno = ENOENT;
+    return NULL;
+  }
+  DWORD n = GetFullPathNameW(wsrc, 520, wfull, NULL);
+  if (!n || n >= 520) {
+    errno = ENOENT;
+    return NULL;
+  }
+  char utf8[520 * 3];
+  if (WideCharToMultiByte(CP_UTF8, 0, wfull, -1, utf8, sizeof(utf8), NULL,
+                          NULL) <= 0) {
+    errno = ENOENT;
+    return NULL;
+  }
+  // blink 用返回串直接做路径前缀拼接，统一成 '/' 分隔
+  for (char *p = utf8; *p; ++p)
+    if (*p == '\\') *p = '/';
+  if (resolved) {
+    strcpy(resolved, utf8);
+    return resolved;
+  }
+  char *out = malloc(strlen(utf8) + 1);
+  if (out) strcpy(out, utf8);
+  return out;
+}
+
 // ---------------------------------------------------------------- TUI stubs (real mode only; unused by L1)
 
 struct Pty *pty;
