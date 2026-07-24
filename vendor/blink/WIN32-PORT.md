@@ -70,7 +70,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |
 | 7 | MAP_SHARED 文件写回 | ⚠️ 未实现（L1 gap，代码内注释标注）；文件映射按 MAP_PRIVATE pread 拷贝 |
-| 8 | JIT | ❌ 禁用（DISABLE_JIT），纯解释器；性能档位 1/50–1/80，L2 评估接入 |
+| 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
 | 10 | clone/线程 | ❌ 未接入（静态 glibc pthread 在上游 blink 亦 100% 崩溃，列入不支持） |
 | 11 | 动态链接（PT_INTERP） | ✅ 可用（映射 rootfs/宿主 ld-linux；动态 glibc 测试程序在 wine 下运行正常） |
@@ -82,7 +82,6 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 - socket 族（ENOSYS）
 - mremap 扩容（ENOMEM）
 - MAP_SHARED 写回
-- JIT（纯解释）
 - 终端仅哑控制台（cooked/raw 两档）
 - wineserver 报 "prefix is not owned by you" 为 wine 沙箱提示，无功能影响
 
@@ -139,6 +138,34 @@ sh: can't fork: Function not implemented                                        
 ```
 
 调试开关（默认全关）：`WBOX_DEBUG_MEM=1`（w32mem 窗口/mmap 插桩）。
+
+## 7.1 JIT 与体积/性能（wine 11.11 实测）
+
+构建开关：`WBOX_JIT=1`（默认，JIT）/ `WBOX_JIT=0`（`-DDISABLE_JIT` 纯解释器）；
+运行期还可用 `wbox-linux.exe -j` 临时关闭 JIT。
+
+体积（zig cc -O2，同树构建）：JIT 版 862720 字节，纯解释版 794624 字节。
+
+JIT 关键修复（feat/jit）：
+
+- Win64 ABI 三处：jit.h kJitArg0..3 改 rcx/rdx/r8/r9（扩展到 `_WIN32`）；
+  path.c kEnter/kLeave 取 Cygwin 分支（rcx 取参、保存/恢复 rdi/rsi），
+  EndPath→BlinkEndPath 避让 wingdi.h；xmm.h / machine.c Actor 取 Cygwin 分支
+- uop.c GetInstructionLength：micro-op 函数体的分支/静态内存（RIP 相对）
+  检测在 `_WIN32` release 构建同样启用——否则逐字节拷贝后的 RIP 相对
+  .refptr 访问指向 JIT 内存，段错误
+
+基准（同机 wine 11.11，`WINEDEBUG=-all` 独立 WINEPREFIX；sha256sum 64MB
+随机文件 / awk 300 万循环；解释器数字为同一 JIT 二进制加 `-j` 测得）：
+
+| 基准 | JIT | 解释器（-j） | 倍数 |
+|---|---|---|---|
+| sha256sum 64MB | 29.9s | 183.3s | 6.13× |
+| awk 3M 循环 | 66.5s | 420.6s | 6.32× |
+
+11 项验收矩阵在 JIT 版全部通过（输出与第 7 节一致，含已知 fork 限制项）。
+注意：4GB 内存受限容器内解释器长跑进程 RSS 约 2.1GB，勿与多个 wineserver
+并存跑基准（会被 memcg OOM kill）。
 
 ## 8. 真 Windows 验证清单
 
