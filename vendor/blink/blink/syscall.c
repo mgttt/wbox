@@ -581,11 +581,14 @@ static int W32Fork(struct Machine *m) {
        e = dll_next(m->system->fds.list, e)) {
     struct Fd *fd = FD_CONTAINER(e);
     int nf;
-    if ((nf = dup(fd->hostfd)) == -1) continue;  // best effort
+    // NB: must be VfsDup, not raw dup: the fd callbacks (kFdCbHost) go
+    // through the VFS layer, which only knows descriptors it registered
+    // itself — a raw dup()ed fd would read/write EBADF in the child.
+    if ((nf = VfsDup(fd->hostfd)) == -1) continue;  // best effort
     if ((fd2 = ForkFd(&s2->fds, fd, fd->fildes, fd->oflags))) {
       fd2->hostfd = nf;
     } else {
-      close(nf);
+      VfsClose(nf);
     }
   }
   UNLOCK(&m->system->fds.lock);
@@ -5796,6 +5799,13 @@ void OpSyscall(P) {
     u64 sn = Get64(m->ax) & 0xfff;
     if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 || sn == 435)
       W32ForkDbg("syscall", (int)sn, 0);
+    else if (m->system->w32child && getenv("WBOX_DEBUG_FORK")) {
+      char buf[160];
+      int n = snprintf(buf, sizeof(buf), "[w32fork] child sys=%d di=%#llx\n",
+                       (int)sn, (unsigned long long)Get64(m->di));
+      DWORD nw;
+      WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
+    }
   }
 #endif
   size_t mark;
@@ -6085,6 +6095,15 @@ void OpSyscall(P) {
   if (!m->interrupted) {
     Put64(m->ax, ax != -1 ? ax : -(XlatErrno(errno) & 0xfff));
   }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (m->system->w32child && getenv("WBOX_DEBUG_FORK") && !m->interrupted) {
+    char buf[200];
+    int n = snprintf(buf, sizeof(buf), "[w32fork] child ret ax=%lld\n",
+                     (long long)(i64)Get64(m->ax));
+    DWORD nw;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
+  }
+#endif
   unassert(--m->sysdepth >= 0);
   CollectPageLocks(m);
   unassert(!m->pagelocks.i || m->sysdepth);
