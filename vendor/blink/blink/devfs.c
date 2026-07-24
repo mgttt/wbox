@@ -18,14 +18,144 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/devfs.h"
 
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <sys/stat.h>
 
+#include "blink/assert.h"
 #include "blink/errno.h"
 #include "blink/hostfs.h"
 #include "blink/log.h"
 
 #ifndef DISABLE_VFS
+
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: the well-known device files map to NUL/CON handles or to
+// the fake band fds of w32fd.c (1000000+). Hostfs path resolution would
+// look for real files under the (BLINK_PREFIX'ed) host /dev and fail
+// with ENOENT/EINVAL, so intercept them here and open the guest-style
+// path, which win32's W32OpenSpecial() recognizes.
+static int DevfsOpen(struct VfsInfo *parent, const char *name, int flags,
+                     int mode, struct VfsInfo **output) {
+  struct HostfsInfo *outputinfo;
+  struct stat st;
+  char gp[16];
+  int i;
+  if (parent == NULL || name == NULL || output == NULL) {
+    return efault();
+  }
+  if (strcmp(name, "null") && strcmp(name, "zero") && strcmp(name, "full") &&
+      strcmp(name, "urandom") && strcmp(name, "random") &&
+      strcmp(name, "tty")) {
+    return HostfsOpen(parent, name, flags, mode, output);
+  }
+  if (!S_ISDIR(parent->mode)) {
+    return enotdir();
+  }
+  *output = NULL;
+  outputinfo = NULL;
+  snprintf(gp, sizeof(gp), "/dev/%s", name);
+  if (HostfsCreateInfo(&outputinfo) == -1) {
+    return -1;
+  }
+  outputinfo->filefd = open(gp, flags, mode);  // -> W32OpenSpecial(gp)
+  if (getenv("WBOX_DEBUG_FORK"))
+    fprintf(stderr, "[devfs] open %s flags=%#x -> %d errno=%d\n", gp, flags,
+            outputinfo->filefd, errno);
+  if (outputinfo->filefd == -1) {
+    goto cleananddie;
+  }
+  unassert(fstat(outputinfo->filefd, &st) != -1);
+  outputinfo->mode = st.st_mode;
+  if (VfsCreateInfo(output) == -1) {
+    goto cleananddie;
+  }
+  (*output)->data = outputinfo;
+  (*output)->name = strdup(name);
+  if ((*output)->name == NULL) {
+    enomem();
+    goto cleananddie;
+  }
+  (*output)->namelen = strlen(name);
+  unassert(!VfsAcquireDevice(parent->device, &(*output)->device));
+  (*output)->dev = parent->dev;
+  (*output)->ino = 0x6465762f;  // "dev/" — no host inode behind band fds
+  for (i = 0; name[i]; ++i) (*output)->ino = (*output)->ino * 33 + name[i];
+  (*output)->mode = outputinfo->mode;
+  (*output)->refcount = 1;
+  unassert(!VfsAcquireInfo(parent, &(*output)->parent));
+  return 0;
+cleananddie:
+  if (*output) {
+    unassert(!VfsFreeInfo(*output));
+  } else {
+    unassert(!HostfsFreeInfo(outputinfo));
+  }
+  return -1;
+}
+static bool DevfsIsW32Device(const char *name) {
+  return name && (!strcmp(name, "null") || !strcmp(name, "zero") ||
+                  !strcmp(name, "full") || !strcmp(name, "urandom") ||
+                  !strcmp(name, "random") || !strcmp(name, "tty"));
+}
+
+// Finddir must not touch the host filesystem for our device names: under
+// wine the host /dev/null is a real char device and win32 fstatat() on it
+// fails (EINVAL), which aborts the whole VfsOpen before Open is reached.
+static int DevfsFinddir(struct VfsInfo *parent, const char *name,
+                        struct VfsInfo **output) {
+  struct HostfsInfo *outputinfo;
+  if (!DevfsIsW32Device(name)) {
+    return HostfsFinddir(parent, name, output);
+  }
+  if (parent == NULL || output == NULL) {
+    return efault();
+  }
+  if (!S_ISDIR(parent->mode)) {
+    return enotdir();
+  }
+  *output = NULL;
+  outputinfo = NULL;
+  if (HostfsCreateInfo(&outputinfo) == -1) {
+    return -1;
+  }
+  outputinfo->mode = S_IFCHR | 0666;
+  outputinfo->filefd = -1;
+  if (VfsCreateInfo(output) == -1) {
+    goto cleananddie;
+  }
+  (*output)->name = strdup(name);
+  if ((*output)->name == NULL) {
+    enomem();
+    goto cleananddie;
+  }
+  (*output)->namelen = strlen(name);
+  (*output)->data = outputinfo;
+  unassert(!VfsAcquireDevice(parent->device, &(*output)->device));
+  (*output)->dev = parent->dev;
+  (*output)->ino = 0x6465762f;
+  for (int i = 0; name[i]; ++i) (*output)->ino = (*output)->ino * 33 + name[i];
+  (*output)->mode = outputinfo->mode;
+  (*output)->refcount = 1;
+  unassert(!VfsAcquireInfo(parent, &(*output)->parent));
+  return 0;
+cleananddie:
+  if (*output) {
+    unassert(!VfsFreeInfo(*output));
+  } else {
+    unassert(!HostfsFreeInfo(outputinfo));
+  }
+  return -1;
+}
+#define DEVFS_OPEN DevfsOpen
+#define DEVFS_FINDDIR DevfsFinddir
+#else
+#define DEVFS_OPEN HostfsOpen
+#define DEVFS_FINDDIR HostfsFinddir
+#endif
 
 static int DevfsInit(const char *source, u64 flags, const void *data,
                      struct VfsDevice **device, struct VfsMount **mount) {
@@ -64,12 +194,12 @@ struct VfsSystem g_devfs = {.name = "devfs",
                                 .Init = DevfsInit,
                                 .Freeinfo = HostfsFreeInfo,
                                 .Freedevice = HostfsFreeDevice,
-                                .Finddir = HostfsFinddir,
+                                .Finddir = DEVFS_FINDDIR,
                                 .Readmountentry = DevfsReadmountentry,
                                 .Readlink = HostfsReadlink,
                                 .Mkdir = HostfsMkdir,
                                 .Mkfifo = HostfsMkfifo,
-                                .Open = HostfsOpen,
+                                .Open = DEVFS_OPEN,
                                 .Access = HostfsAccess,
                                 .Stat = HostfsStat,
                                 .Fstat = HostfsFstat,

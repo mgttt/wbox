@@ -222,6 +222,15 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     // wiped range.
     uintptr_t lo = WboxMemWindowBase();
     uintptr_t hi = WboxMemLimit();
+#ifdef HAVE_JIT
+    // NB: before the wipe, not after — DisableJit recycles the old
+    // System's JIT pages into the global page freelist, and a stale
+    // freelist entry inside the wiped range is later popped by
+    // AllocateAnonymousPage() and dereferenced uncommitted (ReserveVirtual
+    // page fault). Everything that can recycle window pages must run
+    // before WboxPurgeHostPagesInRange() below.
+    DisableJit(&old->system->jit);
+#endif
     old->system->cr3 = 0;  // page tables lived in the wiped window
     old->system->memstat.tables = 0;
     WboxMemWipeWindow();
@@ -242,7 +251,9 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     }
     ProgramLimit(m->system, RLIMIT_NOFILE, RLIMIT_NOFILE_LINUX);
   } else {
-#ifdef HAVE_JIT
+#if defined(HAVE_JIT) && !(defined(_WIN32) && !defined(__CYGWIN__))
+    // win32: already disabled above, before the window wipe (not
+    // idempotent — a second call would double-free the JIT pages)
     DisableJit(&old->system->jit);  // unmapping exec pages is slow
 #endif
     unassert(!m->sysdepth);
