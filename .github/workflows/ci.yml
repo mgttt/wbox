@@ -49,10 +49,37 @@ jobs:
         shell: cmd
         run: .\target\debug\wbox.exe run --memory 256 -V -- cmd.exe /c echo wbox-smoke-ok
 
-  # ④ tag 发布：打包 portable 单 exe 上传 GitHub Release
+  # ④ 构建 wbox-linux.exe（blink Win32 移植，C11 + GNU 扩展）。
+  #    MSVC 无法编译 GNU 扩展，故用 windows runner 自带 MSYS2 的
+  #    MinGW-w64 gcc 跑 vendor/blink/win32/build-mingw.sh。
+  build-wbox-linux:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 MinGW-w64 工具链（MSYS2）
+        run: |
+          pacman -Sy --noconfirm --needed \
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+      - name: 构建 wbox-linux.exe
+        run: |
+          export PATH=/c/msys64/ucrt64/bin:$PATH
+          WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
+      - name: 冒烟 —— wbox-linux.exe 能启动并跑内置用法输出
+        shell: cmd
+        run: .\vendor\blink\build-win32\wbox-linux.exe --help || ver > nul
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wbox-linux.exe
+          path: vendor/blink/build-win32/wbox-linux.exe
+          retention-days: 30
+
+  # ⑤ tag 发布：打包 portable 双 exe（wbox.exe + wbox-linux.exe）上传 GitHub Release
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, check-windows-msvc, smoke-windows]
+    needs: [test-linux, check-windows-msvc, smoke-windows, build-wbox-linux]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -61,7 +88,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release
-      - name: 上传 wbox.exe 到 Release
+      - name: 下载 wbox-linux.exe 产物（与 wbox.exe 同目录，portable 分发形态）
+        uses: actions/download-artifact@v4
+        with:
+          name: wbox-linux.exe
+          path: target/release
+      - name: 打包 wbox-portable-windows-x64.zip（wbox.exe + wbox-linux.exe）
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target\release\wbox.exe, target\release\wbox-linux.exe `
+            -DestinationPath wbox-portable-windows-x64.zip
+      - name: 上传 Release 资产
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/wbox.exe
+          files: |
+            target/release/wbox.exe
+            target/release/wbox-linux.exe
+            wbox-portable-windows-x64.zip

@@ -67,6 +67,40 @@ fn not_ready_error(detail: String) -> WboxError {
     )
 }
 
+/// 公共 DNS（阿里公共 DNS）。rootfs 内缺失 /etc/resolv.conf 时注入，
+/// 保证 guest 程序能解析域名（blink 的 socket 直通宿主网络栈）。
+pub const DEFAULT_DNS: &str = "223.5.5.5";
+
+/// 确保 rootfs 内存在 `/etc/resolv.conf`；缺失（或为空文件）时写入公共 DNS。
+/// 已存在且有内容的 resolv.conf 不覆盖（用户/镜像自定义优先）。
+/// 返回是否发生了注入。纯文件操作，Windows/Linux 宿主通用。
+fn ensure_resolv_conf(rootfs: &Path) -> Result<bool> {
+    let etc = rootfs.join("etc");
+    let resolv = etc.join("resolv.conf");
+    let need_inject = match std::fs::metadata(&resolv) {
+        Ok(m) => m.is_file() && m.len() == 0,
+        Err(_) => true,
+    };
+    if !need_inject {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(&etc).map_err(|e| {
+        WboxError::registry(format!(
+            "创建 rootfs etc 目录 '{}' 失败：{}",
+            etc.display(),
+            e
+        ))
+    })?;
+    std::fs::write(&resolv, format!("nameserver {}\n", DEFAULT_DNS)).map_err(|e| {
+        WboxError::registry(format!(
+            "写入 '{}' 失败：{}",
+            resolv.display(),
+            e
+        ))
+    })?;
+    Ok(true)
+}
+
 /// 构造 wbox-linux 的命令行：`wbox-linux.exe <guest cmd...>`。
 /// （rootfs 不经命令行传递，而是工作目录 + BLINK_PREFIX 环境变量。）
 fn build_blink_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
@@ -82,13 +116,25 @@ impl Backend for BlinkBackend {
                 "镜像未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
             ));
         }
-        let (exe, _src) = locate_linux_exe()?;
+        let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
         if !rootfs.is_dir() {
             return Err(WboxError::registry(format!(
                 "镜像 rootfs 目录 '{}' 不存在（是否已成功 pull？）",
                 rootfs.display()
             )));
+        }
+        if spec.verbose {
+            println!("wbox: Linux 后端模拟器 = {}（{}）", exe.display(), src);
+            println!("wbox: rootfs = {}", rootfs.display());
+        }
+        // rootfs 网络可用性：缺失/空的 /etc/resolv.conf 注入公共 DNS，
+        // 使 guest 程序（apt/wget 等）开箱即可解析域名。
+        if ensure_resolv_conf(rootfs)? && spec.verbose {
+            println!(
+                "wbox: rootfs 缺少 /etc/resolv.conf，已注入公共 DNS {}",
+                DEFAULT_DNS
+            );
         }
         let mut env = spec.env.clone();
         // BLINK_PREFIX：guest `/` 的 VFS 根。用户已在 Env 里显式设置则不覆盖。
@@ -98,8 +144,18 @@ impl Backend for BlinkBackend {
                 rootfs.to_string_lossy().into_owned(),
             ));
         }
+        let cmd = build_blink_command(&exe, &spec.cmd);
+        if spec.verbose {
+            println!("wbox: guest 命令行（Entrypoint/Cmd 合并后）= {:?}", &spec.cmd);
+            println!("wbox: 最终命令行 = {:?}", cmd);
+            for (k, v) in &env {
+                if k == BLINK_PREFIX_ENV {
+                    println!("wbox: {} = {}", k, v);
+                }
+            }
+        }
         Ok(Prepared {
-            cmd: build_blink_command(&exe, &spec.cmd),
+            cmd,
             workdir: rootfs.clone(),
             env,
         })
@@ -193,5 +249,51 @@ mod tests {
     fn prepare_requires_command() {
         let err = BlinkBackend.prepare(&spec(&[])).unwrap_err();
         assert!(format!("{}", err).contains("Entrypoint/Cmd"));
+    }
+
+    // ---- resolv.conf 注入 ----
+
+    /// 建一个临时 rootfs（含唯一目录名，避免并发冲突）。
+    fn temp_rootfs(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "wbox-test-rootfs-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn injects_resolv_conf_when_missing() {
+        let rootfs = temp_rootfs("missing");
+        assert!(ensure_resolv_conf(&rootfs).unwrap());
+        let content = std::fs::read_to_string(rootfs.join("etc/resolv.conf")).unwrap();
+        assert!(content.contains(DEFAULT_DNS), "{}", content);
+        // 幂等：已存在且有内容则不再注入
+        assert!(!ensure_resolv_conf(&rootfs).unwrap());
+        let _ = std::fs::remove_dir_all(&rootfs);
+    }
+
+    #[test]
+    fn rewrites_empty_resolv_conf_but_keeps_custom() {
+        let rootfs = temp_rootfs("empty");
+        let etc = rootfs.join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        // 空文件 → 注入
+        std::fs::write(etc.join("resolv.conf"), "").unwrap();
+        assert!(ensure_resolv_conf(&rootfs).unwrap());
+        assert!(std::fs::read_to_string(etc.join("resolv.conf"))
+            .unwrap()
+            .contains(DEFAULT_DNS));
+        // 自定义内容 → 保留
+        std::fs::write(etc.join("resolv.conf"), "nameserver 8.8.8.8\n").unwrap();
+        assert!(!ensure_resolv_conf(&rootfs).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(etc.join("resolv.conf")).unwrap(),
+            "nameserver 8.8.8.8\n"
+        );
+        let _ = std::fs::remove_dir_all(&rootfs);
     }
 }
