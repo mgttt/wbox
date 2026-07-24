@@ -9,6 +9,7 @@
 #   WBOX_TARGET  target triple        (default x86_64-windows-gnu)
 #   WBOX_BUILD   build/output dir     (default <repo>/build-win32)
 #   WBOX_JOBS    parallel jobs        (default nproc)
+#   WBOX_JIT     1 = JIT (default), 0 = pure interpreter (-DDISABLE_JIT)
 #
 # Example (llvm-mingw):
 #   WBOX_CC=/tmp/wbox5/llvm-mingw/bin/x86_64-w64-mingw32-clang sh build-mingw.sh
@@ -30,6 +31,9 @@ echo "CC = $CC"
 
 CFLAGS="-O2 -g0 -fno-ident -DNDEBUG -Wno-everything \
   -Iwin32/compat -Iwin32 -I. -Ithird_party/libz -include win32/config.h"
+
+JIT=${WBOX_JIT:-1}
+echo "WBOX_JIT = $JIT"
 # zlib is plain C and must NOT see our POSIX compat headers (io.h clashes).
 ZCFLAGS="-O2 -g0 -fno-ident -DNDEBUG -Wno-everything -I. -Ithird_party/libz"
 
@@ -37,6 +41,11 @@ ZCFLAGS="-O2 -g0 -fno-ident -DNDEBUG -Wno-everything -I. -Ithird_party/libz"
 # oneoff test utility (both carry their own main()).
 SRCS=$(ls blink/*.c | grep -v -e 'blink/blinkenlights.c' -e 'blink/oneoff.c' \
         -e 'blink/jit.c' -e 'blink/jitflush.c')
+if [ "$JIT" = 1 ]; then
+  SRCS="$SRCS blink/jit.c blink/jitflush.c"
+else
+  CFLAGS="$CFLAGS -DDISABLE_JIT"
+fi
 SRCS="$SRCS win32/w32mem.c win32/w32fd.c win32/w32proc.c win32/w32sig.c win32/w32stubs.c"
 # zlib core only: gz*.c pull in <io.h> and blink only needs
 # compress2/uncompress/compressBound.

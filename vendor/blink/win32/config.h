@@ -1,7 +1,7 @@
 #ifndef BLINK_CONFIG_H_
 #define BLINK_CONFIG_H_
 /* wbox win32 L1 bring-up config */
-#define DISABLE_JIT
+/* JIT is on by default; build-mingw.sh WBOX_JIT=0 defines DISABLE_JIT */
 #define DISABLE_SOCKETS
 #define DISABLE_VFS
 #define DISABLE_OVERLAYS
