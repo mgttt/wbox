@@ -1592,7 +1592,7 @@ static int SysDup1(struct Machine *m, i32 fildes) {
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
-  if ((hostfd = dup(fd->hostfd)) == -1) {
+  if ((hostfd = VfsDup(fd->hostfd)) == -1) {  // VFS-aware (pipes/sockets)
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
@@ -1656,14 +1656,16 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
       return ebadf();
     }
     oflags = fd->oflags & ~O_CLOEXEC;
+    // NB: VfsDup2/VfsDup, not raw dup2/dup — hostfd may be a VFS-layer
+    // descriptor (pipes, sockets), which the raw win32 dup does not know.
     if ((fd2 = GetFd(&m->system->fds, newfildes))) {
-      if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+      if (VfsDup2(fd->hostfd, fd2->hostfd) == -1) {
         UNLOCK(&m->system->fds.lock);
         return -1;
       }
       fd2->oflags = oflags;
     } else {
-      int hostfd = dup(fd->hostfd);
+      int hostfd = VfsDup(fd->hostfd);
       if (hostfd == -1) {
         UNLOCK(&m->system->fds.lock);
         return -1;
@@ -1694,13 +1696,13 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
     oflags |= O_CLOEXEC;
   }
   if ((fd2 = GetFd(&m->system->fds, newfildes))) {
-    if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+    if (VfsDup2(fd->hostfd, fd2->hostfd) == -1) {  // VFS-aware (pipes)
       UNLOCK(&m->system->fds.lock);
       return -1;
     }
     fd2->oflags = oflags;
   } else {
-    int hostfd = dup(fd->hostfd);
+    int hostfd = VfsDup(fd->hostfd);
     if (hostfd == -1) {
       UNLOCK(&m->system->fds.lock);
       return -1;
@@ -1722,7 +1724,7 @@ static int SysDupf(struct Machine *m, i32 fildes, i32 minfildes, int cmd) {
     UNLOCK(&m->system->fds.lock);
     return ebadf();
   }
-  if ((hostfd = dup(fd->hostfd)) == -1) {
+  if ((hostfd = VfsDup(fd->hostfd)) == -1) {  // VFS-aware (pipes/sockets)
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
