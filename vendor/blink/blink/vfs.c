@@ -137,12 +137,21 @@ int VfsInit(const char *prefix) {
   unassert(!VfsChdir("/"));
 
   // Mount the host's root.
+#ifdef _WIN32
+  // win32: 无 BLINK_PREFIX 时 guest 根直接落在宿主根（wine 下 Z:\ 映射
+  // Linux /，通常只读），VfsMkdir(SystemRoot) 会 EACCES；SystemRoot 挂载
+  // 仅用于在 guest 内回看宿主根，降级为 best-effort。
+  if (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) != -1 || errno == EEXIST) {
+    VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL);
+  }
+#else
   if (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) == -1 &&
       errno != EEXIST) {
     ERRF("Failed to create system root mount directory, %s", strerror(errno));
     goto cleananddie;
   }
   unassert(VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL) != -1);
+#endif
   unassert(!VfsTraverse("/", &g_actualrootinfo, false));
 
   // devfs, procfs
@@ -172,6 +181,20 @@ int VfsInit(const char *prefix) {
       memcpy(cwd, hostcwd + prefixlen, hostcwdlen - prefixlen + 1);
     }
   } else {
+#ifdef _WIN32
+    // win32: guest 根 == 宿主根（恒等映射），SystemRoot 挂载可能因宿主根
+    // 只读被跳过；cwd 直接用宿主路径本身，不绕 SystemRoot。
+    cwd = strdup(hostcwd);
+    if (cwd == NULL) {
+      enomem();
+      goto cleananddie;
+    }
+    // 统一成 '/' 分隔（getcwd 在 win32 可能返回反斜杠）
+    for (char *p = cwd; *p; ++p)
+      if (*p == '\\') *p = '/';
+    // "Z:/..." → "/..."（wine Z: 盘即 Linux 根）
+    if (cwd[0] && cwd[1] == ':' && cwd[2] == '/') memmove(cwd, cwd + 2, strlen(cwd + 2) + 1);
+#else
     cwd = (char *)malloc(PATH_MAX + sizeof(VFS_SYSTEM_ROOT_MOUNT));
     if (cwd == NULL) {
       enomem();
@@ -179,6 +202,7 @@ int VfsInit(const char *prefix) {
     }
     memcpy(cwd, VFS_SYSTEM_ROOT_MOUNT, sizeof(VFS_SYSTEM_ROOT_MOUNT));
     strcat(cwd, hostcwd);
+#endif
   }
 
   unassert(!VfsChdir(cwd));
@@ -242,6 +266,9 @@ int VfsMount(const char *source, const char *target, const char *fstype,
     LOGF("Unsupported mount flags: 0x%llx", (unsigned long long)flags);
   }
   if (VfsTraverse(target, &targetinfo, true) == -1) {
+    if (getenv("WBOX_DEBUG_VFS"))
+      fprintf(stderr, "[vfs] mount: traverse(%s) failed errno=%d\n", target,
+              errno);
     return -1;
   }
   if (!S_ISDIR(targetinfo->mode)) {
@@ -289,6 +316,9 @@ int VfsMount(const char *source, const char *target, const char *fstype,
     }
   }
   if (newsystem->ops.Init(source, flags, data, &newdevice, &newmount) == -1) {
+    if (getenv("WBOX_DEBUG_VFS"))
+      fprintf(stderr, "[vfs] mount: %s Init(%s) failed errno=%d\n", fstype,
+              source, errno);
     UNLOCK(&g_vfs.lock);
     return -1;
   }

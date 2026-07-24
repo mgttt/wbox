@@ -60,6 +60,7 @@
 #include "blink/endian.h"
 #include "blink/errno.h"
 #include "blink/flag.h"
+#include "blink/hostfs.h"
 #include "blink/iovs.h"
 #include "blink/limits.h"
 #include "blink/linux.h"
@@ -5667,6 +5668,30 @@ static i32 SysEpollCreate(struct Machine *m, i32 size) {
   return SysEpollCreate1(m, 0);
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// win32: VFS 开启后 guest fd 编号独立于宿主 CRT fd（epoll 实现按宿主 fd
+// 工作，见 win32/w32sock.c）。VFS fd 的真实宿主 fd 在 HostfsInfo.filefd；
+// epoll 自身/管道等非 VFS fd 走 fds 表 hostfd。非 VFS 构建两者恒等。
+static int W32EpollHostFd(struct Machine *m, int guestfd) {
+  struct Fd *fd;
+  struct VfsInfo *info;
+  int hostfd = -1;
+#ifndef DISABLE_VFS
+  if (VfsGetFd(guestfd, &info) != -1) {
+    hostfd = ((struct HostfsInfo *)info->data)->filefd;
+    unassert(!VfsFreeInfo(info));
+    return hostfd;
+  }
+#endif
+  LOCK(&m->system->fds.lock);
+  if ((fd = GetFd(&m->system->fds, guestfd))) {
+    hostfd = fd->hostfd;
+  }
+  UNLOCK(&m->system->fds.lock);
+  return hostfd;
+}
+#endif
+
 static i32 SysEpollCtl(struct Machine *m, i32 epfd, i32 op, i32 fd,
                        i64 eventaddr) {
   struct epoll_event epe, *pepe;
@@ -5688,6 +5713,11 @@ static i32 SysEpollCtl(struct Machine *m, i32 epfd, i32 op, i32 fd,
     default:
       return einval();
   }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  epfd = W32EpollHostFd(m, epfd);
+  fd = W32EpollHostFd(m, fd);
+  if (epfd == -1 || (op != EPOLL_CTL_DEL_LINUX && fd == -1)) return ebadf();
+#endif
   return epoll_ctl(epfd, op, fd, pepe);
 }
 
@@ -5736,8 +5766,14 @@ static i32 EpollPwait(struct Machine *m, i32 epfd, i64 eventsaddr,
 #if defined(HAVE_EPOLL_PWAIT2) && !defined(MUSL_CROSS_MAKE)
       rc = epoll_pwait2(epfd, events, maxevents, &waitfor, &oldmask);
 #else
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // win32: guest epfd -> 宿主 CRT fd（见 W32EpollHostFd）
+      rc = epoll_pwait(W32EpollHostFd(m, epfd), events, maxevents,
+                       ConvertTimeToInt(ToMilliseconds(waitfor)), &oldmask);
+#else
       rc = epoll_pwait(epfd, events, maxevents,
                        ConvertTimeToInt(ToMilliseconds(waitfor)), &oldmask);
+#endif
 #endif
       if (rc == -1 && errno == EINTR) {
         if (CheckInterrupt(m, false)) {

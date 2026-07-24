@@ -64,9 +64,14 @@ int HostfsInit(const char *source, u64 flags, const void *data,
     return efault();
   }
   if (stat(source, &st) == -1) {
+    if (getenv("WBOX_DEBUG_VFS"))
+      fprintf(stderr, "[hostfs] stat(%s) failed errno=%d\n", source, errno);
     return -1;
   }
   if (!S_ISDIR(st.st_mode)) {
+    if (getenv("WBOX_DEBUG_VFS"))
+      fprintf(stderr, "[hostfs] stat(%s) not dir mode=%o\n", source,
+              (unsigned)st.st_mode);
     return enotdir();
   }
   hostdevice = NULL;
