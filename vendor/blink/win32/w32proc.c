@@ -56,8 +56,239 @@ pid_t getsid(pid_t pid) { return getpid(); }
 pid_t tcgetpgrp(int fd) { return g_pgrp; }
 int tcsetpgrp(int fd, pid_t pgrp) { return 0; }
 
-// ---------------------------------------------------------------- fork/wait (L1: unsupported)
+// ---------------------------------------------------------------- fork/wait
+//
+// wbox win32 process model: vfork-style fork (see WIN32-PORT.md §4).
+//
+// Windows has no private anonymous COW, so a real fork() is impossible.
+// Instead the guest fork/vfork syscall (wired in blink/syscall.c) creates
+// a child Machine as a THREAD inside the parent's System (shared address
+// space, exactly like vfork) and blocks the parent thread until the child
+// either execve()s (blink rebuilds it into a fresh System with its own
+// guest VA window) or exits. This covers the dominant shell pattern
+// fork->exec / fork->exit (`sh -c cmd`, command substitution, pipelines).
+// A true concurrent COW fork (parent and child writing memory long-term,
+// e.g. a double-fork daemon) is NOT covered by design; nothing here
+// attempts it.
+//
+// This file owns the virtual pid table: each forked child gets a small
+// virtual pid plus a record holding its thread handle and exit status.
+// wait/waitpid/wait3/wait4/waitid (called by blink's SysWait4) reap from
+// that table, with WNOHANG support.
+//
+// Deadlock guard: the parent normally blocks until the child execs or
+// exits. A child that neither execs nor exits for a long time (e.g. a
+// subshell blocked writing a full pipe nobody reads yet) would hang the
+// pair; after W32_VFORK_TIMEOUT_MS the parent is resumed anyway with a
+// diagnostic on stderr. Resuming is safe in practice because the child
+// is stuck inside a host syscall or pure guest computation, but it is a
+// vfork semantics escape hatch, hence the loud warning.
 
+struct W32Child {
+  int vpid;
+  HANDLE thread;      // waitable handle of the child's host thread
+  HANDLE exec_event;  // manual-reset: set when child execs or exits
+  volatile LONG exited;
+  volatile LONG status;  // raw guest exit code (0..255)
+  int reaped;
+  struct W32Child *next;
+};
+
+#define W32_VFORK_TIMEOUT_MS 10000
+
+static CRITICAL_SECTION g_children_lock;
+static INIT_ONCE g_children_once = INIT_ONCE_STATIC_INIT;
+static struct W32Child *g_children;
+static int g_next_vpid = 1000;
+
+static BOOL CALLBACK W32ChildrenInit(PINIT_ONCE once, PVOID param,
+                                     PVOID *ctx) {
+  InitializeCriticalSection(&g_children_lock);
+  return TRUE;
+}
+
+static void W32ChildrenLock(void) {
+  InitOnceExecuteOnce(&g_children_once, W32ChildrenInit, NULL, NULL);
+  EnterCriticalSection(&g_children_lock);
+}
+
+static void W32ChildrenUnlock(void) {
+  LeaveCriticalSection(&g_children_lock);
+}
+
+// Allocate a child record with a fresh virtual pid and the vfork
+// handshake event. Not yet visible to waitpid(); see W32ChildPublish.
+struct W32Child *W32ChildAlloc(void) {
+  struct W32Child *c = calloc(1, sizeof(*c));
+  if (!c) return NULL;
+  c->exec_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+  if (!c->exec_event) {
+    free(c);
+    return NULL;
+  }
+  c->status = -1;
+  W32ChildrenLock();
+  c->vpid = g_next_vpid++;
+  W32ChildrenUnlock();
+  return c;
+}
+
+int W32ChildVpid(struct W32Child *c) {
+  return c->vpid;
+}
+
+// Drop an unpublished record (thread creation failed).
+void W32ChildAbandon(struct W32Child *c) {
+  if (!c) return;
+  if (c->exec_event) CloseHandle(c->exec_event);
+  free(c);
+}
+
+// Make the record reappable by waitpid() once the thread handle exists.
+void W32ChildPublish(struct W32Child *c, void *thread_handle) {
+  c->thread = (HANDLE)thread_handle;
+  W32ChildrenLock();
+  c->next = g_children;
+  g_children = c;
+  W32ChildrenUnlock();
+}
+
+// Child reached execve(): its new System is loaded, parent may resume.
+void W32ChildSignalExec(struct W32Child *c) {
+  SetEvent(c->exec_event);
+}
+
+// Child exited (before or after exec): record status, wake everyone.
+void W32ChildSignalExit(struct W32Child *c, int status) {
+  InterlockedExchange(&c->status, status & 0xff);
+  InterlockedExchange(&c->exited, 1);
+  SetEvent(c->exec_event);
+}
+
+// vfork semantics: block the parent thread until the child execs or
+// exits. Also wakes if the child thread dies unexpectedly (e.g. guest
+// fatal signal) so the parent can never hang on a dead child. As a last
+// resort a timeout resumes the parent with a diagnostic (see header
+// comment): better a vfork semantics violation than a silent deadlock.
+void W32VforkWaitParent(struct W32Child *c) {
+  HANDLE h[2];
+  DWORD r;
+  h[0] = c->exec_event;
+  h[1] = c->thread;
+  r = WaitForMultipleObjects(2, h, FALSE, W32_VFORK_TIMEOUT_MS);
+  if (r == WAIT_TIMEOUT) {
+    fprintf(stderr,
+            "wbox: vfork child %d neither exec'd nor exited within %d ms;"
+            " resuming parent anyway (possible pipe/subshell stall)\n",
+            c->vpid, W32_VFORK_TIMEOUT_MS);
+  } else if (r == WAIT_OBJECT_0 + 1 && !c->exited) {
+    // thread died without going through the exit path
+    InterlockedExchange(&c->status, 127);
+    InterlockedExchange(&c->exited, 1);
+  }
+}
+
+static struct W32Child *W32FindChild(pid_t pid) {
+  struct W32Child *c, *first = NULL;
+  for (c = g_children; c; c = c->next) {
+    if (c->reaped) continue;
+    if (pid > 0 && c->vpid != pid) continue;
+    if (c->exited) return c;  // prefer reapable children
+    if (!first) first = c;
+  }
+  return first;
+}
+
+static int W32HaveChildren(void) {
+  struct W32Child *c;
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped) return 1;
+  }
+  return 0;
+}
+
+pid_t waitpid(pid_t pid, int *status, int flags) {
+  struct W32Child *c;
+  int vpid, code;
+  struct W32Child **cp;
+  W32ChildrenLock();
+  c = W32FindChild(pid);
+  if (!c) {
+    int any = W32HaveChildren();
+    W32ChildrenUnlock();
+    if (any && (flags & WNOHANG)) return 0;
+    errno = ECHILD;
+    return -1;
+  }
+  if (!c->exited && (flags & WNOHANG)) {
+    W32ChildrenUnlock();
+    return 0;
+  }
+  // claim the record before blocking: no other waiter can reap it, and
+  // the table lock is NOT held across the (potentially long) wait below
+  // so concurrent fork()/waitpid(WNOHANG) on other threads never stall.
+  c->reaped = 1;
+  W32ChildrenUnlock();
+  if (!c->exited) {
+    WaitForSingleObject(c->thread, INFINITE);
+    InterlockedExchange(&c->exited, 1);
+    if (c->status == -1) InterlockedExchange(&c->status, 127);
+  }
+  vpid = c->vpid;
+  code = c->status;
+  W32ChildrenLock();
+  for (cp = &g_children; *cp; cp = &(*cp)->next) {
+    if (*cp == c) {
+      *cp = c->next;
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+  if (status) *status = (code & 0xff) << 8;  // WIFEXITED encoding
+  CloseHandle(c->thread);
+  CloseHandle(c->exec_event);
+  free(c);
+  return vpid;
+}
+
+pid_t wait(int *status) {
+  return waitpid(-1, status, 0);
+}
+
+pid_t wait3(int *status, int flags, struct rusage *ru) {
+  if (ru) memset(ru, 0, sizeof(*ru));
+  return waitpid(-1, status, flags);
+}
+
+pid_t wait4(pid_t pid, int *status, int flags, struct rusage *ru) {
+  if (ru) memset(ru, 0, sizeof(*ru));
+  return waitpid(pid, status, flags);
+}
+
+int waitid(idtype_t t, id_t id, siginfo_t *si, int flags) {
+  int status = 0;
+  pid_t r;
+  int wflags = WEXITED;
+  pid_t pid = (t == P_PID) ? (pid_t)id : -1;
+  if (flags & WNOHANG) wflags |= WNOHANG;
+  r = waitpid(pid, &status, wflags);
+  if (r <= 0) {
+    if (r == 0 && si) memset(si, 0, sizeof(*si));
+    return (r == 0) ? 0 : -1;
+  }
+  if (si) {
+    memset(si, 0, sizeof(*si));
+    si->si_signo = 20;                     // SIGCHLD
+    si->si_code = 1;                       // CLD_EXITED
+    si->si_pid = r;
+    si->si_status = (status >> 8) & 0xff;
+  }
+  return 0;
+}
+
+// Host fork()/vfork() remain unavailable: blink's guest syscall layer
+// implements fork itself (vfork semantics, in-process) and never calls
+// these. If anything does call them, fail loudly rather than silently.
 pid_t fork(void) {
   errno = ENOSYS;
   return -1;
@@ -65,31 +296,6 @@ pid_t fork(void) {
 
 pid_t vfork(void) {
   errno = ENOSYS;
-  return -1;
-}
-
-pid_t wait(int *status) {
-  errno = ECHILD;
-  return -1;
-}
-
-pid_t waitpid(pid_t pid, int *status, int flags) {
-  errno = ECHILD;
-  return -1;
-}
-
-pid_t wait3(int *status, int flags, struct rusage *ru) {
-  errno = ECHILD;
-  return -1;
-}
-
-pid_t wait4(pid_t pid, int *status, int flags, struct rusage *ru) {
-  errno = ECHILD;
-  return -1;
-}
-
-int waitid(idtype_t t, id_t id, siginfo_t *si, int flags) {
-  errno = ECHILD;
   return -1;
 }
 

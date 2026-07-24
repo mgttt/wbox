@@ -275,6 +275,9 @@ struct System {
   u16 gdt_limit;
   u16 idt_limit;
   int exitcode;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  struct W32Child *w32child;  // wbox: set when this System is an exec'd vfork child
+#endif
   u32 efer;
   int pid;
   unsigned next_tid;
@@ -446,6 +449,10 @@ struct Machine {               //
   i64 robust_list;                       //
   i64 ctid;                              //
   int tid;                               //
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  struct W32Child *w32vfork;  // wbox: vfork handshake (pre-exec child)
+  int w32vpid;                // wbox: virtual pid (0 = use system->pid)
+#endif
   sigset_t spawn_sigmask;                //
   struct Dll elem;                       //
   struct SmcQueue smcqueue;              //
