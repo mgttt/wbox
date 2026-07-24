@@ -212,15 +212,45 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
 | `busybox wget http://mirrors.aliyun.com/debian/README` | ✅ 1193 字节，md5=`01718454f79b3bd9fa51e0e1f8966103` 精确匹配 |
 | epoll loopback 单测（zig cc -static 自编译：socket/bind/listen/connect/accept/epoll_ctl/epoll_wait/数据回环） | ✅ `EPOLL_LOOPBACK_OK`（VFS 修复前后均验证） |
 
-## 7.4 已知限制：管道/命令替换/apt-get update（COW 级，不修）
+## 7.4 fork/exec 实测现状（2026-07-25，快照 fork 全部落地后）
 
-现象（`WBOX_DEBUG_FORK=1` 实测）：fork 本身正常（fd 表 host-dup、vpid
-分配、父子 vfork 同步均正确），但**子进程在 exec 前以 rc=1 退出**
-（`child exit noexec a=1`，bash 与 busybox 一致），或偶发整体 rc=137
-"Killed"（apt-get update 在第一个 fork 的 method 子进程启动后必现）。
-单命令 fork+exec（`sh -c '/bin/echo hi'`）多数可用但偶发 Killed。
-判定为 vfork 式 fork 的共享堆/System 竞争（Windows 无私有匿名 COW，
-真 fork 不可得），属 COW 级难题，本里程碑不修，记录在案。
+快照 fork（窗口快照 + 页表重建）替代早期 vfork 式共享堆方案后，管道、
+命令替换、后台任务全部实测通过。busybox 验收矩阵（8 项，含
+`echo hello | cat`、`sleep 0.1 & wait`、命令替换、重定向、/dev/null）
+**8/8 rc=0**；ubuntu rootfs 下 fork 子 exec 动态 glibc 程序
+（md5sum/apt/http method）正常。关键修复链：
+
+1. **guest/host fd 解耦**：VFS fd 表全局共享（父+所有快照子），guest fd
+   号必须按 per-System 表分配（busybox ash `close(0)`+`open(/dev/null)`
+   必须拿到 0）。SysOpenat/SysSocket/SysAccept4 改 AllocGuestFd 客号 +
+   fd->hostfd；所有把 guest fd 直喂 Vfs*/宿主 mmap 的路径（fstat、文件
+   mmap、pread/pwrite 族、ftruncate/fchown/fsync/fchdir/flock/fchmod/
+   fcntl 锁/futimens/getdents、connect/bind、sockname）统一 HostFdOf
+   翻译。fstat 错位曾导致 ld.so 读到 size=0 → mmap(len=0) EINVAL →
+   fork 子 exec 动态库"cannot read file data"/"GLIBC_x not found"。
+2. **SIGCHLD**：W32ChildExit 向父 Machine EnqueueSignal(SIGCHLD)；
+   win32 宿主 sigsuspend=Sleep(INFINITE) 无信号投递，SysSigsuspend 改
+   轮询 polyfill + W32AnyChildExited 兜底（busybox wait4(WNOHANG)+
+   sigsuspend 等待循环依赖）。
+3. **虚拟 pid kill**：SysKill 注册（原 #ifdef HAVE_FORK 内 win32 缺失
+   → ENOSYS）+ 对子 Machine 投递 guest 信号，200ms 宽限后
+   TerminateThread 兜底；apt 杀闲置 method 后 wait4 不再死锁。
+4. **UDP 语义**：win32 recvfrom 零长接收改按 Linux 返回 0（Windows 会
+   WSAEMSGSIZE 丢包）；非零长 WSAEMSGSIZE 按截断语义返回缓冲长度。
+   getent/glibc DNS 在 fork 子内解析成功。
+
+**剩余卡点（apt-get update，未解）**：method 握手（100 Capabilities）
+与 8014B 配置下发已通，apt 排队 3 个 InRelease 亦正确；但 apt 与 http
+方法间存在**启动竞态**——无 debug 输出时 apt 大概率不把已排队的
+"600 URI Acquire" 发给方法（apt pselect 与方法 read(0) 互等死锁，
+rc=124）；开 Debug::pkgAcquire 放慢 apt 后偶发能发出。疑似首个 http
+方法实例被 apt 误杀（kill 已通）时其队列项丢失。另：glibc 并行
+A/AAAA 会用零长 recvfrom 探测第二个应答大小，若按 FIONREAD 应答真实
+数据报大小，会触发一处**独立的快照子窗口提交崩溃**（guest 未提交页
+读异常，直接崩 wine，rc=5），已回避未启用（保持 Linux 零长语义）。
+
+回归保护：wget md5=01718454f79b3bd9fa51e0e1f8966103、
+EPOLL_LOOPBACK_OK、fork 子 exec md5sum 均须保持。
 
 ## 8. 真 Windows 验证清单
 
