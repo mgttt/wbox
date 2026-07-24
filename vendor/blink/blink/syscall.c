@@ -544,7 +544,7 @@ static int W32Fork(struct Machine *m) {
   W32ForkDbg("fork spawn", m2->w32vpid, 0);
   // vfork semantics: parent sleeps until the child execve()s or exits
   W32VforkWaitParent(rec);
-  W32ForkDbg("parent resumed", rec->vpid, rec->exited);
+  W32ForkDbg("parent resumed", W32ChildVpid(rec), W32ChildExited(rec));
   // take back the fd table; the child either has its own System now
   // (exec) or is gone (exit)
   W32UnforkFds(m->system, saved_fds);

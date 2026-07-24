@@ -26,6 +26,7 @@ struct W32Child *W32ChildAlloc(void);
 void W32ChildAbandon(struct W32Child *);
 void W32ChildPublish(struct W32Child *, void *thread_handle);
 int W32ChildVpid(struct W32Child *);
+int W32ChildExited(struct W32Child *);
 void W32ChildSignalExec(struct W32Child *);
 void W32ChildSignalExit(struct W32Child *, int status);
 void W32VforkWaitParent(struct W32Child *);

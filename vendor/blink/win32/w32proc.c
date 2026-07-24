@@ -137,6 +137,10 @@ int W32ChildVpid(struct W32Child *c) {
   return c->vpid;
 }
 
+int W32ChildExited(struct W32Child *c) {
+  return (int)c->exited;
+}
+
 // Drop an unpublished record (thread creation failed).
 void W32ChildAbandon(struct W32Child *c) {
   if (!c) return;
