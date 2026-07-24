@@ -1442,6 +1442,22 @@ int GetOflags(struct Machine *m, int fildes) {
   return oflags;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: translate a GUEST descriptor to the host-side (VFS-global)
+// descriptor for paths that feed a fd straight into Vfs*/host mmap
+// (pread/pwrite family, file mmap). In the main System both numberings
+// agree; in snapshot-fork children they diverge (see SysOpenat).
+static int W32HostFd(struct System *s, int guestfd) {
+  int hostfd;
+  struct Fd *fd;
+  LOCK(&s->fds.lock);
+  hostfd = (fd = GetFd(&s->fds, guestfd)) ? fd->hostfd : -1;
+  UNLOCK(&s->fds.lock);
+  if (hostfd == -1) ebadf();
+  return hostfd;
+}
+#endif
+
 static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
                        int flags, int fildes, i64 offset) {
   u64 key;
@@ -1516,6 +1532,21 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
     }
   }
 CreateTheMap:
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: ReserveVirtual hands fildes to the host mmap shim (which
+  // pread()s the VFS descriptor); translate guest -> host numbering.
+  // (AddFileMapViaMap's debug-symbol lookup misses on the translated
+  // number in fork children — metadata only, no functional impact.)
+  if (fildes != -1) {
+    int guestfd = fildes;
+    if ((fildes = W32HostFd(m->system, fildes)) == -1) {
+      return -1;
+    }
+    if (getenv("WBOX_DEBUG_MEM"))
+      fprintf(stderr, "wbox guest-mmap: guestfd=%d hostfd=%d off=%#llx\n",
+              guestfd, fildes, (unsigned long long)offset);
+  }
+#endif
   virt = ReserveVirtual(m->system, virt, size, key, fildes, offset,
                         !!(flags & MAP_SHARED_LINUX), fixedmap);
   if (virt != -1 && newautomap != -1) {
@@ -1528,9 +1559,20 @@ Finished:
 static i64 SysMmap(struct Machine *m, i64 virt, u64 size, int prot, int flags,
                    int fildes, i64 offset) {
   i64 res;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int dbg = getenv("WBOX_DEBUG_MEM") != 0;
+#endif
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
   res = SysMmapImpl(m, virt, size, prot, flags, fildes, offset);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (dbg && res == -1)
+    fprintf(stderr,
+            "wbox SysMmap FAIL: virt=%#llx size=%#llx prot=%d flags=%#x "
+            "fd=%d off=%#llx errno=%d\n",
+            (unsigned long long)virt, (unsigned long long)size, prot, flags,
+            fildes, (unsigned long long)offset, errno);
+#endif
   unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);
   END_NO_PAGE_FAULTS;
@@ -1826,12 +1868,31 @@ static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
       fildes = emfile();
     } else {
       FixupSock(fildes, flags);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox win32: guest number from the per-System table (see SysOpenat)
+      int hostfd = fildes;
+      LOCK(&m->system->fds.lock);
+      fildes = AllocGuestFd(&m->system->fds, 0);
+      if (fildes >= lim) {
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(hostfd);
+        if (flags) UNLOCK(&m->system->exec_lock);
+        return emfile();
+      }
+      fd = AddFd(&m->system->fds, fildes,
+                 O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                     (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
+      fd->hostfd = hostfd;
+      fd->socktype = type;
+      UNLOCK(&m->system->fds.lock);
+#else
       LOCK(&m->system->fds.lock);
       fd = AddFd(&m->system->fds, fildes,
                  O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
                      (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
       fd->socktype = type;
       UNLOCK(&m->system->fds.lock);
+#endif
     }
   }
   if (flags) UNLOCK(&m->system->exec_lock);
@@ -2000,6 +2061,24 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
       newfd = emfile();
     } else {
       FixupSock(newfd, flags);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox win32: guest number from the per-System table (see SysOpenat)
+      int hostfd = newfd;
+      LOCK(&m->system->fds.lock);
+      newfd = AllocGuestFd(&m->system->fds, 0);
+      if (newfd >= lim || !(fd = GetFd(&m->system->fds, fildes)) ||
+          !ForkFd(&m->system->fds, fd, newfd,
+                  O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                      (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0))) {
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(hostfd);
+        return newfd >= lim ? (errno = EMFILE, -1) : -1;
+      }
+      GetFd(&m->system->fds, newfd)->hostfd = hostfd;
+      UNLOCK(&m->system->fds.lock);
+      StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
+                    (struct sockaddr *)&addr, addrlen);
+#else
       LOCK(&m->system->fds.lock);
       if (!(fd = GetFd(&m->system->fds, fildes)) ||
           !ForkFd(&m->system->fds, fd, newfd,
@@ -2013,6 +2092,7 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
         StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
                       (struct sockaddr *)&addr, addrlen);
       }
+#endif
     }
   }
   return newfd;
@@ -2756,6 +2836,9 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
   struct Iovs iv;
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, false, EBADF) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
@@ -2775,6 +2858,9 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
   struct Iovs iv;
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, true, EBADF) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_READ)) != -1) {
@@ -2823,7 +2909,11 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+          RESTARTABLE(rc = VfsPreadv(fd->hostfd, iv.p, iv.i, offset));
+#else
           RESTARTABLE(rc = VfsPreadv(fildes, iv.p, iv.i, offset));
+#endif
         }
       } else {
         rc = 0;
@@ -2872,7 +2962,11 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+          RESTARTABLE(rc = VfsPwritev(fd->hostfd, iv.p, iv.i, offset));
+#else
           RESTARTABLE(rc = VfsPwritev(fildes, iv.p, iv.i, offset));
+#endif
         }
       } else {
         rc = 0;
@@ -3001,6 +3095,9 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
   if (size < sizeof(rec) - sizeof(rec.name)) return einval();
   if ((fd->oflags & O_DIRECTORY) != O_DIRECTORY) return enotdir();
   if (!IsValidMemory(m, addr, size, PROT_WRITE)) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (VfsFstat(fildes, &st) || !st.st_nlink) return enoent();
   if (!fd->dirstream && !(fd->dirstream = VfsOpendir(fd->hostfd))) {
     return -1;
@@ -3116,6 +3213,9 @@ static i64 SysFtruncate(struct Machine *m, i32 fildes, i64 length) {
   if (length < 0) return einval();
   if (length > NUMERIC_MAX(off_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   RESTARTABLE(rc = VfsFtruncate(fildes, length));
   return rc;
 }
@@ -3156,6 +3256,9 @@ static int SysFstat(struct Machine *m, i32 fd, i64 staddr) {
   int rc;
   struct stat st;
   struct stat_linux gst;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fd = W32HostFd(m->system, fd)) == -1) return -1;
+#endif
   if ((rc = VfsFstat(fd, &st)) != -1) {
     XlatStatToLinux(&gst, &st);
     if (CopyToUserWrite(m, staddr, &gst, sizeof(gst)) == -1) rc = -1;
@@ -3239,6 +3342,9 @@ static int XlatFchownatFlags(int x) {
 }
 
 static int SysFchown(struct Machine *m, i32 fildes, u32 uid, u32 gid) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   return VfsFchown(fildes, uid, gid);
 }
 
@@ -3338,6 +3444,9 @@ static int CheckSyncable(int fildes) {
 }
 
 static int SysFsync(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (CheckSyncable(fildes) == -1) return -1;
 #ifdef F_FULLSYNC
   int rc;
@@ -3362,6 +3471,9 @@ static int SysFsync(struct Machine *m, i32 fildes) {
 }
 
 static int SysFdatasync(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (CheckSyncable(fildes) == -1) return -1;
 #ifdef F_FULLSYNC
   int rc;
@@ -3387,6 +3499,9 @@ static int SysChdir(struct Machine *m, i64 path) {
 }
 
 static int SysFchdir(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   return VfsFchdir(fildes);
 }
 
@@ -3410,6 +3525,9 @@ static int XlatLock(int x) {
 
 static int SysFlock(struct Machine *m, i32 fd, i32 lock) {
   if ((lock = XlatLock(lock)) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fd = HostFdOf(m->system, fd);
+#endif
   return VfsFlock(fd, lock);
 }
 
@@ -3430,6 +3548,9 @@ static int SysMkdir(struct Machine *m, i64 path, i32 mode) {
 }
 
 static int SysFchmod(struct Machine *m, i32 fd, u32 mode) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fd = HostFdOf(m->system, fd);
+#endif
   return VfsFchmod(fd, mode);
 }
 
@@ -3623,8 +3744,9 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
   } else if (cmd == F_SETLK_LINUX ||   //
              cmd == F_SETLKW_LINUX ||  //
              cmd == F_GETLK_LINUX) {
+    int hostfd = fd->hostfd;
     UnlockFd(fd);
-    return SysFcntlLock(m, fildes, cmd, arg);
+    return SysFcntlLock(m, hostfd, cmd, arg);
 #ifdef F_SETOWN
   } else if (cmd == F_SETOWN_LINUX) {
     rc = VfsFcntl(fd->hostfd, F_SETOWN, arg);
@@ -4732,6 +4854,9 @@ static int SysUtimensat(struct Machine *m, i32 fd, i64 pathaddr, i64 tvsaddr,
       LOGF("%s() flags %d not supported", "utimensat(path=null)", flags);
       return einval();
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    fd = HostFdOf(m->system, fd);
+#endif
     return VfsFutime(fd, tsp);
   }
 }

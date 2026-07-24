@@ -516,6 +516,9 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   if ((uintptr_t)addr & (W32PAGE - 1)) {
+    if (getenv("WBOX_DEBUG_MEM"))
+      fprintf(stderr, "wbox mmap EINVAL: addr=%p misaligned (W32PAGE=%#x)\n",
+              addr, (unsigned)W32PAGE);
     errno = EINVAL;
     return MAP_FAILED;
   }
@@ -523,6 +526,10 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   if (flags & MAP_FIXED) {
     a = (uintptr_t)addr;
     if (a < g_base || a + len > g_limit) {
+      if (getenv("WBOX_DEBUG_MEM"))
+        fprintf(stderr,
+                "wbox mmap ENOMEM: addr=%p len=%#zx outside [%p,%p)\n", addr,
+                len, (void *)g_base, (void *)g_limit);
       ReleaseSRWLockExclusive(&g_lock);
       errno = ENOMEM;
       return MAP_FAILED;
