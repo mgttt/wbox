@@ -1,10 +1,17 @@
-# wbox win32 移植（L1 里程碑）
+# wbox win32 移植（L1 里程碑 / L2 进行中）
 
 本文档记录 blink → `wbox-linux.exe`（x86_64-windows，MinGW/zig cc 交叉编译）
 的移植层架构、运行时崩溃根因与修复、缺口裁决、已知限制与验证方法。
 
 L1 目标已达成：**wine 11.11 下 wbox-linux.exe 可运行 busybox 级 Linux 静态
 ELF 程序**（uname/echo/cat/ls/stat/sh/true/false/退出码实测通过，见 §7）。
+
+L2 进展（2026-07-24，wine 11.11 实测）：VFS/overlays 已启用，
+`BLINK_PREFIX=<rootfs>` 可运行 **ubuntu-base-24.04.3** rootfs 内的
+动态链接 glibc 程序（ls/cat/bash/uname/apt --version，见 §7.2）；
+网络矩阵（busybox wget 公网 md5 校验 + epoll loopback）通过（§7.3）。
+已知限制：shell 管道/命令替换与 `apt-get update` 仍失败（fork+exec
+共享堆，COW 级，见 §7.4）。
 
 ## 1. 移植层架构
 
@@ -63,8 +70,8 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 | # | 缺口 | 裁决 |
 |---|---|---|
-| 1 | fork/vfork | ⚠️ vfork 式特判：fork/vfork 以阻塞语义进程内实现（子 Machine 共享 System 线程，父阻塞至子 exec/exit；exec 时子切独立 VA 窗口，fd 表 host-dup 隔离）；`sh -c ':'; sh fork+exec 外部命令`已可用；真 COW fork 不支持；命令替换/管道在 fork 前仍有未定位崩溃（调试中） |
-| 2 | 管道组合命令（`a \| b`） | ❌ 因 fork=ENOSYS（`sh: can't fork: Function not implemented`）；匿名管道本身（pipe2→CreatePipe）已实现 |
+| 1 | fork/vfork | ⚠️ vfork 式特判：fork/vfork 以阻塞语义进程内实现（子 Machine 共享 System 线程，父阻塞至子 exec/exit；exec 时子切独立 VA 窗口，fd 表 host-dup 隔离）；`sh -c ':'; sh fork+exec 外部命令`多数可用；真 COW fork 不支持；命令替换/管道为已知 COW 级限制（见 §7.4） |
+| 2 | 管道组合命令（`a \| b`） | ❌ 仍失败：fork 子进程在 exec 前退出（`child exit noexec rc=1`，bash/busybox 同现），属 fork+exec 共享堆问题（COW 级，见 §7.4）；匿名管道本身（pipe2→CreatePipe）已实现 |
 | 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS；已知 wine 怪癖：wine 进程无法 connect wbox 进程创建的 listener（宿主侧互通正常，独立 issue 跟进） |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
@@ -78,8 +85,10 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 ## 5. 已知不工作项
 
-- fork/vfork/clone（ENOSYS）→ shell 管道、后台任务、多进程 applet 不可用
-- socket 族（ENOSYS）
+- 管道/命令替换/部分 fork+exec 场景：vfork 子在 exec 前异常退出或整体
+  SIGKILL（§7.4，COW 级限制）；`sh -c 'cmd'` 单命令 fork+exec 多数可用
+- 真并发 COW fork（设计上不支持）
+- socketpair（ENOSYS）；socket 族其余可用（feat/net）
 - mremap 扩容（ENOMEM）
 - MAP_SHARED 写回
 - 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty
@@ -166,6 +175,52 @@ JIT 关键修复（feat/jit）：
 11 项验收矩阵在 JIT 版全部通过（输出与第 7 节一致，含已知 fork 限制项）。
 注意：4GB 内存受限容器内解释器长跑进程 RSS 约 2.1GB，勿与多个 wineserver
 并存跑基准（会被 memcg OOM kill）。
+
+## 7.2 L2：ubuntu:24.04 rootfs 矩阵（wine 11.11 实测，2026-07-24）
+
+用法：`BLINK_PREFIX=<rootfs 路径>`（wine 路径形式如 `Z:\tmp\wbox\ubuntu-rootfs`），
+rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
+
+关键修复（本里程碑）：
+
+1. **启用 VFS/overlays**（config.h 原钉死 DISABLE_VFS，BLINK_PREFIX 被忽略，
+   `ls /` 显示宿主根目录）+ 补 win32 缺失的 `realpath`（GetFullPathNameW
+   实现，返回 '/' 分隔路径；Windows 不解析 symlink，L2 接受该差异）。
+2. **无 prefix 启动修复**（vfs.c VfsInit）：宿主根（wine `Z:\`）只读导致
+   SystemRoot 挂载 mkdir EACCES 初始化失败 → 降级 best-effort；cwd 不再绕
+   SystemRoot，直接用宿主路径（guest 根==宿主根恒等映射，`Z:/` 前缀剥成 `/`）。
+3. **epoll guest/host fd 翻译**（syscall.c，`_WIN32`）：VFS 开启后 guest fd
+   编号独立于宿主 CRT fd，epoll_ctl/epoll_pwait 直传 guest 号导致
+   epoll_wait 稳定超时；W32EpollHostFd 按 VfsInfo→HostfsInfo.filefd（VFS fd）
+   或 fds 表 hostfd（epoll 自身/管道）翻译。
+
+| 用例 | 结果 |
+|---|---|
+| `/bin/ls /` | ✅ 列出 rootfs 根（bin etc lib usr var… + SystemRoot/proc/sys/dev 虚拟项） |
+| `/bin/cat /etc/os-release` | ✅ `PRETTY_NAME="Ubuntu 24.04.3 LTS"` 完整输出 |
+| `/bin/bash -c 'echo hi from ubuntu'` | ✅ `hi from ubuntu` |
+| `/usr/bin/uname -a`（动态链接 + glibc） | ✅ 正常输出（blink 内核版本串） |
+| `/usr/bin/apt --version` | ✅ `apt 2.8.3 (amd64)` |
+| `/tmp/busybox wget http://mirrors.aliyun.com/debian/README`（rootfs 内） | ✅ md5 精确匹配（需先向 rootfs 写入有效 /etc/resolv.conf） |
+| `echo hello \| /bin/cat`（bash 管道） | ❌ 失败（§7.4） |
+| `apt-get update` | ❌ rc=137 SIGKILL（§7.4） |
+
+## 7.3 网络矩阵（wine 11.11 实测，2026-07-24）
+
+| 用例 | 结果 |
+|---|---|
+| `busybox wget http://mirrors.aliyun.com/debian/README` | ✅ 1193 字节，md5=`01718454f79b3bd9fa51e0e1f8966103` 精确匹配 |
+| epoll loopback 单测（zig cc -static 自编译：socket/bind/listen/connect/accept/epoll_ctl/epoll_wait/数据回环） | ✅ `EPOLL_LOOPBACK_OK`（VFS 修复前后均验证） |
+
+## 7.4 已知限制：管道/命令替换/apt-get update（COW 级，不修）
+
+现象（`WBOX_DEBUG_FORK=1` 实测）：fork 本身正常（fd 表 host-dup、vpid
+分配、父子 vfork 同步均正确），但**子进程在 exec 前以 rc=1 退出**
+（`child exit noexec a=1`，bash 与 busybox 一致），或偶发整体 rc=137
+"Killed"（apt-get update 在第一个 fork 的 method 子进程启动后必现）。
+单命令 fork+exec（`sh -c '/bin/echo hi'`）多数可用但偶发 Killed。
+判定为 vfork 式 fork 的共享堆/System 竞争（Windows 无私有匿名 COW，
+真 fork 不可得），属 COW 级难题，本里程碑不修，记录在案。
 
 ## 8. 真 Windows 验证清单
 
