@@ -609,6 +609,7 @@ static int W32Fork(struct Machine *m) {
   UNLOCK(&m->system->machines_lock);
   m2->system = s2;
   m2->mode = s2->mode;
+  W32ChildSetMachine(rec, m2);  // for cross-pid kill (SysKill)
   LOCK(&s2->machines_lock);
   dll_make_first(&s2->machines, &m2->elem);
   UNLOCK(&s2->machines_lock);
@@ -1995,6 +1996,9 @@ static int SysSocketName(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   socklen_t addrlen;
   struct sockaddr_storage addr;
   addrlen = sizeof(addr);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   rc = SocketName(fildes, (struct sockaddr *)&addr, &addrlen);
   if (rc != -1) {
     if (StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
@@ -2583,6 +2587,9 @@ static int SysConnectBind(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   } else {
     return -1;
   }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   INTERRUPTIBLE(!norestart,
                 (rc = impl(fildes, (const struct sockaddr *)&addr, addrlen)));
   if (rc != -1 && impl == VfsBind) {
@@ -5349,6 +5356,35 @@ static int SysSigpending(struct Machine *m, i64 setaddr) {
 }
 
 static int SysKill(struct Machine *m, int pid, int sig) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: virtual pids (snapshot-fork children) are process-local;
+  // the host kill() shim only knows the process itself. Deliver to the
+  // child's Machine directly: enqueue the guest signal (the child's
+  // interruptible syscall loops poll it and die via TerminateSignal,
+  // going through the clean W32ChildExit path); if the child is stuck in
+  // a non-polling host wait, give it a short grace and then terminate
+  // the host thread so a blocking wait4 in the parent can never hang.
+  if (pid > 0 && !(0 <= sig && sig <= 64)) return einval();
+  if (pid > 0) {
+    struct Machine *cm = (struct Machine *)W32ChildFindMachine(pid);
+    W32ForkDbg("kill vp", pid, cm ? 1 : 0);
+    if (cm) {
+      if (!sig) return 0;  // existence probe
+      if (sig == SIGKILL_LINUX) {
+        W32ChildTerminate(pid, 9);  // uncatchable: no grace period
+        return 0;
+      }
+      EnqueueSignal(cm, sig);
+      if (W32ChildWaitExited(pid, 200)) {
+        // child is wedged in a host wait that never polls signals
+        W32ChildTerminate(pid, sig);
+      }
+      return 0;
+    }
+    if (W32ChildHasExited(pid)) return 0;  // zombie: kill() succeeds
+    // not a virtual child: fall through (self / ESRCH)
+  }
+#endif
   return kill(pid, sig ? XlatSignal(sig) : 0);
 }
 
@@ -5965,8 +6001,9 @@ void OpSyscall(P) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
   {
     u64 sn = Get64(m->ax) & 0xfff;
-    if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 || sn == 435)
-      W32ForkDbg("syscall", (int)sn, 0);
+    if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 ||
+        sn == 435 || sn == 62)
+      W32ForkDbg("syscall", (int)sn, (int)(Get64(m->ax) >> 12));
     else if ((m->system->w32child || getenv("WBOX_DEBUG_PARENT")) &&
              getenv("WBOX_DEBUG_FORK")) {
       char buf[160];
@@ -6164,7 +6201,8 @@ void OpSyscall(P) {
 #endif
     SYSCALL(4, 0x03D, "wait4", SysWait4, STRACE_WAIT4);
 #endif
-#ifdef HAVE_FORK
+#if defined(HAVE_FORK) || (defined(_WIN32) && !defined(__CYGWIN__))
+    // win32: SysKill delivers to virtual pids (snapshot-fork children)
     SYSCALL(2, 0x03E, "kill", SysKill, STRACE_KILL);
 #endif /* HAVE_FORK */
 #ifdef HAVE_THREADS

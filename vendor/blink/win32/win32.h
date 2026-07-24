@@ -42,6 +42,14 @@ void W32VforkWaitParent(struct W32Child *);
 void W32ChildSetParent(struct W32Child *, void *parent_machine);
 void *W32ChildParent(struct W32Child *);
 int W32AnyChildExited(void);
+// cross-pid kill support (SysKill): find a live child's Machine by vpid
+// (NULL if no such child), and force-kill a child whose host thread is
+// stuck in a blocking wait that never polls guest signals.
+void W32ChildSetMachine(struct W32Child *, void *child_machine);
+void *W32ChildFindMachine(int vpid);
+int W32ChildTerminate(int vpid, int status);
+int W32ChildHasExited(int vpid);
+int W32ChildWaitExited(int vpid, int ms);
 
 // w32sock.c (feat/net): hooks used by w32fd.c. Types kept opaque here so
 // win32.h stays includable without compat socket/poll headers.

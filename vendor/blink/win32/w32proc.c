@@ -92,6 +92,7 @@ struct W32Child {
   volatile LONG status;  // raw guest exit code (0..255)
   int reaped;
   void *parent_machine;  // parent's struct Machine (for SIGCHLD enqueue)
+  void *child_machine;   // child's own struct Machine (for kill signal)
   struct W32Child *next;
 };
 
@@ -164,6 +165,76 @@ void W32ChildSetParent(struct W32Child *c, void *parent_machine) {
 
 void *W32ChildParent(struct W32Child *c) {
   return c->parent_machine;
+}
+
+void W32ChildSetMachine(struct W32Child *c, void *child_machine) {
+  c->child_machine = child_machine;
+}
+
+void *W32ChildFindMachine(int vpid) {
+  struct W32Child *c;
+  void *m = NULL;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped && !c->exited && c->vpid == vpid && c->child_machine) {
+      m = c->child_machine;
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+  return m;
+}
+
+// Last-resort kill: the child's host thread never woke to consume the
+// enqueued guest signal (stuck in a non-polling host wait). Terminate the
+// thread outright and record the exit so wait4 unblocks. The child's
+// System/window leak (cleanup path is skipped) — acceptable for a kill.
+int W32ChildTerminate(int vpid, int status) {
+  struct W32Child *c;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped && !c->exited && c->vpid == vpid) break;
+  }
+  if (!c) {
+    W32ChildrenUnlock();
+    return -1;
+  }
+  TerminateThread(c->thread, (DWORD)(128 + (status & 0x7f)));
+  InterlockedExchange(&c->status, 128 + (status & 0x7f));
+  InterlockedExchange(&c->exited, 1);
+  SetEvent(c->exec_event);
+  W32ChildrenUnlock();
+  return 0;
+}
+
+int W32ChildHasExited(int vpid) {
+  struct W32Child *c;
+  int r = 0;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped && c->exited && c->vpid == vpid) {
+      r = 1;
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+  return r;
+}
+
+// Returns 1 if the child is STILL ALIVE after waiting up to ms, else 0.
+int W32ChildWaitExited(int vpid, int ms) {
+  struct W32Child *c;
+  HANDLE h = NULL;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (!c->reaped && c->vpid == vpid) {
+      h = c->thread;
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+  if (!h) return 0;
+  return WaitForSingleObject(h, (DWORD)ms) == WAIT_TIMEOUT;
 }
 
 int W32AnyChildExited(void) {

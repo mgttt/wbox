@@ -617,15 +617,56 @@ ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *addr,
   struct wsockaddr_storage wa;
   int wlen = sizeof(wa);
   if (n > 0x7fffffff) n = 0x7fffffff;
+  // Linux: a zero-length receive returns 0 immediately and leaves any
+  // pending datagram untouched; Windows instead fails WSAEMSGSIZE and
+  // discards it (glibc's resolver issues such recvfrom(fd, _, 0, 0) as a
+  // size probe for the second parallel A/AAAA answer — see WIN32-PORT.md
+  // known-issues: answering with the FIONREAD pending size here exposed a
+  // separate child-window commit bug, so keep the safe Linux behavior).
+  if (!n) return 0;
   int rc = ws.recvfrom(s, buf, (int)n, WsMsgFlags(flags),
                        addr ? (struct wsockaddr *)&wa : NULL,
                        addr ? &wlen : NULL);
   if (rc < 0) {
+    int werr = ws.WSAGetLastError();
+    if (getenv("WBOX_DEBUG_NET"))
+      fprintf(stderr, "wbox recvfrom ERR(fd=%d n=%d fl=%#x) werr=%d\n", fd,
+              (int)n, flags, werr);
+    // Linux UDP semantics: an oversized datagram is TRUNCATED to the
+    // buffer and its length returned; Windows instead fails with
+    // WSAEMSGSIZE and drops it. glibc's resolver depends on the Linux
+    // behavior (it polls then recvfrom()s into a fixed 512B/64KB buffer
+    // and treats EMSGSIZE errors as fatal), so translate: report a full
+    // buffer. With MSG_TRUNC the caller asked for the untruncated size;
+    // it is unrecoverable here, so a full buffer is the best estimate.
+    if (werr == 10040 /*WSAEMSGSIZE*/) {
+      // glibc probes the true datagram size with a zero-length
+      // MSG_PEEK|MSG_TRUNC recvfrom; FIONREAD reports the pending
+      // datagram size. Otherwise report a full (truncated) buffer.
+      unsigned long pending = 0;
+      if (!ws.ioctlsocket(s, WS_FIONREAD, &pending) && pending) {
+        NET_LOGF("recvfrom(fd=%d) WSAEMSGSIZE -> pending %lu", fd, pending);
+        if (addr && len) {
+          SockAddrOut(addr, &wa);
+          *len = wlen;
+        }
+        return (ssize_t)pending;
+      }
+      NET_LOGF("recvfrom(fd=%d) WSAEMSGSIZE -> truncate to %d", fd, (int)n);
+      if (addr && len) {
+        SockAddrOut(addr, &wa);
+        *len = wlen;
+      }
+      return (ssize_t)n;
+    }
     errno = WsaErrno();
-    NET_LOGF("recvfrom(fd=%d fl=%x) -> -1 wsaerr=%d", fd, flags, ws.WSAGetLastError());
+    NET_LOGF("recvfrom(fd=%d fl=%x) -> -1 wsaerr=%d", fd, flags, werr);
     return -1;
   }
   NET_LOGF("recvfrom(fd=%d fl=%x) -> %d", fd, flags, rc);
+  if (getenv("WBOX_DEBUG_NET"))
+    fprintf(stderr, "wbox recvfrom(fd=%d n=%d fl=%#x) rc=%d wlen=%d\n", fd,
+            (int)n, flags, rc, wlen);
   if (addr && len) {
     SockAddrOut(addr, &wa);
     *len = wlen;
