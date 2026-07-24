@@ -2,7 +2,9 @@
 #define BLINK_CONFIG_H_
 /* wbox win32 L1 bring-up config */
 #define DISABLE_JIT
-#define DISABLE_SOCKETS
+/* feat/net: sockets now map to Winsock2 (win32/w32sock.c) */
+/* #undef DISABLE_SOCKETS */
+#define HAVE_EPOLL_PWAIT1
 #define DISABLE_VFS
 #define DISABLE_OVERLAYS
 #define DISABLE_ANCILLARY

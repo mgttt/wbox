@@ -36,6 +36,12 @@ struct sockaddr_in6 {
 #define IPPROTO_ICMP 1
 #define IPPROTO_RAW 255
 #define IP_TTL 2
+#define IP_TOS 1
+#define IP_HDRINCL 3
+#define IP_OPTIONS 4
+#define IP_RECVERR 11
+#define IP_RECVTTL 12
+#define IPV6_RECVERR 25
 #define IP_MULTICAST_TTL 33
 #define IP_MULTICAST_LOOP 34
 #define IP_ADD_MEMBERSHIP 35

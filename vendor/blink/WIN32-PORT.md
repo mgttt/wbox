@@ -65,7 +65,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 |---|---|---|
 | 1 | fork/vfork | ⚠️ vfork 式特判：fork/vfork 以阻塞语义进程内实现（子 Machine 共享 System 线程，父阻塞至子 exec/exit；exec 时子切独立 VA 窗口，fd 表 host-dup 隔离）；`sh -c ':'; sh fork+exec 外部命令`已可用；真 COW fork 不支持；命令替换/管道在 fork 前仍有未定位崩溃（调试中） |
 | 2 | 管道组合命令（`a \| b`） | ❌ 因 fork=ENOSYS（`sh: can't fork: Function not implemented`）；匿名管道本身（pipe2→CreatePipe）已实现 |
-| 3 | socket 族 | ❌ ENOSYS（DISABLE_SOCKETS），L2 再映射 Winsock2 |
+| 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS；已知 wine 怪癖：wine 进程无法 connect wbox 进程创建的 listener（宿主侧互通正常，独立 issue 跟进） |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |
@@ -83,7 +83,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 - mremap 扩容（ENOMEM）
 - MAP_SHARED 写回
 - JIT（纯解释）
-- 终端仅哑控制台（cooked/raw 两档）
+- 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty
 - wineserver 报 "prefix is not owned by you" 为 wine 沙箱提示，无功能影响
 
 ## 6. 构建与 wine 验证

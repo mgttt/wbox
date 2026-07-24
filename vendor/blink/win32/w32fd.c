@@ -245,6 +245,7 @@ static int IsSpecial(int fd) {
 }
 
 ssize_t read(int fd, void *buf, size_t n) {
+  if (WboxSockIsFd(fd)) return WboxSockRead(fd, buf, n);  // feat/net
   if (IsSpecial(fd)) {
     if (fd == 1000001) {  // zero
       memset(buf, 0, n);
@@ -277,6 +278,7 @@ ssize_t read(int fd, void *buf, size_t n) {
 }
 
 ssize_t write(int fd, const void *buf, size_t n) {
+  if (WboxSockIsFd(fd)) return WboxSockWrite(fd, buf, n);  // feat/net
   if (IsSpecial(fd)) {
     if (fd == 1000002) {  // full
       errno = ENOSPC;
@@ -299,6 +301,8 @@ ssize_t write(int fd, const void *buf, size_t n) {
 }
 
 int close(int fd) {
+  if (WboxSockClose(fd)) return 0;    // feat/net: socket fds
+  if (WboxEpollClose(fd)) return 0;   // feat/net: epoll fds
   if (IsSpecial(fd)) return 0;
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
@@ -502,6 +506,11 @@ int fcntl(int fd, int cmd, ...) {
       cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)
     arg = va_arg(ap, int);
   va_end(ap);
+  // feat/net: socket fds get real O_NONBLOCK (FIONBIO) semantics
+  if (cmd == F_GETFL || cmd == F_SETFL || cmd == F_GETFD || cmd == F_SETFD) {
+    int src = WboxSockFcntl(fd, cmd, arg);
+    if (src != -2) return src;
+  }
   switch (cmd) {
     case F_GETFL:
       return O_RDWR;  // good enough for L1 (busybox checks & clears NONBLOCK)
@@ -659,6 +668,21 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
 }
 
 int fstat(int fd, struct stat *st) {
+  unsigned sockmode;
+  if (WboxSockFstatMode(fd, &sockmode)) {  // feat/net
+    memset(st, 0, sizeof(*st));
+    st->st_mode = sockmode;
+    st->st_blksize = 4096;
+    st->st_nlink = 1;
+    return 0;
+  }
+  if (WboxEpollIsFd(fd)) {  // feat/net
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFCHR | 0600;
+    st->st_blksize = 4096;
+    st->st_nlink = 1;
+    return 0;
+  }
   if (IsSpecial(fd)) {
     memset(st, 0, sizeof(*st));
     st->st_mode = S_IFCHR | 0666;
@@ -972,14 +996,17 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2],
 // ---------------------------------------------------------------- poll/select
 
 int poll(struct pollfd *pfds, nfds_t n, int timeout) {
-  // L1: files & console always ready; pipes peeked; sockets n/a
+  // files & console always ready; pipes peeked; sockets via WSAPoll (feat/net)
   DWORD deadline = timeout >= 0 ? GetTickCount() + timeout : 0;
+  int nsock = 0;
+  for (nfds_t i = 0; i < n; ++i)
+    if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) ++nsock;
   for (;;) {
     int nready = 0;
     for (nfds_t i = 0; i < n; ++i) {
       struct pollfd *p = pfds + i;
       p->revents = 0;
-      if (p->fd < 0) continue;
+      if (p->fd < 0 || WboxSockIsFd(p->fd)) continue;
       if (IsSpecial(p->fd)) {
         p->revents = p->events & (POLLIN | POLLOUT);
       } else {
@@ -1003,9 +1030,26 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
       }
       if (p->revents) ++nready;
     }
+    // socket fds: level-triggered WSAPoll. slice the wait so the non-socket
+    // fds above are re-checked regularly (shared wait primitive).
+    if (nsock) {
+      int slice = 0;
+      if (!nready && timeout != 0) {
+        slice = 10;
+        if (timeout > 0) {
+          DWORD now = GetTickCount();
+          long left = (long)(deadline - now);
+          if (left < 0) left = 0;
+          if (left < slice) slice = (int)left;
+        }
+      }
+      int src = WboxSockPoll(pfds, n, slice);
+      if (src < 0) return -1;
+      nready += src;
+    }
     if (nready || timeout == 0) return nready;
     if (timeout > 0 && GetTickCount() >= deadline) return 0;
-    Sleep(timeout > 10 ? 10 : 1);
+    if (!nsock) Sleep(timeout > 10 ? 10 : 1);
   }
 }
 
@@ -1090,6 +1134,8 @@ int ioctl(int fd, unsigned long req, ...) {
       return 0;
     case FIONREAD: {
       DWORD avail = 0;
+      int src = WboxSockFionread(fd, (int *)arg);  // feat/net: sockets
+      if (src != -2) return src;
       HANDLE h = W32Handle(fd);
       if (h == INVALID_HANDLE_VALUE) {
         errno = EBADF;
