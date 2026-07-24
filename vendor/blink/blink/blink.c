@@ -46,6 +46,9 @@
 #include "blink/syscall.h"
 #include "blink/thread.h"
 #include "blink/tunables.h"
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "win32.h"  // wbox: wipe+reload exec (WboxMemWipeWindow etc.)
+#endif
 #include "blink/util.h"
 #include "blink/vfs.h"
 #include "blink/web.h"
@@ -207,6 +210,24 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
   sigset_t oldmask;
   struct Machine *m, *old;
   if ((old = g_machine)) KillOtherThreads(old->system);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (old) {
+    // wbox win32: execve is wipe+reload in place (snapshot fork model).
+    // Decommit EVERY guest page of the current VA window instead of
+    // walking the guest page tables (FreeVirtual): the page table pages
+    // themselves live in the window, so a table walk after decommit
+    // dereferences uncommitted memory. The reservation survives and the
+    // new program is loaded into it below. This must happen BEFORE
+    // NewSystem so no allocation of the new System can land in the
+    // wiped range.
+    uintptr_t lo = WboxMemWindowBase();
+    uintptr_t hi = WboxMemLimit();
+    old->system->cr3 = 0;  // page tables lived in the wiped window
+    old->system->memstat.tables = 0;
+    WboxMemWipeWindow();
+    WboxPurgeHostPagesInRange(lo, hi);
+  }
+#endif
   unassert((g_machine = m = NewMachine(NewSystem(XED_MACHINE_MODE_LONG), 0)));
 #ifdef HAVE_JIT
   if (FLAG_nojit) DisableJit(&m->system->jit);
@@ -226,7 +247,20 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
 #endif
     unassert(!m->sysdepth);
     unassert(!m->pagelocks.i);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // the window was already wiped above; nothing to unmap here.
+    // A snapshot-fork child keeps its virtual pid and its child record
+    // across exec (reaped by the parent's waitpid); detach the record
+    // from the old System, which is freed at the bottom of this block.
+    if (old->system->w32child) {
+      m->system->w32child = old->system->w32child;
+      old->system->w32child = 0;
+      m->system->pid = old->system->pid;
+      m->tid = m->system->pid;
+    }
+#else
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
+#endif
     for (i = 1; i <= 64; ++i) {
       if (Read64(old->system->hands[i - 1].handler) == SIG_IGN_LINUX) {
         Write64(m->system->hands[i - 1].handler, SIG_IGN_LINUX);

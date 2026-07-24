@@ -164,7 +164,9 @@ static struct WboxWindow *WboxWindowReserve(int maxbits) {
   int bits, slot;
   uintptr_t base = 0;
   struct WboxWindow *w;
-  for (bits = maxbits; bits >= 40; --bits) {
+  if (maxbits > 43) maxbits = 43;
+  if (maxbits < 38) maxbits = 38;
+  for (bits = maxbits; bits >= 38; --bits) {
     uint64_t size = (1ULL << bits) - 0x10000;
     void *p = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
     if (p) {
@@ -173,7 +175,7 @@ static struct WboxWindow *WboxWindowReserve(int maxbits) {
     }
   }
   // fallback: fixed-address attempt at 16TB, shrinking
-  for (bits = maxbits; bits >= 40; --bits) {
+  for (bits = maxbits; bits >= 38; --bits) {
     uint64_t size = (1ULL << bits) - 0x10000;
     void *p = VirtualAlloc((LPVOID)(uintptr_t)0x1000000000000ULL, size,
                            MEM_RESERVE, PAGE_NOACCESS);
@@ -213,6 +215,8 @@ ok:
 
 int WboxMemInit(void) {
   struct WboxWindow *w;
+  int bits = 40;
+  const char *e;
   if (g_windows[0]) return 0;
   // feat/listener: cap the guest window at 40 bits (1TB). Under wine 11.11,
   // an N-byte MEM_RESERVE costs an extra N/4096-byte committed+zeroed
@@ -220,7 +224,14 @@ int WboxMemInit(void) {
   // RSS per wbox process, so two wbox processes exceeded the 3GiB CI memcg
   // and the OOM killer SIGKILLed the listener (clients then saw
   // ECONNREFUSED). 40 bits costs ~256MB. Real Windows has no such overhead.
-  if (!(w = WboxWindowReserve(40))) return -1;
+  // feat/cow: WBOX_VA_BITS (38..43) overrides the default for experiments;
+  // snapshot fork reserves one window per live guest process, so each extra
+  // bit doubles the per-process phantom RSS under wine.
+  if ((e = getenv("WBOX_VA_BITS"))) {
+    int v = atoi(e);
+    if (v >= 38 && v <= 43) bits = v;
+  }
+  if (!(w = WboxWindowReserve(bits))) return -1;
   g_win = w;
   kSkew = (uint64_t)w->base;
   g_vabits = w->bits;
@@ -282,6 +293,118 @@ void WboxMemReleaseWindow(void) {
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
+}
+
+// ---- snapshot fork support (see WIN32-PORT.md §7.4) ----
+
+// Base/limit of an arbitrary window handle (from WboxMemCurrentWindow).
+uintptr_t WboxMemHandleBase(void *win) {
+  return win ? ((struct WboxWindow *)win)->base : 0;
+}
+
+uintptr_t WboxMemHandleLimit(void *win) {
+  return win ? ((struct WboxWindow *)win)->limit : 0;
+}
+
+// Full snapshot of the committed pages of `srcwin` into a fresh window.
+// Runs on the CALLING thread with explicit window handles (window ops are
+// otherwise thread-local): the parent performs the copy synchronously at
+// fork() so the parent window can not be mutated or released mid-copy.
+// Every committed interval is committed at the same offset in the child,
+// its bytes copied, and its host protections replicated region-by-region.
+// Returns 0 and stores the new window handle in *dstout, -1 on failure.
+int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
+  struct WboxWindow *src = (struct WboxWindow *)srcwin;
+  struct WboxWindow *dst;
+  size_t i, n;
+  uintptr_t p;
+  int rc = -1;
+  if (!src || !dstout) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(dst = WboxWindowReserve(src->bits))) {
+    errno = ENOMEM;
+    return -1;
+  }
+  AcquireSRWLockShared(&src->lock);
+  n = src->ivn;
+  if (!(dst->iv = malloc((n ? n : 1) * sizeof(*dst->iv)))) {
+    ReleaseSRWLockShared(&src->lock);
+    goto fail;
+  }
+  dst->ivcap = n;
+  memcpy(dst->iv, src->iv, n * sizeof(*dst->iv));
+  dst->ivn = n;
+  for (i = 0; i < n; ++i) {
+    uintptr_t a = src->iv[i].a, b = src->iv[i].b;
+    uintptr_t da = dst->base + (a - src->base);
+    if (!VirtualAlloc((LPVOID)da, b - a, MEM_COMMIT, PAGE_READWRITE)) {
+      ReleaseSRWLockShared(&src->lock);
+      goto fail;
+    }
+    memcpy((void *)da, (const void *)a, b - a);
+    // replicate host protections region-by-region
+    p = a;
+    while (p < b) {
+      MEMORY_BASIC_INFORMATION mbi;
+      uintptr_t s, e2;
+      if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi)) ||
+          mbi.State != MEM_COMMIT) {
+        ReleaseSRWLockShared(&src->lock);
+        goto fail;
+      }
+      s = (uintptr_t)mbi.BaseAddress;
+      e2 = s + mbi.RegionSize;
+      if (s < a) s = a;
+      if (e2 > b) e2 = b;
+      if (mbi.Protect != PAGE_READWRITE) {
+        DWORD old;
+        if (!VirtualProtect((LPVOID)(dst->base + (s - src->base)), e2 - s,
+                            mbi.Protect, &old)) {
+          ReleaseSRWLockShared(&src->lock);
+          goto fail;
+        }
+      }
+      p = e2;
+    }
+  }
+  dst->hinttop = dst->base + (src->hinttop - src->base);
+  ReleaseSRWLockShared(&src->lock);
+  *dstout = dst;
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mem: snapshot window #%d -> #%d (%zu intervals)\n",
+            src->index, dst->index, n);
+  return 0;
+fail:
+  AcquireSRWLockExclusive(&g_windows_lock);
+  g_windows[dst->index] = 0;
+  ReleaseSRWLockExclusive(&g_windows_lock);
+  VirtualFree((LPVOID)dst->base, 0, MEM_RELEASE);
+  free(dst->iv);
+  free(dst);
+  errno = ENOMEM;
+  return rc;
+}
+
+// Decommit every guest page of the calling thread's window and reset the
+// allocator bookkeeping, keeping the reservation itself. Used by execve()
+// (wipe+reload in place) so a window survives the exec of its System.
+// Guest page tables lived in the wiped range; the caller drops cr3 itself
+// and must purge recycled host pages via WboxPurgeHostPagesInRange().
+void WboxMemWipeWindow(void) {
+  struct WboxWindow *w = g_win;
+  size_t i;
+  if (!w) return;
+  AcquireSRWLockExclusive(&w->lock);
+  for (i = 0; i < w->ivn; ++i) {
+    VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
+  }
+  w->ivn = 0;
+  w->hinttop = w->base + 0x10000000;
+  ReleaseSRWLockExclusive(&w->lock);
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mem: wipe window #%d\n", w->index);
 }
 
 static void *W32Commit(uintptr_t a, size_t len, int prot) {

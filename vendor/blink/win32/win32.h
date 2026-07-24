@@ -9,12 +9,16 @@ struct pollfd;
 int WboxMemInit(void);
 uintptr_t WboxMemLimit(void);
 int WboxMemVabits(void);
-// multi-window support for vfork-style fork (w32mem.c)
+// multi-window support for snapshot fork (w32mem.c)
 void *WboxMemCurrentWindow(void);
 uintptr_t WboxMemWindowBase(void);
 void WboxMemSetWindow(void *);
 int WboxMemForkWindow(void);
 void WboxMemReleaseWindow(void);
+uintptr_t WboxMemHandleBase(void *);
+uintptr_t WboxMemHandleLimit(void *);
+int WboxMemSnapshotWindow(void *srcwin, void **dstout);
+void WboxMemWipeWindow(void);
 // blink core hook (memorymalloc.c): drop recycled host pages in [lo,hi)
 void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi);
 
