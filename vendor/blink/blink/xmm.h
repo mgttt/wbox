@@ -3,7 +3,7 @@
 #include "blink/builtin.h"
 #include "blink/types.h"
 
-#ifdef __CYGWIN__
+#if defined(__CYGWIN__) || defined(_WIN32)
 #define XMM_TYPE           void
 #define RETURN_XMM(ax, dx) asm volatile("" : : "a"(ax), "d"(dx))
 #else

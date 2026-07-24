@@ -14,6 +14,22 @@ cargo build --release
 # 产物：target/release/wbox.exe（单文件，可拷贝到任意目录直接运行）
 ```
 
+### Linux 交叉构建（x86_64-pc-windows-gnu，无需 MSVC）
+
+```sh
+pip install ziglang                     # 提供 zig cc 作为 mingw 链接器
+rustup target add x86_64-pc-windows-gnu
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$PWD/win32-link-zig.sh \
+  cargo build --release --target x86_64-pc-windows-gnu
+# 产物：target/x86_64-pc-windows-gnu/release/wbox.exe
+```
+
+注意：rustc 会向 linker 透传 `-nodefaultlibs`，zig lld 的 no_fallback 模式
+因此找不到 libmsvcrt.a / libwindows.*.a；`win32-link-zig.sh` 用 bash 数组
+重建参数列表过滤该 flag（循环里直接 continue 改写 "$@" 不生效），其余参数
+原样透传给 `zig cc -target x86_64-windows-gnu`。release profile
+（opt-level=z / lto / codegen-units=1 / panic=abort / strip）已按最小体积配置。
+
 ## 用法
 
 ```

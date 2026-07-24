@@ -1501,7 +1501,7 @@ static pureconst bool UsesStaticMemory(u64 rde) {
 static void ClobberEverythingExceptResult(struct Machine *m) {
 #ifdef DEBUG
 // clobber everything except result registers
-#if defined(__x86_64__) && !defined(__CYGWIN__)
+#if defined(__x86_64__) && !defined(__CYGWIN__) && !defined(_WIN32)
   AppendJitSetReg(m->path.jb, kAmdDi, 0x666);
   AppendJitSetReg(m->path.jb, kAmdSi, 0x666);
   AppendJitSetReg(m->path.jb, kAmdCx, 0x666);
@@ -1557,7 +1557,10 @@ static long GetInstructionLength(u8 *p) {
 #elif defined(__x86_64__) /* !__aarch64__ */
   struct XedDecodedInst x;
   unassert(!DecodeInstruction(&x, p, 15, XED_MODE_LONG));
-#ifndef NDEBUG
+/* on _WIN32 we must reject branch/static-memory micro-op bodies even in
+   * release builds: byte-wise RIP-relative copies (e.g. .refptr access)
+   * would otherwise point into JIT memory and segfault. */
+#if !defined(NDEBUG) || defined(_WIN32)
   if (ClassifyOp(x.op.rde) == kOpBranching) return -1;
   if (UsesStaticMemory(x.op.rde)) return -1;
 #endif /* NDEBUG */

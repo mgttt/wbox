@@ -2231,14 +2231,14 @@ void ExecuteInstruction(struct Machine *m) {
 }
 
 void Actor(struct Machine *mm) {
-#ifdef __CYGWIN__
+#if defined(__CYGWIN__) || defined(_WIN32)
   // TODO: Why does JIT clobber %rbx on Cygwin?
   struct Machine *volatile m;
 #else
   struct Machine *m;
 #endif
   for (g_machine = mm, m = mm;;) {
-#ifndef __CYGWIN__
+#if !defined(__CYGWIN__) && !defined(_WIN32)
     STATISTIC(++interps);
 #endif
     if (!atomic_load_explicit(&m->attention, memory_order_acquire)) {

@@ -1,7 +1,7 @@
 #ifndef BLINK_CONFIG_H_
 #define BLINK_CONFIG_H_
 /* wbox win32 L1 bring-up config */
-#define DISABLE_JIT
+/* JIT is on by default; build-mingw.sh WBOX_JIT=0 defines DISABLE_JIT */
 /* feat/net: sockets now map to Winsock2 (win32/w32sock.c) */
 /* #undef DISABLE_SOCKETS */
 #define HAVE_EPOLL_PWAIT1
