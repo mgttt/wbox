@@ -26,7 +26,9 @@
 // stores the base here, because probing TB-sized fixed-address reserves
 // is unreliable under Wine (and conflicts with host mappings).
 // Defined in win32/w32mem.c; initialized before any ToHost() use.
-extern uint64_t kSkew;
+// THREAD-LOCAL: vfork children get a private VA window at execve(),
+// so the skew depends on which guest System the current thread runs.
+extern _Thread_local uint64_t kSkew;
 #else
 #define kSkew 0x000000000000
 #endif

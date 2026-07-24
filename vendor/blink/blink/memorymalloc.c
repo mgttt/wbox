@@ -96,6 +96,25 @@ void FreeAnonymousPage(struct System *s, u8 *page) {
   UNLOCK(&g_allocator.lock);
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: drop recycled host pages that live inside a guest VA window
+// which is about to be released (vfork child exit -> WboxMemReleaseWindow).
+// Handing those pages to another System afterwards would fault.
+void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi) {
+  struct HostPage **hp, *h;
+  LOCK(&g_allocator.lock);
+  for (hp = &g_allocator.pages; (h = *hp);) {
+    if ((uintptr_t)h->page >= lo && (uintptr_t)h->page < hi) {
+      *hp = h->next;
+      FreeHostPage(h);
+    } else {
+      hp = &h->next;
+    }
+  }
+  UNLOCK(&g_allocator.lock);
+}
+#endif
+
 static size_t GetBigSize(size_t n) {
   unassert(n);
   long z = FLAG_pagesize;
