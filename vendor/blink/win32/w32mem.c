@@ -284,12 +284,21 @@ int WboxMemForkWindow(void) {
 // caller via WboxPurgeHostPagesInRange() before the reservation goes away.
 void WboxMemReleaseWindow(void) {
   struct WboxWindow *w = g_win;
+  size_t i;
   if (!w || w->index == 0) return;
   AcquireSRWLockExclusive(&g_windows_lock);
   g_windows[w->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
   g_win = g_windows[0];
   kSkew = g_win ? (uint64_t)g_win->base : 0;
+  // MEM_RELEASE fails when ANY page in the reservation is still committed.
+  // Committed pages can outlive the guest mappings here: recycled host
+  // pages (g_allocator batches) were committed by mmap but are tracked
+  // only in the interval table, not in guest page tables. Decommit all.
+  for (i = 0; i < w->ivn; ++i) {
+    VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
+  }
+  w->ivn = 0;
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
@@ -334,16 +343,43 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
     goto fail;
   }
   dst->ivcap = n;
-  memcpy(dst->iv, src->iv, n * sizeof(*dst->iv));
-  dst->ivn = n;
+  dst->ivn = 0;
   for (i = 0; i < n; ++i) {
     uintptr_t a = src->iv[i].a, b = src->iv[i].b;
     uintptr_t da = dst->base + (a - src->base);
+    // the interval table can drift out of sync with reality (a window's
+    // committed set changes through munmap/brk/recommit paths): verify
+    // the whole range is really committed before copying
+    {
+      uintptr_t q = a;
+      int bad = 0;
+      while (q < b) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPVOID)q, &mbi, sizeof(mbi)) ||
+            mbi.State != MEM_COMMIT) {
+          if (getenv("WBOX_DEBUG_FORK"))
+            fprintf(stderr,
+                    "wbox mem: snapshot: stale interval [%p,%p) bad@%p\n",
+                    (void *)a, (void *)b, (void *)q);
+          bad = 1;
+          break;
+        }
+        q = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (q <= a || q >= b + 0x1000) q = b;  // defensive
+      }
+      if (bad) continue;  // skip the stale interval
+    }
     if (!VirtualAlloc((LPVOID)da, b - a, MEM_COMMIT, PAGE_READWRITE)) {
       ReleaseSRWLockShared(&src->lock);
       goto fail;
     }
     memcpy((void *)da, (const void *)a, b - a);
+    // NB: the child's interval table must hold CHILD addresses — copying
+    // src->iv verbatim would make the child's munmap/wipe/release operate
+    // on the PARENT's pages (decommitting them under a running parent).
+    dst->iv[dst->ivn].a = da;
+    dst->iv[dst->ivn].b = dst->base + (b - src->base);
+    ++dst->ivn;
     // replicate host protections region-by-region
     p = a;
     while (p < b) {
@@ -405,6 +441,35 @@ void WboxMemWipeWindow(void) {
   ReleaseSRWLockExclusive(&w->lock);
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mem: wipe window #%d\n", w->index);
+}
+
+// Validate a recycled host page (g_allocator freelist) before reuse.
+// Such a page can dangle: guest munmap() decommits whole regions without
+// consulting the freelist, and an exiting snapshot sibling releases its
+// whole window — both leave stale page pointers behind. Returns 1 when
+// the page is usable (committed, or recommitted because it belongs to
+// one of our live windows), 0 when it must be discarded.
+int WboxMemRecommitIfOurs(void *p) {
+  MEMORY_BASIC_INFORMATION mbi;
+  uintptr_t a = (uintptr_t)p;
+  struct WboxWindow *w;
+  int rc = 0;
+  if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi))) return 0;
+  if (mbi.State == MEM_COMMIT) return 1;
+  if (mbi.State != MEM_RESERVE) return 0;
+  // only recommit when the page belongs to the CALLING thread's window
+  // (the interval table is per-window and driven off thread-local g_win);
+  // a stale page from another window is simply dropped
+  if (!(w = g_win) || a < w->base || a >= w->limit) return 0;
+  AcquireSRWLockExclusive(&w->lock);
+  if (VirtualAlloc((LPVOID)a, 4096, MEM_COMMIT, PAGE_READWRITE) &&
+      IvInsert(a, a + 4096) == 0) {
+    rc = 1;
+  } else {
+    VirtualFree((LPVOID)a, 4096, MEM_DECOMMIT);
+  }
+  ReleaseSRWLockExclusive(&w->lock);
+  return rc;
 }
 
 static void *W32Commit(uintptr_t a, size_t len, int prot) {

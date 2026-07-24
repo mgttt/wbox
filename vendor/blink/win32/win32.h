@@ -19,6 +19,7 @@ uintptr_t WboxMemHandleBase(void *);
 uintptr_t WboxMemHandleLimit(void *);
 int WboxMemSnapshotWindow(void *srcwin, void **dstout);
 void WboxMemWipeWindow(void);
+int WboxMemRecommitIfOurs(void *);
 // blink core hook (memorymalloc.c): drop recycled host pages in [lo,hi)
 void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi);
 
