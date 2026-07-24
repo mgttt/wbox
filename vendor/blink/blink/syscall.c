@@ -2901,8 +2901,28 @@ static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
   ssize_t got, wrote;
   u8 *buf, *offsetp = 0;
   size_t chunk, maxchunk = 16384;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: in_fd/out_fd are GUEST descriptors; the Vfs* calls below
+  // need the host-side descriptors (guest 0 is not necessarily VFS fd 0 —
+  // reading it would slurp the emulator's own stdin and hang, which is
+  // exactly what `echo x | cat` did).
+  {
+    struct Fd *fdi, *fdo;
+    LOCK(&m->system->fds.lock);
+    fdi = GetFd(&m->system->fds, in_fd);
+    fdo = GetFd(&m->system->fds, out_fd);
+    if (!fdi || !fdo) {
+      UNLOCK(&m->system->fds.lock);
+      return ebadf();
+    }
+    in_fd = fdi->hostfd;
+    out_fd = fdo->hostfd;
+    UNLOCK(&m->system->fds.lock);
+  }
+#else
   if (CheckFdAccess(m, out_fd, true, EBADF) == -1) return -1;
   if (CheckFdAccess(m, in_fd, false, EBADF) == -1) return -1;
+#endif
   if (offsetaddr && !(offsetp = (u8 *)SchlepRW(m, offsetaddr, 8))) return -1;
   if (!(buf = (u8 *)AddToFreeList(m, malloc(maxchunk)))) return -1;
   if (offsetp) {
