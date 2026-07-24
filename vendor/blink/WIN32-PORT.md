@@ -65,7 +65,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 |---|---|---|
 | 1 | fork/vfork | ❌ 不支持（Windows 无私有匿名 COW），ENOSYS；依赖 fork 的 shell 管道/后台随之不可用 |
 | 2 | 管道组合命令（`a \| b`） | ❌ 因 fork=ENOSYS（`sh: can't fork: Function not implemented`）；匿名管道本身（pipe2→CreatePipe）已实现 |
-| 3 | socket 族 | ❌ ENOSYS（DISABLE_SOCKETS），L2 再映射 Winsock2 |
+| 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS |
 | 4 | wait/waitpid/wait3/wait4/waitid | ❌ ENOSYS（无多进程模型） |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |
@@ -83,7 +83,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 - mremap 扩容（ENOMEM）
 - MAP_SHARED 写回
 - JIT（纯解释）
-- 终端仅哑控制台（cooked/raw 两档）
+- 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty
 - wineserver 报 "prefix is not owned by you" 为 wine 沙箱提示，无功能影响
 
 ## 6. 构建与 wine 验证
