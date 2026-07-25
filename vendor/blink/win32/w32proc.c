@@ -171,18 +171,56 @@ void W32ChildSetMachine(struct W32Child *c, void *child_machine) {
   c->child_machine = child_machine;
 }
 
-void *W32ChildFindMachine(int vpid) {
+// caller must hold g_children_lock
+static void *W32ChildFindMachineLocked(int vpid) {
   struct W32Child *c;
-  void *m = NULL;
-  W32ChildrenLock();
   for (c = g_children; c; c = c->next) {
     if (!c->reaped && !c->exited && c->vpid == vpid && c->child_machine) {
-      m = c->child_machine;
-      break;
+      return c->child_machine;
     }
   }
+  return NULL;
+}
+
+void *W32ChildFindMachine(int vpid) {
+  void *m;
+  W32ChildrenLock();
+  m = W32ChildFindMachineLocked(vpid);
   W32ChildrenUnlock();
   return m;
+}
+
+// H1 (security-audit): find with the table lock STILL HELD on return;
+// pair with W32ChildUnlock() after the Machine has been used. This
+// closes the find->use TOCTOU window in SysKill.
+void *W32ChildFindMachineHold(int vpid) {
+  W32ChildrenLock();
+  return W32ChildFindMachineLocked(vpid);
+}
+
+// C3 (security-audit): called from FreeMachine() before a Machine is
+// released — drop every vpid-table reference to it (as a child's
+// parent_machine or as a child_machine) so a later SIGCHLD enqueue or
+// cross-pid kill can never write into freed memory.
+void W32ChildUnlinkMachine(void *machine) {
+  struct W32Child *c;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (c->parent_machine == machine) c->parent_machine = NULL;
+    if (c->child_machine == machine) c->child_machine = NULL;
+  }
+  W32ChildrenUnlock();
+}
+
+// H1 (security-audit): exported so syscall.c can keep the table locked
+// across a find + EnqueueSignal, closing the TOCTOU window in which the
+// target child could free its Machine.
+void W32ChildLock(void) {
+  W32ChildrenLock();
+}
+
+void W32ChildUnlock(void) {
+  W32ChildrenUnlock();
 }
 
 // Last-resort kill: the child's host thread never woke to consume the

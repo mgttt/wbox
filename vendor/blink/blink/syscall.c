@@ -527,6 +527,7 @@ static void W32SnapFixTable(u64 *tab, int level, uintptr_t lo, uintptr_t hi,
 
 static int W32Fork(struct Machine *m) {
   int i;
+  int rc;
   int vpid;
   i64 delta;
   HANDLE thr;
@@ -547,20 +548,40 @@ static int W32Fork(struct Machine *m) {
   vpid = W32ChildVpid(rec);
   srcwin = WboxMemCurrentWindow();
   dstwin = 0;
+  // H4 (security-audit): take the upstream fork() lock set (same order:
+  // exec before sig before mmap before pagelocks before fds/machines,
+  // futexes+jit last) for the duration of the snapshot+page-table-fix
+  // critical section. Without these, sibling guest threads can mmap /
+  // mprotect / signal / recycle JIT blocks while WboxMemSnapshotWindow
+  // memcpy's pages and W32SnapFixTable walks half-written page tables,
+  // producing a torn (potentially guest-controlled) child page table.
+  // fds.lock and machines_lock are still taken at their inner sites to
+  // keep the critical section non-recursive (NewSystem/NewMachine take
+  // machines_lock internally).
+  LOCK(&m->system->exec_lock);
+  LOCK(&m->system->sig_lock);
+  LOCK(&m->system->mmap_lock);
+  LOCK(&m->system->pagelocks_lock);
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  LOCK(&g_bus->futexes.lock);
+#endif
+#ifdef HAVE_JIT
+  LOCK(&m->system->jit.lock);
+#endif
   // 1. synchronously snapshot every committed page into a fresh window;
   //    the parent window can not be mutated or released mid-copy because
   //    the copy runs here, on the parent's own thread
   if (WboxMemSnapshotWindow(srcwin, &dstwin) == -1) {
-    W32ChildAbandon(rec);
-    return eagain();
+    rc = eagain();
+    goto unlock_and_abandon;
   }
   lo = WboxMemHandleBase(srcwin);
   hi = WboxMemHandleLimit(srcwin);
   delta = (i64)(WboxMemHandleBase(dstwin) - lo);
   // 2. build the child's own System
   if (!(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
-    W32ChildAbandon(rec);
-    return enomem();  // snapshot window leaks (fatal ENOMEM anyway)
+    rc = enomem();  // snapshot window leaks (fatal ENOMEM anyway)
+    goto unlock_and_abandon;
   }
   s2->w32child = rec;
   s2->pid = vpid;
@@ -598,9 +619,21 @@ static int W32Fork(struct Machine *m) {
   if (s2->cr3) {
     W32SnapFixTable((u64 *)(uintptr_t)(s2->cr3 & PAGE_TA), 1, lo, hi, delta);
   }
+  // H4: snapshot+fix critical section ends here; release in reverse order
+#ifdef HAVE_JIT
+  UNLOCK(&m->system->jit.lock);
+#endif
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  UNLOCK(&g_bus->futexes.lock);
+#endif
+  UNLOCK(&m->system->pagelocks_lock);
+  UNLOCK(&m->system->mmap_lock);
+  UNLOCK(&m->system->sig_lock);
+  UNLOCK(&m->system->exec_lock);
   // 4. child Machine: clone the register state, then reparent to s2
   if (!(m2 = NewMachine(m->system, m))) {
     FreeSystem(s2);
+    WboxMemDestroyWindow(dstwin);  // M3: no 1TB snapshot window leak
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -624,6 +657,7 @@ static int W32Fork(struct Machine *m) {
   // 5. spawn the child thread; the parent returns immediately
   if (!(a = calloc(1, sizeof(*a)))) {
     FreeMachine(m2);  // orphan -> frees s2 as well
+    WboxMemDestroyWindow(dstwin);  // M3
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -633,6 +667,7 @@ static int W32Fork(struct Machine *m) {
   if (!thr) {
     free(a);
     FreeMachine(m2);
+    WboxMemDestroyWindow(dstwin);  // M3
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -641,6 +676,20 @@ static int W32Fork(struct Machine *m) {
   THR_LOGF("pid=%d W32Fork -> vpid=%d", m->system->pid, vpid);
   W32ForkDbg("fork spawn", vpid, 0);
   return vpid;
+unlock_and_abandon:
+#ifdef HAVE_JIT
+  UNLOCK(&m->system->jit.lock);
+#endif
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  UNLOCK(&g_bus->futexes.lock);
+#endif
+  UNLOCK(&m->system->pagelocks_lock);
+  UNLOCK(&m->system->mmap_lock);
+  UNLOCK(&m->system->sig_lock);
+  UNLOCK(&m->system->exec_lock);
+  if (dstwin) WboxMemDestroyWindow(dstwin);  // M3: no snapshot window leak
+  W32ChildAbandon(rec);
+  return rc;
 }
 
 // Guest exit of a snapshot-fork child (its own System and window):
@@ -655,13 +704,17 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   W32ChildSignalExit(rec, rc);
   // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
   // into the parent's guest signal set (busybox ash's wait loop depends on
-  // it). The parent Machine is necessarily alive here in the supported
-  // model: a System only exits after its own children (wait/ECHILD), and
-  // the main System outlives every snapshot child.
+  // it). C3 (security-audit): the parent Machine is NOT necessarily alive
+  // (A->B->C with B exiting first) — the vpid table holds a weak
+  // reference cleared by FreeMachine via W32ChildUnlinkMachine, and we
+  // hold the table lock across the lookup+enqueue so the pointer can
+  // not go stale mid-flight.
+  W32ChildLock();
   {
     struct Machine *pm = (struct Machine *)W32ChildParent(rec);
     if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
   }
+  W32ChildUnlock();
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
   // recycled host pages handed out from the child's window must not be
   // reused by other Systems once the reservation is gone
@@ -5374,21 +5427,31 @@ static int SysKill(struct Machine *m, int pid, int sig) {
   // the host thread so a blocking wait4 in the parent can never hang.
   if (pid > 0 && !(0 <= sig && sig <= 64)) return einval();
   if (pid > 0) {
-    struct Machine *cm = (struct Machine *)W32ChildFindMachine(pid);
+    // H1 (security-audit): the table lock is held across find+enqueue so
+    // the child can not free its Machine in between (its exit path first
+    // marks exited and FreeMachine unlinks the record under the same
+    // lock).
+    struct Machine *cm = (struct Machine *)W32ChildFindMachineHold(pid);
     W32ForkDbg("kill vp", pid, cm ? 1 : 0);
     if (cm) {
-      if (!sig) return 0;  // existence probe
+      if (!sig) {
+        W32ChildUnlock();
+        return 0;  // existence probe
+      }
       if (sig == SIGKILL_LINUX) {
+        W32ChildUnlock();
         W32ChildTerminate(pid, 9);  // uncatchable: no grace period
         return 0;
       }
       EnqueueSignal(cm, sig);
+      W32ChildUnlock();
       if (W32ChildWaitExited(pid, 200)) {
         // child is wedged in a host wait that never polls signals
         W32ChildTerminate(pid, sig);
       }
       return 0;
     }
+    W32ChildUnlock();
     if (W32ChildHasExited(pid)) return 0;  // zombie: kill() succeeds
     // not a virtual child: fall through (self / ESRCH)
   }

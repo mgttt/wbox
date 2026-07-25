@@ -3,6 +3,47 @@
 本文档记录 blink → `wbox-linux.exe`（x86_64-windows，MinGW/zig cc 交叉编译）
 的移植层架构、运行时崩溃根因与修复、缺口裁决、已知限制与验证方法。
 
+## 0. 生产状态声明（wbox-linux 1.0.0-rc1）
+
+**支持矩阵**（wine 11.11 实测；真 Windows 验收矩阵待跑，见 §8）：
+
+| 场景 | 状态 |
+|---|---|
+| busybox 静态（11 项基础矩阵：uname/echo/cat/ls/stat/find/重定向/退出码…） | ✅ 全通 |
+| shell 8 项（管道/命令替换/后台+wait/重定向链/dev/null/fork 子 exec） | ✅ 全通（快照式 fork，§7.4） |
+| ubuntu-base-24.04.3 动态 glibc 程序（ls/cat/bash/uname/apt --version） | ✅（`BLINK_PREFIX=<rootfs>`，§7.2） |
+| 网络（busybox wget 公网 + md5、epoll loopback） | ✅（§7.3） |
+| JIT（x86_64→x86_64） | ✅ 默认开启（`WBOX_JIT=0` 可关） |
+
+**已知限制汇总**：
+
+- `apt-get update` 卡点（指令仿真级，专项在修）；glibc pthread 程序崩溃（musl/busybox 不受影响）
+- epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT` 支持）；eventfd/signalfd ENOSYS
+- AF_UNIX/socketpair ENOSYS；`MAP_SHARED` 写回未实现；mremap 收缩外仅失败
+- setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
+- 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
+- 宿主 symlink/reparse point 不防护（rootfs 内勿放行特权创建的 symlink）
+- guest 崩溃/host 异常时进程以 128+SIGSEGV 退出并输出诊断（见下）
+
+**诊断开关**（全部运行期环境变量，默认关闭，零开销）：
+
+| 开关 | 作用 |
+|---|---|
+| `WBOX_DEBUG=1` | 崩溃时 VEH 追加 host 寄存器转储与 VA 窗口布局 |
+| `WBOX_DEBUG_FORK=1` | 快照 fork/回收页诊断（stale interval、dropped page） |
+| `WBOX_DEBUG_MEM=1` | 窗口 reserve/snapshot/wipe 与 mmap 逐笔日志 |
+| `WBOX_DEBUG_NET=1` | Winsock/epoll 翻译层日志 |
+| `WBOX_DEBUG_VFS=1` | VFS mount/traverse 诊断（blink 核心侧） |
+| `WBOX_VA_BITS=38..43` | 调整 guest VA 窗口位数（默认 40=1TB/进程） |
+| `wbox-linux.exe --version` | 版本号 + git 短哈希 + UTC 构建时间 |
+
+**问题上报指引**：提交 issue 请附 ① `wbox-linux.exe --version` 输出；
+② 崩溃时 stderr 的 `wbox-linux: fatal host exception ...` 段（含 guest
+pid/rip/故障地址，`WBOX_DEBUG=1` 重跑一次取完整转储）；③ 最小 guest
+复现命令与 rootfs 来源；④ 运行环境（wine 版本或 Windows 版本）。
+
+---
+
 L1 目标已达成：**wine 11.11 下 wbox-linux.exe 可运行 busybox 级 Linux 静态
 ELF 程序**（uname/echo/cat/ls/stat/sh/true/false/退出码实测通过，见 §7）。
 
@@ -10,8 +51,8 @@ L2 进展（2026-07-24，wine 11.11 实测）：VFS/overlays 已启用，
 `BLINK_PREFIX=<rootfs>` 可运行 **ubuntu-base-24.04.3** rootfs 内的
 动态链接 glibc 程序（ls/cat/bash/uname/apt --version，见 §7.2）；
 网络矩阵（busybox wget 公网 md5 校验 + epoll loopback）通过（§7.3）。
-已知限制：shell 管道/命令替换与 `apt-get update` 仍失败（fork+exec
-共享堆，COW 级，见 §7.4）。
+feat/cow 合入后 shell 管道/命令替换/后台任务已全通（快照式 fork，§7.4）；
+剩余已知限制为 `apt-get update`（指令仿真级）与 glibc pthread（汇总见 §0）。
 
 ## 1. 移植层架构
 

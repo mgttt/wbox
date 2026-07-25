@@ -19,6 +19,9 @@ uintptr_t WboxMemHandleBase(void *);
 uintptr_t WboxMemHandleLimit(void *);
 int WboxMemSnapshotWindow(void *srcwin, void **dstout);
 void WboxMemWipeWindow(void);
+// destroy an arbitrary window handle (fork failure paths; the normal exit
+// path uses WboxMemReleaseWindow which also switches TLS back)
+void WboxMemDestroyWindow(void *win);
 int WboxMemRecommitIfOurs(void *);
 // blink core hook (memorymalloc.c): drop recycled host pages in [lo,hi)
 void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi);
@@ -47,6 +50,14 @@ int W32AnyChildExited(void);
 // stuck in a blocking wait that never polls guest signals.
 void W32ChildSetMachine(struct W32Child *, void *child_machine);
 void *W32ChildFindMachine(int vpid);
+void *W32ChildFindMachineHold(int vpid);  // returns with table lock held
+// C3/H1 (security-audit): raw Machine pointers in the vpid table dangle
+// once the referenced Machine is freed. FreeMachine() calls
+// W32ChildUnlinkMachine to drop every reference to the dying Machine;
+// syscall.c brackets find+EnqueueSignal sequences with the table lock.
+void W32ChildUnlinkMachine(void *machine);
+void W32ChildLock(void);
+void W32ChildUnlock(void);
 int W32ChildTerminate(int vpid, int status);
 int W32ChildHasExited(int vpid);
 int W32ChildWaitExited(int vpid, int ms);

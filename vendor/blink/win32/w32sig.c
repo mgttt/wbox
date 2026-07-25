@@ -12,6 +12,8 @@
 
 #include <windows.h>
 
+#include "blink/machine.h"
+#include "blink/tunables.h"
 #include "win32.h"
 
 static struct sigaction g_sa[NSIG];
@@ -159,18 +161,94 @@ char *strsignal(int sig) {
 
 // ---------------------------------------------------------------- VEH
 
+// Crash diagnostics. Runs ONLY on a fatal host exception (zero cost on
+// the normal path): reports the host fault, the guest PC of the crashing
+// thread, the guest fault address (translated through the thread's VA
+// window) and the guest executable it maps into. WBOX_DEBUG=1 adds the
+// host register dump and window layout.
+static void WboxVehDiagnose(EXCEPTION_POINTERS *ep) {
+  DWORD code = ep->ExceptionRecord->ExceptionCode;
+  CONTEXT *ctx = ep->ContextRecord;
+  struct Machine *m;
+  uintptr_t fa = 0;
+  int have_fa = 0;
+  const char *what = "exception";
+  switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION: {
+      static const char *ops[] = {"read", "write", "exec"};
+      ULONG_PTR op = ep->ExceptionRecord->ExceptionInformation[0];
+      fa = (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
+      have_fa = 1;
+      what = ops[op == 1 ? 1 : (op == 8 ? 2 : 0)];
+      break;
+    }
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+      what = "illegal instruction";
+      break;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+      what = "integer divide by zero";
+      break;
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+      what = "float divide by zero";
+      break;
+    case EXCEPTION_STACK_OVERFLOW:
+      what = "stack overflow";
+      break;
+  }
+  fprintf(stderr, "wbox-linux: fatal host exception %#lx (%s) at rip=%p\n",
+          code, what, (void *)ctx->Rip);
+  m = g_machine;  // thread-local of the crashing thread
+  if (m && m->system) {
+    uint64_t grip = m->ip;
+    fprintf(stderr,
+            "wbox-linux: guest pid=%d rip=%#llx in %s (code [%#llx,+%#lx))"
+            " => guest+%#llx\n",
+            m->system->pid, (unsigned long long)grip,
+            m->system->elf.execfn ? m->system->elf.execfn
+                                  : "(unknown guest)",
+            (unsigned long long)m->system->codestart,
+            (unsigned long)m->system->codesize,
+            (unsigned long long)(grip - (uint64_t)m->system->codestart));
+  } else {
+    fprintf(stderr, "wbox-linux: fault outside guest context (host code)\n");
+  }
+  if (have_fa) {
+    uintptr_t base = WboxMemWindowBase();
+    uintptr_t lim = WboxMemLimit();
+    if (base && fa >= base && fa < lim) {
+      fprintf(stderr, "wbox-linux: guest fault address %#llx (host %p)\n",
+              (unsigned long long)(fa - (uint64_t)base), (void *)fa);
+    } else {
+      fprintf(stderr, "wbox-linux: fault address %p (outside guest window)\n",
+              (void *)fa);
+    }
+  }
+  if (getenv("WBOX_DEBUG")) {
+    fprintf(stderr,
+            "wbox-linux: host rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p\n"
+            "wbox-linux:      rbp=%p rsp=%p r8=%p r9=%p r10=%p r11=%p\n"
+            "wbox-linux:      r12=%p r13=%p r14=%p r15=%p eflags=%#lx\n"
+            "wbox-linux: window [%p,%p) skew=%#llx\n",
+            (void *)ctx->Rax, (void *)ctx->Rbx, (void *)ctx->Rcx,
+            (void *)ctx->Rdx, (void *)ctx->Rsi, (void *)ctx->Rdi,
+            (void *)ctx->Rbp, (void *)ctx->Rsp, (void *)ctx->R8,
+            (void *)ctx->R9, (void *)ctx->R10, (void *)ctx->R11,
+            (void *)ctx->R12, (void *)ctx->R13, (void *)ctx->R14,
+            (void *)ctx->R15, (unsigned long)ctx->EFlags,
+            (void *)WboxMemWindowBase(), (void *)WboxMemLimit(),
+            (unsigned long long)kSkew);
+  }
+}
+
 static LONG WINAPI WboxVeh(EXCEPTION_POINTERS *ep) {
   DWORD code = ep->ExceptionRecord->ExceptionCode;
-  void *addr = ep->ExceptionRecord->ExceptionAddress;
   switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
     case EXCEPTION_ILLEGAL_INSTRUCTION:
     case EXCEPTION_INT_DIVIDE_BY_ZERO:
     case EXCEPTION_FLT_DIVIDE_BY_ZERO:
     case EXCEPTION_STACK_OVERFLOW:
-      fprintf(stderr,
-              "wbox-linux: fatal host exception %#lx at %p (rip=%p)\n", code,
-              addr, (void *)ep->ContextRecord->Rip);
+      WboxVehDiagnose(ep);
       ExitProcess(128 + SIGSEGV);
       return EXCEPTION_CONTINUE_SEARCH;
     default:

@@ -135,6 +135,15 @@ static int IvOverlaps(uintptr_t a, uintptr_t b) {
   return 0;
 }
 
+// H7 (security-audit): range validation helper. All length arithmetic
+// below must go through this so a guest-controlled (or blink-internal)
+// near-2^64 length can not wrap a+len back into the window and make
+// commit/decommit/protect operate on the wrong host pages.
+// Requires: caller holds or will hold the window lock; g_win != NULL.
+static int W32RangeOk(uintptr_t a, size_t len) {
+  return len > 0 && a >= g_base && a <= g_limit && len <= g_limit - a;
+}
+
 static DWORD W32Prot(int prot) {
   if (prot & PROT_EXEC) {
     if (prot & PROT_WRITE) return PAGE_EXECUTE_READWRITE;
@@ -277,20 +286,24 @@ int WboxMemForkWindow(void) {
   return 0;
 }
 
-// Release the calling thread's window (must not be window #0) and switch
-// back to the primary window. Called when an exec'd vfork child exits.
-// Caller must have unmapped all guest pages already (FreeSystem does).
-// NB: recycled host pages handed out from this window are purged by the
-// caller via WboxPurgeHostPagesInRange() before the reservation goes away.
-void WboxMemReleaseWindow(void) {
-  struct WboxWindow *w = g_win;
+// Destroy an ARBITRARY window (not necessarily the calling thread's
+// current one): detach, decommit everything, release the reservation,
+// free the bookkeeping. Used by the W32Fork failure paths to not leak
+// the 1TB snapshot window when child setup fails after the copy, and by
+// WboxMemReleaseWindow for the normal exit path.
+void WboxMemDestroyWindow(void *win) {
+  struct WboxWindow *w = (struct WboxWindow *)win;
   size_t i;
   if (!w || w->index == 0) return;
+  // H5 (security-audit): detach from the global table first, then take
+  // the window lock exclusively before touching the interval table and
+  // freeing — a concurrent WboxMemSnapshotWindow holds src->lock shared
+  // while reading the same table, and WboxMemRecommitIfOurs takes it
+  // exclusive. Releasing the reservation without the lock raced both.
   AcquireSRWLockExclusive(&g_windows_lock);
   g_windows[w->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
-  g_win = g_windows[0];
-  kSkew = g_win ? (uint64_t)g_win->base : 0;
+  AcquireSRWLockExclusive(&w->lock);
   // MEM_RELEASE fails when ANY page in the reservation is still committed.
   // Committed pages can outlive the guest mappings here: recycled host
   // pages (g_allocator batches) were committed by mmap but are tracked
@@ -299,9 +312,23 @@ void WboxMemReleaseWindow(void) {
     VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
   }
   w->ivn = 0;
+  ReleaseSRWLockExclusive(&w->lock);
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
+}
+
+// Release the calling thread's window (must not be window #0) and switch
+// back to the primary window. Called when an exec'd vfork child exits.
+// Caller must have unmapped all guest pages already (FreeSystem does).
+// NB: recycled host pages handed out from this window are purged by the
+// caller via WboxPurgeHostPagesInRange() before the reservation goes away.
+void WboxMemReleaseWindow(void) {
+  struct WboxWindow *w = g_win;
+  if (!w || w->index == 0) return;
+  g_win = g_windows[0];
+  kSkew = g_win ? (uint64_t)g_win->base : 0;
+  WboxMemDestroyWindow(w);
 }
 
 // ---- snapshot fork support (see WIN32-PORT.md §7.4) ----
@@ -455,12 +482,18 @@ int WboxMemRecommitIfOurs(void *p) {
   struct WboxWindow *w;
   int rc = 0;
   if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi))) return 0;
+  // C1 (security-audit): the blink host-page freelist is process-global
+  // while each snapshot fork child owns an independent VA window. A
+  // recycled page MUST belong to the calling thread's window in every
+  // case — a committed page from a sibling window would otherwise be
+  // reused as a page-table/data page of THIS guest, letting one guest
+  // process read/write another guest's page tables and memory.
+  w = g_win;
+  if (!w || a < w->base || a >= w->limit) return 0;
   if (mbi.State == MEM_COMMIT) return 1;
   if (mbi.State != MEM_RESERVE) return 0;
-  // only recommit when the page belongs to the CALLING thread's window
-  // (the interval table is per-window and driven off thread-local g_win);
-  // a stale page from another window is simply dropped
-  if (!(w = g_win) || a < w->base || a >= w->limit) return 0;
+  // MEM_RESERVE inside our window: decommitted by a whole-region munmap
+  // without consulting the freelist; recommit it.
   AcquireSRWLockExclusive(&w->lock);
   if (VirtualAlloc((LPVOID)a, 4096, MEM_COMMIT, PAGE_READWRITE) &&
       IvInsert(a, a + 4096) == 0) {
@@ -514,6 +547,11 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = EINVAL;
     return MAP_FAILED;
   }
+  // H7: reject lengths that would wrap the page-align or a+len arithmetic
+  if (len > (size_t)1 << 48) {
+    errno = ENOMEM;
+    return MAP_FAILED;
+  }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   if ((uintptr_t)addr & (W32PAGE - 1)) {
     if (getenv("WBOX_DEBUG_MEM"))
@@ -525,7 +563,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   AcquireSRWLockExclusive(&g_lock);
   if (flags & MAP_FIXED) {
     a = (uintptr_t)addr;
-    if (a < g_base || a + len > g_limit) {
+    if (!W32RangeOk(a, len)) {
       if (getenv("WBOX_DEBUG_MEM"))
         fprintf(stderr,
                 "wbox mmap ENOMEM: addr=%p len=%#zx outside [%p,%p)\n", addr,
@@ -541,7 +579,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
   } else if (flags & MAP_FIXED_NOREPLACE) {
     a = (uintptr_t)addr;
-    if (a < g_base || a + len > g_limit || IvOverlaps(a, a + len)) {
+    if (!W32RangeOk(a, len) || IvOverlaps(a, a + len)) {
       ReleaseSRWLockExclusive(&g_lock);
       errno = EEXIST;
       return MAP_FAILED;
@@ -594,8 +632,20 @@ int munmap(void *addr, size_t len) {
     errno = EINVAL;
     return -1;
   }
+  // H7: no wrap on align, and the range must live inside our window —
+  // VirtualFree(MEM_DECOMMIT) on an out-of-window address would hit
+  // arbitrary host mappings.
+  if (len > (size_t)1 << 48) {
+    errno = EINVAL;
+    return -1;
+  }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   AcquireSRWLockExclusive(&g_lock);
+  if (!W32RangeOk(a, len)) {
+    ReleaseSRWLockExclusive(&g_lock);
+    errno = EINVAL;
+    return -1;
+  }
   IvRemove(a, a + len);
   // decommit subrange; ignore failure (may straddle uncommitted)
   uintptr_t p;
@@ -618,6 +668,14 @@ int munmap(void *addr, size_t len) {
 int mprotect(void *addr, size_t len, int prot) {
   DWORD old;
   if (!len) return 0;
+  // H7: wrap guard only — blink legitimately mprotects memory OUTSIDE the
+  // guest window (the JIT's static g_code[] block pool lives in the exe's
+  // BSS), so a window-bounds rejection here is wrong; we only stop
+  // pathological lengths.
+  if (len > (size_t)1 << 48) {
+    errno = EINVAL;
+    return -1;
+  }
   if (!VirtualProtect((LPVOID)addr, len, W32Prot(prot), &old)) {
     errno = EINVAL;
     return -1;
@@ -627,6 +685,11 @@ int mprotect(void *addr, size_t len, int prot) {
 
 int msync(void *addr, size_t len, int flags) {
   MEMORY_BASIC_INFORMATION mbi;
+  // H7: wrap guard only (see mprotect)
+  if (len > (size_t)1 << 48) {
+    errno = EINVAL;
+    return -1;
+  }
   if (!VirtualQuery((LPVOID)addr, &mbi, sizeof(mbi)) ||
       mbi.State != MEM_COMMIT) {
     errno = ENOMEM;
