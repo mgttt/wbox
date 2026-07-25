@@ -68,7 +68,7 @@ wbox run -V --keep-profile -- cmd.exe /c whoami /all
 | 资源限额（内存/CPU/进程数）+ 进程树收割 | ✅ |
 | 默认断网、`--allow-network` 放行 | ✅ |
 | 拉取 OCI 镜像 rootfs（`wbox image pull ubuntu:24.04`） | ✅ |
-| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 全链路已串联：镜像解析 → rootfs 定位 → config 合并（Entrypoint/Cmd/Env）→ 注入 resolv.conf 与 `BLINK_PREFIX` → AppContainer 内拉起 wbox-linux.exe。Wine 11.11 实测矩阵：busybox 级静态程序 ✅（L1）；ubuntu:24.04 rootfs 内动态 glibc 程序 ls/cat/bash/uname/`apt --version` ✅、rootfs 内 wget 下载 md5 校验通过 ✅、epoll/socket ✅（L2）。剩余限制：shell 管道/命令替换、`apt-get update` 因 fork+exec 共享堆（COW 级）暂不可用；详见 vendor/blink/WIN32-PORT.md §7 |
+| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 全链路已串联：镜像解析 → rootfs 定位 → config 合并（Entrypoint/Cmd/Env）→ 注入 resolv.conf 与 `BLINK_PREFIX` → AppContainer 内拉起 wbox-linux.exe。Wine 11.11 实测矩阵：busybox 级静态程序 ✅（L1）；ubuntu:24.04 rootfs 内动态 glibc 程序 ls/cat/bash/uname/`apt --version` ✅、rootfs 内 wget 下载 md5 校验通过 ✅、epoll/socket ✅（L2）。快照式 fork 落地后（8 项 shell 矩阵 + 8 项 fork 矩阵 Wine 实测全过）：shell 管道/命令替换/多段管道/后台任务+wait/kill 子进程/重定向 ✅、fork 子内 DNS 解析 ✅。剩余限制：`apt-get update` 死锁（指令仿真层 std::string append 级 bug，100% 可复现，已定位到最后一环，见 vendor/blink/WIN32-PORT.md §7.4）；异步信号投递不完整 |
 | GUI 桌面程序（notepad 等） | ⚠️ AppContainer 对 GUI 有天然限制，多数会失败或异常，非目标场景 |
 | Windows 服务 / COM / 驱动类程序 | ❌ 超出进程级容器边界 |
 | 容器生命周期管理（ps/stop/rm/logs/exec） | 📐 未实现（v1 为前台一次性运行） |
