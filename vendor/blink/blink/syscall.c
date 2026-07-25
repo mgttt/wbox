@@ -586,6 +586,9 @@ static int W32Fork(struct Machine *m) {
   s2->w32child = rec;
   s2->pid = vpid;
   s2->exec = m->system->exec;
+  // wbox win32: the fork child keeps the parent's /proc/self/exe until it
+  // execs (busybox standalone applets exec self/exe without a prior exec).
+  unassert(!VfsAcquireInfo(m->system->selfexeinfo, &s2->selfexeinfo));
   memcpy(s2->rlim, m->system->rlim, sizeof(s2->rlim));
   memcpy(s2->hands, m->system->hands, sizeof(s2->hands));
   s2->blinksigs = m->system->blinksigs;

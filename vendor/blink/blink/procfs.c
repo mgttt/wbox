@@ -994,8 +994,21 @@ int ProcfsRegisterExe(i32 pid, const char *path) {
   struct VfsInfo *newinfo, *tmp;
   unassert(pid == getpid());
   unassert(!VfsTraverse(path, &newinfo, true));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: register in the calling guest process's own System (see
+  // the selfexeinfo comment in machine.h); the global stays a fallback
+  // for the first program load before a Machine exists.
+  if (g_machine && g_machine->system) {
+    tmp = g_machine->system->selfexeinfo;
+    g_machine->system->selfexeinfo = newinfo;
+  } else {
+    tmp = g_selfexeinfo;
+    g_selfexeinfo = newinfo;
+  }
+#else
   tmp = g_selfexeinfo;
   g_selfexeinfo = newinfo;
+#endif
   unassert(!VfsFreeInfo(tmp));
   return 0;
 }
@@ -1125,9 +1138,20 @@ static ssize_t ProcfsPiddirExeReadlink(struct VfsInfo *info, char **buf) {
   char *tmp;
   struct stat st;
   VFS_LOGF("ProcfsPiddirExeReadlink(%p (%s), %p)", info, info->name, buf);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: resolve "self" against the calling guest process's System.
+  struct VfsInfo *exeinfo = g_selfexeinfo;
+  if (g_machine && g_machine->system && g_machine->system->selfexeinfo) {
+    exeinfo = g_machine->system->selfexeinfo;
+  }
+  if ((len = VfsPathBuildFull(exeinfo, NULL, buf)) == -1) {
+    return -1;
+  }
+#else
   if ((len = VfsPathBuildFull(g_selfexeinfo, NULL, buf)) == -1) {
     return -1;
   }
+#endif
   if (VfsStat(AT_FDCWD, *buf, &st, 0) == -1) {
     len += sizeof(PROCFS_DELETED) - 1;
     tmp = realloc(*buf, len + 1);
