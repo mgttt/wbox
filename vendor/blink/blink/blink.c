@@ -285,6 +285,11 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
       m->system->pid = old->system->pid;
       m->tid = m->system->pid;
     }
+    // wbox win32: /proc/self/exe (e.g. busybox standalone applets) must keep
+    // resolving to the caller's program while LoadProgram below registers
+    // the new one into this fresh System.
+    unassert(!VfsAcquireInfo(old->system->selfexeinfo,
+                             &m->system->selfexeinfo));
 #else
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
 #endif

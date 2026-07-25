@@ -996,11 +996,16 @@ int ProcfsRegisterExe(i32 pid, const char *path) {
   unassert(!VfsTraverse(path, &newinfo, true));
 #if defined(_WIN32) && !defined(__CYGWIN__)
   // wbox win32: register in the calling guest process's own System (see
-  // the selfexeinfo comment in machine.h); the global stays a fallback
-  // for the first program load before a Machine exists.
+  // the selfexeinfo comment in machine.h). The global is still updated as
+  // a last-resort fallback so readers never dereference a NULL registry.
   if (g_machine && g_machine->system) {
+    struct VfsInfo *globalref;
     tmp = g_machine->system->selfexeinfo;
     g_machine->system->selfexeinfo = newinfo;
+    unassert(!VfsFreeInfo(tmp));
+    unassert(!VfsAcquireInfo(newinfo, &globalref));
+    tmp = g_selfexeinfo;
+    g_selfexeinfo = globalref;
   } else {
     tmp = g_selfexeinfo;
     g_selfexeinfo = newinfo;
