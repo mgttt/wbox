@@ -670,6 +670,14 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   ExitThread(0);
   unassert(0);
 }
+
+// Guest death by unhandled signal inside a snapshot-fork child: the stock
+// TerminateSignal would kill(getpid(), sig) and take down the whole host
+// process (parent included). Exit only the child, with the conventional
+// 128+sig status so wait4 reports a signal death.
+_Noreturn void W32ChildSignalDeath(struct Machine *m, int sig) {
+  W32ChildExit(m, 128 + (sig & 0x7f));
+}
 #endif /* _WIN32 snapshot fork */
 
 static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {

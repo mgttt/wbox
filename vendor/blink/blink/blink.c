@@ -153,6 +153,14 @@ void TerminateSignal(struct Machine *m, int sig, int code) {
   int syssig;
   struct sigaction sa;
   unassert(!IsSignalIgnoredByDefault(sig));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox: a snapshot-fork child must not kill the host process (the
+  // kill(getpid(), syssig) below would take the parent down with it);
+  // exit only the child with a 128+sig status.
+  if (m->system->w32child) {
+    W32ChildSignalDeath(m, sig);
+  }
+#endif
   KillOtherThreads(m->system);
 #ifdef HAVE_JIT
   DisableJit(&m->system->jit);  // unmapping exec pages is slow

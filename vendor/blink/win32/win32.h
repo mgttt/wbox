@@ -50,6 +50,10 @@ void *W32ChildFindMachine(int vpid);
 int W32ChildTerminate(int vpid, int status);
 int W32ChildHasExited(int vpid);
 int W32ChildWaitExited(int vpid, int ms);
+// guest death by unhandled signal inside a snapshot child: route through
+// the child exit path (status 128+sig) instead of killing the host process
+struct Machine;
+_Noreturn void W32ChildSignalDeath(struct Machine *, int sig);
 
 // w32sock.c (feat/net): hooks used by w32fd.c. Types kept opaque here so
 // win32.h stays includable without compat socket/poll headers.
