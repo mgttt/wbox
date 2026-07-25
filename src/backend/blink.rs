@@ -136,14 +136,21 @@ impl Backend for BlinkBackend {
                 DEFAULT_DNS
             );
         }
-        let mut env = spec.env.clone();
-        // BLINK_PREFIX：guest `/` 的 VFS 根。用户已在 Env 里显式设置则不覆盖。
-        if !env.iter().any(|(k, _)| k == BLINK_PREFIX_ENV) {
-            env.push((
-                BLINK_PREFIX_ENV.to_string(),
-                rootfs.to_string_lossy().into_owned(),
-            ));
+        // H2 修复：镜像 config.Env 中的隔离/凭证保留键（BLINK_*/WBOX_*）一律
+        // 丢弃；BLINK_PREFIX 由 wbox 强制为 rootfs（镜像/宿主均不可覆盖），
+        // 子进程环境为显式白名单（不直通宿主环境，H6）。
+        let (img_env, dropped) = super::env::sanitize_image_env(&spec.env);
+        if spec.verbose && !dropped.is_empty() {
+            println!(
+                "wbox: 已丢弃镜像 Env 中的保留键（隔离/凭证相关）：{}",
+                dropped.join(", ")
+            );
         }
+        let forced = [(
+            BLINK_PREFIX_ENV.to_string(),
+            rootfs.to_string_lossy().into_owned(),
+        )];
+        let env = super::env::build_child_env(&img_env, &forced, spec.env_pass_all);
         let cmd = build_blink_command(&exe, &spec.cmd);
         if spec.verbose {
             println!("wbox: guest 命令行（Entrypoint/Cmd 合并后）= {:?}", &spec.cmd);
@@ -196,6 +203,7 @@ mod tests {
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             verbose: false,
+            env_pass_all: false,
         }
     }
 
@@ -228,21 +236,46 @@ mod tests {
     }
 
     #[test]
-    fn user_blink_prefix_not_overridden() {
+    fn image_blink_prefix_forced_to_rootfs() {
+        // H2：镜像 Env 里的 BLINK_PREFIX（如恶意值 "/"）不得生效，
+        // wbox 强制覆盖为 rootfs。
         let fake = std::env::current_exe().unwrap();
         std::env::set_var(LINUX_EXE_ENV, &fake);
         let mut s = spec(&["bash"]);
-        s.env.push((BLINK_PREFIX_ENV.to_string(), "/custom".to_string()));
+        s.env.push((BLINK_PREFIX_ENV.to_string(), "/".to_string()));
         let p = BlinkBackend.prepare(&s).unwrap();
+        let vals: Vec<&str> = p
+            .env
+            .iter()
+            .filter(|(k, _)| k == BLINK_PREFIX_ENV)
+            .map(|(_, v)| v.as_str())
+            .collect();
         assert_eq!(
-            p.env.iter().filter(|(k, _)| k == BLINK_PREFIX_ENV).count(),
-            1
-        );
-        assert_eq!(
-            p.env.iter().find(|(k, _)| k == BLINK_PREFIX_ENV).unwrap().1,
-            "/custom"
+            vals,
+            vec![std::env::temp_dir().to_string_lossy().as_ref()],
+            "BLINK_PREFIX 必须唯一且强制为 rootfs"
         );
         std::env::remove_var(LINUX_EXE_ENV);
+    }
+
+    #[test]
+    fn image_env_reserved_keys_dropped_and_host_not_inherited() {
+        // H2/H6：镜像 Env 的 WBOX_* 隔离旋钮被丢弃；宿主环境（含机密）
+        // 默认不透传给子进程。
+        let fake = std::env::current_exe().unwrap();
+        std::env::set_var(LINUX_EXE_ENV, &fake);
+        std::env::set_var("WBOX_REGISTRY_PASS", "hunter2");
+        let mut s = spec(&["bash"]);
+        s.env.push(("WBOX_ROOT".to_string(), r"C:\".to_string()));
+        s.env.push(("WBOX_VA_BITS".to_string(), "43".to_string()));
+        s.env.push(("LANG".to_string(), "C".to_string()));
+        let p = BlinkBackend.prepare(&s).unwrap();
+        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_ROOT"));
+        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
+        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
+        assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
+        std::env::remove_var(LINUX_EXE_ENV);
+        std::env::remove_var("WBOX_REGISTRY_PASS");
     }
 
     #[test]

@@ -23,10 +23,20 @@ impl Backend for NativeBackend {
                 spec.workdir.display()
             )));
         }
+        // H2/H6：默认不继承完整宿主环境——构造显式白名单环境；
+        // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入。
+        let (img_env, dropped) = super::env::sanitize_image_env(&spec.env);
+        if spec.verbose && !dropped.is_empty() {
+            println!(
+                "wbox: 已丢弃环境变量中的保留键（隔离/凭证相关）：{}",
+                dropped.join(", ")
+            );
+        }
+        let env = super::env::build_child_env(&img_env, &[], spec.env_pass_all);
         Ok(Prepared {
             cmd: spec.cmd.clone(),
             workdir: spec.workdir.clone(),
-            env: spec.env.clone(),
+            env,
         })
     }
 
@@ -41,15 +51,9 @@ impl Backend for NativeBackend {
 /// - `prepared` 提供最终命令行、工作目录与注入环境变量；
 /// - `target_desc`：verbose 输出中的目标描述（原生进程 / wbox-linux 模拟器）。
 pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> Result<u32> {
-    // ---- 0. 环境变量注入（CreateProcess 传 null 环境块 = 继承本进程环境，
-    //    故先写入本进程环境再创建子进程；wbox 为一次性进程，无需恢复）----
-    for (k, v) in &prepared.env {
-        // 空 key 或含 '=' 的 key 为非法输入，防御性跳过
-        if k.is_empty() || k.contains('=') {
-            continue;
-        }
-        std::env::set_var(k, v);
-    }
+    // ---- 0. 子进程环境：prepared.env 为 prepare 阶段构造的**显式白名单**
+    //    环境（含强制覆盖项），经 lpEnvironment 直接传给 CreateProcessW，
+    //    不再通过本进程 set_var 继承（默认不透传宿主环境/机密，H6）----
 
     // 工作目录：只做存在性校验，不 canonicalize（std 会产生 `\\?\` 扩展
     // 前缀，CreateProcessW 的 lpCurrentDirectory 不接受）。
@@ -112,7 +116,7 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
 
     // ---- 5. 启动并等待 ----
     let cmdline = sandbox::build_cmdline(&prepared.cmd)?;
-    let code = sandbox::run_container(&profile, &caps, &cmdline, &workdir, &job)?;
+    let code = sandbox::run_container(&profile, &caps, &cmdline, &workdir, &job, &prepared.env)?;
 
     if spec.verbose {
         println!("wbox: 子进程退出，退出码 = {}", code);

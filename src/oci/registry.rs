@@ -61,9 +61,13 @@ impl RegistryClient {
         }
         if let Some(t) = self.token.borrow().as_ref() {
             req = req.set("Authorization", &format!("Bearer {}", t));
-        } else if let Some(basic) = basic_auth_from_env() {
-            // 私有 registry 可选基本认证（WBOX_REGISTRY_USER/PASS），base64(user:pass)
-            req = req.set("Authorization", &basic);
+        } else if url_host_matches(url, &self.registry) {
+            // H3：Basic 凭证（WBOX_REGISTRY_USER/PASS）只发给与 registry
+            // 同 host 的 URL——跨 host 的 realm/重定向不得携带凭证。
+            if let Some(basic) = basic_auth_from_env() {
+                // 私有 registry 可选基本认证，base64(user:pass)
+                req = req.set("Authorization", &basic);
+            }
         }
         let resp = match req.call() {
             Ok(r) => r,
@@ -120,6 +124,14 @@ impl RegistryClient {
             return Err(WboxError::registry(format!(
                 "认证 realm 非 https，拒绝请求 token：{}",
                 realm
+            )));
+        }
+        // H3：realm 必须是 https 且与 registry 同 host（或显式允许列表），
+        // 否则恶意 registry 可把 token 请求（乃至凭证）导向攻击者端点。
+        if !realm_host_allowed(realm, &self.registry) {
+            return Err(WboxError::registry(format!(
+                "认证 realm host 与 registry '{}' 不同且不在允许列表，拒绝请求 token：{}",
+                self.registry, realm
             )));
         }
         let service = params.get("service").cloned().unwrap_or_default();
@@ -256,6 +268,38 @@ fn parse_auth_params(header: &str) -> std::collections::HashMap<String, String> 
     map
 }
 
+/// 显式允许的跨 host realm 主机（H3）：Docker Hub 的 token 端点在
+/// auth.docker.io 而非 registry-1.docker.io，属合法已知端点。
+const ALLOWED_REALM_HOSTS: &[&str] = &["auth.docker.io"];
+
+/// 提取 URL 的 host 部分（可含端口），去掉 scheme 与 path；无 scheme 返回 None。
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r)?;
+    let host = rest.split('/').next()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(host.to_ascii_lowercase())
+}
+
+/// URL 是否为 https 且 host 与 registry 主机一致（大小写不敏感，端口参与比较）。
+fn url_host_matches(url: &str, registry: &str) -> bool {
+    url.to_ascii_lowercase().starts_with("https://")
+        && url_host(url).as_deref() == Some(&registry.to_ascii_lowercase())
+}
+
+/// realm 是否允许请求 token：https 且 host 与 registry 相同，或 host 在
+/// 显式允许列表（如 Docker Hub 的 auth.docker.io）。
+fn realm_host_allowed(realm: &str, registry: &str) -> bool {
+    match url_host(realm) {
+        Some(h) => {
+            h == registry.to_ascii_lowercase()
+                || ALLOWED_REALM_HOSTS.iter().any(|a| h == *a)
+        }
+        None => false,
+    }
+}
+
 /// 从环境变量构造可选的 Basic 认证头（用于私有 registry 的 token 端点）。
 fn basic_auth_from_env() -> Option<String> {
     use base64::Engine;
@@ -315,6 +359,71 @@ mod tests {
             "http realm 必须被拒绝：{}",
             e
         );
+    }
+
+    // ---- H3：realm host 必须同 registry（或显式允许列表）----
+
+    #[test]
+    fn realm_foreign_host_rejected() {
+        let client = RegistryClient::new("registry.example.com");
+        let resp = HttpResponse {
+            status: 401,
+            headers: vec![(
+                "www-authenticate".to_string(),
+                // https 但指向攻击者 host：必须拒绝（凭证/token 不得外发）
+                r#"Bearer realm="https://evil.example/token",service="s",scope="x""#.to_string(),
+            )],
+            body: Vec::new(),
+        };
+        let e = client.authenticate(&resp).unwrap_err();
+        assert!(
+            e.to_string().contains("不在允许列表"),
+            "伪造 realm 必须被拒绝：{}",
+            e
+        );
+    }
+
+    #[test]
+    fn realm_host_allowed_rules() {
+        // 同 host（大小写不敏感）
+        assert!(realm_host_allowed(
+            "https://Registry.Example.COM/token",
+            "registry.example.com"
+        ));
+        // 带端口需端口一致
+        assert!(realm_host_allowed(
+            "https://localhost:5000/auth",
+            "localhost:5000"
+        ));
+        assert!(!realm_host_allowed("https://localhost:6000/auth", "localhost:5000"));
+        // 允许列表：Docker Hub 的 auth.docker.io
+        assert!(realm_host_allowed(
+            "https://auth.docker.io/token",
+            "registry-1.docker.io"
+        ));
+        // 不同 host / 无 scheme / 相似域名欺骗均拒绝
+        assert!(!realm_host_allowed("https://evil.example/token", "registry.example.com"));
+        assert!(!realm_host_allowed(
+            "https://registry.example.com.evil.example/token",
+            "registry.example.com"
+        ));
+        assert!(!realm_host_allowed("//evil.example/token", "registry.example.com"));
+    }
+
+    #[test]
+    fn basic_auth_scoped_to_registry_host() {
+        assert!(url_host_matches(
+            "https://registry.example.com/v2/ns/app/manifests/1",
+            "registry.example.com"
+        ));
+        assert!(!url_host_matches(
+            "https://evil.example/token",
+            "registry.example.com"
+        ));
+        assert!(!url_host_matches(
+            "http://registry.example.com/v2/x", // 非 https 也不发凭证
+            "registry.example.com"
+        ));
     }
 
     #[test]
