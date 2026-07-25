@@ -295,9 +295,15 @@ void WboxMemReleaseWindow(void) {
   struct WboxWindow *w = g_win;
   size_t i;
   if (!w || w->index == 0) return;
+  // H5 (security-audit): detach from the global table first, then take
+  // the window lock exclusively before touching the interval table and
+  // freeing — a concurrent WboxMemSnapshotWindow holds src->lock shared
+  // while reading the same table, and WboxMemRecommitIfOurs takes it
+  // exclusive. Releasing the reservation without the lock raced both.
   AcquireSRWLockExclusive(&g_windows_lock);
   g_windows[w->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
+  AcquireSRWLockExclusive(&w->lock);
   g_win = g_windows[0];
   kSkew = g_win ? (uint64_t)g_win->base : 0;
   // MEM_RELEASE fails when ANY page in the reservation is still committed.
@@ -308,6 +314,7 @@ void WboxMemReleaseWindow(void) {
     VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
   }
   w->ivn = 0;
+  ReleaseSRWLockExclusive(&w->lock);
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
