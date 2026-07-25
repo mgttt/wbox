@@ -487,5 +487,19 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE_EXEC_FAILED);
   }
   argv[optind_] = g_pathbuf;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  {
+    // wbox win32: wine hands us a Windows-style PATH (C:\windows\system32;
+    // ...), which is meaningless to guest Linux processes — apt-key(1)
+    // could not find gpgv via `command -v` and InRelease verification
+    // failed. Substitute a sane Linux default search path.
+    char **e;
+    for (e = environ; *e; ++e) {
+      if (!strncmp(*e, "PATH=", 5)) {
+        *e = (char *)"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+      }
+    }
+  }
+#endif
   return Exec(g_pathbuf, g_pathbuf, argv + optind_ + FLAG_zero, environ);
 }
