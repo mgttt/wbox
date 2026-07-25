@@ -586,6 +586,9 @@ static int W32Fork(struct Machine *m) {
   s2->w32child = rec;
   s2->pid = vpid;
   s2->exec = m->system->exec;
+  // wbox win32: the fork child keeps the parent's /proc/self/exe until it
+  // execs (busybox standalone applets exec self/exe without a prior exec).
+  unassert(!VfsAcquireInfo(m->system->selfexeinfo, &s2->selfexeinfo));
   memcpy(s2->rlim, m->system->rlim, sizeof(s2->rlim));
   memcpy(s2->hands, m->system->hands, sizeof(s2->hands));
   s2->blinksigs = m->system->blinksigs;
@@ -2777,6 +2780,12 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   socklen_t optvalsize;
   u8 optvalsize_linux[4];
   int syslevel, sysoptname;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: the fast paths below must see the host socket fd, not the
+  // guest fd number (they diverge, e.g. in fork children) — otherwise
+  // VfsGetsockopt misses the socket slot and fails with ENOTSOCK.
+  fildes = HostFdOf(m->system, fildes);
+#endif
   switch (level) {
     case SOL_SOCKET_LINUX:
       switch (optname) {
@@ -2812,6 +2821,31 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   return rc;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: the host F_SETFL shim can not make Windows pipes
+// nonblocking, so a guest O_NDELAY on a non-socket fd lives only in
+// fd->oflags. Gate the host read/write with a zero-timeout poll so a
+// "nonblocking" guest fd yields EAGAIN instead of wedging the thread in
+// ReadFile/WriteFile (apt's http method sets its stdin O_NONBLOCK via
+// SetNonBlock(STDIN_FILENO) and a blocking read(0) on the empty apt
+// pipe deadlocked the whole acquire loop: worker waited for the next
+// command while apt waited for the fetch result). Sockets are excluded:
+// WboxSockFcntl applies real FIONBIO semantics for them.
+static int W32NonblockPoll(struct Fd *fd, short events) {
+  struct pollfd pfd;
+  // NB: discriminate sockets via Fd.socktype, NOT WboxSockIsFd(hostfd) —
+  // hostfd is a *VFS* fd number while the socket table is keyed by *CRT*
+  // fd; the two namespaces collide numerically (a pipe's VFS fd 17 matched
+  // a DNS/TCP socket's CRT fd 17 inside apt's http method and the gate was
+  // skipped, reintroducing the blocking-read deadlock).
+  if (fd->socktype) return 1;
+  pfd.fd = fd->hostfd;
+  pfd.events = events;
+  pfd.revents = 0;
+  return fd->cb->poll(&pfd, 1, 0);
+}
+#endif
+
 static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   i64 rc;
   int oflags;
@@ -2831,6 +2865,14 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   UNLOCK(&m->system->fds.lock);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((oflags & O_NDELAY) && size) {
+    i64 prc;
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
+  }
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
@@ -2863,6 +2905,14 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   UNLOCK(&m->system->fds.lock);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((oflags & O_NDELAY) && size) {
+    i64 prc;
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
+  }
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_READ)) != -1) {
@@ -2966,6 +3016,14 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
   UNLOCK(&m->system->fds.lock);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((oflags & O_NDELAY) && iovlen && offset == -1) {
+    i64 prc;
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
+  }
+#endif
   if (iovlen) {
     InitIovs(&iv);
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_WRITE)) != -1) {
@@ -3018,6 +3076,14 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
   UNLOCK(&m->system->fds.lock);
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((oflags & O_NDELAY) && iovlen && offset == -1) {
+    i64 prc;
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
+  }
+#endif
   if (iovlen) {
     InitIovs(&iv);
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_READ)) != -1) {

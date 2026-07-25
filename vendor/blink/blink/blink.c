@@ -285,6 +285,11 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
       m->system->pid = old->system->pid;
       m->tid = m->system->pid;
     }
+    // wbox win32: /proc/self/exe (e.g. busybox standalone applets) must keep
+    // resolving to the caller's program while LoadProgram below registers
+    // the new one into this fresh System.
+    unassert(!VfsAcquireInfo(old->system->selfexeinfo,
+                             &m->system->selfexeinfo));
 #else
     unassert(!FreeVirtual(old->system, -0x800000000000, 0x1000000000000));
 #endif
@@ -302,6 +307,18 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     UNLOCK(&old->system->exec_lock);
     // freeing the last machine in a system will free its system too
     FreeMachine(old);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (m->system->w32child) {
+      // wbox win32: FreeMachine(old) just cleared the vpid record's weak
+      // child_machine reference (W32ChildUnlinkMachine). Re-point it at
+      // the exec'd machine, otherwise a later cross-pid kill() from the
+      // parent (SysKill -> W32ChildFindMachineHold) can never find this
+      // child, the guest signal is never delivered, and the parent's
+      // blocking wait4() deadlocks (apt-get update killing an idle http
+      // method hit exactly this).
+      W32ChildSetMachine(m->system->w32child, m);
+    }
+#endif
     // restore the signal mask we had before execve() was called
     unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
   }
@@ -475,5 +492,19 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE_EXEC_FAILED);
   }
   argv[optind_] = g_pathbuf;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  {
+    // wbox win32: wine hands us a Windows-style PATH (C:\windows\system32;
+    // ...), which is meaningless to guest Linux processes — apt-key(1)
+    // could not find gpgv via `command -v` and InRelease verification
+    // failed. Substitute a sane Linux default search path.
+    char **e;
+    for (e = environ; *e; ++e) {
+      if (!strncmp(*e, "PATH=", 5)) {
+        *e = (char *)"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+      }
+    }
+  }
+#endif
   return Exec(g_pathbuf, g_pathbuf, argv + optind_ + FLAG_zero, environ);
 }

@@ -262,6 +262,8 @@ struct OpCache {
   u64 icache[512][kInstructionBytes / 8];
 };
 
+struct VfsInfo;
+
 struct System {
   struct XedMachineMode mode;
   bool dlab;
@@ -277,6 +279,13 @@ struct System {
   int exitcode;
 #if defined(_WIN32) && !defined(__CYGWIN__)
   struct W32Child *w32child;  // wbox: set when this System is an exec'd vfork child
+  // wbox win32: /proc/self/exe must name the program running in THIS guest
+  // process. All guest processes share one wine process (one host pid), so
+  // the upstream single global registry lets a fork sibling (e.g. apt-config
+  // spawning dpkg --print-architecture) clobber another process's self/exe;
+  // busybox sh's standalone applet dispatch (execve("/proc/self/exe", applet,
+  // ...)) then execs the wrong binary. Keep a per-System registry instead.
+  struct VfsInfo *selfexeinfo;
 #endif
   u32 efer;
   int pid;

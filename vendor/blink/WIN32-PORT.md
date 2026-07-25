@@ -280,15 +280,20 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
    WSAEMSGSIZE 丢包）；非零长 WSAEMSGSIZE 按截断语义返回缓冲长度。
    getent/glibc DNS 在 fork 子内解析成功。
 
-**剩余卡点（apt-get update，未解）**：method 握手（100 Capabilities）
-与 8014B 配置下发已通，apt 排队 3 个 InRelease 亦正确；但 apt 与 http
-方法间存在**启动竞态**——无 debug 输出时 apt 大概率不把已排队的
-"600 URI Acquire" 发给方法（apt pselect 与方法 read(0) 互等死锁，
-rc=124）；开 Debug::pkgAcquire 放慢 apt 后偶发能发出。疑似首个 http
-方法实例被 apt 误杀（kill 已通）时其队列项丢失。另：glibc 并行
-A/AAAA 会用零长 recvfrom 探测第二个应答大小，若按 FIONREAD 应答真实
-数据报大小，会触发一处**独立的快照子窗口提交崩溃**（guest 未提交页
-读异常，直接崩 wine，rc=5），已回避未启用（保持 Linux 零长语义）。
+**apt-get update 已实测通过（2026-07-25）**：`Get:1..18` 全量下载、
+gpgv 验签通过、`Reading package lists...` 完成、rc=0，
+InRelease/Packages/Translation 全部落盘 /var/lib/apt/lists/（noble
+universe 索引超过 apt 默认 24MB 动态 mmap，需
+`APT::Cache-Start "200000000"`，属 apt 配置而非仿真缺陷）。收尾两个
+修复：/proc/self/exe 改 per-System 注册表（原全局注册被 apt-config
+内部 popen 的 dpkg 覆盖，busybox standalone applet exec self/exe 误载
+dpkg，apt-key 判 keyring unsupported filetype）；O_TMPFILE 改走
+SysTmpfile 创建+unlink 模拟（win32/compat/fcntl.h 定义 O_TMPFILE 致
+`#ifndef O_TMPFILE` 分支被编译掉，透传后打开目录本身，write EBADF）。
+另：glibc 并行 A/AAAA 会用零长 recvfrom 探测第二个应答大小，若按
+FIONREAD 应答真实数据报大小，会触发一处**独立的快照子窗口提交崩溃**
+（guest 未提交页读异常，直接崩 wine，rc=5），已回避未启用（保持
+Linux 零长语义）。
 
 回归保护：wget md5=01718454f79b3bd9fa51e0e1f8966103、
 EPOLL_LOOPBACK_OK、fork 子 exec md5sum 均须保持。

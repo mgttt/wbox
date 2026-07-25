@@ -33,6 +33,7 @@
 #include "blink/linux.h"
 #include "blink/log.h"
 #include "blink/machine.h"
+#include "blink/vfs.h"
 #include "blink/macros.h"
 #include "blink/map.h"
 #include "blink/pml4t.h"
@@ -385,6 +386,9 @@ void FreeSystem(struct System *s) {
   // TODO(jart): Figure out why sig_lock sometimes fails to destroy
   (void)pthread_mutex_destroy(&s->sig_lock);
   free(s->elf.interpreter);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (s->selfexeinfo) VfsFreeInfo(s->selfexeinfo);  // wbox win32
+#endif
   DestroyFds(&s->fds);
   free(s->elf.execfn);
   free(s->elf.prog);

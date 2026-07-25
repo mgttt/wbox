@@ -64,7 +64,7 @@ bool IsSignalSerious(int sig) {
 void DeliverSignal(struct Machine *m, int sig, int code) {
   u64 sp;
   struct SignalFrame sf;
-  if (IsMakingPath(g_machine)) AbandonPath(g_machine);
+  if (IsMakingPath(m)) AbandonPath(m);
   memset(&sf, 0, sizeof(sf));
   // capture the current state of the machine
   Write32(sf.si.signo, sig);
