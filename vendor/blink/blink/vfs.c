@@ -319,6 +319,7 @@ int VfsMount(const char *source, const char *target, const char *fstype,
     if (getenv("WBOX_DEBUG_VFS"))
       fprintf(stderr, "[vfs] mount: %s Init(%s) failed errno=%d\n", fstype,
               source, errno);
+    free(newname);
     UNLOCK(&g_vfs.lock);
     return -1;
   }
