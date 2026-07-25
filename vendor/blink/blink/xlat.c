@@ -158,7 +158,13 @@ int XlatErrno(int x) {
 #endif
   if (x == ETIMEDOUT) return ETIMEDOUT_LINUX;
   if (x == ECONNREFUSED) return ECONNREFUSED_LINUX;
-#ifdef EHOSTDOWN
+// wbox win32: mingw/MSVC alias EHOSTDOWN == EINPROGRESS (both 112).
+// This table is matched sequentially, so an unguarded EHOSTDOWN entry
+// shadows EINPROGRESS and guests then see every nonblocking connect()
+// fail with EHOSTUNREACH(112) instead of EINPROGRESS(115) — apt's http
+// method aborted all connections this way. Nothing on win32 ever
+// produces EHOSTDOWN, so drop the entry when it collides.
+#if defined(EHOSTDOWN) && (!defined(EINPROGRESS) || EHOSTDOWN != EINPROGRESS)
   if (x == EHOSTDOWN) return EHOSTDOWN_LINUX;
 #endif
   if (x == EHOSTUNREACH) return EHOSTUNREACH_LINUX;
