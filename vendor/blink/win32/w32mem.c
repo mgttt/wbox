@@ -650,8 +650,11 @@ int munmap(void *addr, size_t len) {
 int mprotect(void *addr, size_t len, int prot) {
   DWORD old;
   if (!len) return 0;
-  // H7: window bounds (same rationale as munmap)
-  if (len > (size_t)1 << 48 || !g_win || !W32RangeOk((uintptr_t)addr, len)) {
+  // H7: wrap guard only — blink legitimately mprotects memory OUTSIDE the
+  // guest window (the JIT's static g_code[] block pool lives in the exe's
+  // BSS), so a window-bounds rejection here is wrong; we only stop
+  // pathological lengths.
+  if (len > (size_t)1 << 48) {
     errno = EINVAL;
     return -1;
   }
@@ -664,8 +667,8 @@ int mprotect(void *addr, size_t len, int prot) {
 
 int msync(void *addr, size_t len, int flags) {
   MEMORY_BASIC_INFORMATION mbi;
-  // H7: window bounds (same rationale as munmap)
-  if (len > (size_t)1 << 48 || !g_win || !W32RangeOk((uintptr_t)addr, len)) {
+  // H7: wrap guard only (see mprotect)
+  if (len > (size_t)1 << 48) {
     errno = EINVAL;
     return -1;
   }
