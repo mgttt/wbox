@@ -83,6 +83,13 @@
 #warning "-DCONFIG_ARGUMENTS=... should be passed to blink/blink.c"
 #endif
 
+#if defined(_WIN32) && !defined(__CYGWIN__) && defined(WBOX_BUILD_VERSION)
+// wbox: wbox-linux.exe --version prints the wbox release stamp generated
+// by win32/build-mingw.sh (version + git short hash + UTC build time)
+// instead of upstream blink branding.
+#define VERSION \
+  "wbox-linux " WBOX_BUILD_VERSION " (" WBOX_BUILD_TIMESTAMP ")\n"
+#else
 #define VERSION \
   "Blink Virtual Machine " BLINK_VERSION " (" BUILD_TIMESTAMP ")\n\
 Copyright (c) 2023 Justine Alexandra Roberts Tunney\n\
@@ -92,6 +99,7 @@ For more information, see the file named LICENSE.\n\
 Toolchain: " BUILD_TOOLCHAIN "\n\
 Revision: #" BLINK_COMMITS " " BLINK_GITSHA "\n\
 Config: ./configure MODE=" BUILD_MODE " " CONFIG_ARGUMENTS "\n"
+#endif
 
 #define OPTS "hvjemZs0L:C:"
 
@@ -316,6 +324,17 @@ _Noreturn static void PrintVersion(void) {
   exit(EXIT_SUCCESS);
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox: GNU-style --version (wbox-linux.exe --version). Handled before
+// blink's short-option parser, which would otherwise treat "--version"
+// as "--" + a guest program named "version".
+static void WboxMaybePrintVersion(int argc, char *argv[]) {
+  if (argc > 1 && !strcmp(argv[1], "--version")) {
+    PrintVersion();
+  }
+}
+#endif
+
 static void GetOpts(int argc, char *argv[]) {
   int opt;
   FLAG_nolinear = !CanHaveLinearMemory();
@@ -425,6 +444,9 @@ int main(int argc, char *argv[]) {
   SetConsoleOutputCP(CP_UTF8);
 #endif
   g_blink_path = argc > 0 ? argv[0] : 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  WboxMaybePrintVersion(argc, argv);  // wbox: --version
+#endif
   WriteErrorInit();
   InitMap();
   GetOpts(argc, argv);
