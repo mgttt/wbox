@@ -50,6 +50,7 @@ const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer + J
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --interactive     连接 stdio（当前默认且唯一支持的模式；--detach 预留）
   --pull            run 目标为镜像时，本地无缓存则先 pull
+  --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
   -V, --verbose     打印隔离配置摘要
 
 镜像模式说明:
@@ -76,6 +77,8 @@ struct RunOptions {
     verbose: bool,
     /// 本地无缓存时先 pull（镜像模式）
     pull: bool,
+    /// 继承完整宿主环境（默认仅白名单；保留键始终不透传）
+    env_pass_all: bool,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -129,6 +132,7 @@ fn parse_run_args(args: &[String]) -> error::Result<RunOptions> {
         workdir: None,
         verbose: false,
         pull: false,
+        env_pass_all: false,
         positional: None,
         cmd: Vec::new(),
     };
@@ -174,6 +178,7 @@ fn parse_run_args(args: &[String]) -> error::Result<RunOptions> {
             "--keep-profile" => opts.keep_profile = true,
             "--interactive" => {} // v1 唯一支持的模式，接受并忽略
             "--pull" => opts.pull = true,
+            "--env-pass-all" => opts.env_pass_all = true,
             "--workdir" => {
                 opts.workdir = Some(take_value(args, &mut i, "--workdir")?);
             }
@@ -220,6 +225,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         cmd,
         env,
         verbose: opts.verbose,
+        env_pass_all: opts.env_pass_all,
     }
 }
 
@@ -391,7 +397,8 @@ fn cmd_image_show(args: &[String]) -> error::Result<u32> {
             } else {
                 println!("  Env        :");
                 for (k, v) in &c.env {
-                    println!("    {}={}", k, v);
+                    // 键名敏感的值脱敏（防镜像内嵌凭证经 show 输出泄露）
+                    println!("    {}={}", k, backend::env::redact_value(k, v));
                 }
             }
         }

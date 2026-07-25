@@ -14,6 +14,7 @@
 //! 使命令行合并、exe 定位等纯逻辑能在 Linux 沙箱单测。
 
 mod blink;
+pub mod env;
 #[cfg(windows)]
 mod native;
 
@@ -56,6 +57,9 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     /// 打印隔离配置摘要
     pub verbose: bool,
+    /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
+    /// 保留键 BLINK_*/WBOX_* 两路均不透传，见 env.rs）
+    pub env_pass_all: bool,
 }
 
 /// 后端 prepare 的产出：可直接 spawn 的执行计划。

@@ -32,12 +32,15 @@ use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
 /// - `cmdline`：完整命令行（含程序名与参数）
 /// - `workdir`：容器工作目录（"镜像根"）
 /// - `job`：创建后立即把子进程分配进该 Job
+/// - `env`：子进程的**完整显式环境**（白名单，见 backend/env.rs）；
+///   经 lpEnvironment 传递，不再继承 wbox 宿主环境（H6）
 pub fn run_container(
     profile: &AppContainerProfile,
     capabilities: &[CapabilitySid],
     cmdline: &str,
     workdir: &str,
     job: &crate::job::Job,
+    env: &[(String, String)],
 ) -> Result<u32> {
     let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
     let workdir_wide = to_wide(workdir);
@@ -125,10 +128,15 @@ pub fn run_container(
     // 防止子进程在入 Job 之前执行代码（逃逸窗口）。
     let flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
 
+    // 显式环境块（"KEY=VAL\0...\0\0" 的 UTF-16 形式）：白名单环境
+    // 直接交给子进程，杜绝宿主环境（含 WBOX_REGISTRY_* 等机密）直通。
+    let env_wide = build_env_block(env);
+
     // # Safety:
     // - cmd_wide 为可写 NUL 结尾缓冲区（CreateProcessW 会就地修改）；
     // - si/pi 为有效栈上结构；attribute list 在调用期间有效；
-    // - 环境块传 null（继承当前进程环境），stdout/stdin/stderr 继承。
+    // - env_wide 为合法的双 NUL 结尾环境块，调用期间存活；
+    //   stdout/stdin/stderr 继承。
     let ok = unsafe {
         CreateProcessW(
             std::ptr::null(), // 从命令行解析程序名
@@ -137,7 +145,7 @@ pub fn run_container(
             std::ptr::null(), // 线程安全属性（默认）
             0,                // 不继承额外句柄（stdio 走控制台自动继承）
             flags,
-            std::ptr::null(), // 继承当前环境
+            env_wide.as_ptr() as *const core::ffi::c_void, // 显式环境块
             workdir_wide.as_ptr(),
             &si.StartupInfo as *const _,
             &mut pi,
@@ -189,6 +197,23 @@ pub fn run_container(
         ));
     }
     Ok(code)
+}
+
+/// 构造 CreateProcessW lpEnvironment 所需的 UTF-16 环境块
+/// （`KEY=VAL\0...KEY=VAL\0\0`）。非法键（空/含 '='）防御性跳过。
+fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
+    let mut s = String::new();
+    for (k, v) in env {
+        if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
+            continue;
+        }
+        s.push_str(k);
+        s.push('=');
+        s.push_str(v);
+        s.push('\0');
+    }
+    s.push('\0'); // 双 NUL 结尾
+    s.encode_utf16().collect()
 }
 
 /// attribute list 的 RAII 销毁器。
