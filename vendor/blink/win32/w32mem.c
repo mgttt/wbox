@@ -135,6 +135,15 @@ static int IvOverlaps(uintptr_t a, uintptr_t b) {
   return 0;
 }
 
+// H7 (security-audit): range validation helper. All length arithmetic
+// below must go through this so a guest-controlled (or blink-internal)
+// near-2^64 length can not wrap a+len back into the window and make
+// commit/decommit/protect operate on the wrong host pages.
+// Requires: caller holds or will hold the window lock; g_win != NULL.
+static int W32RangeOk(uintptr_t a, size_t len) {
+  return len > 0 && a >= g_base && a <= g_limit && len <= g_limit - a;
+}
+
 static DWORD W32Prot(int prot) {
   if (prot & PROT_EXEC) {
     if (prot & PROT_WRITE) return PAGE_EXECUTE_READWRITE;
@@ -520,6 +529,11 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = EINVAL;
     return MAP_FAILED;
   }
+  // H7: reject lengths that would wrap the page-align or a+len arithmetic
+  if (len > (size_t)1 << 48) {
+    errno = ENOMEM;
+    return MAP_FAILED;
+  }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   if ((uintptr_t)addr & (W32PAGE - 1)) {
     if (getenv("WBOX_DEBUG_MEM"))
@@ -531,7 +545,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   AcquireSRWLockExclusive(&g_lock);
   if (flags & MAP_FIXED) {
     a = (uintptr_t)addr;
-    if (a < g_base || a + len > g_limit) {
+    if (!W32RangeOk(a, len)) {
       if (getenv("WBOX_DEBUG_MEM"))
         fprintf(stderr,
                 "wbox mmap ENOMEM: addr=%p len=%#zx outside [%p,%p)\n", addr,
@@ -547,7 +561,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
   } else if (flags & MAP_FIXED_NOREPLACE) {
     a = (uintptr_t)addr;
-    if (a < g_base || a + len > g_limit || IvOverlaps(a, a + len)) {
+    if (!W32RangeOk(a, len) || IvOverlaps(a, a + len)) {
       ReleaseSRWLockExclusive(&g_lock);
       errno = EEXIST;
       return MAP_FAILED;
@@ -600,8 +614,20 @@ int munmap(void *addr, size_t len) {
     errno = EINVAL;
     return -1;
   }
+  // H7: no wrap on align, and the range must live inside our window —
+  // VirtualFree(MEM_DECOMMIT) on an out-of-window address would hit
+  // arbitrary host mappings.
+  if (len > (size_t)1 << 48) {
+    errno = EINVAL;
+    return -1;
+  }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   AcquireSRWLockExclusive(&g_lock);
+  if (!W32RangeOk(a, len)) {
+    ReleaseSRWLockExclusive(&g_lock);
+    errno = EINVAL;
+    return -1;
+  }
   IvRemove(a, a + len);
   // decommit subrange; ignore failure (may straddle uncommitted)
   uintptr_t p;
@@ -624,6 +650,11 @@ int munmap(void *addr, size_t len) {
 int mprotect(void *addr, size_t len, int prot) {
   DWORD old;
   if (!len) return 0;
+  // H7: window bounds (same rationale as munmap)
+  if (len > (size_t)1 << 48 || !g_win || !W32RangeOk((uintptr_t)addr, len)) {
+    errno = EINVAL;
+    return -1;
+  }
   if (!VirtualProtect((LPVOID)addr, len, W32Prot(prot), &old)) {
     errno = EINVAL;
     return -1;
@@ -633,6 +664,11 @@ int mprotect(void *addr, size_t len, int prot) {
 
 int msync(void *addr, size_t len, int flags) {
   MEMORY_BASIC_INFORMATION mbi;
+  // H7: window bounds (same rationale as munmap)
+  if (len > (size_t)1 << 48 || !g_win || !W32RangeOk((uintptr_t)addr, len)) {
+    errno = EINVAL;
+    return -1;
+  }
   if (!VirtualQuery((LPVOID)addr, &mbi, sizeof(mbi)) ||
       mbi.State != MEM_COMMIT) {
     errno = ENOMEM;
