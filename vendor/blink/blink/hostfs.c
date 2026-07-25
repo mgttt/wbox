@@ -411,10 +411,16 @@ int HostfsTraverse(struct VfsInfo **dir, const char **path,
     if (nextpath == currentpath) {
       break;
     }
-    if (!strcmp(currentpath, ".")) {
+    // C2 (security-audit): compare the current COMPONENT only, not the
+    // whole remaining path — an intermediate ".." (e.g. "/sub/../../x")
+    // must clamp at the VFS root just like a trailing one, otherwise it
+    // is copied verbatim into the host path and resolves outside
+    // BLINK_PREFIX.
+    if (nextpath - currentpath == 1 && currentpath[0] == '.') {
       currentpath = nextpath;
       continue;
-    } else if (!strcmp(currentpath, "..")) {
+    } else if (nextpath - currentpath == 2 && currentpath[0] == '.' &&
+               currentpath[1] == '.') {
       currentpath = nextpath;
       if (*dir == root || (*dir)->parent == NULL) {
         continue;
