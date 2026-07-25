@@ -2777,6 +2777,12 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
   socklen_t optvalsize;
   u8 optvalsize_linux[4];
   int syslevel, sysoptname;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: the fast paths below must see the host socket fd, not the
+  // guest fd number (they diverge, e.g. in fork children) — otherwise
+  // VfsGetsockopt misses the socket slot and fails with ENOTSOCK.
+  fildes = HostFdOf(m->system, fildes);
+#endif
   switch (level) {
     case SOL_SOCKET_LINUX:
       switch (optname) {
