@@ -91,7 +91,18 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
           unassert(!VfsFcntl(fildes, F_SETFD, FD_CLOEXEC));
         }
         LOCK(&m->system->fds.lock);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        // wbox win32: same guest/VFS fd split as SysOpenat — the VFS
+        // descriptor lives in fd->hostfd, the guest gets the lowest free
+        // per-System number (fork children included).
+        struct Fd *fd;
+        int guestfd = AllocGuestFd(&m->system->fds, 0);
+        unassert(fd = AddFd(&m->system->fds, guestfd, oflags));
+        fd->hostfd = fildes;
+        fildes = guestfd;
+#else
         unassert(AddFd(&m->system->fds, fildes, oflags));
+#endif
         UNLOCK(&m->system->fds.lock);
       } else {
         unassert(!VfsClose(tmpdir));
@@ -111,7 +122,12 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
   int sysflags;
   struct Fd *fd;
   const char *path;
-#ifndef O_TMPFILE
+// wbox win32: win32/compat/fcntl.h defines O_TMPFILE (Linux values) so the
+// host has NO native O_TMPFILE even though the macro exists; always route
+// through the create+unlink emulation below, otherwise the flag would pass
+// XlatOpenFlags into win32 openat which opens the DIRECTORY itself and every
+// write to the "temporary file" fails with EBADF (apt's GetTempFile).
+#if !defined(O_TMPFILE) || (defined(_WIN32) && !defined(__CYGWIN__))
 #ifndef DISABLE_NONPOSIX
   if ((oflags & O_TMPFILE_LINUX) == O_TMPFILE_LINUX) {
     return SysTmpfile(m, dirfildes, pathaddr, oflags & ~O_TMPFILE_LINUX, mode);
