@@ -1006,6 +1006,9 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
         ++k;
       }
     }
+    /* analyzer: idx[0..k) is fully initialized here and k == nsock
+       (same filter as the count pass above); the "uninitialized
+       subscript" warning below is a false positive. */
     int rc = ws.WSAPoll(w, nsock, timeout);
     if (rc < 0) {
       errno = WsaErrno();
@@ -1300,6 +1303,8 @@ int getaddrinfo(const char *node, const char *service,
     a->ai_protocol = w->ai_protocol;
     a->ai_addrlen = (socklen_t)w->ai_addrlen;
     if (w->ai_addr) {
+      /* analyzer: allocating sockaddr_storage (128B) into a sockaddr* is
+         intentional — callers may copy up to ai_addrlen bytes. */
       a->ai_addr = malloc(sizeof(struct sockaddr_storage));
       memset(a->ai_addr, 0, sizeof(struct sockaddr_storage));
       size_t c = w->ai_addrlen < sizeof(struct sockaddr_storage)

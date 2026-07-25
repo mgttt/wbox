@@ -157,7 +157,7 @@ int open(const char *path, int flags, ...) {
   if (flags & O_CREAT) {
     va_list ap;
     va_start(ap, flags);
-    mode = va_arg(ap, mode_t);
+    mode = (mode_t)va_arg(ap, int); /* mode_t promotes to int in varargs */
     va_end(ap);
   }
   return openat(AT_FDCWD, path, flags, mode);
@@ -225,7 +225,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
   if (flags & O_CREAT) {
     va_list ap;
     va_start(ap, flags);
-    mode = va_arg(ap, mode_t);
+    mode = (mode_t)va_arg(ap, int); /* mode_t promotes to int in varargs */
     va_end(ap);
   }
   (void)mode;
@@ -359,8 +359,10 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
   }
   OVERLAPPED ov;
   memset(&ov, 0, sizeof(ov));
-  ov.Offset = (DWORD)off;
-  ov.OffsetHigh = (DWORD)(off >> 32);
+  /* off_t is 32-bit on windows-gnu; widen before shifting (>>32 on a
+     32-bit value is UB). Files >=4GiB still need the CRT off_t fixed. */
+  ov.Offset = (DWORD)(uint64_t)off;
+  ov.OffsetHigh = (DWORD)((uint64_t)off >> 32);
   DWORD got = 0;
   if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, &ov)) {
     DWORD e = GetLastError();
@@ -379,8 +381,9 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
   }
   OVERLAPPED ov;
   memset(&ov, 0, sizeof(ov));
-  ov.Offset = (DWORD)off;
-  ov.OffsetHigh = (DWORD)(off >> 32);
+  /* see pread(): widen the 32-bit off_t before shifting. */
+  ov.Offset = (DWORD)(uint64_t)off;
+  ov.OffsetHigh = (DWORD)((uint64_t)off >> 32);
   DWORD put = 0;
   if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, &ov)) {
     errno = W32Err();
