@@ -302,6 +302,18 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     UNLOCK(&old->system->exec_lock);
     // freeing the last machine in a system will free its system too
     FreeMachine(old);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (m->system->w32child) {
+      // wbox win32: FreeMachine(old) just cleared the vpid record's weak
+      // child_machine reference (W32ChildUnlinkMachine). Re-point it at
+      // the exec'd machine, otherwise a later cross-pid kill() from the
+      // parent (SysKill -> W32ChildFindMachineHold) can never find this
+      // child, the guest signal is never delivered, and the parent's
+      // blocking wait4() deadlocks (apt-get update killing an idle http
+      // method hit exactly this).
+      W32ChildSetMachine(m->system->w32child, m);
+    }
+#endif
     // restore the signal mask we had before execve() was called
     unassert(!pthread_sigmask(SIG_SETMASK, &oldmask, 0));
   }
