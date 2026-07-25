@@ -185,6 +185,31 @@ void *W32ChildFindMachine(int vpid) {
   return m;
 }
 
+// C3 (security-audit): called from FreeMachine() before a Machine is
+// released — drop every vpid-table reference to it (as a child's
+// parent_machine or as a child_machine) so a later SIGCHLD enqueue or
+// cross-pid kill can never write into freed memory.
+void W32ChildUnlinkMachine(void *machine) {
+  struct W32Child *c;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (c->parent_machine == machine) c->parent_machine = NULL;
+    if (c->child_machine == machine) c->child_machine = NULL;
+  }
+  W32ChildrenUnlock();
+}
+
+// H1 (security-audit): exported so syscall.c can keep the table locked
+// across a find + EnqueueSignal, closing the TOCTOU window in which the
+// target child could free its Machine.
+void W32ChildLock(void) {
+  W32ChildrenLock();
+}
+
+void W32ChildUnlock(void) {
+  W32ChildrenUnlock();
+}
+
 // Last-resort kill: the child's host thread never woke to consume the
 // enqueued guest signal (stuck in a non-polling host wait). Terminate the
 // thread outright and record the exit so wait4 unblocks. The child's

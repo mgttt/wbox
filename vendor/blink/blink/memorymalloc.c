@@ -455,6 +455,13 @@ void FreeMachine(struct Machine *m) {
   if (m) {
     unassert((s = m->system));
     m->sysdepth = 0;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // C3 (security-audit): drop this Machine from every vpid-table
+    // parent/child reference before the memory is released, so a
+    // snapshot child can never enqueue SIGCHLD into (or be signaled
+    // through) freed memory.
+    W32ChildUnlinkMachine(m);
+#endif
     CollectPageLocks(m);
     LOCK(&s->machines_lock);
     dll_remove(&s->machines, &m->elem);

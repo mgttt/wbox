@@ -655,13 +655,17 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   W32ChildSignalExit(rec, rc);
   // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
   // into the parent's guest signal set (busybox ash's wait loop depends on
-  // it). The parent Machine is necessarily alive here in the supported
-  // model: a System only exits after its own children (wait/ECHILD), and
-  // the main System outlives every snapshot child.
+  // it). C3 (security-audit): the parent Machine is NOT necessarily alive
+  // (A->B->C with B exiting first) — the vpid table holds a weak
+  // reference cleared by FreeMachine via W32ChildUnlinkMachine, and we
+  // hold the table lock across the lookup+enqueue so the pointer can
+  // not go stale mid-flight.
+  W32ChildLock();
   {
     struct Machine *pm = (struct Machine *)W32ChildParent(rec);
     if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
   }
+  W32ChildUnlock();
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
   // recycled host pages handed out from the child's window must not be
   // reused by other Systems once the reservation is gone
