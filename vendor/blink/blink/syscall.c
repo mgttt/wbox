@@ -527,6 +527,7 @@ static void W32SnapFixTable(u64 *tab, int level, uintptr_t lo, uintptr_t hi,
 
 static int W32Fork(struct Machine *m) {
   int i;
+  int rc;
   int vpid;
   i64 delta;
   HANDLE thr;
@@ -547,20 +548,40 @@ static int W32Fork(struct Machine *m) {
   vpid = W32ChildVpid(rec);
   srcwin = WboxMemCurrentWindow();
   dstwin = 0;
+  // H4 (security-audit): take the upstream fork() lock set (same order:
+  // exec before sig before mmap before pagelocks before fds/machines,
+  // futexes+jit last) for the duration of the snapshot+page-table-fix
+  // critical section. Without these, sibling guest threads can mmap /
+  // mprotect / signal / recycle JIT blocks while WboxMemSnapshotWindow
+  // memcpy's pages and W32SnapFixTable walks half-written page tables,
+  // producing a torn (potentially guest-controlled) child page table.
+  // fds.lock and machines_lock are still taken at their inner sites to
+  // keep the critical section non-recursive (NewSystem/NewMachine take
+  // machines_lock internally).
+  LOCK(&m->system->exec_lock);
+  LOCK(&m->system->sig_lock);
+  LOCK(&m->system->mmap_lock);
+  LOCK(&m->system->pagelocks_lock);
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  LOCK(&g_bus->futexes.lock);
+#endif
+#ifdef HAVE_JIT
+  LOCK(&m->system->jit.lock);
+#endif
   // 1. synchronously snapshot every committed page into a fresh window;
   //    the parent window can not be mutated or released mid-copy because
   //    the copy runs here, on the parent's own thread
   if (WboxMemSnapshotWindow(srcwin, &dstwin) == -1) {
-    W32ChildAbandon(rec);
-    return eagain();
+    rc = eagain();
+    goto unlock_and_abandon;
   }
   lo = WboxMemHandleBase(srcwin);
   hi = WboxMemHandleLimit(srcwin);
   delta = (i64)(WboxMemHandleBase(dstwin) - lo);
   // 2. build the child's own System
   if (!(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
-    W32ChildAbandon(rec);
-    return enomem();  // snapshot window leaks (fatal ENOMEM anyway)
+    rc = enomem();  // snapshot window leaks (fatal ENOMEM anyway)
+    goto unlock_and_abandon;
   }
   s2->w32child = rec;
   s2->pid = vpid;
@@ -598,6 +619,17 @@ static int W32Fork(struct Machine *m) {
   if (s2->cr3) {
     W32SnapFixTable((u64 *)(uintptr_t)(s2->cr3 & PAGE_TA), 1, lo, hi, delta);
   }
+  // H4: snapshot+fix critical section ends here; release in reverse order
+#ifdef HAVE_JIT
+  UNLOCK(&m->system->jit.lock);
+#endif
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  UNLOCK(&g_bus->futexes.lock);
+#endif
+  UNLOCK(&m->system->pagelocks_lock);
+  UNLOCK(&m->system->mmap_lock);
+  UNLOCK(&m->system->sig_lock);
+  UNLOCK(&m->system->exec_lock);
   // 4. child Machine: clone the register state, then reparent to s2
   if (!(m2 = NewMachine(m->system, m))) {
     FreeSystem(s2);
@@ -641,6 +673,19 @@ static int W32Fork(struct Machine *m) {
   THR_LOGF("pid=%d W32Fork -> vpid=%d", m->system->pid, vpid);
   W32ForkDbg("fork spawn", vpid, 0);
   return vpid;
+unlock_and_abandon:
+#ifdef HAVE_JIT
+  UNLOCK(&m->system->jit.lock);
+#endif
+#ifndef HAVE_PTHREAD_PROCESS_SHARED
+  UNLOCK(&g_bus->futexes.lock);
+#endif
+  UNLOCK(&m->system->pagelocks_lock);
+  UNLOCK(&m->system->mmap_lock);
+  UNLOCK(&m->system->sig_lock);
+  UNLOCK(&m->system->exec_lock);
+  W32ChildAbandon(rec);
+  return rc;
 }
 
 // Guest exit of a snapshot-fork child (its own System and window):
