@@ -455,12 +455,18 @@ int WboxMemRecommitIfOurs(void *p) {
   struct WboxWindow *w;
   int rc = 0;
   if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi))) return 0;
+  // C1 (security-audit): the blink host-page freelist is process-global
+  // while each snapshot fork child owns an independent VA window. A
+  // recycled page MUST belong to the calling thread's window in every
+  // case — a committed page from a sibling window would otherwise be
+  // reused as a page-table/data page of THIS guest, letting one guest
+  // process read/write another guest's page tables and memory.
+  w = g_win;
+  if (!w || a < w->base || a >= w->limit) return 0;
   if (mbi.State == MEM_COMMIT) return 1;
   if (mbi.State != MEM_RESERVE) return 0;
-  // only recommit when the page belongs to the CALLING thread's window
-  // (the interval table is per-window and driven off thread-local g_win);
-  // a stale page from another window is simply dropped
-  if (!(w = g_win) || a < w->base || a >= w->limit) return 0;
+  // MEM_RESERVE inside our window: decommitted by a whole-region munmap
+  // without consulting the freelist; recommit it.
   AcquireSRWLockExclusive(&w->lock);
   if (VirtualAlloc((LPVOID)a, 4096, MEM_COMMIT, PAGE_READWRITE) &&
       IvInsert(a, a + 4096) == 0) {
