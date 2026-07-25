@@ -109,5 +109,15 @@ wait
 
 echo "linking..."
 $CC -O2 -o "$BUILD/wbox-linux.exe" @"$OBJLIST" -lws2_32 -lwinmm -lbcrypt
-ls -la "$BUILD/wbox-linux.exe"
+PRE=$(wc -c <"$BUILD/wbox-linux.exe")
+# strip debug/symbol residue when a PE-capable strip is at hand (mingw
+# gcc builds carry a symbol table; zig cc -g0 output is already
+# symbol-free, where this is a verified no-op).
+if command -v x86_64-w64-mingw32-strip >/dev/null 2>&1; then
+  x86_64-w64-mingw32-strip "$BUILD/wbox-linux.exe"
+elif command -v llvm-strip >/dev/null 2>&1; then
+  llvm-strip "$BUILD/wbox-linux.exe"
+fi
+POST=$(wc -c <"$BUILD/wbox-linux.exe")
+echo "size: $PRE -> $POST bytes (strip delta $((PRE - POST)))"
 echo "built: $BUILD/wbox-linux.exe"
