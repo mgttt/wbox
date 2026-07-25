@@ -286,13 +286,13 @@ int WboxMemForkWindow(void) {
   return 0;
 }
 
-// Release the calling thread's window (must not be window #0) and switch
-// back to the primary window. Called when an exec'd vfork child exits.
-// Caller must have unmapped all guest pages already (FreeSystem does).
-// NB: recycled host pages handed out from this window are purged by the
-// caller via WboxPurgeHostPagesInRange() before the reservation goes away.
-void WboxMemReleaseWindow(void) {
-  struct WboxWindow *w = g_win;
+// Destroy an ARBITRARY window (not necessarily the calling thread's
+// current one): detach, decommit everything, release the reservation,
+// free the bookkeeping. Used by the W32Fork failure paths to not leak
+// the 1TB snapshot window when child setup fails after the copy, and by
+// WboxMemReleaseWindow for the normal exit path.
+void WboxMemDestroyWindow(void *win) {
+  struct WboxWindow *w = (struct WboxWindow *)win;
   size_t i;
   if (!w || w->index == 0) return;
   // H5 (security-audit): detach from the global table first, then take
@@ -304,8 +304,6 @@ void WboxMemReleaseWindow(void) {
   g_windows[w->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
   AcquireSRWLockExclusive(&w->lock);
-  g_win = g_windows[0];
-  kSkew = g_win ? (uint64_t)g_win->base : 0;
   // MEM_RELEASE fails when ANY page in the reservation is still committed.
   // Committed pages can outlive the guest mappings here: recycled host
   // pages (g_allocator batches) were committed by mmap but are tracked
@@ -318,6 +316,19 @@ void WboxMemReleaseWindow(void) {
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
+}
+
+// Release the calling thread's window (must not be window #0) and switch
+// back to the primary window. Called when an exec'd vfork child exits.
+// Caller must have unmapped all guest pages already (FreeSystem does).
+// NB: recycled host pages handed out from this window are purged by the
+// caller via WboxPurgeHostPagesInRange() before the reservation goes away.
+void WboxMemReleaseWindow(void) {
+  struct WboxWindow *w = g_win;
+  if (!w || w->index == 0) return;
+  g_win = g_windows[0];
+  kSkew = g_win ? (uint64_t)g_win->base : 0;
+  WboxMemDestroyWindow(w);
 }
 
 // ---- snapshot fork support (see WIN32-PORT.md §7.4) ----

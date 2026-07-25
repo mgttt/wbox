@@ -633,6 +633,7 @@ static int W32Fork(struct Machine *m) {
   // 4. child Machine: clone the register state, then reparent to s2
   if (!(m2 = NewMachine(m->system, m))) {
     FreeSystem(s2);
+    WboxMemDestroyWindow(dstwin);  // M3: no 1TB snapshot window leak
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -656,6 +657,7 @@ static int W32Fork(struct Machine *m) {
   // 5. spawn the child thread; the parent returns immediately
   if (!(a = calloc(1, sizeof(*a)))) {
     FreeMachine(m2);  // orphan -> frees s2 as well
+    WboxMemDestroyWindow(dstwin);  // M3
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -665,6 +667,7 @@ static int W32Fork(struct Machine *m) {
   if (!thr) {
     free(a);
     FreeMachine(m2);
+    WboxMemDestroyWindow(dstwin);  // M3
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -684,6 +687,7 @@ unlock_and_abandon:
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   UNLOCK(&m->system->exec_lock);
+  if (dstwin) WboxMemDestroyWindow(dstwin);  // M3: no snapshot window leak
   W32ChildAbandon(rec);
   return rc;
 }
