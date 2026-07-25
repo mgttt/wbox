@@ -42,6 +42,10 @@
 #include "blink/types.h"
 #include "blink/util.h"
 #include "blink/x86.h"
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "win32.h"  // wbox: WboxMemRecommitIfOurs
+#include <stdio.h>
+#endif
 
 struct Allocator {
   pthread_mutex_t_ lock;
@@ -471,12 +475,31 @@ u64 AllocateAnonymousPage(struct System *s) {
   u8 *page;
   size_t i, n;
   struct HostPage *h;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+retry:
+#endif
   LOCK(&g_allocator.lock);
   if ((h = g_allocator.pages)) {
     g_allocator.pages = h->next;
     UNLOCK(&g_allocator.lock);
     page = h->page;
     FreeHostPage(h);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // wbox win32: a recycled page can dangle — guest munmap() decommits
+    // whole regions without consulting the freelist, and an exiting
+    // snapshot sibling releases its whole window. Validate before reuse
+    // (recommit when it is ours, drop when it is not).
+    if (!WboxMemRecommitIfOurs(page)) {
+      if (getenv("WBOX_DEBUG_FORK")) {
+        MEMORY_BASIC_INFORMATION mbi;
+        DWORD st = VirtualQuery(page, &mbi, sizeof(mbi)) ? mbi.State : 0;
+        fprintf(stderr,
+                "[w32fork] dropped stale recycled page %p state=%#lx win=%p\n",
+                page, (unsigned long)st, WboxMemCurrentWindow());
+      }
+      goto retry;
+    }
+#endif
     goto Finished;
   } else {
     UNLOCK(&g_allocator.lock);

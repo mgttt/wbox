@@ -167,19 +167,44 @@ int creat(const char *path, mode_t mode) {
   return open(path, O_WRONLY | O_CREAT | O_TRUNC, mode);
 }
 
+// Find the final "/dev/" path component, if any. Matches both the bare
+// guest form ("/dev/null") and the prefixed host form produced by the
+// VFS layer under BLINK_PREFIX ("/tmp/rootfs/dev/null" or, after win32
+// translation, "Z:\tmp\rootfs\dev\null"). Returns a pointer to "dev/..."
+// or NULL when the path is not a device path.
+static const char *W32DevName(const char *path) {
+  const char *p, *last = 0;
+  if (!path) return 0;
+  for (p = path; p[0] && p[1] && p[2] && p[3]; ++p) {
+    if ((p == path || p[-1] == '/' || p[-1] == '\\' || p[-1] == ':') &&
+        p[0] == 'd' && p[1] == 'e' && p[2] == 'v' &&
+        (p[3] == '/' || p[3] == '\\')) {
+      last = p;
+      p += 2;
+    }
+  }
+  return last;
+}
+
 // special device files faked for L1
 static int W32OpenSpecial(const char *path, int flags) {
   HANDLE h;
-  if (!strcmp(path, "/dev/tty")) {
+  const char *dev = W32DevName(path);
+  const char *name = dev ? dev + 4 : path;  // skip "dev/" if present
+  if (dev && !strcmp(name, "null")) {
+    h = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                    0, NULL);
+  } else if (!strcmp(path, "/dev/tty") || (dev && !strcmp(name, "tty"))) {
     h = CreateFileW(((flags & O_ACCMODE) == O_RDONLY) ? L"CONIN$" : L"CONOUT$",
                     GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     NULL, OPEN_EXISTING, 0, NULL);
-  } else if (!strcmp(path, "/dev/urandom") || !strcmp(path, "/dev/random")) {
-    // fd -2 sentinel: handled in read()
+  } else if (dev && (!strcmp(name, "urandom") || !strcmp(name, "random"))) {
+    // fd 1000000 sentinel: handled in read()
     return 1000000;
-  } else if (!strcmp(path, "/dev/zero")) {
+  } else if (dev && !strcmp(name, "zero")) {
     return 1000001;
-  } else if (!strcmp(path, "/dev/full")) {
+  } else if (dev && !strcmp(name, "full")) {
     return 1000002;
   } else {
     return -2;  // not special

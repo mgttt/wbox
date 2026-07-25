@@ -141,10 +141,22 @@ void FreeFd(struct Fd *fd) {
 
 void DestroyFds(struct Fds *fds) {
   struct Dll *e, *e2;
+  struct Fd *fd;
   for (e = dll_first(fds->list); e; e = e2) {
     e2 = dll_next(fds->list, e);
     dll_remove(&fds->list, e);
-    FreeFd(FD_CONTAINER(e));
+    fd = FD_CONTAINER(e);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // wbox win32: with snapshot fork the host process outlives guest
+    // processes, so a dying System must really close its descriptors —
+    // otherwise e.g. a pipe write end leaks and the reader never sees
+    // EOF. (On Linux upstream the host process exits with the guest and
+    // the kernel reaps everything.)
+    if (fd->hostfd != -1 && fd->cb && fd->cb->close) {
+      fd->cb->close(fd->hostfd);  // best effort
+    }
+#endif
+    FreeFd(fd);
   }
   unassert(!fds->list);
   unassert(!pthread_mutex_destroy(&fds->lock));

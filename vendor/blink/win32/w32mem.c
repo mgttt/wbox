@@ -164,7 +164,9 @@ static struct WboxWindow *WboxWindowReserve(int maxbits) {
   int bits, slot;
   uintptr_t base = 0;
   struct WboxWindow *w;
-  for (bits = maxbits; bits >= 40; --bits) {
+  if (maxbits > 43) maxbits = 43;
+  if (maxbits < 38) maxbits = 38;
+  for (bits = maxbits; bits >= 38; --bits) {
     uint64_t size = (1ULL << bits) - 0x10000;
     void *p = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
     if (p) {
@@ -173,7 +175,7 @@ static struct WboxWindow *WboxWindowReserve(int maxbits) {
     }
   }
   // fallback: fixed-address attempt at 16TB, shrinking
-  for (bits = maxbits; bits >= 40; --bits) {
+  for (bits = maxbits; bits >= 38; --bits) {
     uint64_t size = (1ULL << bits) - 0x10000;
     void *p = VirtualAlloc((LPVOID)(uintptr_t)0x1000000000000ULL, size,
                            MEM_RESERVE, PAGE_NOACCESS);
@@ -213,6 +215,8 @@ ok:
 
 int WboxMemInit(void) {
   struct WboxWindow *w;
+  int bits = 40;
+  const char *e;
   if (g_windows[0]) return 0;
   // feat/listener: cap the guest window at 40 bits (1TB). Under wine 11.11,
   // an N-byte MEM_RESERVE costs an extra N/4096-byte committed+zeroed
@@ -220,7 +224,14 @@ int WboxMemInit(void) {
   // RSS per wbox process, so two wbox processes exceeded the 3GiB CI memcg
   // and the OOM killer SIGKILLed the listener (clients then saw
   // ECONNREFUSED). 40 bits costs ~256MB. Real Windows has no such overhead.
-  if (!(w = WboxWindowReserve(40))) return -1;
+  // feat/cow: WBOX_VA_BITS (38..43) overrides the default for experiments;
+  // snapshot fork reserves one window per live guest process, so each extra
+  // bit doubles the per-process phantom RSS under wine.
+  if ((e = getenv("WBOX_VA_BITS"))) {
+    int v = atoi(e);
+    if (v >= 38 && v <= 43) bits = v;
+  }
+  if (!(w = WboxWindowReserve(bits))) return -1;
   g_win = w;
   kSkew = (uint64_t)w->base;
   g_vabits = w->bits;
@@ -273,15 +284,192 @@ int WboxMemForkWindow(void) {
 // caller via WboxPurgeHostPagesInRange() before the reservation goes away.
 void WboxMemReleaseWindow(void) {
   struct WboxWindow *w = g_win;
+  size_t i;
   if (!w || w->index == 0) return;
   AcquireSRWLockExclusive(&g_windows_lock);
   g_windows[w->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
   g_win = g_windows[0];
   kSkew = g_win ? (uint64_t)g_win->base : 0;
+  // MEM_RELEASE fails when ANY page in the reservation is still committed.
+  // Committed pages can outlive the guest mappings here: recycled host
+  // pages (g_allocator batches) were committed by mmap but are tracked
+  // only in the interval table, not in guest page tables. Decommit all.
+  for (i = 0; i < w->ivn; ++i) {
+    VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
+  }
+  w->ivn = 0;
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
   free(w->iv);
   free(w);
+}
+
+// ---- snapshot fork support (see WIN32-PORT.md §7.4) ----
+
+// Base/limit of an arbitrary window handle (from WboxMemCurrentWindow).
+uintptr_t WboxMemHandleBase(void *win) {
+  return win ? ((struct WboxWindow *)win)->base : 0;
+}
+
+uintptr_t WboxMemHandleLimit(void *win) {
+  return win ? ((struct WboxWindow *)win)->limit : 0;
+}
+
+// Full snapshot of the committed pages of `srcwin` into a fresh window.
+// Runs on the CALLING thread with explicit window handles (window ops are
+// otherwise thread-local): the parent performs the copy synchronously at
+// fork() so the parent window can not be mutated or released mid-copy.
+// Every committed interval is committed at the same offset in the child,
+// its bytes copied, and its host protections replicated region-by-region.
+// Returns 0 and stores the new window handle in *dstout, -1 on failure.
+int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
+  struct WboxWindow *src = (struct WboxWindow *)srcwin;
+  struct WboxWindow *dst;
+  size_t i, n;
+  uintptr_t p;
+  int rc = -1;
+  if (!src || !dstout) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(dst = WboxWindowReserve(src->bits))) {
+    errno = ENOMEM;
+    return -1;
+  }
+  AcquireSRWLockShared(&src->lock);
+  n = src->ivn;
+  if (!(dst->iv = malloc((n ? n : 1) * sizeof(*dst->iv)))) {
+    ReleaseSRWLockShared(&src->lock);
+    goto fail;
+  }
+  dst->ivcap = n;
+  dst->ivn = 0;
+  for (i = 0; i < n; ++i) {
+    uintptr_t a = src->iv[i].a, b = src->iv[i].b;
+    uintptr_t da = dst->base + (a - src->base);
+    // the interval table can drift out of sync with reality (a window's
+    // committed set changes through munmap/brk/recommit paths): verify
+    // the whole range is really committed before copying
+    {
+      uintptr_t q = a;
+      int bad = 0;
+      while (q < b) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((LPVOID)q, &mbi, sizeof(mbi)) ||
+            mbi.State != MEM_COMMIT) {
+          if (getenv("WBOX_DEBUG_FORK"))
+            fprintf(stderr,
+                    "wbox mem: snapshot: stale interval [%p,%p) bad@%p\n",
+                    (void *)a, (void *)b, (void *)q);
+          bad = 1;
+          break;
+        }
+        q = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (q <= a || q >= b + 0x1000) q = b;  // defensive
+      }
+      if (bad) continue;  // skip the stale interval
+    }
+    if (!VirtualAlloc((LPVOID)da, b - a, MEM_COMMIT, PAGE_READWRITE)) {
+      ReleaseSRWLockShared(&src->lock);
+      goto fail;
+    }
+    memcpy((void *)da, (const void *)a, b - a);
+    // NB: the child's interval table must hold CHILD addresses — copying
+    // src->iv verbatim would make the child's munmap/wipe/release operate
+    // on the PARENT's pages (decommitting them under a running parent).
+    dst->iv[dst->ivn].a = da;
+    dst->iv[dst->ivn].b = dst->base + (b - src->base);
+    ++dst->ivn;
+    // replicate host protections region-by-region
+    p = a;
+    while (p < b) {
+      MEMORY_BASIC_INFORMATION mbi;
+      uintptr_t s, e2;
+      if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi)) ||
+          mbi.State != MEM_COMMIT) {
+        ReleaseSRWLockShared(&src->lock);
+        goto fail;
+      }
+      s = (uintptr_t)mbi.BaseAddress;
+      e2 = s + mbi.RegionSize;
+      if (s < a) s = a;
+      if (e2 > b) e2 = b;
+      if (mbi.Protect != PAGE_READWRITE) {
+        DWORD old;
+        if (!VirtualProtect((LPVOID)(dst->base + (s - src->base)), e2 - s,
+                            mbi.Protect, &old)) {
+          ReleaseSRWLockShared(&src->lock);
+          goto fail;
+        }
+      }
+      p = e2;
+    }
+  }
+  dst->hinttop = dst->base + (src->hinttop - src->base);
+  ReleaseSRWLockShared(&src->lock);
+  *dstout = dst;
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mem: snapshot window #%d -> #%d (%zu intervals)\n",
+            src->index, dst->index, n);
+  return 0;
+fail:
+  AcquireSRWLockExclusive(&g_windows_lock);
+  g_windows[dst->index] = 0;
+  ReleaseSRWLockExclusive(&g_windows_lock);
+  VirtualFree((LPVOID)dst->base, 0, MEM_RELEASE);
+  free(dst->iv);
+  free(dst);
+  errno = ENOMEM;
+  return rc;
+}
+
+// Decommit every guest page of the calling thread's window and reset the
+// allocator bookkeeping, keeping the reservation itself. Used by execve()
+// (wipe+reload in place) so a window survives the exec of its System.
+// Guest page tables lived in the wiped range; the caller drops cr3 itself
+// and must purge recycled host pages via WboxPurgeHostPagesInRange().
+void WboxMemWipeWindow(void) {
+  struct WboxWindow *w = g_win;
+  size_t i;
+  if (!w) return;
+  AcquireSRWLockExclusive(&w->lock);
+  for (i = 0; i < w->ivn; ++i) {
+    VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
+  }
+  w->ivn = 0;
+  w->hinttop = w->base + 0x10000000;
+  ReleaseSRWLockExclusive(&w->lock);
+  if (getenv("WBOX_DEBUG_MEM"))
+    fprintf(stderr, "wbox mem: wipe window #%d\n", w->index);
+}
+
+// Validate a recycled host page (g_allocator freelist) before reuse.
+// Such a page can dangle: guest munmap() decommits whole regions without
+// consulting the freelist, and an exiting snapshot sibling releases its
+// whole window — both leave stale page pointers behind. Returns 1 when
+// the page is usable (committed, or recommitted because it belongs to
+// one of our live windows), 0 when it must be discarded.
+int WboxMemRecommitIfOurs(void *p) {
+  MEMORY_BASIC_INFORMATION mbi;
+  uintptr_t a = (uintptr_t)p;
+  struct WboxWindow *w;
+  int rc = 0;
+  if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi))) return 0;
+  if (mbi.State == MEM_COMMIT) return 1;
+  if (mbi.State != MEM_RESERVE) return 0;
+  // only recommit when the page belongs to the CALLING thread's window
+  // (the interval table is per-window and driven off thread-local g_win);
+  // a stale page from another window is simply dropped
+  if (!(w = g_win) || a < w->base || a >= w->limit) return 0;
+  AcquireSRWLockExclusive(&w->lock);
+  if (VirtualAlloc((LPVOID)a, 4096, MEM_COMMIT, PAGE_READWRITE) &&
+      IvInsert(a, a + 4096) == 0) {
+    rc = 1;
+  } else {
+    VirtualFree((LPVOID)a, 4096, MEM_DECOMMIT);
+  }
+  ReleaseSRWLockExclusive(&w->lock);
+  return rc;
 }
 
 static void *W32Commit(uintptr_t a, size_t len, int prot) {
@@ -328,6 +516,9 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   }
   len = (len + W32PAGE - 1) & ~(W32PAGE - 1);
   if ((uintptr_t)addr & (W32PAGE - 1)) {
+    if (getenv("WBOX_DEBUG_MEM"))
+      fprintf(stderr, "wbox mmap EINVAL: addr=%p misaligned (W32PAGE=%#x)\n",
+              addr, (unsigned)W32PAGE);
     errno = EINVAL;
     return MAP_FAILED;
   }
@@ -335,6 +526,10 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   if (flags & MAP_FIXED) {
     a = (uintptr_t)addr;
     if (a < g_base || a + len > g_limit) {
+      if (getenv("WBOX_DEBUG_MEM"))
+        fprintf(stderr,
+                "wbox mmap ENOMEM: addr=%p len=%#zx outside [%p,%p)\n", addr,
+                len, (void *)g_base, (void *)g_limit);
       ReleaseSRWLockExclusive(&g_lock);
       errno = ENOMEM;
       return MAP_FAILED;

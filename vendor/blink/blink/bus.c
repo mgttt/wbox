@@ -45,12 +45,20 @@ void InitBus(void) {
   unsigned i;
   pthread_condattr_t_ cattr;
   pthread_mutexattr_t_ mattr;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: AllocateBig() lands inside the guest VA window, which
+  // execve() decommits wholesale (wipe+reload); the futex bus is
+  // process-global and must survive exec, so keep it on the host heap.
+  free(g_bus);
+  unassert(g_bus = (struct Bus *)calloc(1, sizeof(*g_bus)));
+#else
 #ifndef HAVE_PTHREAD_PROCESS_SHARED
   if (g_bus) FreeBig(g_bus, sizeof(*g_bus));
 #endif
   unassert(g_bus =
                (struct Bus *)AllocateBig(sizeof(*g_bus), PROT_READ | PROT_WRITE,
                                          BUS_MEMORY | MAP_ANONYMOUS_, -1, 0));
+#endif
   unassert(!pthread_condattr_init(&cattr));
   unassert(!pthread_mutexattr_init(&mattr));
 #ifdef HAVE_PTHREAD_PROCESS_SHARED

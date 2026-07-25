@@ -1157,6 +1157,12 @@ int VfsOpen(int dirfd, const char *name, int flags, int mode) {
   unassert(!VfsTraverseMount(&dir, newname));
   if (ret != -1) {
     if (dir->device->ops->Open) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      if (getenv("WBOX_DEBUG_FORK"))
+        fprintf(stderr, "[vfs] open dir=%s newname=%s ops=%p Open=%p\n",
+                dir->name ? dir->name : "?", newname, dir->device->ops,
+                dir->device->ops->Open);
+#endif
       if (dir->device->ops->Open(dir, newname, flags, mode, &out) == -1) {
         ret = -1;
       } else {

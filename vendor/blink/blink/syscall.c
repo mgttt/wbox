@@ -351,21 +351,17 @@ static void ClearChildTid(struct Machine *m) {
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-// wbox win32 vfork child exit paths (defined further below)
+// wbox win32 snapshot-fork child exit path (defined further below)
 _Noreturn static void W32ChildExit(struct Machine *, int);
-_Noreturn static void W32VforkChildExitNoExec(struct Machine *, int);
 #endif
 
 _Noreturn void SysExitGroup(struct Machine *m, int rc) {
   THR_LOGF("pid=%d tid=%d SysExitGroup", m->system->pid, m->tid);
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  // wbox win32: a vfork child must not exit the host process; record its
-  // exit code in the virtual pid table and end only this thread.
+  // wbox win32: a snapshot-fork child must not exit the host process;
+  // record its exit code in the virtual pid table and end only its thread.
   if (m->system->w32child) {
     W32ChildExit(m, rc);
-  }
-  if (m->w32vfork) {
-    W32VforkChildExitNoExec(m, rc);
   }
 #endif
   ClearChildTid(m);
@@ -403,9 +399,9 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
 
 _Noreturn void SysExit(struct Machine *m, int rc) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  // wbox win32: vfork children always take the group-exit path so their
-  // status reaches the virtual pid table (a bare exit must not leak).
-  if (m->system->w32child || m->w32vfork) {
+  // wbox win32: snapshot-fork children always take the group-exit path so
+  // their status reaches the virtual pid table (a bare exit must not leak).
+  if (m->system->w32child) {
     SysExitGroup(m, rc);
   }
 #endif
@@ -437,19 +433,30 @@ static int HostFdOf(struct System *s, int fildes) {
 }
 
 // ---------------------------------------------------------------------
-// wbox win32: vfork-style fork (see win32/WIN32-PORT.md).
+// ---------------------------------------------------------------------
+// wbox win32: snapshot fork (see win32/WIN32-PORT.md).
 //
-// Windows has no fork() and no private anonymous COW, so we implement
-// vfork() semantics for both fork and vfork:
-//   1. the child is a new Machine in the SAME System (shared address
-//      space and fd table), running on a new host thread;
-//   2. the parent thread blocks until the child execve()s or exits;
-//   3. at execve() the child gets a brand-new System loaded into a
-//      private guest VA window (WboxMemForkWindow), so the parent's
-//      address space survives; fds are host-dup'd across;
-//   4. exit codes travel through the virtual pid table in w32proc.c.
-// This covers the shell's dominant fork->exec / fork->exit patterns.
-// A true concurrent COW fork is intentionally NOT attempted here.
+// Windows has no fork() and no private anonymous COW, so fork/vfork are
+// implemented as a SNAPSHOT fork:
+//   1. the parent synchronously copies every committed page of its guest
+//      VA window into a fresh window (WboxMemSnapshotWindow);
+//   2. the child gets its OWN System (own fd table with host-dup'd
+//      descriptors, own locks, own pid from the virtual pid table) so
+//      parent and child run truly concurrently — the parent returns from
+//      fork() as soon as the snapshot is taken;
+//   3. the copied guest page tables (page table pages are ordinary
+//      committed window pages in this port) are fixed up in place: every
+//      PAGE_HOST entry pointing into the parent window is re-skewed to
+//      the child window;
+//   4. exit codes travel through the virtual pid table in w32proc.c and
+//      are reaped by wait/waitpid as before;
+//   5. execve() is wipe+reload in place (see Exec in blink.c): the
+//      window is decommitted and the new program is loaded into the same
+//      reservation, so a window lives exactly as long as its guest
+//      process and exec no longer allocates a second address space.
+// This replaces the earlier vfork-style fork (parent blocked until the
+// child exec'd or exited); patterns that broke under it (subshells
+// writing pipes, `sleep & wait`, long-lived non-exec children) work now.
 #include "win32.h"
 
 
@@ -465,208 +472,196 @@ static void W32ForkDbg(const char *msg, int a, int b) {
 }
 #endif
 
-struct W32VforkArgs {
+struct W32SnapArgs {
   struct Machine *m;
-  void *win;  // parent's guest VA window handle (w32mem.c)
+  void *win;  // the child's snapshot window (w32mem.c)
 };
 
-static DWORD WINAPI W32VforkThreadMain(LPVOID argp) {
-  struct W32VforkArgs *a = (struct W32VforkArgs *)argp;
+static DWORD WINAPI W32SnapThreadMain(LPVOID argp) {
+  struct W32SnapArgs *a = (struct W32SnapArgs *)argp;
   struct Machine *m = a->m;
   W32ForkDbg("child thread enter", 0, 0);
-  WboxMemSetWindow(a->win);  // share parent's guest address space
+  WboxMemSetWindow(a->win);  // adopt the snapshot address space
   free(a);
+  g_machine = m;
   m->thread = pthread_self();
-  W32ForkDbg("child thread blink", m->w32vpid, 0);
-  Blink(m);  // noreturn; guest exit/exec intercepted in the syscall layer
+  W32ForkDbg("child thread blink", m->system->pid, 0);
+  Blink(m);  // noreturn; guest exit intercepted in the syscall layer
   return 0;
 }
 
-// Deep-copy the System's fd table for the child (host-dup every fd so
-// the child's close/dup2 calls cannot corrupt the parent's table — real
-// vfork shares the table, but real shells use fork() and depend on the
-// copy). The parent's original list is detached and restored when the
-// parent resumes (child exec'd or exited).
-static struct Dll *W32ForkFds(struct System *s) {
-  struct Dll *e, *saved;
-  struct Fd *fd2;
-  LOCK(&s->fds.lock);
-  saved = s->fds.list;
-  s->fds.list = 0;
-  for (e = dll_first(saved); e; e = dll_next(saved, e)) {
-    struct Fd *fd = FD_CONTAINER(e);
-    int nf;
-    if ((nf = dup(fd->hostfd)) == -1) continue;  // best effort
-    if (getenv("WBOX_DEBUG_FORK"))
-      fprintf(stderr, "[w32fork] fd copy guest=%d host=%d\n", fd->fildes, nf);
-    // key by the GUEST number and record the dup'd host descriptor
-    // separately (fd->hostfd): the child must see the parent's fd
-    // numbering, while its closes/dup2s only affect its own host copies.
-    if ((fd2 = ForkFd(&s->fds, fd, fd->fildes, fd->oflags))) {
-      fd2->hostfd = nf;
-    }
+// Re-skew one page table entry's host pointer from the parent window
+// [lo,hi) into the child window (delta = child_base - parent_base).
+// Entries whose PAGE_TA does not point at host memory (no PAGE_HOST) or
+// points outside the parent window are left untouched.
+static u64 W32SnapFixEntry(u64 e, uintptr_t lo, uintptr_t hi, i64 delta) {
+  uintptr_t p;
+  if (!(e & PAGE_HOST)) return e;
+  p = (uintptr_t)(e & PAGE_TA);
+  if (p >= lo && p < hi) {
+    return (e & ~(u64)PAGE_TA) | ((u64)(uintptr_t)(p + delta) & PAGE_TA);
   }
-  UNLOCK(&s->fds.lock);
-  return saved;
+  return e;
 }
 
-static void W32UnforkFds(struct System *s, struct Dll *saved) {
-  struct Fds tmp;
-  struct Dll *e;
-  LOCK(&s->fds.lock);
-  InitFds(&tmp);
-  tmp.list = s->fds.list;  // child's leftover table
-  s->fds.list = saved;
-  UNLOCK(&s->fds.lock);
-  // close the child's dup'd host descriptors (DestroyFds only frees)
-  for (e = dll_first(tmp.list); e; e = dll_next(tmp.list, e)) {
-    close(FD_CONTAINER(e)->hostfd);
+// Recursively fix up a copied page table (level 1 = PML4 .. 4 = PT).
+// The table pages themselves are committed window pages, so the snapshot
+// copied them verbatim and they are walked in the CHILD window.
+static void W32SnapFixTable(u64 *tab, int level, uintptr_t lo, uintptr_t hi,
+                            i64 delta) {
+  long i;
+  for (i = 0; i < 512; ++i) {
+    u8 *slot = (u8 *)tab + i * 8;
+    u64 e = LoadPte(slot);
+    u64 ne;
+    if (!e) continue;
+    ne = W32SnapFixEntry(e, lo, hi, delta);
+    if (ne != e) StorePte(slot, ne);
+    if (level < 4 && (e & PAGE_V)) {
+      // non-leaf entries always reference a child-window page table page
+      W32SnapFixTable((u64 *)(uintptr_t)(ne & PAGE_TA), level + 1, lo, hi,
+                      delta);
+    }
   }
-  DestroyFds(&tmp);
 }
 
 static int W32Fork(struct Machine *m) {
-  struct Machine *m2;
-  struct W32Child *rec;
-  struct W32VforkArgs *a;
-  struct Dll *saved_fds;
-  HANDLE thr;
-  W32ForkDbg("fork enter", 0, 0);
-  m->threaded = true;
-  if (!(m2 = NewMachine(m->system, m))) {
-    return eagain();
-  }
-  m2->w32vfork = 0;  // NewMachine memcpy'd the parent's fields
-  m2->w32vpid = 0;
-  Put64(m2->ax, 0);  // child sees fork() == 0
-  if (!(rec = W32ChildAlloc())) {
-    FreeMachine(m2);
-    return eagain();
-  }
-  if (!(a = calloc(1, sizeof(*a)))) {
-    W32ChildAbandon(rec);
-    FreeMachine(m2);
-    return eagain();
-  }
-  a->m = m2;
-  a->win = WboxMemCurrentWindow();
-  // give the child its own fd table (see W32ForkFds comment)
-  saved_fds = W32ForkFds(m->system);
-  // suspended: the child must not run before its vpid/record are set
-  thr = CreateThread(NULL, 0, W32VforkThreadMain, a, CREATE_SUSPENDED, NULL);
-  if (!thr) {
-    W32UnforkFds(m->system, saved_fds);
-    free(a);
-    W32ChildAbandon(rec);
-    FreeMachine(m2);
-    return eagain();
-  }
-  m2->w32vfork = rec;
-  m2->w32vpid = W32ChildVpid(rec);
-  m2->tid = m2->w32vpid;  // gettid() == getpid() for a fork child
-  W32ChildPublish(rec, thr);
-  ResumeThread(thr);
-  THR_LOGF("pid=%d W32Fork -> vpid=%d", m->system->pid, m2->w32vpid);
-  W32ForkDbg("fork spawn", m2->w32vpid, 0);
-  // vfork semantics: parent sleeps until the child execve()s or exits
-  W32VforkWaitParent(rec);
-  W32ForkDbg("parent resumed", W32ChildVpid(rec), W32ChildExited(rec));
-  // take back the fd table; the child either has its own System now
-  // (exec) or is gone (exit)
-  W32UnforkFds(m->system, saved_fds);
-  return W32ChildVpid(rec);
-}
-
-// Execve path for a vfork child (called from ExecveBlink, noreturn on
-// success): build a fresh System for the new program, give it a private
-// guest VA window, host-dup the inherited fds, wake the parent, and run
-// the new program on this thread. Returns -1 (errno) on early failure,
-// in which case the child simply keeps running in the shared System.
-static int W32VforkExec(struct Machine *m, char *execfn, char *prog,
-                        char **argv, char **envp) {
   int i;
   int vpid;
+  i64 delta;
+  HANDLE thr;
+  uintptr_t lo, hi;
+  void *srcwin, *dstwin;
   struct Dll *e;
   struct Fd *fd2;
   struct System *s2;
   struct Machine *m2;
-  struct W32Child *rec = m->w32vfork;
-  unassert(rec);
-  vpid = m->w32vpid;
+  struct W32Child *rec;
+  struct W32SnapArgs *a;
+  W32ForkDbg("fork enter", 0, 0);
+  m->threaded = true;
+  if (!(rec = W32ChildAlloc())) {
+    return eagain();
+  }
+  W32ChildSetParent(rec, m);  // for SIGCHLD enqueue on child exit
+  vpid = W32ChildVpid(rec);
+  srcwin = WboxMemCurrentWindow();
+  dstwin = 0;
+  // 1. synchronously snapshot every committed page into a fresh window;
+  //    the parent window can not be mutated or released mid-copy because
+  //    the copy runs here, on the parent's own thread
+  if (WboxMemSnapshotWindow(srcwin, &dstwin) == -1) {
+    W32ChildAbandon(rec);
+    return eagain();
+  }
+  lo = WboxMemHandleBase(srcwin);
+  hi = WboxMemHandleLimit(srcwin);
+  delta = (i64)(WboxMemHandleBase(dstwin) - lo);
+  // 2. build the child's own System
   if (!(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
-    return enomem();
+    W32ChildAbandon(rec);
+    return enomem();  // snapshot window leaks (fatal ENOMEM anyway)
   }
-  if (!(m2 = NewMachine(s2, 0))) {
-    FreeSystem(s2);
-    return enomem();
-  }
-  // inherit resource limits and ignored signal dispositions (cf. Exec())
+  s2->w32child = rec;
+  s2->pid = vpid;
+  s2->exec = m->system->exec;
   memcpy(s2->rlim, m->system->rlim, sizeof(s2->rlim));
-  for (i = 1; i <= 64; ++i) {
-    if (Read64(m->system->hands[i - 1].handler) == SIG_IGN_LINUX) {
-      Write64(s2->hands[i - 1].handler, SIG_IGN_LINUX);
-    }
-  }
-  // give the child its own copies of the inherited fds (skip cloexec);
-  // the parent's table is left untouched
+  memcpy(s2->hands, m->system->hands, sizeof(s2->hands));
+  s2->blinksigs = m->system->blinksigs;
+  s2->brk = m->system->brk;
+  s2->automap = m->system->automap;
+  s2->ender = m->system->ender;
+  s2->codestart = m->system->codestart;
+  s2->codesize = m->system->codesize;
+  s2->rss = m->system->rss;
+  s2->vss = m->system->vss;
+  // fds: host-dup every descriptor into the child's table, keeping the
+  // guest numbering (fd->hostfd is the child's own host copy)
   LOCK(&m->system->fds.lock);
   for (e = dll_first(m->system->fds.list); e;
        e = dll_next(m->system->fds.list, e)) {
     struct Fd *fd = FD_CONTAINER(e);
     int nf;
-    if (fd->oflags & O_CLOEXEC) continue;
-    if ((nf = dup(fd->hostfd)) == -1) continue;  // best effort
-    // keep the guest numbering; the host side is the child's own dup
-    if ((fd2 = ForkFd(&s2->fds, fd, fd->fildes, fd->oflags & ~O_CLOEXEC))) {
+    // NB: must be VfsDup, not raw dup: the fd callbacks (kFdCbHost) go
+    // through the VFS layer, which only knows descriptors it registered
+    // itself — a raw dup()ed fd would read/write EBADF in the child.
+    if ((nf = VfsDup(fd->hostfd)) == -1) continue;  // best effort
+    if ((fd2 = ForkFd(&s2->fds, fd, fd->fildes, fd->oflags))) {
       fd2->hostfd = nf;
+    } else {
+      VfsClose(nf);
     }
   }
   UNLOCK(&m->system->fds.lock);
-  // the child record (vpid, thread handle, exit status) follows the exec
-  s2->w32child = rec;
-  s2->pid = vpid;
-  m2->w32vpid = vpid;
-  m2->tid = vpid;
-  // the child needs a private guest VA window: the new program loads at
-  // the same guest addresses the (suspended) parent still occupies.
-  // NB: after this call the OLD system's guest memory must not be
-  // dereferenced on this thread; prog/argv/envp are host-side copies.
-  if (WboxMemForkWindow() == -1) {
-    LOGF("vfork exec: could not reserve a guest VA window");
-    FreeMachine(m2);  // orphan, frees s2 as well
-    return enomem();
+  // 3. adopt the copied page tables, re-skewed into the child window
+  s2->cr3 = W32SnapFixEntry(m->system->cr3, lo, hi, delta);
+  if (s2->cr3) {
+    W32SnapFixTable((u64 *)(uintptr_t)(s2->cr3 & PAGE_TA), 1, lo, hi, delta);
   }
-  m->w32vfork = 0;
-  m->w32vpid = 0;
-  W32ForkDbg("child exec", vpid, 0);
-  // LoadProgram is point-of-no-return (exits on failure like upstream).
-  LoadProgram(m2, execfn, prog, argv, envp, NULL);
-  // LoadProgram may leave elf.prog/execfn pointing at the old machine's
-  // freelist; make them heap-owned so FreeSystem(s2) at exit is clean.
-  s2->elf.prog = strdup(s2->elf.prog);
-  s2->elf.execfn = strdup(s2->elf.execfn);
-  W32ForkDbg("child exec loaded", vpid, 0);
-  // release the old system's execve() lock (SysExecve holds it), wake
-  // the parent, abandon the pre-exec machine, and run the new program
-  UNLOCK(&m->system->exec_lock);
-  W32ChildSignalExec(rec);
-  g_machine = m2;
-  m2->thread = pthread_self();
-  FreeMachine(m);
-  Blink(m2);  // noreturn
-  unassert(0);
-  return 0;
+  // 4. child Machine: clone the register state, then reparent to s2
+  if (!(m2 = NewMachine(m->system, m))) {
+    FreeSystem(s2);
+    W32ChildAbandon(rec);
+    return eagain();
+  }
+  LOCK(&m->system->machines_lock);
+  dll_remove(&m->system->machines, &m2->elem);
+  UNLOCK(&m->system->machines_lock);
+  m2->system = s2;
+  m2->mode = s2->mode;
+  W32ChildSetMachine(rec, m2);  // for cross-pid kill (SysKill)
+  LOCK(&s2->machines_lock);
+  dll_make_first(&s2->machines, &m2->elem);
+  UNLOCK(&s2->machines_lock);
+  Put64(m2->ax, 0);  // child sees fork() == 0
+  m2->tid = vpid;    // gettid() == getpid() for a fork child
+  // the cloned TLB/icache refers to parent-window pages: drop it
+  ResetTlb(m2);
+  m2->xedd = 0;
+  atomic_store_explicit(&m2->invalidated, true, memory_order_release);
+  atomic_store_explicit(&m2->opcache->invalidated, true,
+                        memory_order_release);
+  // 5. spawn the child thread; the parent returns immediately
+  if (!(a = calloc(1, sizeof(*a)))) {
+    FreeMachine(m2);  // orphan -> frees s2 as well
+    W32ChildAbandon(rec);
+    return eagain();
+  }
+  a->m = m2;
+  a->win = dstwin;
+  thr = CreateThread(NULL, 0, W32SnapThreadMain, a, CREATE_SUSPENDED, NULL);
+  if (!thr) {
+    free(a);
+    FreeMachine(m2);
+    W32ChildAbandon(rec);
+    return eagain();
+  }
+  W32ChildPublish(rec, thr);
+  ResumeThread(thr);
+  THR_LOGF("pid=%d W32Fork -> vpid=%d", m->system->pid, vpid);
+  W32ForkDbg("fork spawn", vpid, 0);
+  return vpid;
 }
 
-// Guest exit of an exec'd vfork child (its own System): record the exit
-// code in the virtual pid table, free the System, release the private
-// guest VA window, and terminate only this thread. Never returns.
+// Guest exit of a snapshot-fork child (its own System and window):
+// record the exit code in the virtual pid table, free the System,
+// release the guest VA window, and terminate only this thread.
+// Never returns.
 _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   struct W32Child *rec = m->system->w32child;
   uintptr_t lo = WboxMemWindowBase();
   uintptr_t hi = WboxMemLimit();
   W32ForkDbg("child exit", rc, 0);
   W32ChildSignalExit(rec, rc);
+  // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
+  // into the parent's guest signal set (busybox ash's wait loop depends on
+  // it). The parent Machine is necessarily alive here in the supported
+  // model: a System only exits after its own children (wait/ECHILD), and
+  // the main System outlives every snapshot child.
+  {
+    struct Machine *pm = (struct Machine *)W32ChildParent(rec);
+    if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
+  }
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
   // recycled host pages handed out from the child's window must not be
   // reused by other Systems once the reservation is gone
@@ -676,19 +671,14 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   unassert(0);
 }
 
-// Guest exit of a vfork child BEFORE exec (shared System with parent):
-// record the exit code, wake the parent, drop only this Machine.
-_Noreturn static void W32VforkChildExitNoExec(struct Machine *m, int rc) {
-  struct W32Child *rec = m->w32vfork;
-  m->w32vfork = 0;
-  m->w32vpid = 0;
-  W32ForkDbg("child exit noexec", rc, 0);
-  W32ChildSignalExit(rec, rc);
-  FreeMachine(m);  // parent machine remains; System survives
-  ExitThread(0);
-  unassert(0);
+// Guest death by unhandled signal inside a snapshot-fork child: the stock
+// TerminateSignal would kill(getpid(), sig) and take down the whole host
+// process (parent included). Exit only the child, with the conventional
+// 128+sig status so wait4 reports a signal death.
+_Noreturn void W32ChildSignalDeath(struct Machine *m, int sig) {
+  W32ChildExit(m, 128 + (sig & 0x7f));
 }
-#endif /* _WIN32 vfork-style fork */
+#endif /* _WIN32 snapshot fork */
 
 static int Fork(struct Machine *m, u64 flags, u64 stack, u64 ctid) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -1461,6 +1451,22 @@ int GetOflags(struct Machine *m, int fildes) {
   return oflags;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32: translate a GUEST descriptor to the host-side (VFS-global)
+// descriptor for paths that feed a fd straight into Vfs*/host mmap
+// (pread/pwrite family, file mmap). In the main System both numberings
+// agree; in snapshot-fork children they diverge (see SysOpenat).
+static int W32HostFd(struct System *s, int guestfd) {
+  int hostfd;
+  struct Fd *fd;
+  LOCK(&s->fds.lock);
+  hostfd = (fd = GetFd(&s->fds, guestfd)) ? fd->hostfd : -1;
+  UNLOCK(&s->fds.lock);
+  if (hostfd == -1) ebadf();
+  return hostfd;
+}
+#endif
+
 static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
                        int flags, int fildes, i64 offset) {
   u64 key;
@@ -1535,6 +1541,21 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
     }
   }
 CreateTheMap:
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: ReserveVirtual hands fildes to the host mmap shim (which
+  // pread()s the VFS descriptor); translate guest -> host numbering.
+  // (AddFileMapViaMap's debug-symbol lookup misses on the translated
+  // number in fork children — metadata only, no functional impact.)
+  if (fildes != -1) {
+    int guestfd = fildes;
+    if ((fildes = W32HostFd(m->system, fildes)) == -1) {
+      return -1;
+    }
+    if (getenv("WBOX_DEBUG_MEM"))
+      fprintf(stderr, "wbox guest-mmap: guestfd=%d hostfd=%d off=%#llx\n",
+              guestfd, fildes, (unsigned long long)offset);
+  }
+#endif
   virt = ReserveVirtual(m->system, virt, size, key, fildes, offset,
                         !!(flags & MAP_SHARED_LINUX), fixedmap);
   if (virt != -1 && newautomap != -1) {
@@ -1547,9 +1568,20 @@ Finished:
 static i64 SysMmap(struct Machine *m, i64 virt, u64 size, int prot, int flags,
                    int fildes, i64 offset) {
   i64 res;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int dbg = getenv("WBOX_DEBUG_MEM") != 0;
+#endif
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
   res = SysMmapImpl(m, virt, size, prot, flags, fildes, offset);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (dbg && res == -1)
+    fprintf(stderr,
+            "wbox SysMmap FAIL: virt=%#llx size=%#llx prot=%d flags=%#x "
+            "fd=%d off=%#llx errno=%d\n",
+            (unsigned long long)virt, (unsigned long long)size, prot, flags,
+            fildes, (unsigned long long)offset, errno);
+#endif
   unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);
   END_NO_PAGE_FAULTS;
@@ -1621,7 +1653,7 @@ static int SysDup1(struct Machine *m, i32 fildes) {
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
-  if ((hostfd = dup(fd->hostfd)) == -1) {
+  if ((hostfd = VfsDup(fd->hostfd)) == -1) {  // VFS-aware (pipes/sockets)
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
@@ -1685,14 +1717,16 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
       return ebadf();
     }
     oflags = fd->oflags & ~O_CLOEXEC;
+    // NB: VfsDup2/VfsDup, not raw dup2/dup — hostfd may be a VFS-layer
+    // descriptor (pipes, sockets), which the raw win32 dup does not know.
     if ((fd2 = GetFd(&m->system->fds, newfildes))) {
-      if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+      if (VfsDup2(fd->hostfd, fd2->hostfd) == -1) {
         UNLOCK(&m->system->fds.lock);
         return -1;
       }
       fd2->oflags = oflags;
     } else {
-      int hostfd = dup(fd->hostfd);
+      int hostfd = VfsDup(fd->hostfd);
       if (hostfd == -1) {
         UNLOCK(&m->system->fds.lock);
         return -1;
@@ -1723,13 +1757,13 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
     oflags |= O_CLOEXEC;
   }
   if ((fd2 = GetFd(&m->system->fds, newfildes))) {
-    if (dup2(fd->hostfd, fd2->hostfd) == -1) {
+    if (VfsDup2(fd->hostfd, fd2->hostfd) == -1) {  // VFS-aware (pipes)
       UNLOCK(&m->system->fds.lock);
       return -1;
     }
     fd2->oflags = oflags;
   } else {
-    int hostfd = dup(fd->hostfd);
+    int hostfd = VfsDup(fd->hostfd);
     if (hostfd == -1) {
       UNLOCK(&m->system->fds.lock);
       return -1;
@@ -1751,7 +1785,7 @@ static int SysDupf(struct Machine *m, i32 fildes, i32 minfildes, int cmd) {
     UNLOCK(&m->system->fds.lock);
     return ebadf();
   }
-  if ((hostfd = dup(fd->hostfd)) == -1) {
+  if ((hostfd = VfsDup(fd->hostfd)) == -1) {  // VFS-aware (pipes/sockets)
     UNLOCK(&m->system->fds.lock);
     return -1;
   }
@@ -1843,12 +1877,31 @@ static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
       fildes = emfile();
     } else {
       FixupSock(fildes, flags);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox win32: guest number from the per-System table (see SysOpenat)
+      int hostfd = fildes;
+      LOCK(&m->system->fds.lock);
+      fildes = AllocGuestFd(&m->system->fds, 0);
+      if (fildes >= lim) {
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(hostfd);
+        if (flags) UNLOCK(&m->system->exec_lock);
+        return emfile();
+      }
+      fd = AddFd(&m->system->fds, fildes,
+                 O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                     (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
+      fd->hostfd = hostfd;
+      fd->socktype = type;
+      UNLOCK(&m->system->fds.lock);
+#else
       LOCK(&m->system->fds.lock);
       fd = AddFd(&m->system->fds, fildes,
                  O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
                      (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0));
       fd->socktype = type;
       UNLOCK(&m->system->fds.lock);
+#endif
     }
   }
   if (flags) UNLOCK(&m->system->exec_lock);
@@ -1951,6 +2004,9 @@ static int SysSocketName(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   socklen_t addrlen;
   struct sockaddr_storage addr;
   addrlen = sizeof(addr);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   rc = SocketName(fildes, (struct sockaddr *)&addr, &addrlen);
   if (rc != -1) {
     if (StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
@@ -2017,6 +2073,24 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
       newfd = emfile();
     } else {
       FixupSock(newfd, flags);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox win32: guest number from the per-System table (see SysOpenat)
+      int hostfd = newfd;
+      LOCK(&m->system->fds.lock);
+      newfd = AllocGuestFd(&m->system->fds, 0);
+      if (newfd >= lim || !(fd = GetFd(&m->system->fds, fildes)) ||
+          !ForkFd(&m->system->fds, fd, newfd,
+                  O_RDWR | (flags & SOCK_CLOEXEC_LINUX ? O_CLOEXEC : 0) |
+                      (flags & SOCK_NONBLOCK_LINUX ? O_NDELAY : 0))) {
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(hostfd);
+        return newfd >= lim ? (errno = EMFILE, -1) : -1;
+      }
+      GetFd(&m->system->fds, newfd)->hostfd = hostfd;
+      UNLOCK(&m->system->fds.lock);
+      StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
+                    (struct sockaddr *)&addr, addrlen);
+#else
       LOCK(&m->system->fds.lock);
       if (!(fd = GetFd(&m->system->fds, fildes)) ||
           !ForkFd(&m->system->fds, fd, newfd,
@@ -2030,6 +2104,7 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
         StoreSockaddr(m, sockaddr_addr, sockaddr_size_addr,
                       (struct sockaddr *)&addr, addrlen);
       }
+#endif
     }
   }
   return newfd;
@@ -2520,6 +2595,9 @@ static int SysConnectBind(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   } else {
     return -1;
   }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   INTERRUPTIBLE(!norestart,
                 (rc = impl(fildes, (const struct sockaddr *)&addr, addrlen)));
   if (rc != -1 && impl == VfsBind) {
@@ -2773,6 +2851,9 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
   struct Iovs iv;
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, false, EBADF) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
@@ -2792,6 +2873,9 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
   struct Iovs iv;
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, true, EBADF) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+#endif
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_READ)) != -1) {
@@ -2840,7 +2924,11 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+          RESTARTABLE(rc = VfsPreadv(fd->hostfd, iv.p, iv.i, offset));
+#else
           RESTARTABLE(rc = VfsPreadv(fildes, iv.p, iv.i, offset));
+#endif
         }
       } else {
         rc = 0;
@@ -2889,7 +2977,11 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+          RESTARTABLE(rc = VfsPwritev(fd->hostfd, iv.p, iv.i, offset));
+#else
           RESTARTABLE(rc = VfsPwritev(fildes, iv.p, iv.i, offset));
+#endif
         }
       } else {
         rc = 0;
@@ -2928,8 +3020,28 @@ static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
   ssize_t got, wrote;
   u8 *buf, *offsetp = 0;
   size_t chunk, maxchunk = 16384;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: in_fd/out_fd are GUEST descriptors; the Vfs* calls below
+  // need the host-side descriptors (guest 0 is not necessarily VFS fd 0 —
+  // reading it would slurp the emulator's own stdin and hang, which is
+  // exactly what `echo x | cat` did).
+  {
+    struct Fd *fdi, *fdo;
+    LOCK(&m->system->fds.lock);
+    fdi = GetFd(&m->system->fds, in_fd);
+    fdo = GetFd(&m->system->fds, out_fd);
+    if (!fdi || !fdo) {
+      UNLOCK(&m->system->fds.lock);
+      return ebadf();
+    }
+    in_fd = fdi->hostfd;
+    out_fd = fdo->hostfd;
+    UNLOCK(&m->system->fds.lock);
+  }
+#else
   if (CheckFdAccess(m, out_fd, true, EBADF) == -1) return -1;
   if (CheckFdAccess(m, in_fd, false, EBADF) == -1) return -1;
+#endif
   if (offsetaddr && !(offsetp = (u8 *)SchlepRW(m, offsetaddr, 8))) return -1;
   if (!(buf = (u8 *)AddToFreeList(m, malloc(maxchunk)))) return -1;
   if (offsetp) {
@@ -2998,6 +3110,9 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
   if (size < sizeof(rec) - sizeof(rec.name)) return einval();
   if ((fd->oflags & O_DIRECTORY) != O_DIRECTORY) return enotdir();
   if (!IsValidMemory(m, addr, size, PROT_WRITE)) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (VfsFstat(fildes, &st) || !st.st_nlink) return enoent();
   if (!fd->dirstream && !(fd->dirstream = VfsOpendir(fd->hostfd))) {
     return -1;
@@ -3113,6 +3228,9 @@ static i64 SysFtruncate(struct Machine *m, i32 fildes, i64 length) {
   if (length < 0) return einval();
   if (length > NUMERIC_MAX(off_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   RESTARTABLE(rc = VfsFtruncate(fildes, length));
   return rc;
 }
@@ -3153,6 +3271,9 @@ static int SysFstat(struct Machine *m, i32 fd, i64 staddr) {
   int rc;
   struct stat st;
   struct stat_linux gst;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fd = W32HostFd(m->system, fd)) == -1) return -1;
+#endif
   if ((rc = VfsFstat(fd, &st)) != -1) {
     XlatStatToLinux(&gst, &st);
     if (CopyToUserWrite(m, staddr, &gst, sizeof(gst)) == -1) rc = -1;
@@ -3236,6 +3357,9 @@ static int XlatFchownatFlags(int x) {
 }
 
 static int SysFchown(struct Machine *m, i32 fildes, u32 uid, u32 gid) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   return VfsFchown(fildes, uid, gid);
 }
 
@@ -3335,6 +3459,9 @@ static int CheckSyncable(int fildes) {
 }
 
 static int SysFsync(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (CheckSyncable(fildes) == -1) return -1;
 #ifdef F_FULLSYNC
   int rc;
@@ -3359,6 +3486,9 @@ static int SysFsync(struct Machine *m, i32 fildes) {
 }
 
 static int SysFdatasync(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   if (CheckSyncable(fildes) == -1) return -1;
 #ifdef F_FULLSYNC
   int rc;
@@ -3384,6 +3514,9 @@ static int SysChdir(struct Machine *m, i64 path) {
 }
 
 static int SysFchdir(struct Machine *m, i32 fildes) {
+  #if defined(_WIN32) && !defined(__CYGWIN__)
+  fildes = HostFdOf(m->system, fildes);
+#endif
   return VfsFchdir(fildes);
 }
 
@@ -3407,6 +3540,9 @@ static int XlatLock(int x) {
 
 static int SysFlock(struct Machine *m, i32 fd, i32 lock) {
   if ((lock = XlatLock(lock)) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fd = HostFdOf(m->system, fd);
+#endif
   return VfsFlock(fd, lock);
 }
 
@@ -3427,6 +3563,9 @@ static int SysMkdir(struct Machine *m, i64 path, i32 mode) {
 }
 
 static int SysFchmod(struct Machine *m, i32 fd, u32 mode) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  fd = HostFdOf(m->system, fd);
+#endif
   return VfsFchmod(fd, mode);
 }
 
@@ -3620,8 +3759,9 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
   } else if (cmd == F_SETLK_LINUX ||   //
              cmd == F_SETLKW_LINUX ||  //
              cmd == F_GETLK_LINUX) {
+    int hostfd = fd->hostfd;
     UnlockFd(fd);
-    return SysFcntlLock(m, fildes, cmd, arg);
+    return SysFcntlLock(m, hostfd, cmd, arg);
 #ifdef F_SETOWN
   } else if (cmd == F_SETOWN_LINUX) {
     rc = VfsFcntl(fd->hostfd, F_SETOWN, arg);
@@ -3888,18 +4028,6 @@ static void ExecveBlink(struct Machine *m, char *prog, char **argv,
       CollectPageLocks(m);
       // TODO(jart): Prevent possibility of stack overflow.
       SYS_LOGF("m->system->exec(%s)", prog);
-#if defined(_WIN32) && !defined(__CYGWIN__)
-      if (m->w32vfork) {
-        // vfork child: rebuild into a private System/VA window on this
-        // thread; noreturn on success (parent is woken, fd table dup'd)
-        if (W32VforkExec(m, execfn, prog, argv, envp) == -1) {
-          // setup failed: keep running in the shared System
-          unassert(!pthread_sigmask(SIG_SETMASK, &m->system->exec_sigmask, 0));
-          return;
-        }
-        unassert(0);
-      }
-#endif
       SysCloseExec(m->system);
       ResetTimerDispositions(m->system);
       ResetSignalDispositions(m->system);
@@ -4385,7 +4513,16 @@ static int SigsuspendPolyfill(struct Machine *m, u64 mask) {
   oldmask = m->sigmask;
   m->sigmask = mask;
   nanos = 1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: host sigsuspend() is a bare Sleep(INFINITE) with no async
+  // signal delivery, so always poll; additionally wake as soon as any
+  // snapshot child has exited (SIGCHLD enqueue normally beats this, but
+  // the guest may have SIGCHLD blocked/ignored while still wanting to
+  // re-run its wait4(WNOHANG) loop).
+  while (!CheckInterrupt(m, false) && !W32AnyChildExited()) {
+#else
   while (!CheckInterrupt(m, false)) {
+#endif
     if (nanos > 256) {
       if (nanos < 10 * 1000) {
 #ifdef HAVE_SCHED_YIELD
@@ -4411,7 +4548,9 @@ static int SysSigsuspend(struct Machine *m, i64 maskaddr, i64 sigsetsize) {
   u8 word[8];
   if (sigsetsize != 8) return einval();
   if (CopyFromUserRead(m, word, maskaddr, 8) == -1) return -1;
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) || (defined(_WIN32) && !defined(__CYGWIN__))
+  // win32: no host async signals (sigsuspend shim is Sleep(INFINITE)),
+  // so use the guest-signal polling polyfill
   return SigsuspendPolyfill(m, Read64(word));
 #else
   return SigsuspendActual(m, Read64(word));
@@ -4730,6 +4869,9 @@ static int SysUtimensat(struct Machine *m, i32 fd, i64 pathaddr, i64 tvsaddr,
       LOGF("%s() flags %d not supported", "utimensat(path=null)", flags);
       return einval();
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    fd = HostFdOf(m->system, fd);
+#endif
     return VfsFutime(fd, tsp);
   }
 }
@@ -5222,6 +5364,35 @@ static int SysSigpending(struct Machine *m, i64 setaddr) {
 }
 
 static int SysKill(struct Machine *m, int pid, int sig) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // wbox win32: virtual pids (snapshot-fork children) are process-local;
+  // the host kill() shim only knows the process itself. Deliver to the
+  // child's Machine directly: enqueue the guest signal (the child's
+  // interruptible syscall loops poll it and die via TerminateSignal,
+  // going through the clean W32ChildExit path); if the child is stuck in
+  // a non-polling host wait, give it a short grace and then terminate
+  // the host thread so a blocking wait4 in the parent can never hang.
+  if (pid > 0 && !(0 <= sig && sig <= 64)) return einval();
+  if (pid > 0) {
+    struct Machine *cm = (struct Machine *)W32ChildFindMachine(pid);
+    W32ForkDbg("kill vp", pid, cm ? 1 : 0);
+    if (cm) {
+      if (!sig) return 0;  // existence probe
+      if (sig == SIGKILL_LINUX) {
+        W32ChildTerminate(pid, 9);  // uncatchable: no grace period
+        return 0;
+      }
+      EnqueueSignal(cm, sig);
+      if (W32ChildWaitExited(pid, 200)) {
+        // child is wedged in a host wait that never polls signals
+        W32ChildTerminate(pid, sig);
+      }
+      return 0;
+    }
+    if (W32ChildHasExited(pid)) return 0;  // zombie: kill() succeeds
+    // not a virtual child: fall through (self / ESRCH)
+  }
+#endif
   return kill(pid, sig ? XlatSignal(sig) : 0);
 }
 
@@ -5338,9 +5509,7 @@ static i32 SysGetsid(struct Machine *m, i32 pid) {
 }
 
 static int SysGetpid(struct Machine *m) {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-  if (m->w32vpid) return m->w32vpid;  // wbox win32: vfork child virtual pid
-#endif
+  // wbox win32: a snapshot-fork child's System carries its virtual pid
   return m->system->pid;
 }
 
@@ -5840,8 +6009,18 @@ void OpSyscall(P) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
   {
     u64 sn = Get64(m->ax) & 0xfff;
-    if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 || sn == 435)
-      W32ForkDbg("syscall", (int)sn, 0);
+    if (sn == 22 || sn == 56 || sn == 57 || sn == 58 || sn == 293 ||
+        sn == 435 || sn == 62)
+      W32ForkDbg("syscall", (int)sn, (int)(Get64(m->ax) >> 12));
+    else if ((m->system->w32child || getenv("WBOX_DEBUG_PARENT")) &&
+             getenv("WBOX_DEBUG_FORK")) {
+      char buf[160];
+      int n = snprintf(buf, sizeof(buf), "[w32fork] pid=%d sys=%d di=%#llx\n",
+                       m->system->pid, (int)sn,
+                       (unsigned long long)Get64(m->di));
+      DWORD nw;
+      WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
+    }
   }
 #endif
   size_t mark;
@@ -6030,7 +6209,8 @@ void OpSyscall(P) {
 #endif
     SYSCALL(4, 0x03D, "wait4", SysWait4, STRACE_WAIT4);
 #endif
-#ifdef HAVE_FORK
+#if defined(HAVE_FORK) || (defined(_WIN32) && !defined(__CYGWIN__))
+    // win32: SysKill delivers to virtual pids (snapshot-fork children)
     SYSCALL(2, 0x03E, "kill", SysKill, STRACE_KILL);
 #endif /* HAVE_FORK */
 #ifdef HAVE_THREADS
@@ -6131,6 +6311,16 @@ void OpSyscall(P) {
   if (!m->interrupted) {
     Put64(m->ax, ax != -1 ? ax : -(XlatErrno(errno) & 0xfff));
   }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((m->system->w32child || getenv("WBOX_DEBUG_PARENT")) &&
+      getenv("WBOX_DEBUG_FORK") && !m->interrupted) {
+    char buf[200];
+    int n = snprintf(buf, sizeof(buf), "[w32fork] pid=%d ret ax=%lld\n",
+                     m->system->pid, (long long)(i64)Get64(m->ax));
+    DWORD nw;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), buf, n, &nw, NULL);
+  }
+#endif
   unassert(--m->sysdepth >= 0);
   CollectPageLocks(m);
   unassert(!m->pagelocks.i || m->sysdepth);

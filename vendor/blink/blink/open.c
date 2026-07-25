@@ -127,10 +127,33 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
       close(fildes);
       fildes = emfile();
     } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox win32: the VFS fd table is global (shared with every snapshot
+      // fork child), so the number VfsOpen returned can not double as the
+      // guest fd. Allocate the lowest free guest number from the per-System
+      // table instead (like SysDup1/SysPipe) and keep the VFS descriptor in
+      // fd->hostfd. In the main System both tables agree, so the numbering
+      // is unchanged there; fork children get correct lowest-fd semantics
+      // (e.g. busybox ash does close(0) + open("/dev/null") expecting 0).
+      int guestfd;
+      LOCK(&m->system->fds.lock);
+      guestfd = AllocGuestFd(&m->system->fds, 0);
+      if (guestfd >= lim) {
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(fildes);
+        return emfile();
+      }
+      unassert(fd = AddFd(&m->system->fds, guestfd, sysflags));
+      fd->hostfd = fildes;
+      fd->path = JoinPath(GetDirFildesPath(m->system, dirfildes), path);
+      UNLOCK(&m->system->fds.lock);
+      fildes = guestfd;
+#else
       LOCK(&m->system->fds.lock);
       unassert(fd = AddFd(&m->system->fds, fildes, sysflags));
       fd->path = JoinPath(GetDirFildesPath(m->system, dirfildes), path);
       UNLOCK(&m->system->fds.lock);
+#endif
     }
   } else {
 #ifdef __FreeBSD__

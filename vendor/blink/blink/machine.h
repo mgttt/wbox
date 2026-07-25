@@ -450,8 +450,7 @@ struct Machine {               //
   i64 ctid;                              //
   int tid;                               //
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  struct W32Child *w32vfork;  // wbox: vfork handshake (pre-exec child)
-  int w32vpid;                // wbox: virtual pid (0 = use system->pid)
+
 #endif
   sigset_t spawn_sigmask;                //
   struct Dll elem;                       //
