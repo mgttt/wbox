@@ -47,6 +47,7 @@ int W32AnyChildExited(void);
 // stuck in a blocking wait that never polls guest signals.
 void W32ChildSetMachine(struct W32Child *, void *child_machine);
 void *W32ChildFindMachine(int vpid);
+void *W32ChildFindMachineHold(int vpid);  // returns with table lock held
 // C3/H1 (security-audit): raw Machine pointers in the vpid table dangle
 // once the referenced Machine is freed. FreeMachine() calls
 // W32ChildUnlinkMachine to drop every reference to the dying Machine;

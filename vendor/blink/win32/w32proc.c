@@ -171,18 +171,31 @@ void W32ChildSetMachine(struct W32Child *c, void *child_machine) {
   c->child_machine = child_machine;
 }
 
-void *W32ChildFindMachine(int vpid) {
+// caller must hold g_children_lock
+static void *W32ChildFindMachineLocked(int vpid) {
   struct W32Child *c;
-  void *m = NULL;
-  W32ChildrenLock();
   for (c = g_children; c; c = c->next) {
     if (!c->reaped && !c->exited && c->vpid == vpid && c->child_machine) {
-      m = c->child_machine;
-      break;
+      return c->child_machine;
     }
   }
+  return NULL;
+}
+
+void *W32ChildFindMachine(int vpid) {
+  void *m;
+  W32ChildrenLock();
+  m = W32ChildFindMachineLocked(vpid);
   W32ChildrenUnlock();
   return m;
+}
+
+// H1 (security-audit): find with the table lock STILL HELD on return;
+// pair with W32ChildUnlock() after the Machine has been used. This
+// closes the find->use TOCTOU window in SysKill.
+void *W32ChildFindMachineHold(int vpid) {
+  W32ChildrenLock();
+  return W32ChildFindMachineLocked(vpid);
 }
 
 // C3 (security-audit): called from FreeMachine() before a Machine is

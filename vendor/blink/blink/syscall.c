@@ -5378,21 +5378,31 @@ static int SysKill(struct Machine *m, int pid, int sig) {
   // the host thread so a blocking wait4 in the parent can never hang.
   if (pid > 0 && !(0 <= sig && sig <= 64)) return einval();
   if (pid > 0) {
-    struct Machine *cm = (struct Machine *)W32ChildFindMachine(pid);
+    // H1 (security-audit): the table lock is held across find+enqueue so
+    // the child can not free its Machine in between (its exit path first
+    // marks exited and FreeMachine unlinks the record under the same
+    // lock).
+    struct Machine *cm = (struct Machine *)W32ChildFindMachineHold(pid);
     W32ForkDbg("kill vp", pid, cm ? 1 : 0);
     if (cm) {
-      if (!sig) return 0;  // existence probe
+      if (!sig) {
+        W32ChildUnlock();
+        return 0;  // existence probe
+      }
       if (sig == SIGKILL_LINUX) {
+        W32ChildUnlock();
         W32ChildTerminate(pid, 9);  // uncatchable: no grace period
         return 0;
       }
       EnqueueSignal(cm, sig);
+      W32ChildUnlock();
       if (W32ChildWaitExited(pid, 200)) {
         // child is wedged in a host wait that never polls signals
         W32ChildTerminate(pid, sig);
       }
       return 0;
     }
+    W32ChildUnlock();
     if (W32ChildHasExited(pid)) return 0;  // zombie: kill() succeeds
     // not a virtual child: fall through (self / ESRCH)
   }
