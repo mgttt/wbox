@@ -2830,7 +2830,12 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
 // WboxSockFcntl applies real FIONBIO semantics for them.
 static int W32NonblockPoll(struct Fd *fd, short events) {
   struct pollfd pfd;
-  if (WboxSockIsFd(fd->hostfd)) return 1;
+  // NB: discriminate sockets via Fd.socktype, NOT WboxSockIsFd(hostfd) —
+  // hostfd is a *VFS* fd number while the socket table is keyed by *CRT*
+  // fd; the two namespaces collide numerically (a pipe's VFS fd 17 matched
+  // a DNS/TCP socket's CRT fd 17 inside apt's http method and the gate was
+  // skipped, reintroducing the blocking-read deadlock).
+  if (fd->socktype) return 1;
   pfd.fd = fd->hostfd;
   pfd.events = events;
   pfd.revents = 0;
