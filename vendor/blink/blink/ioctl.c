@@ -360,11 +360,17 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
 #endif
 #ifdef FIONREAD
     case FIONREAD_LINUX:
-      return IoctlGetInt32(m, fildes, FIONREAD, addr);
+      // wbox win32: must resolve to the host fd — on win32 the guest fd
+      // number is not the host CRT/socket fd (fork children host-dup
+      // into a different numbering), so VfsIoctl on the guest number
+      // missed the socket slot and always answered 0, which broke
+      // glibc's parallel A/AAAA resolver (its second-answer buffer
+      // sizing depends on FIONREAD) inside apt's http method.
+      return IoctlGetInt32(m, fd->hostfd, FIONREAD, addr);
 #endif
 #ifdef TIOCOUTQ
     case TIOCOUTQ_LINUX:
-      return IoctlGetInt32(m, fildes, TIOCOUTQ, addr);
+      return IoctlGetInt32(m, fd->hostfd, TIOCOUTQ, addr);
 #endif
 #ifdef TIOCSTI
     case TIOCSTI_LINUX:
