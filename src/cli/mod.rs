@@ -22,6 +22,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
+  wbox image rm <REF> [--yes]                      删除已 pull 镜像的本地缓存（默认交互确认）
   wbox --help | -h
   wbox --version
 
@@ -34,6 +35,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --no-network      显式声明不授予网络（默认行为，预留）
   --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
+  --rm              显式声明退出即清理（默认行为，docker 习惯写法；仅 run）
   --interactive     连接 stdio（当前默认且唯一支持的模式；--detach 预留）
   --pull            run 目标为镜像时，本地无缓存则先 pull
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）

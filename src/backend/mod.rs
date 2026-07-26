@@ -94,6 +94,12 @@ pub(crate) fn require_cmd(cmd: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// verbose 输出的统一结构化形式：`wbox: <key> = <value>`。
+/// 各后端/CLI 的 verbose 行统一经此输出，避免格式漂移。
+pub(crate) fn verbose_kv(key: &str, value: impl std::fmt::Display) {
+    println!("wbox: {} = {}", key, value);
+}
+
 /// 构造子进程显式环境（H2/H6 统一路径）：
 /// 过滤 spec.env 的保留键（verbose 时报告丢弃清单），并入 wbox 强制项，
 /// 最后按 pass_all 决定白名单/全量继承。两后端共用，保证策略单一出口。

@@ -72,6 +72,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--allow-network" => opts.allow_network = true,
             "--no-network" => opts.allow_network = false, // 显式默认，预留
             "--keep-profile" => opts.keep_profile = true,
+            // docker 风格显式清理：v1 默认即为退出即删（profile RAII 删除 +
+            // Job KILL_ON_JOB_CLOSE），接受并等价于默认（与 --no-network 同为显式默认）。
+            "--rm" => opts.keep_profile = false,
             "--interactive" => {} // v1 唯一支持的模式，接受并忽略
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
@@ -301,6 +304,16 @@ mod tests {
         for args in [&["--name"][..], &["--cpu-pct"][..], &["--max-procs"][..], &["--workdir"][..]] {
             assert!(parse(args).is_err(), "{:?}", args);
         }
+    }
+
+    #[test]
+    fn parse_rm_flag_accepted_as_explicit_default() {
+        // --rm 等价默认：退出即清理（keep_profile=false）
+        let o = parse(&["--rm", "--", "x"]).unwrap();
+        assert!(!o.keep_profile);
+        // 与 --keep-profile 同现后者覆盖（声明顺序生效）
+        let o = parse(&["--rm", "--keep-profile", "--", "x"]).unwrap();
+        assert!(o.keep_profile);
     }
 
     #[test]

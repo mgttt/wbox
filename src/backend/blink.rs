@@ -118,15 +118,15 @@ impl Backend for BlinkBackend {
             )));
         }
         if spec.verbose {
-            println!("wbox: Linux 后端模拟器 = {}（{}）", exe.display(), src);
-            println!("wbox: rootfs = {}", rootfs.display());
+            super::verbose_kv("Linux 后端模拟器", format!("{}（{}）", exe.display(), src));
+            super::verbose_kv("rootfs", rootfs.display());
         }
         // rootfs 网络可用性：缺失/空的 /etc/resolv.conf 注入公共 DNS，
         // 使 guest 程序（apt/wget 等）开箱即可解析域名。
         if ensure_resolv_conf(rootfs)? && spec.verbose {
-            println!(
-                "wbox: rootfs 缺少 /etc/resolv.conf，已注入公共 DNS {}",
-                DEFAULT_DNS
+            super::verbose_kv(
+                "resolv.conf",
+                format!("rootfs 缺失/为空，已注入公共 DNS {}", DEFAULT_DNS),
             );
         }
         // H2 修复：镜像 config.Env 中的隔离/凭证保留键（BLINK_*/WBOX_*）一律
@@ -140,11 +140,11 @@ impl Backend for BlinkBackend {
         let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose);
         let cmd = build_blink_command(&exe, &spec.cmd);
         if spec.verbose {
-            println!("wbox: guest 命令行（Entrypoint/Cmd 合并后）= {:?}", &spec.cmd);
-            println!("wbox: 最终命令行 = {:?}", cmd);
+            super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", &spec.cmd));
+            super::verbose_kv("最终命令行", format!("{:?}", cmd));
             for (k, v) in &env {
                 if k == BLINK_PREFIX_ENV {
-                    println!("wbox: {} = {}", k, v);
+                    super::verbose_kv(k, v);
                 }
             }
         }
