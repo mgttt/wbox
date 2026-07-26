@@ -840,6 +840,10 @@
 #define EFD_SEMAPHORE_LINUX 1
 #define EFD_CLOEXEC_LINUX   O_CLOEXEC_LINUX
 #define EFD_NONBLOCK_LINUX  O_NDELAY_LINUX
+#define TFD_TIMER_ABSTIME_LINUX       1
+#define TFD_TIMER_CANCEL_ON_SET_LINUX 2
+#define TFD_CLOEXEC_LINUX             O_CLOEXEC_LINUX
+#define TFD_NONBLOCK_LINUX            O_NDELAY_LINUX
 
 #define EPOLL_CTL_ADD_LINUX 1
 #define EPOLL_CTL_DEL_LINUX 2
@@ -993,6 +997,11 @@ struct stat_linux {
 struct itimerval_linux {
   struct timeval_linux interval;
   struct timeval_linux value;
+};
+
+struct itimerspec_linux {
+  struct timespec_linux interval;
+  struct timespec_linux value;
 };
 
 struct rusage_linux {

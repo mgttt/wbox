@@ -35,6 +35,10 @@
   剩余时间、周期触发、fork 不继承及退出同步回收。`pause` 和 `nanosleep`
   可被 guest 信号中断。新增 `t_signal_timer` 后真机套件达到
   **18/18 文件通过，558 pass / 0 fail / 9 skip**。
+- **timerfd**：Win32 fd 层实现 `timerfd_create/settime/gettime`，支持
+  realtime、monotonic、boottime 时钟，一次性/周期/绝对定时、nonblock、
+  dup/fork 共享及 poll/epoll 就绪。新增 `t_timerfd` 后真机套件达到
+  **19/19 文件通过，625 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

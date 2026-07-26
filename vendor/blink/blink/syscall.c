@@ -6095,19 +6095,17 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
   return SysPipe2(m, pipefds_addr, 0);
 }
 
-static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  int rawfd, hostfd, guestfd, lim, oflags;
+static int AddW32CounterFd(struct Machine *m, int rawfd, int flags) {
+  int hostfd, guestfd, lim, oflags;
   struct Fd *fd;
 #ifndef DISABLE_VFS
   struct VfsInfo *info;
 #endif
-  if (flags & ~(EFD_SEMAPHORE_LINUX | EFD_CLOEXEC_LINUX |
-                EFD_NONBLOCK_LINUX)) {
-    return einval();
+  if (!(lim = GetFileDescriptorLimit(m->system))) {
+    close(rawfd);
+    return emfile();
   }
-  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
-  if ((rawfd = WboxEventfdCreate(initval, flags)) == -1) return -1;
 #ifndef DISABLE_VFS
   if (HostfsWrapFd(rawfd, false, &info) == -1) {
     close(rawfd);
@@ -6135,6 +6133,18 @@ static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
   fd->eventfd = true;
   UNLOCK(&m->system->fds.lock);
   return guestfd;
+}
+#endif
+
+static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int rawfd;
+  if (flags & ~(EFD_SEMAPHORE_LINUX | EFD_CLOEXEC_LINUX |
+                EFD_NONBLOCK_LINUX)) {
+    return einval();
+  }
+  if ((rawfd = WboxEventfdCreate(initval, flags)) == -1) return -1;
+  return AddW32CounterFd(m, rawfd, flags);
 #else
   (void)m;
   (void)initval;
@@ -6145,6 +6155,102 @@ static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
 
 static int SysEventfd(struct Machine *m, u32 initval) {
   return SysEventfd2(m, initval, 0);
+}
+
+static int LoadItimerspec(struct Machine *m, i64 addr,
+                          struct itimerspec *value) {
+  const struct itimerspec_linux *guest;
+  if (!(guest = (const struct itimerspec_linux *)SchlepR(
+            m, addr, sizeof(*guest)))) {
+    return -1;
+  }
+  value->it_interval.tv_sec = Read64(guest->interval.sec);
+  value->it_interval.tv_nsec = Read64(guest->interval.nsec);
+  value->it_value.tv_sec = Read64(guest->value.sec);
+  value->it_value.tv_nsec = Read64(guest->value.nsec);
+  if (value->it_interval.tv_sec < 0 || value->it_interval.tv_nsec < 0 ||
+      value->it_interval.tv_nsec >= 1000000000 ||
+      value->it_value.tv_sec < 0 || value->it_value.tv_nsec < 0 ||
+      value->it_value.tv_nsec >= 1000000000) {
+    return einval();
+  }
+  return 0;
+}
+
+static int StoreItimerspec(struct Machine *m, i64 addr,
+                           const struct itimerspec *value) {
+  struct itimerspec_linux guest;
+  Write64(guest.interval.sec, value->it_interval.tv_sec);
+  Write64(guest.interval.nsec, value->it_interval.tv_nsec);
+  Write64(guest.value.sec, value->it_value.tv_sec);
+  Write64(guest.value.nsec, value->it_value.tv_nsec);
+  return CopyToUserWrite(m, addr, &guest, sizeof(guest));
+}
+
+static int SysTimerfdCreate(struct Machine *m, i32 clockid, i32 flags) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int rawfd;
+  if (flags & ~(TFD_CLOEXEC_LINUX | TFD_NONBLOCK_LINUX)) return einval();
+  if ((rawfd = WboxTimerfdCreate(clockid, flags)) == -1) return -1;
+  return AddW32CounterFd(m, rawfd, flags);
+#else
+  (void)m;
+  (void)clockid;
+  (void)flags;
+  return enosys();
+#endif
+}
+
+static int SysTimerfdSettime(struct Machine *m, i32 fildes, i32 flags,
+                             i64 neuaddr, i64 oldaddr) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int hostfd;
+  struct itimerspec neu, old;
+  if (flags &
+      ~(TFD_TIMER_ABSTIME_LINUX | TFD_TIMER_CANCEL_ON_SET_LINUX)) {
+    return einval();
+  }
+  if (!neuaddr) return efault();
+  if (LoadItimerspec(m, neuaddr, &neu) == -1) return -1;
+  if (oldaddr &&
+      !IsValidMemory(m, oldaddr, sizeof(struct itimerspec_linux),
+                     PROT_WRITE)) {
+    return -1;
+  }
+  hostfd = W32ResolveFd(m->system, fildes, 1);
+  if (hostfd == -1) return -1;
+  if (WboxTimerfdSettime(hostfd, flags, &neu, oldaddr ? &old : NULL) == -1) {
+    return -1;
+  }
+  return oldaddr ? StoreItimerspec(m, oldaddr, &old) : 0;
+#else
+  (void)m;
+  (void)fildes;
+  (void)flags;
+  (void)neuaddr;
+  (void)oldaddr;
+  return enosys();
+#endif
+}
+
+static int SysTimerfdGettime(struct Machine *m, i32 fildes, i64 valueaddr) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int hostfd;
+  struct itimerspec value;
+  if (!valueaddr) return efault();
+  if (!IsValidMemory(m, valueaddr, sizeof(struct itimerspec_linux),
+                     PROT_WRITE))
+    return -1;
+  hostfd = W32ResolveFd(m->system, fildes, 1);
+  if (hostfd == -1) return -1;
+  if (WboxTimerfdGettime(hostfd, &value) == -1) return -1;
+  return StoreItimerspec(m, valueaddr, &value);
+#else
+  (void)m;
+  (void)fildes;
+  (void)valueaddr;
+  return enosys();
+#endif
 }
 
 #ifdef HAVE_EPOLL_PWAIT1
@@ -6602,6 +6708,9 @@ void OpSyscall(P) {
     SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
     SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
     SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
+    SYSCALL(2, 0x11B, "timerfd_create", SysTimerfdCreate, STRACE_2);
+    SYSCALL(4, 0x11E, "timerfd_settime", SysTimerfdSettime, STRACE_4);
+    SYSCALL(2, 0x11F, "timerfd_gettime", SysTimerfdGettime, STRACE_2);
     SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #ifdef HAVE_EPOLL_PWAIT1

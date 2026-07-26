@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <wctype.h>
 #include <poll.h>
 #include <sys/select.h>
@@ -746,6 +747,10 @@ struct WboxEventfd {
   SRWLOCK lock;
   CONDITION_VARIABLE changed;
   uint64_t counter;
+  uint64_t due_ns;
+  uint64_t interval_ns;
+  int clockid;
+  int timerfd;
   int semaphore;
   int nonblock;
   int refs;  // descriptor mappings plus in-flight operations
@@ -826,6 +831,65 @@ static int EventfdUnmap(int fd) {
   return obj != NULL;
 }
 
+static uint64_t TimerfdNowNs(int clockid) {
+  struct timespec now;
+  clock_gettime(clockid, &now);
+  return (uint64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+}
+
+static void TimerfdUpdateLocked(struct WboxEventfd *obj) {
+  uint64_t now;
+  uint64_t expirations;
+  if (!obj->timerfd || !obj->due_ns) return;
+  now = TimerfdNowNs(obj->clockid);
+  if (now < obj->due_ns) return;
+  if (obj->interval_ns) {
+    expirations = (now - obj->due_ns) / obj->interval_ns + 1;
+    if (expirations >
+        (UINT64_MAX - obj->due_ns) / obj->interval_ns) {
+      obj->due_ns = UINT64_MAX;
+    } else {
+      obj->due_ns += expirations * obj->interval_ns;
+    }
+  } else {
+    expirations = 1;
+    obj->due_ns = 0;
+  }
+  if (expirations > UINT64_MAX - obj->counter) {
+    obj->counter = UINT64_MAX;
+  } else {
+    obj->counter += expirations;
+  }
+  WakeAllConditionVariable(&obj->changed);
+}
+
+static void TimerfdStoreNs(struct timespec *ts, uint64_t ns) {
+  ts->tv_sec = ns / 1000000000;
+  ts->tv_nsec = ns % 1000000000;
+}
+
+static int TimerfdLoadNs(const struct timespec *ts, uint64_t *ns) {
+  if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000 ||
+      (uint64_t)ts->tv_sec > (UINT64_MAX - 999999999) / 1000000000) {
+    errno = EINVAL;
+    return -1;
+  }
+  *ns = (uint64_t)ts->tv_sec * 1000000000 + ts->tv_nsec;
+  return 0;
+}
+
+static void TimerfdGettimeLocked(struct WboxEventfd *obj,
+                                 struct itimerspec *value) {
+  uint64_t now;
+  uint64_t remaining;
+  TimerfdUpdateLocked(obj);
+  now = TimerfdNowNs(obj->clockid);
+  remaining = obj->due_ns > now ? obj->due_ns - now : 0;
+  memset(value, 0, sizeof(*value));
+  TimerfdStoreNs(&value->it_value, remaining);
+  TimerfdStoreNs(&value->it_interval, obj->interval_ns);
+}
+
 int WboxEventfdCreate(unsigned int initval, int flags) {
   HANDLE h;
   int fd;
@@ -866,6 +930,110 @@ int WboxEventfdCreate(unsigned int initval, int flags) {
   return fd;
 }
 
+int WboxTimerfdCreate(int clockid, int flags) {
+  HANDLE h;
+  int fd;
+  struct WboxEventfd *obj;
+  if ((clockid != 0 && clockid != 1 && clockid != 7) ||
+      (flags & ~(O_NONBLOCK | O_CLOEXEC))) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(obj = calloc(1, sizeof(*obj)))) {
+    errno = ENOMEM;
+    return -1;
+  }
+  InitializeSRWLock(&obj->lock);
+  InitializeConditionVariable(&obj->changed);
+  obj->clockid = clockid;
+  obj->timerfd = 1;
+  obj->nonblock = !!(flags & O_NONBLOCK);
+  h = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0,
+                  NULL);
+  if (h == INVALID_HANDLE_VALUE) {
+    free(obj);
+    errno = W32Err();
+    return -1;
+  }
+  if ((fd = W32ToCrt(h, O_RDWR)) == -1) {
+    free(obj);
+    errno = EMFILE;
+    return -1;
+  }
+  if (EventfdMap(fd, obj) == -1) {
+    _close(fd);
+    free(obj);
+    return -1;
+  }
+  return fd;
+}
+
+int WboxTimerfdSettime(int fd, int flags, const struct itimerspec *neu,
+                       struct itimerspec *old) {
+  uint64_t now;
+  uint64_t value;
+  uint64_t interval;
+  struct WboxEventfd *obj;
+  if (!neu || flags & ~(1 | 2)) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (TimerfdLoadNs(&neu->it_value, &value) == -1 ||
+      TimerfdLoadNs(&neu->it_interval, &interval) == -1) {
+    return -1;
+  }
+  if (!(obj = EventfdAcquire(fd))) {
+    errno = EBADF;
+    return -1;
+  }
+  AcquireSRWLockExclusive(&obj->lock);
+  if (!obj->timerfd) {
+    ReleaseSRWLockExclusive(&obj->lock);
+    EventfdRelease(obj);
+    errno = EINVAL;
+    return -1;
+  }
+  if (old) TimerfdGettimeLocked(obj, old);
+  now = TimerfdNowNs(obj->clockid);
+  obj->counter = 0;
+  obj->interval_ns = interval;
+  if (!value) {
+    obj->due_ns = 0;
+  } else if (flags & 1) {
+    obj->due_ns = value;
+  } else {
+    obj->due_ns = value > UINT64_MAX - now ? UINT64_MAX : now + value;
+  }
+  WakeAllConditionVariable(&obj->changed);
+  ReleaseSRWLockExclusive(&obj->lock);
+  EventfdRelease(obj);
+  return 0;
+}
+
+int WboxTimerfdGettime(int fd, struct itimerspec *value) {
+  struct WboxEventfd *obj;
+  if (!value) {
+    errno = EFAULT;
+    return -1;
+  }
+  if (!(obj = EventfdAcquire(fd))) {
+    errno = EBADF;
+    return -1;
+  }
+  AcquireSRWLockExclusive(&obj->lock);
+  if (!obj->timerfd) {
+    ReleaseSRWLockExclusive(&obj->lock);
+    EventfdRelease(obj);
+    errno = EINVAL;
+    return -1;
+  }
+  TimerfdGettimeLocked(obj, value);
+  ReleaseSRWLockExclusive(&obj->lock);
+  EventfdRelease(obj);
+  return 0;
+}
+
 static ssize_t EventfdRead(int fd, void *buf, size_t n) {
   uint64_t value;
   struct WboxEventfd *obj;
@@ -878,14 +1046,23 @@ static ssize_t EventfdRead(int fd, void *buf, size_t n) {
     return -1;
   }
   AcquireSRWLockExclusive(&obj->lock);
-  while (!obj->counter) {
+  for (;;) {
+    DWORD wait = INFINITE;
+    TimerfdUpdateLocked(obj);
+    if (obj->counter) break;
     if (obj->nonblock) {
       ReleaseSRWLockExclusive(&obj->lock);
       EventfdRelease(obj);
       errno = EAGAIN;
       return -1;
     }
-    SleepConditionVariableSRW(&obj->changed, &obj->lock, INFINITE, 0);
+    if (obj->timerfd && obj->due_ns) {
+      uint64_t now = TimerfdNowNs(obj->clockid);
+      uint64_t left = obj->due_ns > now ? obj->due_ns - now : 0;
+      uint64_t millis = left / 1000000 + !!(left % 1000000);
+      wait = millis >= INFINITE ? INFINITE - 1 : (DWORD)millis;
+    }
+    SleepConditionVariableSRW(&obj->changed, &obj->lock, wait, 0);
   }
   if (obj->semaphore) {
     value = 1;
@@ -918,6 +1095,12 @@ static ssize_t EventfdWrite(int fd, const void *buf, size_t n) {
     return -1;
   }
   AcquireSRWLockExclusive(&obj->lock);
+  if (obj->timerfd) {
+    ReleaseSRWLockExclusive(&obj->lock);
+    EventfdRelease(obj);
+    errno = EINVAL;
+    return -1;
+  }
   while (value > UINT64_MAX - 1 - obj->counter) {
     if (obj->nonblock) {
       ReleaseSRWLockExclusive(&obj->lock);
@@ -1009,11 +1192,13 @@ static int EventfdFcntl(int fd, int cmd, int arg) {
 static int EventfdPoll(int fd, short events, short *revents) {
   struct WboxEventfd *obj;
   if (!(obj = EventfdAcquire(fd))) return 0;
-  AcquireSRWLockShared(&obj->lock);
+  AcquireSRWLockExclusive(&obj->lock);
+  TimerfdUpdateLocked(obj);
   *revents = 0;
   if (obj->counter) *revents |= events & POLLIN;
-  if (obj->counter < UINT64_MAX - 1) *revents |= events & POLLOUT;
-  ReleaseSRWLockShared(&obj->lock);
+  if (!obj->timerfd && obj->counter < UINT64_MAX - 1)
+    *revents |= events & POLLOUT;
+  ReleaseSRWLockExclusive(&obj->lock);
   EventfdRelease(obj);
   return 1;
 }
@@ -1082,8 +1267,9 @@ int W32FdClassify(int fd, struct W32FdInfo *out) {
   }
   struct WboxEventfd *eventfd = EventfdAcquire(fd);
   if (eventfd) {
+    int timerfd = eventfd->timerfd;
     EventfdRelease(eventfd);
-    out->kind = W32FD_EVENTFD;
+    out->kind = timerfd ? W32FD_TIMERFD : W32FD_EVENTFD;
     return out->kind;
   }
   if (WboxSockIsFd(fd)) {
@@ -1161,6 +1347,7 @@ ssize_t read(int fd, void *buf, size_t n) {
     case W32FD_SOCKET:
       return WboxSockRead(fd, buf, n);  // feat/net
     case W32FD_EVENTFD:
+    case W32FD_TIMERFD:
       return EventfdRead(fd, buf, n);
     case W32FD_SPECIAL:
       if (fi.dev == 1000001) {  // zero
@@ -1204,6 +1391,7 @@ ssize_t write(int fd, const void *buf, size_t n) {
     case W32FD_SOCKET:
       return WboxSockWrite(fd, buf, n);  // feat/net
     case W32FD_EVENTFD:
+    case W32FD_TIMERFD:
       return EventfdWrite(fd, buf, n);
     case W32FD_SPECIAL:
       if (fi.dev == 1000002) {  // full
@@ -1236,6 +1424,7 @@ int close(int fd) {
       (void)WboxEpollClose(fd);  // feat/net: epoll fds (classified above)
       return 0;
     case W32FD_EVENTFD:
+    case W32FD_TIMERFD:
       WboxEpollPurgeFd(fd);
       EventfdUnmap(fd);
       return _close(fd) ? (errno = EBADF, -1) : 0;
@@ -1249,7 +1438,8 @@ int close(int fd) {
 
 off_t lseek(int fd, off_t off, int whence) {
   if (IsSpecial(fd)) return 0;
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) return 0;
+  int kind = W32FdClassify(fd, NULL);
+  if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD) return 0;
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1268,7 +1458,8 @@ off_t lseek(int fd, off_t off, int whence) {
 
 ssize_t pread(int fd, void *buf, size_t n, off_t off) {
   if (IsSpecial(fd)) return read(fd, buf, n);
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+  int kind = W32FdClassify(fd, NULL);
+  if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD)
     return EventfdRead(fd, buf, n);
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
@@ -1280,7 +1471,8 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+  int kind = W32FdClassify(fd, NULL);
+  if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD)
     return EventfdWrite(fd, buf, n);
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
@@ -1362,7 +1554,8 @@ ssize_t W32Pwritev64(int fd, const struct iovec *iov, int n, int64_t off) {
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int n) {
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+  int kind = W32FdClassify(fd, NULL);
+  if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD)
     return EventfdReadv(fd, iov, n);
   ssize_t total = 0;
   int i;
@@ -1376,7 +1569,8 @@ ssize_t readv(int fd, const struct iovec *iov, int n) {
 }
 
 ssize_t writev(int fd, const struct iovec *iov, int n) {
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+  int kind = W32FdClassify(fd, NULL);
+  if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD)
     return EventfdWritev(fd, iov, n);
   ssize_t total = 0;
   int i;
@@ -1723,6 +1917,7 @@ int fstat(int fd, struct stat *st) {
       st->st_nlink = 1;
       return 0;
     case W32FD_EVENTFD:
+    case W32FD_TIMERFD:
       memset(st, 0, sizeof(*st));
       st->st_mode = S_IFCHR | 0600;
       st->st_blksize = 4096;
@@ -2189,6 +2384,7 @@ int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
         case W32FD_SOCKET:
           continue;  // serviced by WboxSockPoll below
         case W32FD_EVENTFD:
+        case W32FD_TIMERFD:
           EventfdPoll(p->fd, p->events, &p->revents);
           break;
         case W32FD_SPECIAL:
