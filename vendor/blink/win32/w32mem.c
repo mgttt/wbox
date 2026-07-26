@@ -254,15 +254,22 @@ static int FshareSameFile(const struct Fshare *a,
          a->file_lo == b->file_lo;
 }
 
-static void FshareSync(struct Fshares *src, struct Fshares *dst) {
+static void FshareSync(struct Fshares *src, struct Fshares *dst,
+                       uintptr_t rangelo, uintptr_t rangehi) {
   size_t i, j;
   for (i = 0; i < src->n; ++i) {
+    uintptr_t srclo, srchi;
     uint64_t srcoff, srcend;
     if (!src->p[i].used) continue;
+    srclo = src->p[i].lo > rangelo ? src->p[i].lo : rangelo;
+    srchi = src->p[i].hi < rangehi ? src->p[i].hi : rangehi;
+    if (srclo >= srchi) continue;
     if (src->p[i].off < 0) continue;
     srcoff = (uint64_t)src->p[i].off;
-    if (src->p[i].hi - src->p[i].lo > UINT64_MAX - srcoff) continue;
-    srcend = srcoff + (src->p[i].hi - src->p[i].lo);
+    if (srclo - src->p[i].lo > UINT64_MAX - srcoff) continue;
+    srcoff += srclo - src->p[i].lo;
+    if (srchi - srclo > UINT64_MAX - srcoff) continue;
+    srcend = srcoff + (srchi - srclo);
     for (j = 0; j < dst->n; ++j) {
       uint64_t dstoff, dstend, off, end;
       uintptr_t sa, da;
@@ -275,7 +282,7 @@ static void FshareSync(struct Fshares *src, struct Fshares *dst) {
       off = srcoff > dstoff ? srcoff : dstoff;
       end = srcend < dstend ? srcend : dstend;
       if (off >= end) continue;
-      sa = src->p[i].lo + (uintptr_t)(off - srcoff);
+      sa = srclo + (uintptr_t)(off - srcoff);
       da = dst->p[j].lo + (uintptr_t)(off - dstoff);
       while (off < end) {
         MEMORY_BASIC_INFORMATION smbi, dmbi;
@@ -366,6 +373,8 @@ static _Thread_local struct WboxWindow *g_win;
 #define g_hinttop (g_win->hinttop)
 
 static void SharedSync(struct WboxWindow *w);
+static void SharedSyncRangeLocked(struct WboxWindow *w, uintptr_t lo,
+                                  uintptr_t hi);
 void WboxMemSyncSharedToParent(void) {
   SharedSync(g_win);
 }
@@ -428,6 +437,27 @@ void WboxMemFinishUnmap(void) {
   }
 }
 
+// Caller holds w->lock. Pin and lock the snapshot parent, then publish only
+// the range that is about to lose its child Fshare metadata.
+static void SharedSyncRangeLocked(struct WboxWindow *w, uintptr_t lo,
+                                  uintptr_t hi) {
+  struct WboxWindow *p;
+  size_t i;
+  if (!w || !(p = w->sparent) || lo >= hi) return;
+  AcquireSRWLockShared(&g_windows_lock);
+  for (i = 0; i < WBOX_MAX_WINDOWS && g_windows[i] != p; ++i)
+    ;
+  if (i == WBOX_MAX_WINDOWS) {
+    ReleaseSRWLockShared(&g_windows_lock);
+    w->sparent = 0;
+    return;
+  }
+  AcquireSRWLockShared(&p->lock);
+  ReleaseSRWLockShared(&g_windows_lock);
+  FshareSync(&w->fshare, &p->fshare, lo, hi);
+  ReleaseSRWLockShared(&p->lock);
+}
+
 // Copy shared file mappings of window `w` back into its snapshot parent.
 // MAP_SHARED|MAP_ANONYMOUS uses an unlinked temporary file on Windows, so
 // it follows this same file-ID/offset path without separate metadata.
@@ -453,7 +483,7 @@ static void SharedSync(struct WboxWindow *w) {
   ReleaseSRWLockShared(&g_windows_lock);
   AcquireSRWLockShared(&w->lock);
   (void)FshareWriteback(&w->fshare, 0, UINTPTR_MAX);
-  FshareSync(&w->fshare, &p->fshare);
+  FshareSync(&w->fshare, &p->fshare, 0, UINTPTR_MAX);
   ReleaseSRWLockShared(&w->lock);
   ReleaseSRWLockShared(&p->lock);
 }
@@ -1064,6 +1094,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
         ReleaseSRWLockExclusive(&g_lock);
         return MAP_FAILED;
       }
+      SharedSyncRangeLocked(g_win, a, a + len);
       if (FshareRemove(&g_win->fshare, a, a + len) == -1) {
         ReleaseSRWLockExclusive(&g_lock);
         return MAP_FAILED;
@@ -1158,6 +1189,7 @@ int munmap(void *addr, size_t len) {
     ReleaseSRWLockExclusive(&g_lock);
     return -1;
   }
+  SharedSyncRangeLocked(g_win, a, a + len);
   if (FshareRemove(&g_win->fshare, a, a + len) == -1) {
     ReleaseSRWLockExclusive(&g_lock);
     return -1;
@@ -1215,6 +1247,10 @@ int msync(void *addr, size_t len, int flags) {
   AcquireSRWLockExclusive(&g_lock);
   rc = FshareWriteback(&g_win->fshare, (uintptr_t)addr,
                        (uintptr_t)addr + len);
+  if (rc == 0) {
+    SharedSyncRangeLocked(g_win, (uintptr_t)addr,
+                          (uintptr_t)addr + len);
+  }
   ReleaseSRWLockExclusive(&g_lock);
   return rc;
 }

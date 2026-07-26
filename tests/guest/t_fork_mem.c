@@ -175,6 +175,27 @@ int main(int argc, char **argv) {
     }
   }
 
+  T_BEGIN("fork/anon-shared-child-munmap-visible");
+  {
+    int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    T_ASSERT(sp != MAP_FAILED);
+    if (sp != MAP_FAILED) {
+      *sp = 41;
+      pid = fork();
+      T_ASSERT(pid >= 0);
+      if (pid == 0) {
+        *sp = 43;
+        _exit(munmap(sp, 4096) == 0 ? 0 : 1);
+      }
+      if (pid > 0) {
+        T_ASSERT(wait_status_ok(pid, 0));
+        T_ASSERT(*sp == 43);
+      }
+      T_ASSERT_OK(munmap(sp, 4096));
+    }
+  }
+
   T_BEGIN("fork/anon-shared-many-visible");
   {
     enum { MAP_COUNT = 160 };
@@ -207,6 +228,37 @@ int main(int argc, char **argv) {
       if (munmap(maps[i], 4096) == -1) cleaned = 0;
     }
     T_ASSERT(cleaned);
+  }
+
+  T_BEGIN("fork/file-shared-child-munmap-visible");
+  {
+    int fd = open("t_fork_mem_child_unmap.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      int initial = 47;
+      T_ASSERT_EQ(write(fd, &initial, sizeof(initial)), sizeof(initial));
+      int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(sp != MAP_FAILED);
+      if (sp != MAP_FAILED) {
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          *sp = 53;
+          _exit(munmap(sp, 4096) == 0 ? 0 : 1);
+        }
+        if (pid > 0) {
+          int ondisk = 0;
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(*sp == 53);
+          T_ASSERT_EQ(pread(fd, &ondisk, sizeof(ondisk), 0), sizeof(ondisk));
+          T_ASSERT(ondisk == 53);
+        }
+        T_ASSERT_OK(munmap(sp, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_child_unmap.bin"));
+    }
   }
 
   /* --- file-backed MAP_SHARED: child writes reach parent and disk --- */
@@ -285,6 +337,92 @@ int main(int argc, char **argv) {
       T_ASSERT(cleaned);
       T_ASSERT_OK(close(fd));
       T_ASSERT_OK(unlink("t_fork_mem_many.bin"));
+    }
+  }
+
+  T_BEGIN("fork/file-shared-msync-before-exit-visible");
+  {
+    int fd = open("t_fork_mem_msync_live.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    int ready[2] = {-1, -1};
+    int release[2] = {-1, -1};
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      int initial = 67;
+      T_ASSERT_EQ(write(fd, &initial, sizeof(initial)), sizeof(initial));
+      int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(sp != MAP_FAILED);
+      T_ASSERT_OK(pipe(ready));
+      T_ASSERT_OK(pipe(release));
+      if (sp != MAP_FAILED && ready[0] >= 0 && release[0] >= 0) {
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          char byte = 1;
+          close(ready[0]);
+          close(release[1]);
+          *sp = 71;
+          if (msync(sp, 4096, MS_SYNC) == -1 ||
+              write(ready[1], &byte, 1) != 1 ||
+              read(release[0], &byte, 1) != 1) {
+            _exit(1);
+          }
+          _exit(0);
+        }
+        if (pid > 0) {
+          char byte = 0;
+          close(ready[1]);
+          ready[1] = -1;
+          close(release[0]);
+          release[0] = -1;
+          T_ASSERT_EQ(read(ready[0], &byte, 1), 1);
+          T_ASSERT(*sp == 71);
+          T_ASSERT_EQ(write(release[1], &byte, 1), 1);
+          T_ASSERT(wait_status_ok(pid, 0));
+        }
+        T_ASSERT_OK(munmap(sp, 4096));
+      }
+      if (ready[0] >= 0) close(ready[0]);
+      if (ready[1] >= 0) close(ready[1]);
+      if (release[0] >= 0) close(release[0]);
+      if (release[1] >= 0) close(release[1]);
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_msync_live.bin"));
+    }
+  }
+
+  T_BEGIN("fork/file-shared-child-fixed-visible");
+  {
+    int fd = open("t_fork_mem_child_fixed.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      int initial = 59;
+      T_ASSERT_EQ(write(fd, &initial, sizeof(initial)), sizeof(initial));
+      int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(sp != MAP_FAILED);
+      if (sp != MAP_FAILED) {
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          *sp = 61;
+          int *replacement =
+              mmap(sp, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+          if (replacement != sp || *replacement != 0) _exit(1);
+          _exit(munmap(replacement, 4096) == 0 ? 0 : 2);
+        }
+        if (pid > 0) {
+          int ondisk = 0;
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(*sp == 61);
+          T_ASSERT_EQ(pread(fd, &ondisk, sizeof(ondisk), 0), sizeof(ondisk));
+          T_ASSERT(ondisk == 61);
+        }
+        T_ASSERT_OK(munmap(sp, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_child_fixed.bin"));
     }
   }
 
