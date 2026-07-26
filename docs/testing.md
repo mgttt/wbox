@@ -129,7 +129,7 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 ## 二、本地跑法
 
 ```bash
-# Rust 单测（Linux 173 项；Windows 另含 11 项真机 API/启动链测试）
+# Rust 单测（Linux 177 项；Windows 另含 11 项真机 API/启动链测试）
 cargo test --locked
 
 # Windows 代码编译门禁（Win32 专属模块只在 windows target 编译）
