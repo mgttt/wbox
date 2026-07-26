@@ -504,43 +504,9 @@ static DWORD W32Disposition(int flags) {
   return OPEN_EXISTING;
 }
 
+// mapping table centralized in w32errno.c (W32ErrFromHost)
 static int W32Err(void) {
-  DWORD e = GetLastError();
-  switch (e) {
-    case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND:
-      return ENOENT;
-    case ERROR_ACCESS_DENIED:
-      return EACCES;
-    case ERROR_ALREADY_EXISTS:
-    case ERROR_FILE_EXISTS:
-      return EEXIST;
-    case ERROR_INVALID_HANDLE:
-      return EBADF;
-    case ERROR_INVALID_PARAMETER:
-      return EINVAL;
-    case ERROR_NOT_ENOUGH_MEMORY:
-      return ENOMEM;
-    case ERROR_WRITE_PROTECT:
-      return EROFS;
-    case ERROR_SHARING_VIOLATION:
-    case ERROR_LOCK_VIOLATION:
-      return EACCES;
-    case ERROR_HANDLE_EOF:
-      return 0;
-    case ERROR_BROKEN_PIPE:
-      return EPIPE;
-    case ERROR_DISK_FULL:
-      return ENOSPC;
-    case ERROR_DIR_NOT_EMPTY:
-      return ENOTEMPTY;
-        case ERROR_DIRECTORY:
-      return ENOTDIR;
-    case ERROR_IS_SUBSTED:
-      return EEXIST;
-    default:
-      return EINVAL;
-  }
+  return W32ErrFromHost(GetLastError());
 }
 
 static int W32ToCrt(HANDLE h, int flags) {

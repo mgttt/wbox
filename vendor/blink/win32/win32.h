@@ -111,6 +111,12 @@ struct W32FdInfo {
 };
 int W32FdClassify(int fd, struct W32FdInfo *out);
 
+// ---------------------------------------------------------------- errno
+// Centralized host-error translation tables (w32errno.c).
+int W32ErrFromHost(unsigned long win32_err);  // GetLastError -> errno value
+int W32ErrFromWsa(int wsa_err);               // WSAGetLastError -> errno value
+int W32GaiErrFromWsa(int wsa_rc);             // ws getaddrinfo rc -> EAI_*
+
 // ---------------------------------------------------------------- wait
 // Shared wait primitive (w32fd.c): readiness for an array of CRT-namespace
 // fds with a millisecond timeout (-1 = infinite). poll()/ppoll() and

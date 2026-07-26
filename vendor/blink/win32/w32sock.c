@@ -270,47 +270,10 @@ static int WsaInit(void) {
 }
 
 // ---------------------------------------------------------------- errno map
+// mapping tables centralized in w32errno.c
 
 static int WsaErrno(void) {
-  switch (ws.WSAGetLastError()) {
-    case 10004: return EINTR;
-    case 10013: return EACCES;
-    case 10014: return EFAULT;
-    case 10022: return EINVAL;
-    case 10024: return EMFILE;
-    case 10035: return EAGAIN;      // WSAEWOULDBLOCK
-    case 10036: return EINPROGRESS;
-    case 10037: return EALREADY;
-    case 10038: return ENOTSOCK;
-    case 10039: return EDESTADDRREQ;
-    case 10040: return EMSGSIZE;
-    case 10041: return EPROTOTYPE;
-    case 10042: return ENOPROTOOPT;
-    case 10043: return EPROTONOSUPPORT;
-    case 10044: return ESOCKTNOSUPPORT;
-    case 10045: return EOPNOTSUPP;
-    case 10046: return EPFNOSUPPORT;
-    case 10047: return EAFNOSUPPORT;
-    case 10048: return EADDRINUSE;
-    case 10049: return EADDRNOTAVAIL;
-    case 10050: return ENETDOWN;
-    case 10051: return ENETUNREACH;
-    case 10052: return ENETRESET;
-    case 10053: return ECONNABORTED;
-    case 10054: return ECONNRESET;
-    case 10055: return ENOBUFS;
-    case 10056: return EISCONN;
-    case 10057: return ENOTCONN;
-    case 10058: return EPIPE;       // WSAESHUTDOWN
-    case 10060: return ETIMEDOUT;
-    case 10061: return ECONNREFUSED;
-    case 10065: return EHOSTUNREACH;
-    case 11001: return ENOENT;      // WSAHOST_NOT_FOUND
-    case 11002: return EAGAIN;      // WSATRY_AGAIN
-    case 11003: return EIO;         // WSANO_RECOVERY
-    case 11004: return ENOENT;      // WSANO_DATA
-    default: return EINVAL;
-  }
+  return W32ErrFromWsa(ws.WSAGetLastError());
 }
 
 static int WsaRc(int rc) {
@@ -1279,14 +1242,10 @@ int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
 
 int h_errno;
 
+// winsock returns WSATRY_AGAIN/WSAHOST_NOT_FOUND/... positive codes;
+// table centralized in w32errno.c
 static int GaiErr(int wsrc) {
-  // winsock returns WSATRY_AGAIN/WSAHOST_NOT_FOUND/... positive codes
-  switch (wsrc) {
-    case 11002: return EAI_AGAIN;
-    case 11001:
-    case 11004: return EAI_NONAME;
-    default: return EAI_FAIL;
-  }
+  return W32GaiErrFromWsa(wsrc);
 }
 
 int getaddrinfo(const char *node, const char *service,

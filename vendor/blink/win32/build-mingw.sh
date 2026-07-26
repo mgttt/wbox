@@ -60,7 +60,7 @@ if [ "$JIT" = 1 ]; then
 else
   CFLAGS="$CFLAGS -DDISABLE_JIT"
 fi
-SRCS="$SRCS win32/w32mem.c win32/w32fd.c win32/w32proc.c win32/w32sig.c win32/w32stubs.c win32/w32sock.c"
+SRCS="$SRCS win32/w32mem.c win32/w32fd.c win32/w32proc.c win32/w32sig.c win32/w32stubs.c win32/w32sock.c win32/w32errno.c"
 # feat/net: w32sock.c provides the real socket/epoll/termios symbols; the
 # L1 stubs still living in w32stubs.c are renamed away (dead code) until the
 # merge deletes them there. Keep this list in sync with w32sock.c's header.
