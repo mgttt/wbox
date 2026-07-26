@@ -4,7 +4,7 @@
 
 **定位**：面向**未启用硬件虚拟化**（无 VT-x/AMD-V → 无 WSL2、无 Hyper-V 隔离）的 Windows 10/11 / Server 环境。单 exe、免安装、默认**不需要管理员权限**、不需要启用任何 Windows 可选功能。它不是 Docker 替代品——没有镜像分层、没有内核命名空间，只做"进程级容器"。
 
-> **测试声明**：本项目在 Linux 沙箱中完成开发，已通过 `cargo check --target x86_64-pc-windows-msvc` 编译期验证；**尚未在 Windows 真机上完成功能测试**，使用前请先在真机验证（尤其 Job 嵌套、AppContainer profile 在不同版本上的行为差异）。
+> **测试声明**：本项目在 Linux 沙箱中完成开发，已通过 `cargo check --target x86_64-pc-windows-msvc` 编译期验证。**Windows 真机冒烟已通过**：Windows Server 2022 上 `wbox run` 的 AppContainer profile 创建 + Job Object 分配 + 子进程退出码转发全链绿（`write.exe` 等系统自带程序 rc=0）；Job 嵌套、不同 Windows 版本上的 profile 行为差异仍需用户在目标环境复测。
 
 ## 构建
 
