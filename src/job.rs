@@ -43,10 +43,7 @@ impl Job {
         let h = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if h.is_null() {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::new(
-                ErrKind::Job,
-                anyhow::anyhow!("CreateJobObjectW 失败，GetLastError={}", err),
-            ));
+            return Err(crate::error::WboxError::job(format!("CreateJobObjectW 失败，GetLastError={}", err)));
         }
         let job = Job {
             handle: OwnedHandle(h),
@@ -89,13 +86,10 @@ impl Job {
         };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::new(
-                ErrKind::Job,
-                anyhow::anyhow!(
+            return Err(crate::error::WboxError::job(format!(
                     "SetInformationJobObject(ExtendedLimit) 失败，GetLastError={}（可能父进程所在 Job 不允许嵌套限制）",
                     err
-                ),
-            ));
+                )));
         }
 
         // ---- CPU rate control（硬性上限，单位 = 百分比 × 100）----
@@ -117,13 +111,10 @@ impl Job {
             };
             if ok == 0 {
                 let err = unsafe { GetLastError() };
-                return Err(crate::error::WboxError::new(
-                    ErrKind::Job,
-                    anyhow::anyhow!(
+                return Err(crate::error::WboxError::job(format!(
                         "SetInformationJobObject(CpuRateControl) 失败，GetLastError={}（需要 Windows 8+）",
                         err
-                    ),
-                ));
+                    )));
             }
         }
         Ok(())
@@ -135,13 +126,10 @@ impl Job {
         let ok = unsafe { AssignProcessToJobObject(self.handle.raw(), process) };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::new(
-                ErrKind::Job,
-                anyhow::anyhow!(
+            return Err(crate::error::WboxError::job(format!(
                     "AssignProcessToJobObject 失败，GetLastError={}（wbox 可能已运行在不兼容的 Job 中）",
                     err
-                ),
-            ));
+                )));
         }
         Ok(())
     }

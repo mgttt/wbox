@@ -76,10 +76,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
     let ok = unsafe { ConvertStringSidToSidW(sid_str.as_ptr(), &mut sid) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(WboxError::new(
-            ErrKind::Registry,
-            anyhow::anyhow!("ConvertStringSidToSidW({}) 失败，GetLastError={}", ALL_APP_PACKAGES_SID, err),
-        ));
+        return Err(WboxError::registry(format!("ConvertStringSidToSidW({}) 失败，GetLastError={}", ALL_APP_PACKAGES_SID, err)));
     }
     let _sid_guard = LocalGuard(sid as HLOCAL);
 
@@ -102,10 +99,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
         )
     };
     if ret != 0 {
-        return Err(WboxError::new(
-            ErrKind::Registry,
-            anyhow::anyhow!("GetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret),
-        ));
+        return Err(WboxError::registry(format!("GetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret)));
     }
     let _sd_guard = LocalGuard(sd as HLOCAL);
 
@@ -134,10 +128,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
     // new_dacl 为有效输出指针，成功后由 LocalFree 释放。
     let ret = unsafe { SetEntriesInAclW(1, &mut ea, old_dacl, &mut new_dacl) };
     if ret != 0 {
-        return Err(WboxError::new(
-            ErrKind::Registry,
-            anyhow::anyhow!("SetEntriesInAclW('{}') 失败，错误码={}", path.display(), ret),
-        ));
+        return Err(WboxError::registry(format!("SetEntriesInAclW('{}') 失败，错误码={}", path.display(), ret)));
     }
     let _acl_guard = LocalGuard(new_dacl as HLOCAL);
 
@@ -154,10 +145,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
         )
     };
     if ret != 0 {
-        return Err(WboxError::new(
-            ErrKind::Registry,
-            anyhow::anyhow!("SetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret),
-        ));
+        return Err(WboxError::registry(format!("SetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret)));
     }
     Ok(())
 }

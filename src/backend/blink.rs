@@ -12,7 +12,7 @@
 //! "Linux 后端尚未就绪"的明确错误（而不是含糊的"文件不存在"）。
 
 use super::{Backend, Prepared, RunSpec};
-use crate::error::{ErrKind, Result, WboxError};
+use crate::error::{Result, WboxError};
 use std::path::{Path, PathBuf};
 
 /// Linux 模拟器二进制文件名。
@@ -57,14 +57,11 @@ fn locate_linux_exe() -> Result<(PathBuf, &'static str)> {
 
 /// 统一的"后端未就绪"错误（退出码 4 = 进程创建类，语义最接近）。
 fn not_ready_error(detail: String) -> WboxError {
-    WboxError::new(
-        ErrKind::Spawn,
-        anyhow::anyhow!(
+    WboxError::spawn(format!(
             "Linux 后端尚未就绪：{}。wbox-linux（blink Win32 移植）仍在开发中，\
              目前 `wbox run` 只能直接运行 Windows 原生程序",
             detail
-        ),
-    )
+        ))
 }
 
 /// 公共 DNS（阿里公共 DNS）。rootfs 内缺失 /etc/resolv.conf 时注入，
@@ -112,9 +109,9 @@ fn build_blink_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
 impl Backend for BlinkBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
         if spec.cmd.is_empty() {
-            return Err(WboxError::args(
+            return Err(WboxError::args(format!(
                 "镜像未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
-            ));
+            )));
         }
         let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
@@ -182,10 +179,7 @@ impl Backend for BlinkBackend {
 
     #[cfg(not(windows))]
     fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
-        Err(WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）"),
-        ))
+        Err(WboxError::spawn("Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）"))
     }
 }
 

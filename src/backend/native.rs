@@ -6,7 +6,7 @@
 //! 也是 Windows 原生程序，经同一条隔离链路启动即成"双层隔离"。
 
 use super::{Backend, Prepared, RunSpec};
-use crate::error::{ErrKind, Result, WboxError};
+use crate::error::{Result, WboxError};
 use crate::{job, sandbox, token};
 
 /// Windows 原生进程后端（无状态）。
@@ -127,5 +127,5 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
 // 供 main.rs 在 verbose 等处复用的错误构造辅助（保持 ErrKind 使用集中）。
 #[allow(dead_code)]
 pub(crate) fn spawn_err(msg: impl Into<String>) -> WboxError {
-    WboxError::new(ErrKind::Spawn, anyhow::anyhow!(msg.into()))
+    WboxError::spawn(msg.into())
 }

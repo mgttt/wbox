@@ -262,7 +262,7 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> error::Result<u32> {
     let workdir = match &opts.workdir {
         Some(d) => std::path::PathBuf::from(d),
         None => std::env::current_dir()
-            .map_err(|e| WboxError::new(error::ErrKind::Args, anyhow::anyhow!(e).context("获取当前目录失败")))?,
+            .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
     let spec = make_spec(opts, workdir, cmd, Vec::new());
     let backend = backend::NativeBackend;
