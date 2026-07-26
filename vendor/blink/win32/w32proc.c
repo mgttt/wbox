@@ -530,17 +530,21 @@ pid_t vfork(void) {
   return -1;
 }
 
-int execve(const char *path, char *const *argv, char *const *envp) {
+// exec 族用 W32* 内部名而非 POSIX 名：UCRT/msvcrt 的导入库同样定义了
+// execve/execv/execvp（libapi-ms-win-crt-process-*），与本文件的定义在
+// 链接期撞成 "multiple definition"。compat/unistd.h 把 POSIX 名 #define
+// 到这里的 W32* 上，故 blink 侧调用点无需改动。
+int W32Execve(const char *path, char *const *argv, char *const *envp) {
   errno = ENOSYS;  // guest execve is rebuilt in-process by blink itself
   return -1;
 }
 
-int execv(const char *path, char *const *argv) {
-  return execve(path, argv, NULL);
+int W32Execv(const char *path, char *const *argv) {
+  return W32Execve(path, argv, NULL);
 }
 
-int execvp(const char *path, char *const *argv) {
-  return execve(path, argv, NULL);
+int W32Execvp(const char *path, char *const *argv) {
+  return W32Execve(path, argv, NULL);
 }
 
 int fexecve(int fd, char *const *argv, char *const *envp) {

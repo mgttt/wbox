@@ -47,9 +47,23 @@ int pipe(int[2]);
 int pipe2(int[2], int);
 pid_t fork(void);
 pid_t vfork(void);
-int execve(const char *, char *const *, char *const *);
-int execv(const char *, char *const *);
-int execvp(const char *, char *const *);
+/* exec 族：CRT 导入库（libapi-ms-win-crt-process-*）也定义 execve/execv/
+   execvp，w32proc.c 若用同名定义会在链接期报 multiple definition。故实现
+   取 W32* 内部名，这里把 POSIX 名重定向过去——调用方（blink/hostfs.c、
+   blink/demangle.c 等）保持写 execve()/execv() 不变。
+
+   必须先把 <process.h> 拉进来再定义下面的宏：它用 _CRTIMP（dllimport）
+   声明 execv/execve，若在宏生效之后才被间接引入，那份声明会一起被改名成
+   `__declspec(dllimport) W32Execve`，调用点转而去找 __imp_W32Execve 而报
+   undefined reference（blink/hostfs.c、blink/demangle.c 实测踩到）。
+   提前引入后其头保护符会阻止后续重复解析。 */
+#include <process.h>
+int W32Execve(const char *, char *const *, char *const *);
+int W32Execv(const char *, char *const *);
+int W32Execvp(const char *, char *const *);
+#define execve W32Execve
+#define execv W32Execv
+#define execvp W32Execvp
 int execlp(const char *, const char *, ...);
 int fexecve(int, char *const *, char *const *);
 int link(const char *, const char *);
