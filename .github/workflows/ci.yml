@@ -173,7 +173,12 @@ jobs:
           name: wbox-linux-test-matrix
           path: matrix.log
           retention-days: 30
+      # always() 让 wbox-linux.exe 产物在 matrix 步骤失败时也上传，
+      # 便于本地拉下来诊断（rc=127 之类的问题需要实机 exe 才能复现）。
+      # 同时 guest-tests job 也声明要从本 artifact 取，但当前路径是
+      # "build-wbox-linux 内部 build" 的产物，guest-tests 走自己 SKIP 分支。
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: wbox-linux.exe
           path: vendor/blink/build-win32/wbox-linux.exe
