@@ -194,18 +194,19 @@ mod tests {
     #[test]
     fn prepare_errors_when_exe_missing() {
         // WBOX_LINUX 指向不存在的路径：必须报"Linux 后端尚未就绪"
-        std::env::set_var(LINUX_EXE_ENV, "/nonexistent/wbox-linux.exe");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set(LINUX_EXE_ENV, "/nonexistent/wbox-linux.exe");
         let err = BlinkBackend.prepare(&spec(&["bash"])).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("Linux 后端尚未就绪"), "{}", msg);
-        std::env::remove_var(LINUX_EXE_ENV);
     }
 
     #[test]
     fn prepare_builds_command_and_blink_prefix() {
         // WBOX_LINUX 指向已存在文件（用 /bin/true 或当前 exe 代替 exe）
         let fake = std::env::current_exe().unwrap();
-        std::env::set_var(LINUX_EXE_ENV, &fake);
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set(LINUX_EXE_ENV, &fake);
         let p = BlinkBackend.prepare(&spec(&["bash", "-l"])).unwrap();
         assert_eq!(p.cmd[0], fake.to_string_lossy());
         assert_eq!(&p.cmd[1..], &["bash", "-l"]);
@@ -216,7 +217,6 @@ mod tests {
             .any(|(k, v)| k == BLINK_PREFIX_ENV && v == &std::env::temp_dir().to_string_lossy()));
         // 镜像 Env 保留
         assert!(p.env.iter().any(|(k, _)| k == "PATH"));
-        std::env::remove_var(LINUX_EXE_ENV);
     }
 
     #[test]
@@ -224,7 +224,8 @@ mod tests {
         // H2：镜像 Env 里的 BLINK_PREFIX（如恶意值 "/"）不得生效，
         // wbox 强制覆盖为 rootfs。
         let fake = std::env::current_exe().unwrap();
-        std::env::set_var(LINUX_EXE_ENV, &fake);
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set(LINUX_EXE_ENV, &fake);
         let mut s = spec(&["bash"]);
         s.env.push((BLINK_PREFIX_ENV.to_string(), "/".to_string()));
         let p = BlinkBackend.prepare(&s).unwrap();
@@ -239,7 +240,6 @@ mod tests {
             vec![std::env::temp_dir().to_string_lossy().as_ref()],
             "BLINK_PREFIX 必须唯一且强制为 rootfs"
         );
-        std::env::remove_var(LINUX_EXE_ENV);
     }
 
     #[test]
@@ -247,8 +247,9 @@ mod tests {
         // H2/H6：镜像 Env 的 WBOX_* 隔离旋钮被丢弃；宿主环境（含机密）
         // 默认不透传给子进程。
         let fake = std::env::current_exe().unwrap();
-        std::env::set_var(LINUX_EXE_ENV, &fake);
-        std::env::set_var("WBOX_REGISTRY_PASS", "hunter2");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set(LINUX_EXE_ENV, &fake);
+        g.set("WBOX_REGISTRY_PASS", "hunter2");
         let mut s = spec(&["bash"]);
         s.env.push(("WBOX_ROOT".to_string(), r"C:\".to_string()));
         s.env.push(("WBOX_VA_BITS".to_string(), "43".to_string()));
@@ -258,8 +259,6 @@ mod tests {
         assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
         assert!(!p.env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
         assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
-        std::env::remove_var(LINUX_EXE_ENV);
-        std::env::remove_var("WBOX_REGISTRY_PASS");
     }
 
     #[test]

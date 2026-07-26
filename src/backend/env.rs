@@ -173,14 +173,13 @@ mod tests {
     #[test]
     fn child_env_defaults_to_whitelist_only() {
         // 宿主机密不透传
-        std::env::set_var("WBOX_REGISTRY_PASS", "hunter2");
-        std::env::set_var("MY_SECRET_HOST_VAR", "x");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("WBOX_REGISTRY_PASS", "hunter2");
+        g.set("MY_SECRET_HOST_VAR", "x");
         let env = build_child_env(&[], &[], false);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
         assert!(!env.iter().any(|(k, _)| k == "MY_SECRET_HOST_VAR"));
         assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
-        std::env::remove_var("WBOX_REGISTRY_PASS");
-        std::env::remove_var("MY_SECRET_HOST_VAR");
     }
 
     #[test]
@@ -202,9 +201,10 @@ mod tests {
 
     #[test]
     fn pass_all_still_filters_reserved_and_applies_forced() {
-        std::env::set_var("WBOX_REGISTRY_PASS", "hunter2");
-        std::env::set_var("BLINK_PREFIX", "/evil");
-        std::env::set_var("HOST_OK", "1");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("WBOX_REGISTRY_PASS", "hunter2");
+        g.set("BLINK_PREFIX", "/evil");
+        g.set("HOST_OK", "1");
         let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
         let env = build_child_env(&[], &forced, true);
         assert!(env.iter().any(|(k, _)| k == "HOST_OK"));
@@ -223,9 +223,6 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("/rootfs")
         );
-        std::env::remove_var("WBOX_REGISTRY_PASS");
-        std::env::remove_var("BLINK_PREFIX");
-        std::env::remove_var("HOST_OK");
     }
 
     #[test]
@@ -267,38 +264,36 @@ mod tests {
     #[test]
     fn whitelist_alias_dedup_keeps_first_with_value() {
         // SystemRoot 与 SYSTEMROOT 同时存在时只保留第一个取到值的别名
-        std::env::set_var("SystemRoot", r"C:\Windows");
-        std::env::set_var("SYSTEMROOT", r"C:\OtherWindows");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("SystemRoot", r"C:\Windows");
+        g.set("SYSTEMROOT", r"C:\OtherWindows");
         let env = build_child_env(&[], &[], false);
         let matches: Vec<&(String, String)> = env
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
             .collect();
         assert_eq!(matches.len(), 1, "大小写别名必须去重：{:?}", matches);
-        std::env::remove_var("SYSTEMROOT");
     }
 
     #[test]
     fn whitelist_systemroot_fallback_injected() {
         // 宿主无 SystemRoot 时注入 C:\Windows 兜底
-        let saved = std::env::var_os("SystemRoot");
-        std::env::remove_var("SystemRoot");
-        std::env::remove_var("SYSTEMROOT");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.remove("SystemRoot");
+        g.remove("SYSTEMROOT");
         let env = build_child_env(&[], &[], false);
         let v = env
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
             .map(|(_, v)| v.as_str());
         assert_eq!(v, Some(r"C:\Windows"));
-        if let Some(s) = saved {
-            std::env::set_var("SystemRoot", s);
-        }
     }
 
     #[test]
     fn image_env_overrides_whitelist_case_insensitive() {
         // Windows 语义：大小写不敏感覆盖；镜像的 "path" 覆盖白名单的 "PATH"
-        std::env::set_var("PATH", "/host/bin");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("PATH", "/host/bin");
         let img = vec![("path".to_string(), "/img/bin".to_string())];
         let env = build_child_env(&img, &[], false);
         let paths: Vec<&str> = env
@@ -347,8 +342,9 @@ mod tests {
     fn pass_all_includes_host_but_reserved_stripped_and_no_systemroot_fallback_needed() {
         // pass_all 分支：不注入 SystemRoot 兜底逻辑（直通宿主全集），
         // 保留键 stripped；forced 仍最终覆盖。
-        std::env::set_var("WBOX_H2_KNOB", "1");
-        std::env::set_var("PASS_ALL_MARKER", "yes");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("WBOX_H2_KNOB", "1");
+        g.set("PASS_ALL_MARKER", "yes");
         let forced = vec![("PASS_ALL_MARKER".to_string(), "overridden".to_string())];
         let env = build_child_env(&[], &forced, true);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_H2_KNOB"));
@@ -358,7 +354,5 @@ mod tests {
                 .map(|(_, v)| v.as_str()),
             Some("overridden")
         );
-        std::env::remove_var("WBOX_H2_KNOB");
-        std::env::remove_var("PASS_ALL_MARKER");
     }
 }

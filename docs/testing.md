@@ -26,6 +26,20 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   （`eprintln!("SKIP：…")` 后返回 Ok）；严格失败场景一律用本地构造输入覆盖。
 - 临时目录约定：用 `std::process::id()` + tag 拼唯一目录，测试末清理；
   需要 HOME 的用例经 `TempHome` 脚手架保存/恢复环境变量。
+- **环境变量约定（硬性）**：`cargo test` 默认在同一进程内并行跑用例，而
+  `std::env::set_var/remove_var` 改的是**进程级**全局状态——两个用例各自设
+  `HOME`／`PATH`／`WBOX_LINUX` 必然互踩（曾导致 `integration_*` 与
+  `image_rm_*` 随机失败：一方读到另一方的临时 HOME，甚至读到一半被对方的
+  清理删掉）。因此：
+  - 测试中**禁止**直接调用 `std::env::set_var/remove_var`，一律经
+    `crate::testenv::EnvGuard`——构造时取全局环境锁（改环境的用例之间自动
+    串行），Drop 时把每个触碰过的键还原到用例开始前的值（含"原本不存在→删除"），
+    杜绝跨用例泄漏；
+  - 需要临时 HOME 的用例用 `cli::TempHome`（内部已持有一把 `EnvGuard`）；
+    若还需要别的变量，经 `TempHome::env()` 借出**同一把**守卫，
+    不要另起 `EnvGuard`（同线程二次加锁会自死锁）；
+  - 回归自查：`grep -rn "std::env::set_var\|std::env::remove_var" src/ |
+    grep -v src/testenv.rs` 应为空。
 
 ### 2. guest 测试（`tests/`）
 
