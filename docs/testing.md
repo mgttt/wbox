@@ -76,6 +76,13 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 - 触发收窄：矩阵脚本无子集开关，故在 workflow 层收窄——**PR 只跑核心组**
   （wbox-linux.exe 构建 + 冒烟），完整矩阵留给 push main / tag / nightly /
   手动触发。
+- CI 里两个环境开关（本地跑不设，全量执行）：
+  - `WBOX_GUEST_SKIP=1`——F 组交给专职的 `guest-tests` job，避免重复；
+  - `WBOX_MATRIX_NET_SKIP=1`——D 组从 guest 内 wget 公网，runner 到该站点的
+    可达性不是被测对象，一次抖动就会弄红发布门禁。这与 `smoke-windows`
+    的 `image pull`（registry 不可达记 `::warning::` 标黄不红）是同一条既有
+    惯例。guest 侧 socket/epoll 语义不因此失去覆盖：`t_net_epoll` /
+    `t_net_sockopt` 走本地 loopback，由 `guest-tests` 执行。
 
 ## 二、本地跑法
 
