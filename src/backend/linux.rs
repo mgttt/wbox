@@ -178,6 +178,7 @@ mod tests {
     }
 
     /// 命令不存在时应给出可读错误（而非 panic 或静默 rc）。
+    #[cfg(target_os = "linux")]
     #[test]
     fn spawn_reports_missing_command() {
         let rootfs = temp_rootfs("nocmd");
@@ -186,6 +187,18 @@ mod tests {
         let err = LinuxNativeBackend.spawn(&s, &p).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("启动容器进程"), "{}", msg);
+        let _ = std::fs::remove_dir_all(&rootfs);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn spawn_rejects_non_linux_host() {
+        let rootfs = temp_rootfs("wrong-host");
+        let s = spec(&rootfs, &["/bin/true"], vec![]);
+        let p = LinuxNativeBackend.prepare(&s).unwrap();
+        let err = LinuxNativeBackend.spawn(&s, &p).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("只能在 Linux 宿主上执行"), "{}", msg);
         let _ = std::fs::remove_dir_all(&rootfs);
     }
 
