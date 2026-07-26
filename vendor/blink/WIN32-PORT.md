@@ -70,15 +70,22 @@ vfs}.h、arpa/、net/、netinet/、netdb.h、poll.h、grp.h、limits.h、stdio.h
 stdlib.h、string.h、time.h。blink 全部源码不经修改（除下述 _WIN32 小补丁）
 即可通过编译。
 
-### 1.2 运行时模块（win32/，~2600 行）
+### 1.2 运行时模块（win32/，~6300 行）
 
 | 模块 | 职责 |
 |---|---|
 | `w32mem.c` | guest 地址空间：启动时 ReserveVirtual 保留整块 VA 窗口并回写 `kSkew`；mmap/munmap/mprotect/mremap → VirtualAlloc/Free/Protect 自管分配器，模拟 blink 依赖的 MAP_FIXED / 部分 munmap 语义；文件映射用 pread 填充（MAP_PRIVATE 拷贝语义） |
-| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；`W32FillStat` 统一组装 struct stat |
-| `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；fork/execve/wait 族 ENOSYS（见 §4） |
+| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe 三类语义内聚） |
+| `w32sock.c` | 网络/epoll/termios 真实现（feat/net）：WSA 动态装载、socket 族、epoll 兴趣表（`epoll_wait` 走 `W32WaitFds`）、tcgetattr/tcsetattr 控制台模式 |
+| `w32errno.c` | 宿主错误→Linux errno 映射表集中：`W32ErrFromHost`（GetLastError）、`W32ErrFromWsa`（WSAGetLastError）、`W32GaiErrFromWsa`（EAI_*） |
+| `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；快照 fork 的虚拟 pid 表（`W32Child*`）；fork/execve/wait 族见 §4/§7.4 |
 | `w32sig.c` | 信号：sigaction/sigprocmask 记录型 stub（guest 信号语义在 blink 内部模拟）；VEH 把宿主同步异常转诊断 abort；Ctrl+C/Close 控制台事件终止进程 |
-| `w32stubs.c` | 杂项：dirent（opendir/fdopendir/readdir/rewinddir/seekdir/telldir）、termios 哑控制台（cooked/raw 切换）、socket 族 ENOSYS、其余长尾 stub |
+| `w32stubs.c` | 杂项：dirent（opendir/fdopendir/readdir/rewinddir/seekdir/telldir）、termios 辅助（cfmakeraw/cfset*speed 等）、TUI 桩、其余长尾 stub |
+
+跨层 fd 命名空间（guest fd → per-System Fd 表 → VFS fd → CRT/host
+HANDLE）在 syscall.c 侧由 `W32ResolveFd(system, guestfd, want_crtfd)`
+单一入口翻译；`win32.h` 按 mem/sig/proc/fd/sock/wait/errno 分组声明
+上述内部接口。
 
 ## 2. 三个运行时崩溃的根因与修复
 
