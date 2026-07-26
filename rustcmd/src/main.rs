@@ -33,7 +33,7 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
         GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        LoadCursorW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW,
+        IsIconic, LoadCursorW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
         TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW,
@@ -378,16 +378,14 @@ impl TerminalTab {
         title: Option<String>,
         command_line: Vec<String>,
         window: HWND,
+        initial_size: TerminalSize,
     ) -> Result<Self> {
         let program = command_line.first().cloned().unwrap_or_else(|| {
             env::var("COMSPEC")
                 .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned())
         });
         let mut command = ChildCommand::new(&program)
-            .size(TerminalSize {
-                rows: INITIAL_ROWS,
-                cols: INITIAL_COLS,
-            })
+            .size(initial_size)
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor")
             .env("TERM_PROGRAM", "RustCmd");
@@ -466,13 +464,13 @@ impl TerminalTab {
             command_name,
             process_id,
             composer: String::new(),
-            parser: vt100::Parser::new(INITIAL_ROWS, INITIAL_COLS, SCROLLBACK_LINES),
+            parser: vt100::Parser::new(initial_size.rows, initial_size.cols, SCROLLBACK_LINES),
             receiver,
             master,
             child,
             exited: None,
             error: None,
-            last_size: (INITIAL_ROWS, INITIAL_COLS),
+            last_size: (initial_size.rows, initial_size.cols),
             input_bytes: 0,
             output_bytes: 0,
             raw_output: Vec::new(),
@@ -664,7 +662,20 @@ impl AppState {
         let index = (0..)
             .find(|candidate| !self.tabs.iter().any(|tab| tab.index == *candidate))
             .unwrap_or(self.tabs.len() as u32);
-        let tab = TerminalTab::spawn(id, index, title, command, self.window)?;
+        let (rows, cols) = self
+            .active_position()
+            .and_then(|position| self.tabs.get(position))
+            .or_else(|| self.tabs.first())
+            .map(|tab| tab.last_size)
+            .unwrap_or((INITIAL_ROWS, INITIAL_COLS));
+        let tab = TerminalTab::spawn(
+            id,
+            index,
+            title,
+            command,
+            self.window,
+            TerminalSize { rows, cols },
+        )?;
         self.tabs.push(tab);
         self.tabs.sort_by_key(|tab| tab.index);
         if select {
@@ -1098,6 +1109,9 @@ impl AppState {
     }
 
     fn paint_terminal(&mut self, device: HDC, position: usize, client: &RECT) {
+        if unsafe { IsIconic(self.window) } != 0 {
+            return;
+        }
         let mut metrics: TEXTMETRICW = unsafe { mem::zeroed() };
         unsafe { GetTextMetricsW(device, &mut metrics) };
         let mut extent: SIZE = unsafe { mem::zeroed() };

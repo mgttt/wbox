@@ -73,6 +73,10 @@ The product must be usable in two equal ways:
 - [x] RMUX Byobu F3/F4 changes update the active marker immediately.
 - [x] RMUX Byobu status labels can be clicked in RustCmd to activate a window,
   including the RMUX 0.9.1 Windows mouse-input compatibility bridge.
+- [x] New ConPTY tabs inherit the current terminal grid size so Windows RMUX
+  places its status rows against the bottom edge on first attach.
+- [x] Minimizing the GUI does not shrink active ConPTY tabs to the iconic
+  window rectangle.
 - [ ] Keyboard, mouse, resize, ANSI color, CJK, and long-output behavior have
   repeatable regression coverage.
 - [ ] High-throughput terminal rendering is visually verified with no flicker.
