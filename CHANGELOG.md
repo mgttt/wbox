@@ -6,6 +6,47 @@
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 里程碑以功能线回溯标注（项目以 trunk 滚动开发，tag 自 v1.0-rc 起）。
 
+## [未发布] —— 真机 CI 首次打通（2026-07-26）
+
+**里程碑：`build-wbox-linux` 在真 Windows 上首次转绿。** 此前该 job 从仓库
+有 CI 起从未成功过；rc2 的"终审通过"实为 wine 单一环境下的结论，真机链路
+的六层缺陷此轮被逐层剥开并修复。
+
+### Fixed
+
+- **fork 永久挂死（W1，真机与 wine 9.0 均复现）**：`WboxMemSnapshotWindow`
+  对每个区间先做整段 `memcpy`，而区间只验证过 `MEM_COMMIT`——**已提交 ≠
+  可读**，撞上 `PAGE_NOACCESS`（guest PROT_NONE）页即触发访问违例；fork 期间
+  `m->canhalt` 为假，故障指令被反复重试 → 永久挂死。改为按区域拷贝并跳过
+  不可读页（保护属性仍在拷贝后再套）。修复后矩阵 **PASS=14 → PASS=35**，
+  全部 fork 依赖项转绿。
+- **堆损坏**：`posix_memalign` 用 `_aligned_malloc` 分配却被 `free()` 释放
+  （0xC0000374，被 msys2 归一成 rc=127，长期伪装成"退出码转发失效"）。
+- **`CreateAppContainerProfile` E_INVALIDARG**：`pszDescription` 必填却传了
+  NULL——隔离主路径在真 Windows 上从来没跑通过。
+- **`wbox-linux.exe` 依赖 libwinpthread-1.dll**：脱离 msys2 环境即
+  `STATUS_DLL_NOT_FOUND`，链接改 `-static`，产物才真正符合 portable 定位。
+- **构建链**：`SSIZE_MAX` 缺失（mingw 不提供，zig/musl 头有，故纯 zig 构建
+  看不到）、exec 族与 CRT 符号冲突（改 `W32Exec*` + compat 头重定向）、
+  响应文件路径被转义吃掉反斜杠（`cygpath -m` + `printf`）、并行编译静默
+  吞掉编译错误（逐 pid 收状态）。
+
+### Changed
+
+- CI：六个门禁 job 全部加 `timeout-minutes`（此前无上界，最坏空烧 6 小时）；
+  矩阵加单项超时（挂死记 `rc=124` 而非拖死 job）；`guest-tests` 接为真门禁
+  （取 artifact + 基线判定）。
+- 版本号收敛到 `Cargo.toml` 单一来源（此前 Cargo.toml / 构建脚本 / CHANGELOG
+  三处互不相同，而 issue 模板要求用户附 `--version` 输出）。
+
+### Notes
+
+- **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
+  在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils
+  而"通过"——即历史基线含**假绿**。已改为 `./busybox <applet>`。
+- 新增本地 wine 复现环境说明（docs/DEVELOPMENT.md §3.1）。W1 在没有本地
+  复现前，8 条静态假设全部落空；装上 wine 后迭代从 10 分钟变成几十秒。
+
 ## [v1.0.0-rc2] —— 终审通过（2026-07-26）
 
 合并 win32 层抽象重构（R1-R5）与 Rust 重构（错误统一 / backend 下沉 /
