@@ -84,6 +84,27 @@ pub trait Backend {
 
 // ---- 后端共享的 prepare 辅助（native / blink 公共逻辑下沉）----
 
+/// `CreateAppContainerProfile` 对 `pszAppContainerName` 的长度上限（字符）。
+/// 见 Win32 文档；超限只会得到 E_INVALIDARG，与其他参数错误无法区分。
+pub(crate) const MAX_CONTAINER_NAME_CHARS: usize = 64;
+
+/// 校验容器名（= AppContainer profile 名）。
+///
+/// 放在跨平台层而非 `token.rs`：一来两个后端最终都经 AppContainer 启动，
+/// 约束一致；二来 `token.rs` 是 `cfg(windows)`，规则若只写在那里，
+/// Linux 上的 `cargo test` 永远覆盖不到。
+pub(crate) fn validate_container_name(name: &str) -> Result<()> {
+    // 按**字符**而非字节计数：非 ASCII 名字按字节判会误伤。
+    let len = name.chars().count();
+    if len == 0 || len > MAX_CONTAINER_NAME_CHARS {
+        return Err(crate::error::WboxError::args(format!(
+            "容器名长度非法（{} 字符）：AppContainer profile 名须为 1..={} 字符",
+            len, MAX_CONTAINER_NAME_CHARS
+        )));
+    }
+    Ok(())
+}
+
 /// 校验命令非空：两后端 prepare 的第一道闸门。
 pub(crate) fn require_cmd(cmd: &[String]) -> Result<()> {
     if cmd.is_empty() {
@@ -320,6 +341,40 @@ mod tests {
         assert!(env.iter().any(|(k, v)| k == "LANG" && v == "C"));
         // SystemRoot 兜底存在（白名单路径）
         assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+    }
+
+    // ---- 容器名校验（AppContainer profile 名 1..=64 字符）----
+
+    #[test]
+    fn container_name_accepts_typical_and_boundary_lengths() {
+        for name in ["w", "wbox-1234", &"a".repeat(MAX_CONTAINER_NAME_CHARS)] {
+            assert!(
+                validate_container_name(name).is_ok(),
+                "应接受长度 {} 的名字",
+                name.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn container_name_rejects_empty_and_overlong() {
+        assert!(validate_container_name("").is_err(), "空名必须拒绝");
+        let too_long = "a".repeat(MAX_CONTAINER_NAME_CHARS + 1);
+        let err = validate_container_name(&too_long).unwrap_err();
+        // 错误须归类为参数错误（退出码 1），而不是 profile 错误（退出码 2）：
+        // 这是用户输入问题，不是 AppContainer 子系统问题。
+        assert_eq!(err.exit_code(), 1, "{}", err);
+        assert!(format!("{}", err).contains("65"), "错误应报出实际长度：{}", err);
+    }
+
+    #[test]
+    fn container_name_counts_chars_not_bytes() {
+        // 64 个中文字符 = 192 字节；按字节判会误拒。Win32 的限制是字符数。
+        let cjk = "容".repeat(MAX_CONTAINER_NAME_CHARS);
+        assert_eq!(cjk.len(), MAX_CONTAINER_NAME_CHARS * 3, "前提：每字符 3 字节");
+        assert!(validate_container_name(&cjk).is_ok(), "64 个非 ASCII 字符应接受");
+        let over = "容".repeat(MAX_CONTAINER_NAME_CHARS + 1);
+        assert!(validate_container_name(&over).is_err(), "65 个字符应拒绝");
     }
 
     #[test]

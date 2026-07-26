@@ -98,6 +98,14 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         i += 1;
     }
 
+    // 在解析期就把 --name 拦下：容器名最终要交给
+    // CreateAppContainerProfile，超长/空只会换回一个 E_INVALIDARG，
+    // 与其他参数错误无法区分。此处提前给出可读错误（退出码 1 = 参数错误），
+    // 且各平台的 cargo test 都能覆盖到这条规则。
+    if let Some(name) = opts.name.as_deref() {
+        crate::backend::validate_container_name(name)?;
+    }
+
     Ok(opts)
 }
 
@@ -315,4 +323,34 @@ mod tests {
     }
 
     // ---- image 子命令参数错误 ----
+
+    // ---- --name 在解析期即校验（规则见 backend::validate_container_name）----
+
+    #[test]
+    fn parse_rejects_overlong_name_at_parse_time() {
+        let long = "a".repeat(65);
+        let err = parse(&["--name", &long, "--", "cmd.exe"]).unwrap_err();
+        assert_eq!(err.exit_code(), 1, "应归类为参数错误：{}", err);
+        assert!(format!("{}", err).contains("容器名"), "{}", err);
+    }
+
+    #[test]
+    fn parse_rejects_empty_name() {
+        assert!(parse(&["--name", "", "--", "cmd.exe"]).is_err());
+    }
+
+    #[test]
+    fn parse_accepts_boundary_length_name() {
+        let ok = "a".repeat(64);
+        assert!(parse(&["--name", &ok, "--", "cmd.exe"]).is_ok());
+    }
+
+    #[test]
+    fn default_name_is_within_limit() {
+        // 缺省名 wbox-<pid> 必须天然合法，否则不带 --name 就跑不起来
+        let opts = parse(&["--", "cmd.exe"]).unwrap();
+        assert!(opts.name.is_none());
+        let default = format!("wbox-{}", std::process::id());
+        assert!(crate::backend::validate_container_name(&default).is_ok(), "{}", default);
+    }
 }
