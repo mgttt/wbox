@@ -266,12 +266,16 @@ jobs:
       # （实测 `error: target not found`，且写在 setup-msys2 的 install:
       # 里是致命的，会把整个 job 判红）。改走 pip 装 ziglang——
       # tests/guest/build.sh 的探测链末位正是 `python3 -m ziglang cc`。
-      - name: 准备 MSYS2（unzip 用于解开 zig 压缩包）
+      # unzip：解开 zig 压缩包；diffutils：build.sh 拷贝校验用的 cmp
+      # （精简安装里没有，实测会把整套 guest 用例误报成 copy verify mismatch）
+      - name: 准备 MSYS2（unzip + diffutils）
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: false
-          install: unzip
+          install: >-
+            unzip
+            diffutils
       - name: 取 wbox-linux.exe（build-wbox-linux 的 artifact）
         uses: actions/download-artifact@v4
         with:

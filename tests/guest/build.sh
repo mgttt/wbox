@@ -45,7 +45,18 @@ for src in "$DIR"/t_*.c; do
     fail=1
     continue
   fi
-  if ! cp "$tmp" "$out" || ! cmp -s "$tmp" "$out"; then
+  # 拷贝后校验：cmp 优先；精简环境（如 CI 上只装了必要包的 MSYS2）可能没有
+  # diffutils，此时退化为比字节数——比不校验强，且不会把"工具缺失"误报成
+  # "拷贝损坏"（真机 CI 上就因此把整套 guest 用例判成构建失败）。
+  cpok=0
+  if cp "$tmp" "$out"; then
+    if command -v cmp >/dev/null 2>&1; then
+      cmp -s "$tmp" "$out" && cpok=1
+    else
+      [ "$(wc -c <"$tmp")" = "$(wc -c <"$out")" ] && cpok=1
+    fi
+  fi
+  if [ "$cpok" -ne 1 ]; then
     echo "build.sh: FAILED to install $name (copy verify mismatch)" >&2
     rm -f "$tmp"
     fail=1
