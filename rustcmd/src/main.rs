@@ -3,7 +3,6 @@ use std::{
     ffi::c_void,
     io::Write,
     mem,
-    process::Command,
     ptr,
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -27,6 +26,7 @@ use windows_sys::Win32::{
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::Input::KeyboardAndMouse::SetFocus,
+    UI::Shell::ShellExecuteW,
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
         GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
@@ -34,7 +34,7 @@ use windows_sys::Win32::{
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
         TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW,
-        MB_ICONERROR, MB_OK, MSG, SW_RESTORE, SW_SHOW, WM_APP, WM_CHAR, WM_CLOSE,
+        MB_ICONERROR, MB_OK, MSG, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_APP, WM_CHAR, WM_CLOSE,
         WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
         WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
         WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
@@ -54,6 +54,7 @@ const EDIT_ID: usize = 1002;
 const TIMER_ID: usize = 1;
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
+const RAW_OUTPUT_LIMIT: usize = 1024 * 1024;
 
 const COLOR_SIDEBAR: COLORREF = rgb(24, 27, 34);
 const COLOR_TERMINAL: COLORREF = rgb(12, 14, 18);
@@ -364,6 +365,7 @@ struct TerminalTab {
     last_size: (u16, u16),
     input_bytes: usize,
     output_bytes: usize,
+    raw_output: Vec<u8>,
 }
 
 impl TerminalTab {
@@ -378,10 +380,14 @@ impl TerminalTab {
             env::var("COMSPEC")
                 .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned())
         });
-        let mut command = ChildCommand::new(&program).size(TerminalSize {
+        let mut command = ChildCommand::new(&program)
+            .size(TerminalSize {
                 rows: INITIAL_ROWS,
                 cols: INITIAL_COLS,
-        });
+            })
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .env("TERM_PROGRAM", "RustCmd");
         for argument in command_line.iter().skip(1) {
             command = command.arg(argument);
         }
@@ -466,6 +472,7 @@ impl TerminalTab {
             last_size: (INITIAL_ROWS, INITIAL_COLS),
             input_bytes: 0,
             output_bytes: 0,
+            raw_output: Vec::new(),
         })
     }
 
@@ -477,6 +484,11 @@ impl TerminalTab {
                 PtyEvent::Output(bytes) => {
                     self.output_bytes += bytes.len();
                     self.parser.process(&bytes);
+                    self.raw_output.extend_from_slice(&bytes);
+                    if self.raw_output.len() > RAW_OUTPUT_LIMIT {
+                        let excess = self.raw_output.len() - RAW_OUTPUT_LIMIT;
+                        self.raw_output.drain(..excess);
+                    }
                 }
                 PtyEvent::Exited(code) => self.exited = Some(code),
                 PtyEvent::Error(error) => self.error = Some(error),
@@ -776,12 +788,27 @@ impl AppState {
 
     fn paint(&mut self) {
         let mut paint: PAINTSTRUCT = unsafe { mem::zeroed() };
-        let device = unsafe { BeginPaint(self.window, &mut paint) };
-        if device.is_null() {
+        let paint_device = unsafe { BeginPaint(self.window, &mut paint) };
+        if paint_device.is_null() {
             return;
         }
         let mut client: RECT = unsafe { mem::zeroed() };
         unsafe { GetClientRect(self.window, &mut client) };
+        let width = client.right.max(1);
+        let height = client.bottom.max(1);
+        let buffer_device = unsafe { CreateCompatibleDC(paint_device) };
+        let buffer_bitmap = unsafe { CreateCompatibleBitmap(paint_device, width, height) };
+        let buffered = !buffer_device.is_null() && !buffer_bitmap.is_null();
+        let previous_bitmap = if buffered {
+            unsafe { SelectObject(buffer_device, buffer_bitmap as HGDIOBJ) }
+        } else {
+            ptr::null_mut()
+        };
+        let device = if buffered {
+            buffer_device
+        } else {
+            paint_device
+        };
 
         fill(device, &client, COLOR_TERMINAL);
         fill(
@@ -923,7 +950,29 @@ impl AppState {
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
             );
         }
-        unsafe { EndPaint(self.window, &paint) };
+        unsafe {
+            if buffered {
+                BitBlt(
+                    paint_device,
+                    0,
+                    0,
+                    width,
+                    height,
+                    buffer_device,
+                    0,
+                    0,
+                    SRCCOPY,
+                );
+                SelectObject(buffer_device, previous_bitmap);
+            }
+            if !buffer_bitmap.is_null() {
+                DeleteObject(buffer_bitmap as HGDIOBJ);
+            }
+            if !buffer_device.is_null() {
+                DeleteDC(buffer_device);
+            }
+            EndPaint(self.window, &paint);
+        };
     }
 
     fn paint_terminal(&mut self, device: HDC, position: usize, client: &RECT) {
@@ -1197,7 +1246,91 @@ impl AppState {
                 let Some(position) = self.target_position(option_value(args, "-t")) else {
                     return IpcResponse::failure("can't find pane");
                 };
+                if args.iter().any(|argument| argument == "--raw-escaped") {
+                    return IpcResponse::success(
+                        String::from_utf8_lossy(&self.tabs[position].raw_output)
+                            .escape_debug()
+                            .to_string(),
+                    );
+                }
                 IpcResponse::success(self.tabs[position].parser.screen().contents())
+            }
+            "dump-cells" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find pane");
+                };
+                let requested_row = option_value(args, "-r")
+                    .and_then(|value| value.parse::<u16>().ok());
+                let tab = &self.tabs[position];
+                let screen = tab.parser.screen();
+                let mut cells = Vec::new();
+                for row in 0..tab.last_size.0 {
+                    if requested_row.is_some_and(|requested| requested != row) {
+                        continue;
+                    }
+                    for col in 0..tab.last_size.1 {
+                        let Some(cell) = screen.cell(row, col) else {
+                            continue;
+                        };
+                        let foreground = format!("{:?}", cell.fgcolor());
+                        let background = format!("{:?}", cell.bgcolor());
+                        if cell.contents().is_empty()
+                            && foreground == "Default"
+                            && background == "Default"
+                            && !cell.inverse()
+                        {
+                            continue;
+                        }
+                        cells.push(serde_json::json!({
+                            "row": row,
+                            "col": col,
+                            "text": cell.contents(),
+                            "fg": foreground,
+                            "bg": background,
+                            "inverse": cell.inverse(),
+                            "wide_continuation": cell.is_wide_continuation(),
+                        }));
+                    }
+                }
+                match serde_json::to_string_pretty(&serde_json::json!({
+                    "window_id": format!("@{}", tab.id),
+                    "rows": tab.last_size.0,
+                    "cols": tab.last_size.1,
+                    "cells": cells,
+                })) {
+                    Ok(json) => IpcResponse::success(json),
+                    Err(error) => IpcResponse::failure(error.to_string()),
+                }
+            }
+            "send-mouse" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find pane");
+                };
+                let Some(x) = option_value(args, "-x").and_then(|value| value.parse::<u16>().ok())
+                else {
+                    return IpcResponse::failure("send-mouse requires numeric -x");
+                };
+                let Some(y) = option_value(args, "-y").and_then(|value| value.parse::<u16>().ok())
+                else {
+                    return IpcResponse::failure("send-mouse requires numeric -y");
+                };
+                let button = match option_value(args, "--button").unwrap_or("left") {
+                    "left" => 0,
+                    "middle" => 1,
+                    "right" => 2,
+                    "wheel-up" => 64,
+                    "wheel-down" => 65,
+                    other => return IpcResponse::failure(format!("unknown mouse button: {other}")),
+                };
+                let suffix = if option_value(args, "--action") == Some("release") {
+                    'm'
+                } else {
+                    'M'
+                };
+                self.tabs[position].send(
+                    format!("\x1b[<{button};{};{}{suffix}", x + 1, y + 1).as_bytes(),
+                );
+                IpcResponse::success("")
             }
             "active-window" | "active-tab" => {
                 let Some(position) = self.active_position() else {
@@ -1550,11 +1683,21 @@ fn run_cli(arguments: Vec<String>) -> i32 {
     let mut response = send_ipc_request(arguments.clone());
     if response.is_err() && may_start_server {
         if let Ok(executable) = env::current_exe() {
-            let mut server = Command::new(executable);
-            server.env("RUSTCMD_SERVER", "1");
-            use std::os::windows::process::CommandExt as _;
-            server.creation_flags(0x0000_0008 | 0x0000_0200);
-            let _ = server.spawn();
+            let executable = wide(&executable.to_string_lossy());
+            let operation = wide("open");
+            let launched = unsafe {
+                ShellExecuteW(
+                    ptr::null_mut(),
+                    operation.as_ptr(),
+                    executable.as_ptr(),
+                    ptr::null(),
+                    ptr::null(),
+                    SW_SHOWNORMAL,
+                )
+            } as isize;
+            if launched <= 32 {
+                eprintln!("failed to launch RustCmd GUI through Windows Shell ({launched})");
+            }
             for _ in 0..40 {
                 thread::sleep(Duration::from_millis(100));
                 response = send_ipc_request(arguments.clone());
@@ -1664,6 +1807,7 @@ attach-session (attach)
 active-window (active-tab)
 capture-pane (capturep)
 display-message (display)
+dump-cells
 has-session (has)
 inspect
 kill-server
@@ -1685,6 +1829,7 @@ screenshot-pane (screenshot-tab)
 select-window (selectw)
 send-keys (send)
 send-composer
+send-mouse
 set-composer
 show-composer
 show-options (show)
@@ -1705,6 +1850,8 @@ Usage:
   rustcmd kill-window -t target
   rustcmd send-keys [-t target] key...
   rustcmd capture-pane -p [-t target]
+  rustcmd capture-pane --raw-escaped [-t target]
+  rustcmd dump-cells [-t target] [-r row]
   rustcmd active-window [-F format]
   rustcmd inspect [-t target]
   rustcmd screenshot [-o file.png]
@@ -1712,6 +1859,7 @@ Usage:
   rustcmd show-composer [-t target]
   rustcmd set-composer [-t target] text
   rustcmd send-composer [-t target]
+  rustcmd send-mouse [-t target] -x col -y row [--button left] [--action press]
   rustcmd list-panes [-F format]
   rustcmd list-sessions | has-session | kill-server"
     );

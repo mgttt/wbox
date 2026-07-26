@@ -48,3 +48,4 @@ $r = ".\target\release\rustcmd.exe"
 - [Product requirements](docs/PRD.md)
 - [CLI reference](docs/CLI.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [RMUX compatibility notes](docs/RMUX_COMPAT.md)

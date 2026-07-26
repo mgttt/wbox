@@ -74,6 +74,19 @@ RustCmd also provides the shorter equivalent:
 `screenshot` captures the native window. `screenshot-pane` captures only the
 target terminal viewport.
 
+### Rendering diagnostics and mouse input
+
+```powershell
+& $r capture-pane --raw-escaped -t build
+& $r dump-cells -t build
+& $r dump-cells -t build -r 39
+& $r send-mouse -t build -x 10 -y 5 --button left --action press
+& $r send-mouse -t build -x 10 -y 5 --button left --action release
+```
+
+`dump-cells` returns styled/non-empty cells as JSON. Mouse coordinates are
+zero-based terminal cells and use xterm SGR mouse encoding.
+
 ### Structured state
 
 ```powershell
@@ -104,4 +117,3 @@ as text.
 
 `split-window` reports an explicit not-implemented error. RustCmd currently maps
 one ConPTY pane to each tab.
-

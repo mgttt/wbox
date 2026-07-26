@@ -22,7 +22,9 @@ painted; the composer uses a native multiline Edit control and Button.
 Terminal drawing batches adjacent cells with identical colors to avoid
 per-character GDI repaint stalls. The 100ms timer only polls state; it invalidates
 the window when PTY or command state actually changed. `WM_ERASEBKGND` is
-suppressed to avoid clear-then-redraw flicker.
+suppressed to avoid clear-then-redraw flicker. Each changed frame is rendered
+into a compatible memory bitmap and copied to the window in one `BitBlt`, so
+background fill and text runs are not presented as separate visible stages.
 
 ## PTY layer
 
@@ -38,6 +40,7 @@ Each tab owns:
 - a reader thread feeding `vt100::Parser`;
 - an exit watcher;
 - terminal metadata, byte counters, and a composer draft.
+- a bounded 1 MiB raw-output tail for protocol/rendering diagnostics.
 
 Exit updates tab state but does not remove the tab.
 
@@ -46,7 +49,8 @@ Exit updates tab state but does not remove the tab.
 The current control transport is per-user loopback TCP with newline-delimited
 JSON request/response envelopes. The GUI is the server and processes requests
 on its message loop. The CLI starts the GUI for commands that can create or
-attach to a session.
+attach to a session. Auto-start uses Windows Shell execution so a caller's
+captured console pipes and enclosing Job Object do not own the GUI lifetime.
 
 The transport is intentionally behind command DTOs so it can later move to
 Windows named pipes and a versioned binary protocol without changing CLI
