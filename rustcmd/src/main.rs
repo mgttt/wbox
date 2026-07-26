@@ -1,45 +1,43 @@
 use std::{
     env,
     ffi::c_void,
-    io::{Read, Write},
+    io::Write,
     mem,
     process::Command,
     ptr,
-    sync::{
-        mpsc::{self, Receiver, Sender},
-        Arc, Mutex,
-    },
+    sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result};
-use portable_pty::{
-    native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize,
-};
+use rmux_pty::{ChildCommand, PtyChild, PtyMaster, TerminalSize};
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
-    Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
     Graphics::Gdi::{
-        CreateSolidBrush, DeleteObject, ExtTextOutW, FillRect, FrameRect, GetStockObject,
-        GetTextExtentPoint32W, GetTextMetricsW, SelectObject, SetBkColor, SetBkMode,
-        SetTextColor, TextOutW, DEFAULT_GUI_FONT, ETO_OPAQUE, HBRUSH, HDC, HFONT,
-        HGDIOBJ, SIZE, SYSTEM_FIXED_FONT, TEXTMETRICW, TRANSPARENT,
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
+        DeleteDC, DeleteObject, DrawTextW, EndPaint, ExtTextOutW, FillRect, FrameRect,
+        GetDC, GetDIBits, GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, GetWindowDC,
+        InvalidateRect, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        PAINTSTRUCT, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow,
+        DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
+        ETO_OPAQUE, HDC, HFONT, HGDIOBJ, SRCCOPY, SYSTEM_FIXED_FONT, TEXTMETRICW,
+        TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
+    UI::Input::KeyboardAndMouse::SetFocus,
     UI::WindowsAndMessaging::{
-        BeginPaint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-        DrawTextW, EndPaint, GetClientRect, GetMessageW, GetWindowLongPtrW,
-        GetWindowTextLengthW, GetWindowTextW, InvalidateRect, LoadCursorW, MessageBoxW,
-        MoveWindow, PAINTSTRUCT, PostMessageW, PostQuitMessage, RegisterClassW, SetFocus,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+        GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+        LoadCursorW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-        TranslateMessage, UpdateWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-        CW_USEDEFAULT, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-        ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW, MB_ICONERROR,
-        MB_OK, MSG, SW_RESTORE, SW_SHOW, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CREATE,
-        WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_NCDESTROY, WM_PAINT,
-        WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN,
-        WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
+        TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+        ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW,
+        MB_ICONERROR, MB_OK, MSG, SW_RESTORE, SW_SHOW, WM_APP, WM_CHAR, WM_CLOSE,
+        WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
+        WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
     },
 };
 
@@ -180,7 +178,13 @@ fn run_gui() -> Result<()> {
             0,
             wide("EDIT").as_ptr(),
             wide("").as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_BORDER
+                | WS_TABSTOP
+                | ES_MULTILINE as u32
+                | ES_AUTOVSCROLL as u32
+                | ES_WANTRETURN as u32,
             0,
             0,
             100,
@@ -248,10 +252,16 @@ unsafe extern "system" fn window_proc(
             let _ = lparam as *const CREATESTRUCTW;
             0
         }
-        WM_TIMER | WM_APP_WAKE => {
+        WM_TIMER => {
             if let Some(state) = state_mut(window) {
                 state.tick();
                 unsafe { InvalidateRect(window, ptr::null(), 0) };
+            }
+            0
+        }
+        WM_APP_WAKE => {
+            if let Some(state) = state_mut(window) {
+                state.tick();
             }
             0
         }
@@ -344,12 +354,13 @@ struct TerminalTab {
     composer: String,
     parser: vt100::Parser,
     receiver: Receiver<PtyEvent>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    master: Box<dyn MasterPty + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
+    master: PtyMaster,
+    child: PtyChild,
     exited: Option<u32>,
     error: Option<String>,
     last_size: (u16, u16),
+    input_bytes: usize,
+    output_bytes: usize,
 }
 
 impl TerminalTab {
@@ -360,45 +371,32 @@ impl TerminalTab {
         command_line: Vec<String>,
         window: HWND,
     ) -> Result<Self> {
-        let pty_system = native_pty_system();
-        let pair = pty_system
-            .openpty(PtySize {
-                rows: INITIAL_ROWS,
-                cols: INITIAL_COLS,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to create Windows ConPTY")?;
-
         let program = command_line.first().cloned().unwrap_or_else(|| {
             env::var("COMSPEC")
                 .unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".to_owned())
         });
-        let mut command = CommandBuilder::new(&program);
+        let mut command = ChildCommand::new(&program).size(TerminalSize {
+                rows: INITIAL_ROWS,
+                cols: INITIAL_COLS,
+        });
         for argument in command_line.iter().skip(1) {
-            command.arg(argument);
+            command = command.arg(argument);
         }
         if let Ok(directory) = env::current_dir() {
-            command.cwd(directory);
+            command = command.current_dir(directory);
         }
 
-        let mut child = pair
-            .slave
-            .spawn_command(command)
+        let spawned = command
+            .spawn()
             .context("failed to start terminal command")?;
-        drop(pair.slave);
-
-        let process_id = child.process_id();
-        let killer = child.clone_killer();
-        let mut reader = pair
-            .master
-            .try_clone_reader()
+        let (mut master, child) = spawned.into_parts();
+        let process_id = Some(child.pid().as_u32());
+        let reader = master
+            .try_clone_for_startup_reader()
             .context("failed to clone ConPTY reader")?;
-        let writer = Arc::new(Mutex::new(
-            pair.master
-                .take_writer()
-                .context("failed to open ConPTY writer")?,
-        ));
+        let mut wait_child = child
+            .try_clone_for_wait()
+            .context("failed to clone ConPTY child wait handle")?;
         let (sender, receiver) = mpsc::channel();
         let wake_window = window as isize;
 
@@ -406,7 +404,7 @@ impl TerminalTab {
         thread::spawn(move || {
             let mut buffer = [0_u8; 16 * 1024];
             loop {
-                match reader.read(&mut buffer) {
+                match reader.io().read(&mut buffer) {
                     Ok(0) => break,
                     Ok(size) => {
                         if output_sender
@@ -431,8 +429,11 @@ impl TerminalTab {
         });
 
         thread::spawn(move || {
-            let event = match child.wait() {
-                Ok(status) => PtyEvent::Exited(status.exit_code()),
+            let event = match wait_child.wait() {
+                Ok(status) => {
+                    wait_child.close_pseudoconsole();
+                    PtyEvent::Exited(status.code().unwrap_or(1) as u32)
+                }
                 Err(error) => PtyEvent::Error(format!("process wait failed: {error}")),
             };
             let _ = sender.send(event);
@@ -455,19 +456,23 @@ impl TerminalTab {
             composer: String::new(),
             parser: vt100::Parser::new(INITIAL_ROWS, INITIAL_COLS, SCROLLBACK_LINES),
             receiver,
-            writer,
-            master: pair.master,
-            killer,
+            master,
+            child,
             exited: None,
             error: None,
             last_size: (INITIAL_ROWS, INITIAL_COLS),
+            input_bytes: 0,
+            output_bytes: 0,
         })
     }
 
     fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
-                PtyEvent::Output(bytes) => self.parser.process(&bytes),
+                PtyEvent::Output(bytes) => {
+                    self.output_bytes += bytes.len();
+                    self.parser.process(&bytes);
+                }
                 PtyEvent::Exited(code) => self.exited = Some(code),
                 PtyEvent::Error(error) => self.error = Some(error),
             }
@@ -480,11 +485,9 @@ impl TerminalTab {
         }
         self.last_size = (rows, cols);
         self.parser.screen_mut().set_size(rows, cols);
-        if let Err(error) = self.master.resize(PtySize {
+        if let Err(error) = self.master.resize(TerminalSize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
         }) {
             self.error = Some(format!("resize failed: {error}"));
         }
@@ -494,19 +497,16 @@ impl TerminalTab {
         if self.exited.is_some() {
             return;
         }
-        match self.writer.lock() {
-            Ok(mut writer) => {
-                if let Err(error) = writer.write_all(bytes).and_then(|_| writer.flush()) {
-                    self.error = Some(format!("input failed: {error}"));
-                }
-            }
-            Err(_) => self.error = Some("terminal input lock was poisoned".to_owned()),
+        if let Err(error) = self.master.write_all(bytes) {
+            self.error = Some(format!("input failed: {error}"));
+        } else {
+            self.input_bytes += bytes.len();
         }
     }
 
     fn close_process(&mut self) {
         if self.exited.is_none() {
-            let _ = self.killer.kill();
+            let _ = self.child.terminate_forcefully();
         }
     }
 }
@@ -933,6 +933,7 @@ impl AppState {
 
         let screen = self.tabs[position].parser.screen();
         for row in 0..rows {
+            let mut runs: Vec<(u16, String, COLORREF, COLORREF)> = Vec::new();
             for col in 0..cols {
                 let cell = screen.cell(row, col);
                 let (text, mut foreground, mut background) = match cell {
@@ -953,13 +954,23 @@ impl AppState {
                 if cell.is_some_and(|value| value.inverse()) {
                     mem::swap(&mut foreground, &mut background);
                 }
+                if let Some((_, run_text, run_foreground, run_background)) = runs.last_mut()
+                    && *run_foreground == foreground
+                    && *run_background == background
+                {
+                    run_text.push_str(text);
+                } else {
+                    runs.push((col, text.to_owned(), foreground, background));
+                }
+            }
+            for (start_col, text, foreground, background) in runs {
                 let encoded: Vec<u16> = text.encode_utf16().collect();
-                let left = SIDEBAR_WIDTH + col as i32 * cell_width;
+                let left = SIDEBAR_WIDTH + start_col as i32 * cell_width;
                 let top = row as i32 * cell_height;
                 let rect = RECT {
                     left,
                     top,
-                    right: left + cell_width,
+                    right: left + text.chars().count() as i32 * cell_width,
                     bottom: top + cell_height,
                 };
                 unsafe {
@@ -1178,6 +1189,129 @@ impl AppState {
                     return IpcResponse::failure("can't find pane");
                 };
                 IpcResponse::success(self.tabs[position].parser.screen().contents())
+            }
+            "active-window" | "active-tab" => {
+                let Some(position) = self.active_position() else {
+                    return IpcResponse::failure("no active window");
+                };
+                let format = option_value(args, "-F").unwrap_or("#{window_id}:#{window_name}");
+                IpcResponse::success(render_format(
+                    format,
+                    &self.tabs[position],
+                    &self.session_name,
+                    true,
+                ))
+            }
+            "show-composer" => {
+                self.save_active_composer();
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find window");
+                };
+                IpcResponse::success(self.tabs[position].composer.clone())
+            }
+            "set-composer" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find window");
+                };
+                let text = positional_values(args, &["-t"], &[])
+                    .join(" ");
+                self.tabs[position].composer = text.clone();
+                if self.active == Some(self.tabs[position].id) {
+                    unsafe { SetWindowTextW(self.edit, wide(&text).as_ptr()) };
+                }
+                IpcResponse::success("")
+            }
+            "send-composer" => {
+                self.save_active_composer();
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find window");
+                };
+                let text = mem::take(&mut self.tabs[position].composer);
+                if !text.is_empty() {
+                    self.tabs[position].send(text.as_bytes());
+                    self.tabs[position].send(b"\r");
+                }
+                if self.active == Some(self.tabs[position].id) {
+                    unsafe { SetWindowTextW(self.edit, wide("").as_ptr()) };
+                }
+                IpcResponse::success("")
+            }
+            "inspect" => {
+                self.save_active_composer();
+                let selected: Vec<&TerminalTab> = match option_value(args, "-t") {
+                    Some(target) => {
+                        let Some(position) = self.target_position(Some(target)) else {
+                            return IpcResponse::failure("can't find window");
+                        };
+                        vec![&self.tabs[position]]
+                    }
+                    None => self.tabs.iter().collect(),
+                };
+                let windows = selected
+                    .into_iter()
+                    .map(|tab| {
+                        serde_json::json!({
+                            "id": format!("@{}", tab.id),
+                            "index": tab.index,
+                            "name": tab.title,
+                            "active": self.active == Some(tab.id),
+                            "dead": tab.exited.is_some(),
+                            "exit_code": tab.exited,
+                            "pid": tab.process_id,
+                            "command": tab.command_name,
+                            "rows": tab.last_size.0,
+                            "cols": tab.last_size.1,
+                            "input_bytes": tab.input_bytes,
+                            "output_bytes": tab.output_bytes,
+                            "composer": tab.composer,
+                            "error": tab.error,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                match serde_json::to_string_pretty(&serde_json::json!({
+                    "session": self.session_name,
+                    "active_window_id": self.active.map(|id| format!("@{id}")),
+                    "windows": windows,
+                })) {
+                    Ok(json) => IpcResponse::success(json),
+                    Err(error) => IpcResponse::failure(error.to_string()),
+                }
+            }
+            "screenshot" => {
+                unsafe {
+                    InvalidateRect(self.window, ptr::null(), 0);
+                }
+                self.paint();
+                let path = screenshot_output_path(args, "rustcmd-window");
+                match save_window_png(self.window, &path, false) {
+                    Ok(()) => IpcResponse::success(path.display().to_string()),
+                    Err(error) => IpcResponse::failure(format!("{error:#}")),
+                }
+            }
+            "screenshot-pane" | "screenshot-tab" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find window");
+                };
+                self.save_active_composer();
+                let previous = self.active;
+                self.active = Some(self.tabs[position].id);
+                self.load_active_composer();
+                unsafe {
+                    InvalidateRect(self.window, ptr::null(), 0);
+                }
+                self.paint();
+                let path = screenshot_output_path(args, "rustcmd-pane");
+                let result = save_window_png(self.window, &path, true);
+                self.save_active_composer();
+                self.active = previous;
+                self.load_active_composer();
+                unsafe {
+                    InvalidateRect(self.window, ptr::null(), 0);
+                }
+                match result {
+                    Ok(()) => IpcResponse::success(path.display().to_string()),
+                    Err(error) => IpcResponse::failure(format!("{error:#}")),
+                }
             }
             "display" | "display-message" => {
                 let Some(position) = self.target_position(option_value(args, "-t")) else {
@@ -1460,9 +1594,11 @@ fn hide_owned_console_window() {
 
 const SUPPORTED_COMMANDS: &str = "\
 attach-session (attach)
+active-window (active-tab)
 capture-pane (capturep)
 display-message (display)
 has-session (has)
+inspect
 kill-server
 kill-session
 kill-window (killw)
@@ -1476,8 +1612,13 @@ next-window (next)
 previous-window (prev)
 rename-session (rename)
 rename-window (renamew)
+screenshot
+screenshot-pane (screenshot-tab)
 select-window (selectw)
 send-keys (send)
+send-composer
+set-composer
+show-composer
 show-options (show)
 start-server";
 
@@ -1496,6 +1637,13 @@ Usage:
   rustcmd kill-window -t target
   rustcmd send-keys [-t target] key...
   rustcmd capture-pane -p [-t target]
+  rustcmd active-window [-F format]
+  rustcmd inspect [-t target]
+  rustcmd screenshot [-o file.png]
+  rustcmd screenshot-pane [-t target] [-o file.png]
+  rustcmd show-composer [-t target]
+  rustcmd set-composer [-t target] text
+  rustcmd send-composer [-t target]
   rustcmd list-panes [-F format]
   rustcmd list-sessions | has-session | kill-server"
     );
@@ -1579,6 +1727,7 @@ fn render_format(
         .replace("#{?window_active,*,}", if active { "*" } else { "" })
         .replace("#{session_name}", session_name)
         .replace("#{window_index}", &tab.index.to_string())
+        .replace("#{window_id}", &format!("@{}", tab.id))
         .replace("#{window_name}", &tab.title)
         .replace("#{window_active}", if active { "1" } else { "0" })
         .replace("#{pane_index}", "0")
@@ -1590,6 +1739,9 @@ fn render_format(
         )
         .replace("#{pane_current_command}", &tab.command_name)
         .replace("#{pane_start_command}", &tab.command_name)
+        .replace("#{pane_input_bytes}", &tab.input_bytes.to_string())
+        .replace("#{pane_output_bytes}", &tab.output_bytes.to_string())
+        .replace("#{pane_error}", tab.error.as_deref().unwrap_or(""))
         .replace("#{pane_width}", &tab.last_size.1.to_string())
         .replace("#{pane_height}", &tab.last_size.0.to_string())
         .replace("#{history_limit}", &SCROLLBACK_LINES.to_string())
@@ -1597,6 +1749,130 @@ fn render_format(
         .replace("#W", &tab.title)
         .replace("#S", session_name)
         .replace("#P", "0")
+}
+
+fn screenshot_output_path(args: &[String], stem: &str) -> std::path::PathBuf {
+    if let Some(path) = option_value(args, "-o")
+        .or_else(|| last_positional(args, &["-t", "-o"]))
+    {
+        return std::path::PathBuf::from(path);
+    }
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join(format!("{stem}-{timestamp}.png"))
+}
+
+fn save_window_png(window: HWND, path: &std::path::Path, pane_only: bool) -> Result<()> {
+    let mut client: RECT = unsafe { mem::zeroed() };
+    let mut outer: RECT = unsafe { mem::zeroed() };
+    unsafe {
+        GetClientRect(window, &mut client);
+        GetWindowRect(window, &mut outer);
+    }
+    let (source, source_x, source_y, width, height) = if pane_only {
+        (
+            unsafe { GetDC(window) },
+            SIDEBAR_WIDTH,
+            0,
+            (client.right - SIDEBAR_WIDTH).max(1),
+            (client.bottom - COMPOSER_HEIGHT).max(1),
+        )
+    } else {
+        (
+            unsafe { GetWindowDC(window) },
+            0,
+            0,
+            (outer.right - outer.left).max(1),
+            (outer.bottom - outer.top).max(1),
+        )
+    };
+    if source.is_null() {
+        anyhow::bail!("failed to acquire window device context");
+    }
+    let memory_dc = unsafe { CreateCompatibleDC(source) };
+    let bitmap = unsafe { CreateCompatibleBitmap(source, width, height) };
+    if memory_dc.is_null() || bitmap.is_null() {
+        if !memory_dc.is_null() {
+            unsafe { DeleteDC(memory_dc) };
+        }
+        unsafe { ReleaseDC(window, source) };
+        anyhow::bail!("failed to allocate screenshot bitmap");
+    }
+
+    let previous = unsafe { SelectObject(memory_dc, bitmap as HGDIOBJ) };
+    let copied = unsafe {
+        BitBlt(
+            memory_dc,
+            0,
+            0,
+            width,
+            height,
+            source,
+            source_x,
+            source_y,
+            SRCCOPY,
+        )
+    };
+    let mut info: BITMAPINFO = unsafe { mem::zeroed() };
+    info.bmiHeader = BITMAPINFOHEADER {
+        biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: width,
+        biHeight: -height,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..unsafe { mem::zeroed() }
+    };
+    let mut bgra = vec![0_u8; width as usize * height as usize * 4];
+    let scanlines = if copied != 0 {
+        unsafe {
+            GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height as u32,
+                bgra.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            )
+        }
+    } else {
+        0
+    };
+    unsafe {
+        SelectObject(memory_dc, previous);
+        DeleteObject(bitmap as HGDIOBJ);
+        DeleteDC(memory_dc);
+        ReleaseDC(window, source);
+    }
+    if copied == 0 || scanlines == 0 {
+        anyhow::bail!("BitBlt/GetDIBits failed while capturing the window");
+    }
+
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for pixel in bgra.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().context("failed to start PNG encoder")?;
+    writer
+        .write_image_data(&rgba)
+        .context("failed to write PNG pixels")?;
+    Ok(())
 }
 
 fn tmux_key_bytes(key: &str) -> Option<Vec<u8>> {
