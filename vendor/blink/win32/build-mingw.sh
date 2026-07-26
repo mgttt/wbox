@@ -79,7 +79,7 @@ ZSRCS=$(ls third_party/libz/*.c | grep -v '/gz')
 mkdir -p "$BUILD/obj"
 OBJLIST=$BUILD/objlist.txt
 
-objfile() { echo "$BUILD/obj/$(echo "$1" | tr '/.' '__').o"; }
+objfile() { printf '%s/obj/%s.o' "$BUILD" "$(printf '%s' "$1" | tr '/.' '__')"; }
 
 # 目标文件清单在**前台按序**生成：原来由各后台子 shell 并发 >> 追加，
 # 顺序不稳定且存在交错风险。
@@ -87,17 +87,22 @@ objfile() { echo "$BUILD/obj/$(echo "$1" | tr '/.' '__').o"; }
 # 路径形态很关键：MSYS2 只对 argv 做 POSIX→Windows 路径转换，**响应文件
 # （@list）的内容不转**。native ld.exe 读到 /d/a/... 会把每个 .o 都报
 # "cannot find"（编译其实已成功，因为 -c -o 走的是 argv）。故清单里的路径
-# 在有 cygpath 时一律转成宿主原生形式；Linux/无 cygpath 环境原样输出。
-# 注意用 `cygpath -m`（D:/a/... 正斜杠形式）而非 -w（D:\a\...）：
-# GCC/ld 的 @响应文件按 C 转义规则解析内容，反斜杠会被吃掉
-# （D:\a\k3-wbox → D:ak3-wbox，CI run 30193233776 实锤）；
-# native ld.exe 同样接受正斜杠的驱动器路径。
+# 在有 cygpath 时转成带盘符的形式；Linux/无 cygpath 环境原样输出。
+#
+# 用 cygpath -m（mixed：D:/a/... 盘符 + 正斜杠）而**不是** -w（D:\a\...）。
+# -w 形式实测会丢反斜杠，ld 报 "cannot find D:ak3-wbox..."
+# （CI run 30193233776 实锤）。有两条机制都能造成该现象、且症状一致：
+#   ① GCC 的 @响应文件按 C 转义规则解析内容，反斜杠被吃；
+#   ② 写清单若用 echo，POSIX sh 的 XSI 行为同样解释反斜杠转义
+#      （dash 实测：D:\a\... → D:^G\...，\a→BEL、\v→VT、\b→BS）。
+# -m 形式路径里根本没有反斜杠，对两者都免疫；写入再统一用
+# printf '%s\n' 而非 echo，把第 ② 条也一并堵死。
 CYGPATH=$(command -v cygpath 2>/dev/null || true)
 : >"$OBJLIST"
 for src in $SRCS $ZSRCS; do
   obj=$(objfile "$src")
   if [ -n "$CYGPATH" ]; then obj=$("$CYGPATH" -m "$obj"); fi
-  echo "$obj" >>"$OBJLIST"
+  printf '%s\n' "$obj" >>"$OBJLIST"
 done
 
 compile_one() {
