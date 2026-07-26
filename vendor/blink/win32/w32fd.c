@@ -109,6 +109,8 @@ static int W32RootComps(const wchar_t *root) {
   return n;
 }
 
+static int W32EscapeName(wchar_t *w);
+
 // C2 (security-audit): THE jail root. Every host path that reaches a
 // Win32 API must textually resolve inside this directory — this is the
 // single egress check shared by all path entries (W32Path for cwd-based
@@ -138,6 +140,10 @@ static const wchar_t *W32JailRoot(int *comps) {
     // strip trailing backslashes ("Z:\" keeps its root slash)
     size_t l = wcslen(root);
     while (l > 3 && root[l - 1] == L'\\') root[--l] = 0;
+    // F7/F8: resolved host paths are compared in ESCAPED form (see
+    // W32EscapeName), so the jail root must be escaped too — otherwise
+    // a non-ASCII jail root would falsely deny everything.
+    W32EscapeName(root);
     root_comps = W32RootComps(root);
     root_init = 1;
     if (getenv("WBOX_DEBUG_PATH"))
@@ -182,6 +188,10 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
       fprintf(stderr, "[w32path] abs '%s'\n", path);
     n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
     if (n <= 0) return NULL;
+    // F7/F8: escape the guest part BEFORE joining — the jail root is
+    // cached in escaped form, and escaping twice would corrupt '%'.
+    // "." / ".." are ASCII, so normalization below is unaffected.
+    if (W32EscapeName(tmp)) return NULL;
     if (wcslen(root) + wcslen(tmp) + 2 >= MAX_PATH) return NULL;
     wcscpy(joined, root);
     wcscat(joined, tmp);
@@ -203,10 +213,11 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
       SetLastError(ERROR_ACCESS_DENIED);
       return NULL;
     }
-    // C2 unified egress check: absolutize and prove the result stays
-    // inside the jail root (defense in depth — the VFS layer should
-    // never hand us ".." or absolute host paths outside the jail).
+    // F7/F8: pure-ASCII host names (locale-proof, win32-legal). Done
+    // before the egress check so it compares in the same (escaped)
+    // form the host filesystem sees.
     if (!W32IsDeviceName(buf)) {
+      if (W32EscapeName(buf)) return NULL;
       if (buf[0] && buf[1] == L':') {
         wcscpy(joined, buf);  // already drive-prefixed absolute
       } else {
@@ -236,6 +247,70 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
 
 static HANDLE W32Handle(int fd);
 
+// ------------------------------------------------ F7/F8: host filename escaping
+// Wine maps Win32 filenames onto the Unix filesystem through the LOCALE
+// charset — with an unset/non-UTF-8 locale any non-ASCII guest filename
+// fails to create (ENOENT), and Win32 natively rejects <>:"|?* and
+// control chars (EINVAL). Linux guests legitimately use both. Escape
+// every such wchar as %XXXX (UTF-16 code units, '%' itself as %25) so
+// host names are pure ASCII; readdir unescapes on the way back. The
+// mapping is injective per code unit, so surrogate pairs round-trip
+// losslessly. (Known limit: guest names ending in '.' or ' ' collide
+// with win32 trailing-dot/space stripping and are not yet escaped.)
+static int W32EscapeName(wchar_t *w) {
+  wchar_t tmp[MAX_PATH];
+  wchar_t *o = tmp;
+  int has_drive = iswalpha(w[0]) && w[1] == L':';
+  for (size_t i = 0; w[i]; ++i) {
+    wchar_t c = w[i];
+    int esc = c == L'%' || c < 0x20 || c > 0x7e || c == L'<' || c == L'>' ||
+              c == L'|' || c == L'?' || c == L'*' || c == L'"' ||
+              (c == L':' && !(has_drive && i == 1));
+    if (!esc) {
+      if (o - tmp >= MAX_PATH - 1) goto toolong;
+      *o++ = c;
+    } else {
+      if (o - tmp >= MAX_PATH - 5) goto toolong;
+      *o++ = L'%';
+      static const wchar_t hexd[] = L"0123456789abcdef";
+      *o++ = hexd[(c >> 12) & 15];
+      *o++ = hexd[(c >> 8) & 15];
+      *o++ = hexd[(c >> 4) & 15];
+      *o++ = hexd[c & 15];
+    }
+  }
+  *o = 0;
+  wcscpy(w, tmp);
+  return 0;
+toolong:
+  SetLastError(ERROR_FILENAME_EXCED_RANGE);
+  return -1;
+}
+
+static int W32HexDig(wchar_t c) {
+  return c >= L'0' && c <= L'9' ? c - L'0'
+       : c >= L'a' && c <= L'f' ? c - L'a' + 10
+       : c >= L'A' && c <= L'F' ? c - L'A' + 10
+                                : -1;
+}
+
+// reverse of W32EscapeName (in place, only shrinks); strict %XXXX
+// (4 hex digits) sequences decode, anything else passes through.
+void W32UnescapeName(wchar_t *w) {
+  wchar_t *r = w, *o = w;
+  while (*r) {
+    if (r[0] == L'%' && W32HexDig(r[1]) >= 0 && W32HexDig(r[2]) >= 0 &&
+        W32HexDig(r[3]) >= 0 && W32HexDig(r[4]) >= 0) {
+      *o++ = (wchar_t)((W32HexDig(r[1]) << 12) | (W32HexDig(r[2]) << 8) |
+                       (W32HexDig(r[3]) << 4) | W32HexDig(r[4]));
+      r += 5;
+    } else {
+      *o++ = *r++;
+    }
+  }
+  *o = 0;
+}
+
 // C2 (security-audit): real dirfd semantics for the *at family. A
 // relative path with dirfd != AT_FDCWD is anchored at the directory the
 // dirfd handle refers to (previously dirfd was silently ignored and the
@@ -261,6 +336,10 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
       MultiByteToWideChar(CP_ACP, 0, path, -1, rel, MAX_PATH) <= 0) {
     return NULL;
   }
+  // F7/F8: the anchor `d` comes from the host (already escaped); escape
+  // the relative part before joining. "." / ".." components are ASCII
+  // and unaffected, so normalization below still sees them.
+  if (W32EscapeName(rel)) return NULL;
   if (wcslen(d) + wcslen(rel) + 2 >= MAX_PATH) return NULL;
   wcscpy(joined, d);
   wcscat(joined, L"\\");
@@ -572,6 +651,12 @@ int openat(int dirfd, const char *path, int flags, ...) {
   h = CreateFileW(wbuf, W32Access(flags, mode), share, NULL,
                   W32Disposition(flags), createflags, NULL);
   if (h == INVALID_HANDLE_VALUE) {
+    if (getenv("WBOX_DEBUG_PATH")) {
+      DWORD gle = GetLastError();
+      fprintf(stderr, "[openat] FAIL gle=%lu '%s' -> [", gle, path);
+      for (wchar_t *q = wbuf; *q; ++q) fprintf(stderr, "%04x.", *q);
+      fprintf(stderr, "]\n");
+    }
     errno = W32Err();
     return -1;
   }
