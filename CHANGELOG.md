@@ -54,6 +54,12 @@
   搬移；MAP_PRIVATE 脏页保持隔离，MAP_SHARED 在搬移、msync、munmap 和
   固定覆盖时正确写回。`t_mmap` 增至 107 项，完整套件现为
   **20/20 文件通过，820 pass / 0 fail / 9 skip**。
+- **快照 fork 文件共享映射**：MAP_SHARED 文件注册由进程全局表改为
+  per-window 表，快照时复制地址范围并独立 dup backing fd；子进程退出或
+  exec wipe 前同时同步父窗口和磁盘，窗口销毁、MAP_FIXED 覆盖与 munmap
+  均先写回再清理。注册槽改用显式 `used` 状态，内部 dup 返回 fd 0 时不再
+  被误判为空槽。`t_mmap` / `t_fork_mem` / `t_exec` 分别增至 115 / 29 / 22
+  项，完整套件现为 **20/20 文件通过，849 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为
