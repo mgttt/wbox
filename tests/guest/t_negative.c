@@ -77,6 +77,7 @@ int main(void) {
   T_ASSERT_ERRNO(fstat(9999, &st), EBADF);
   T_ASSERT_ERRNO(dup(9999), EBADF);
   T_ASSERT_ERRNO(fcntl(9999, F_GETFL), EBADF);
+  T_ASSERT_ERRNO(fcntl(9999, F_DUPFD, -1), EBADF);
 
   T_BEGIN("neg/closed-fd-ebadf");
   {
@@ -84,6 +85,17 @@ int main(void) {
     T_ASSERT(fd >= 0);
     close(fd);
     T_ASSERT_ERRNO(read(fd, b, 1), EBADF);
+  }
+
+  T_BEGIN("neg/dupfd-min-range");
+  {
+    int fd = open("/dev/null", O_RDONLY);
+    T_ASSERT(fd >= 0);
+    T_ASSERT_ERRNO(fcntl(fd, F_DUPFD, -1), EINVAL);
+    T_ASSERT_ERRNO(fcntl(fd, F_DUPFD, INT_MAX), EINVAL);
+    T_ASSERT_ERRNO(fcntl(fd, F_DUPFD_CLOEXEC, -1), EINVAL);
+    T_ASSERT_ERRNO(fcntl(fd, F_DUPFD_CLOEXEC, INT_MAX), EINVAL);
+    close(fd);
   }
 
   /* --- fd used against its type --- */

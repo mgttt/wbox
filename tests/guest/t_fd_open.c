@@ -2,6 +2,7 @@
  * O_TMPFILE, plus dup family semantics. */
 #define _GNU_SOURCE
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -132,6 +133,24 @@ int main(void) {
     close(d6);
   }
   close(fd);
+
+  T_BEGIN("dup2/replaces-open-directory");
+  {
+    char dents[512];
+    int src = open("t_fo_b", O_RDONLY);
+    int target = open(".", O_RDONLY | O_DIRECTORY);
+    T_ASSERT(src >= 0);
+    T_ASSERT(target >= 0);
+    T_ASSERT(syscall(SYS_getdents64, target, dents, sizeof(dents)) > 0);
+    T_ASSERT_EQ(lseek(src, 5, SEEK_SET), 5);
+    T_ASSERT_EQ(dup2(src, target), target);
+    T_ASSERT_EQ(lseek(target, 0, SEEK_SET), 0);
+    T_ASSERT_EQ(read(target, &c, 1), 1);
+    T_ASSERT_EQ(c, '0');
+    T_ASSERT_EQ(lseek(src, 0, SEEK_CUR), 1);
+    close(target);
+    close(src);
+  }
 
   T_BEGIN("ioctl/cloexec-toggle");
   fd = open("/dev/null", O_RDONLY);

@@ -2156,6 +2156,24 @@ static int Dup3(struct Machine *m, int fildes, int newfildes, int flags) {
 }
 #endif
 
+static void ReplaceFdState(struct Fd *dst, const struct Fd *src, int oflags) {
+  char *path = src->path ? strdup(src->path) : NULL;
+  if (dst->dirstream) {
+    // dup2 closes the old target; close errors are not reported by Linux.
+    VfsClosedir(dst->dirstream);
+    dst->dirstream = NULL;
+  }
+  free(dst->path);
+  dst->path = path;
+  dst->oflags = oflags;
+  dst->socktype = src->socktype;
+  dst->eventfd = src->eventfd;
+  dst->signalfd = src->signalfd;
+  dst->norestart = src->norestart;
+  dst->cb = src->cb;
+  memcpy(&dst->saddr, &src->saddr, sizeof(dst->saddr));
+}
+
 static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
   int rc, oflags;
   struct Fd *fd, *fd2;
@@ -2192,7 +2210,7 @@ static int SysDup2(struct Machine *m, i32 fildes, i32 newfildes) {
         UNLOCK(&m->system->fds.lock);
         return -1;
       }
-      fd2->oflags = oflags;
+      ReplaceFdState(fd2, fd, oflags);
     } else {
       int hostfd = VfsDup(fd->hostfd);
       if (hostfd == -1) {
@@ -2229,7 +2247,7 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
       UNLOCK(&m->system->fds.lock);
       return -1;
     }
-    fd2->oflags = oflags;
+    ReplaceFdState(fd2, fd, oflags);
   } else {
     int hostfd = VfsDup(fd->hostfd);
     if (hostfd == -1) {
@@ -2246,12 +2264,18 @@ static int SysDup3(struct Machine *m, i32 fildes, i32 newfildes, i32 flags) {
 static int SysDupf(struct Machine *m, i32 fildes, i32 minfildes, int cmd) {
   struct Fd *fd;
   int lim, oflags, newfildes, hostfd;
-  if (minfildes >= (lim = GetFileDescriptorLimit(m->system))) return emfile();
+  lim = GetFileDescriptorLimit(m->system);
   // wbox win32: table-driven F_DUPFD (see SysDup1)
   LOCK(&m->system->fds.lock);
   if (!(fd = GetFd(&m->system->fds, fildes))) {
     UNLOCK(&m->system->fds.lock);
     return ebadf();
+  }
+  // Linux resolves the source fd before validating the command argument,
+  // so a bad source plus a bad minimum reports EBADF rather than EINVAL.
+  if (minfildes < 0 || minfildes >= lim) {
+    UNLOCK(&m->system->fds.lock);
+    return einval();
   }
   if ((hostfd = VfsDup(fd->hostfd)) == -1) {  // VFS-aware (pipes/sockets)
     UNLOCK(&m->system->fds.lock);

@@ -50,6 +50,36 @@ static int mkpair(int sv[2]) {
   return tcp_pair(sv);
 }
 
+static void check_listener_replace(int use_dup3) {
+  struct sockaddr_in a = {0};
+  socklen_t alen = sizeof(a);
+  int ls = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+  int target = -1, cs = -1, as = -1;
+  T_ASSERT(ls >= 0);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  T_ASSERT_OK(bind(ls, (struct sockaddr *)&a, sizeof(a)));
+  T_ASSERT_OK(listen(ls, 1));
+  T_ASSERT_OK(getsockname(ls, (struct sockaddr *)&a, &alen));
+  target = open("/dev/null", O_RDWR);
+  T_ASSERT(target >= 0);
+  T_ASSERT_EQ(use_dup3 ? dup3(ls, target, O_CLOEXEC) : dup2(ls, target),
+              target);
+  int fdflags = fcntl(target, F_GETFD);
+  T_ASSERT(fdflags >= 0);
+  T_ASSERT(use_dup3 ? (fdflags & FD_CLOEXEC) : !(fdflags & FD_CLOEXEC));
+  T_ASSERT_OK(close(ls));
+  T_ASSERT_ERRNO(accept(target, NULL, NULL), EAGAIN);
+  cs = socket(AF_INET, SOCK_STREAM, 0);
+  T_ASSERT(cs >= 0);
+  T_ASSERT_OK(connect(cs, (struct sockaddr *)&a, sizeof(a)));
+  as = accept(target, NULL, NULL);
+  T_ASSERT(as >= 0);
+  if (as >= 0) close(as);
+  if (cs >= 0) close(cs);
+  close(target);
+}
+
 int main(void) {
   /* --- socket creation matrix --- */
   T_BEGIN("sock/create-types");
@@ -356,6 +386,12 @@ int main(void) {
     close(target);
     close(sv[1]);
   }
+
+  T_BEGIN("socket/dup2-listener-metadata");
+  check_listener_replace(0);
+
+  T_BEGIN("socket/dup3-listener-metadata");
+  check_listener_replace(1);
 
   T_BEGIN("socket/fork-inherits-alias");
   {
