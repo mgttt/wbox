@@ -3,3 +3,5 @@ target/
 vendor/blink/build-win32/
 tests/guest/bin/
 build/
+t_p_L/
+*.lock
