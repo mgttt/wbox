@@ -79,4 +79,13 @@ int WboxSockPoll(struct pollfd *pfds, unsigned long n, int timeout);
 int WboxEpollIsFd(int fd);
 int WboxEpollClose(int fd);                // 1 = handled (fd was epoll)
 
+// w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
+// the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets
+// (>2GiB) through these instead of VfsPreadv/VfsPwritev.
+struct iovec;
+ssize_t W32Preadv64(int fd, const struct iovec *iov, int n, int64_t off);
+ssize_t W32Pwritev64(int fd, const struct iovec *iov, int n, int64_t off);
+// F3: true 64-bit file size (struct stat.st_size is 32-bit on win32)
+int W32FileSize64(int fd, int64_t *out);
+
 #endif
