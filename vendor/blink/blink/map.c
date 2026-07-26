@@ -36,7 +36,6 @@
 #include "blink/util.h"
 #include "blink/vfs.h"
 #if defined(_WIN32) && !defined(__CYGWIN__)
-#include "blink/log.h"
 #include "win32.h"
 #endif
 
@@ -87,15 +86,9 @@ static void *PortableMmap(void *addr,     //
   } else if ((tfd = mkstemp(path)) != -1) {
     unlink(path);
     if (!ftruncate(tfd, length)) {
+      // On Win32 the unlinked file also gives snapshot-fork a stable
+      // Fshare identity, so anonymous and regular shared maps use one path.
       res = mmap(addr, length, prot, flags & ~MAP_ANONYMOUS_, tfd, 0);
-#if defined(_WIN32) && !defined(__CYGWIN__)
-      // wbox: snapshot fork gives each child a private host window, so
-      // MAP_SHARED anon pages need explicit tracking: registered here and
-      // synced child->parent at child exit (see w32mem.c ShsegSync).
-      if (res != MAP_FAILED && (flags & MAP_SHARED)) {
-        WboxShsegRegister((uintptr_t)res, length);
-      }
-#endif
     } else {
       res = MAP_FAILED;
     }

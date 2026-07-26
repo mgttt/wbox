@@ -175,6 +175,40 @@ int main(int argc, char **argv) {
     }
   }
 
+  T_BEGIN("fork/anon-shared-many-visible");
+  {
+    enum { MAP_COUNT = 160 };
+    unsigned char *maps[MAP_COUNT];
+    int mapped = 0;
+    int cleaned = 1;
+    memset(maps, 0, sizeof(maps));
+    for (int i = 0; i < MAP_COUNT; ++i) {
+      maps[i] = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+      if (maps[i] == MAP_FAILED) break;
+      ++mapped;
+    }
+    T_ASSERT_EQ(mapped, MAP_COUNT);
+    if (mapped == MAP_COUNT) {
+      pid = fork();
+      T_ASSERT(pid >= 0);
+      if (pid == 0) {
+        maps[0][0] = 0xb1;
+        maps[MAP_COUNT - 1][0] = 0xb7;
+        _exit(0);
+      }
+      if (pid > 0) {
+        T_ASSERT(wait_status_ok(pid, 0));
+        T_ASSERT(maps[0][0] == 0xb1);
+        T_ASSERT(maps[MAP_COUNT - 1][0] == 0xb7);
+      }
+    }
+    for (int i = 0; i < mapped; ++i) {
+      if (munmap(maps[i], 4096) == -1) cleaned = 0;
+    }
+    T_ASSERT(cleaned);
+  }
+
   /* --- file-backed MAP_SHARED: child writes reach parent and disk --- */
   T_BEGIN("fork/file-shared-visible-writeback");
   {

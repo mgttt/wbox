@@ -29,9 +29,8 @@ void WboxMemFinishUnmap(void);
 // path uses WboxMemReleaseWindow which also switches TLS back)
 void WboxMemDestroyWindow(void *win);
 int WboxMemRecommitIfOurs(void *);
-// MAP_SHARED|MAP_ANONYMOUS tracking across snapshot fork (w32mem.c)
-void WboxShsegRegister(uintptr_t host_addr, size_t len);
-void WboxShsegSyncToParent(void);
+// Flush/sync MAP_SHARED file-backed pages to a snapshot parent.
+void WboxMemSyncSharedToParent(void);
 // blink core hook (memorymalloc.c): drop recycled host pages in [lo,hi)
 void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi);
 

@@ -126,7 +126,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ✅ 匿名及文件映射支持原地扩缩、`MREMAP_MAYMOVE` / `MREMAP_FIXED` 搬移、数据与逐页权限保留、新增页加载/清零；文件 backing 独立于原 fd 生命周期，MAP_PRIVATE 脏页隔离和 MAP_SHARED 写回均覆盖 |
-| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回按文件 ID/偏移同步，注册表按需增长；msync/munmap/MAP_FIXED 写回错误返回 guest 且保留原映射。覆盖 160 个并存映射、fork 后父窗口可见性、子映射搬移、exec wipe、固定覆盖及内部 fd 0；由 `t_mmap` / `t_fork_mem` / `t_exec` 验证 |
+| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回按文件 ID/偏移同步，注册表按需增长；匿名共享映射用未链接临时文件承载并走同一 Fshare 路径。msync/munmap/MAP_FIXED 写回错误返回 guest 且保留原映射。覆盖 160 个并存普通/匿名映射、fork 后父窗口可见性、子映射搬移、exec wipe、固定覆盖及内部 fd 0；由 `t_mmap` / `t_fork_mem` / `t_exec` 验证 |
 | 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
 | 10 | clone/线程 | ❌ 未接入（静态 glibc pthread 在上游 blink 亦 100% 崩溃，列入不支持） |
@@ -292,6 +292,9 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
    写回。注册或中间 munmap 拆分失败会保留原映射并返回错误。guest munmap
    在删除页表前预写回，并用线程本地范围标记让后续宿主反提交不重复 I/O；
    msync、munmap 或 MAP_FIXED 写回失败均返回对应 errno 且不破坏原映射。
+   Windows 的 `MAP_SHARED|MAP_ANONYMOUS` 由立即 unlink 的临时文件实现，
+   因此同样按文件 ID/偏移走 Fshare；旧 Shseg 重复地址表已删除，避免两套
+   元数据在扩容或拆分失败后分叉。
 6. **VFS 映射元数据**：fork 快照将父窗口内的文件 backing 条目平移克隆到
    子窗口，使继承映射可继续 `mremap`；exec wipe 前按当前窗口清除旧条目，
    新映像可安全复用同一 guest 地址且不会删除父窗口记录。

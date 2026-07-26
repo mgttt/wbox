@@ -762,9 +762,9 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc, int termsig) {
   uintptr_t lo = WboxMemWindowBase();
   uintptr_t hi = WboxMemLimit();
   W32ForkDbg("child exit", rc, 0);
-  // flush MAP_SHARED anon pages back to the parent window BEFORE the
-  // exit status becomes waitable, while our guest pages are still mapped
-  WboxShsegSyncToParent();
+  // Flush MAP_SHARED pages back to the parent window BEFORE the exit
+  // status becomes waitable, while our guest pages are still mapped.
+  WboxMemSyncSharedToParent();
   if (termsig) {
     // waitpid must report WIFSIGNALED/WTERMSIG, not a 128+sig exit code
     W32ChildSignalKilled(rec, termsig);
