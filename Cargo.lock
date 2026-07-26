@@ -714,6 +714,7 @@ dependencies = [
  "anyhow",
  "base64",
  "flate2",
+ "libc",
  "native-tls",
  "serde_json",
  "sha2",

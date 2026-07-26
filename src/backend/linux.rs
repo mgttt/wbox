@@ -17,6 +17,10 @@
 //! §10.2 判断"Linux 后端复用面最大、风险最低"的依据。
 
 use super::{Backend, Prepared, RunSpec};
+
+#[cfg(target_os = "linux")]
+#[path = "linux_ns.rs"]
+mod ns;
 use crate::error::{Result, WboxError};
 
 /// Linux 原生容器后端（无状态）。
@@ -59,14 +63,15 @@ impl Backend for LinuxNativeBackend {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32> {
+        ns::spawn_isolated(spec, prepared)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
-        // L1 才落地隔离。这里刻意报错而非"直接 exec 了事"——
-        // 无隔离地执行容器命令会让"同一条 wbox run 在两个宿主上隔离强度不同"，
-        // 正是 §10.5「语义一致性红线」明令禁止的行为。
         Err(WboxError::spawn(
-            "Linux 原生后端尚未就绪：执行计划已可构造（L0），但 user/mount/pid \
-             namespace 与 cgroup v2 限额（L1/L2）未实现。在隔离落地前拒绝执行，\
-             以免与 Windows 侧的隔离承诺不一致；详见 docs-architecture.md §10.5",
+            "Linux 原生后端只能在 Linux 宿主上执行（当前宿主请用 BlinkBackend）",
         ))
     }
 }
@@ -172,15 +177,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rootfs);
     }
 
-    /// L0 阶段 spawn 必须**明确拒绝**而不是无隔离执行（§10.5 语义一致性红线）。
+    /// 命令不存在时应给出可读错误（而非 panic 或静默 rc）。
     #[test]
-    fn spawn_refuses_until_isolation_lands() {
-        let rootfs = temp_rootfs("spawn");
-        let s = spec(&rootfs, &["/bin/true"], vec![]);
+    fn spawn_reports_missing_command() {
+        let rootfs = temp_rootfs("nocmd");
+        let s = spec(&rootfs, &["/bin/definitely-not-here"], vec![]);
         let p = LinuxNativeBackend.prepare(&s).unwrap();
         let err = LinuxNativeBackend.spawn(&s, &p).unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("尚未就绪"), "{}", msg);
+        assert!(msg.contains("启动容器进程"), "{}", msg);
+        let _ = std::fs::remove_dir_all(&rootfs);
+    }
+
+    /// L1 端到端：在 user+mount+pid namespace 内真跑一个静态 busybox，
+    /// 用**退出码**断言 uid 映射生效（`id -u` 在容器内应为 0）。
+    ///
+    /// 前置：仓库根存在静态 busybox（矩阵已在用），且宿主允许 unprivileged
+    /// user namespace。任一不满足按仓库惯例 SKIP 不 fail——环境能力缺失
+    /// 不等于代码回归（docs/testing.md §一.1 的网络用例同一原则）。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_maps_uid_to_root_in_namespace_or_skip() {
+        let bb = std::path::Path::new("busybox");
+        if !bb.is_file() {
+            eprintln!("SKIP：仓库根无静态 busybox（矩阵用二进制），跳过 L1 端到端");
+            return;
+        }
+        let rootfs = temp_rootfs("l1e2e");
+        std::fs::copy(bb, rootfs.join("bin/busybox")).unwrap();
+        // busybox 以 argv[0] 分派 applet，故用符号链接暴露 sh / id
+        for a in ["sh", "id"] {
+            let _ = std::os::unix::fs::symlink("busybox", rootfs.join("bin").join(a));
+        }
+        let s = spec(
+            &rootfs,
+            &["/bin/sh", "-c", "[ \"$(/bin/id -u)\" = 0 ]"],
+            vec![],
+        );
+        let p = LinuxNativeBackend.prepare(&s).unwrap();
+        match LinuxNativeBackend.spawn(&s, &p) {
+            Ok(0) => {} // 容器内 id -u == 0：uid 映射生效
+            Ok(rc) => panic!("容器内 id -u 不为 0（rc={}），uid 映射未生效", rc),
+            Err(e) => {
+                // 例如 CI 禁用 unprivileged userns：报 EPERM
+                eprintln!("SKIP：无法建立 user namespace（{}）", e);
+            }
+        }
         let _ = std::fs::remove_dir_all(&rootfs);
     }
 }

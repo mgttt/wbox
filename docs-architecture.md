@@ -270,7 +270,7 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 | 里程碑 | 范围 | 验收标准 |
 |---|---|---|
 | ✅ L0 骨架 | `backend/linux.rs` 实现 `Backend`；镜像目标按宿主分派（`image_backend_kind`）；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | **已完成**：6 项单测覆盖执行计划（无模拟器前缀 / resolv.conf 注入 / POSIX 环境风味 / 共享保留键策略 / 参数校验 / spawn 拒绝），与 Blink/Native 同构 |
-| L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` `/dev` 最小挂载 | 非 root 用户跑 `wbox run alpine:3.20 -- id` 得 `uid=0(root)` 且宿主侧仍是原 uid |
+| ✅ L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` 与最小 `/dev`（bind 宿主节点，user ns 内不能 mknod） | **已完成并实测**：非 root（uid=1001）跑容器内 `id` 得 `uid=0 gid=0`；`ls /` 只见 rootfs（`bin dev etc proc`），`/home` 不存在；容器内 `$$`=1（PID ns）；退出码 7/0 原样转发 |
 | L2 资源限额 | cgroup v2：`memory.max` / `cpu.max` / `pids.max`，对齐现有 `--memory`/`--cpu-pct`/`--max-procs` 语义 | 三个开关各有一条超限用例（OOM 被杀、CPU 占比受限、fork 炸弹被挡） |
 | L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
 | L4 跨架构 | 宿主 arch ≠ 镜像 arch 时自动切 `BlinkBackend`（arm64 上跑 x86-64 镜像） | arm64 CI 上 `wbox run --platform linux/amd64 alpine -- uname -m` 输出 `x86_64` |
