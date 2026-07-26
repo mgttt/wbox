@@ -212,6 +212,11 @@ jobs:
           # guest 侧的 socket/epoll 语义并未失去覆盖——guest-tests job 的
           # t_net_epoll / t_net_sockopt 走本地 loopback，不依赖公网。
           WBOX_MATRIX_NET_SKIP: 1
+          # 单项超时收到 20s（脚本默认 60s）。当前 W1（fork 挂死）会让 B/C 两组
+          # 共 8 项各等满超时，按 60s 计要白等 8 分钟——而这正是排查 W1 的反馈环。
+          # 实测通过项里最慢的是 D 组 wget 公网下载，约 0.6s，20s 有 30 倍余量，
+          # 信号一点不丢。W1 修复后可视情况调回。
+          WBOX_MATRIX_TIMEOUT: 20
         run: |
           scripts/test-matrix.sh \
             vendor/blink/build-win32/wbox-linux.exe ./busybox 2>&1 | tee matrix.log
