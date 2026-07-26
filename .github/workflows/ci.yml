@@ -24,6 +24,7 @@ env:
 jobs:
   # ① Linux 单测：oci/config/backend 纯逻辑在 Linux 即可跑（当前测试主体）
   test-linux:
+    timeout-minutes: 15  # 纯 Rust 单测，正常 <2 分钟
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,6 +37,7 @@ jobs:
   #     补这个 job 是因为 image_dir_layout_segments 这种 Windows-only bug
   #     长期被 Linux CI 掩盖（Path::components 在 Linux 无盘符前缀）。
   test-windows:
+    timeout-minutes: 25  # windows runner 上编译较慢，正常 <8 分钟
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +48,7 @@ jobs:
   # ② Windows 目标编译检查：Win32 专属代码（job/token/sandbox/acl/backend native）
   #    只能在 windows target 下编译，作为 Windows 代码的编译期门禁
   check-windows-msvc:
+    timeout-minutes: 15  # 仅编译检查，正常 <2 分钟
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +61,7 @@ jobs:
   # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
   smoke-windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -90,6 +94,9 @@ jobs:
   #    构建后在**真 Windows** 上跑完整验收矩阵（scripts/test-matrix.sh）。
   build-wbox-linux:
     runs-on: windows-latest
+    # 上界：构建约 2 分钟，矩阵含网络用例与 guest 套件。没有上界时，
+    # guest 侧一旦挂死会一直烧到 GitHub 默认的 6 小时才被杀。
+    timeout-minutes: 30
     defaults:
       run:
         shell: msys2 {0}
@@ -205,6 +212,9 @@ jobs:
   #    是前置缺失，故此处显式判定并回到契约规定的 SKIP。
   guest-tests:
     runs-on: windows-latest
+    # 上界：16 个用例，runner 内部每例 120s 超时，最坏约 32 分钟；
+    # 留 40 分钟，超出即视为整体挂死。
+    timeout-minutes: 40
     # 需要 build-wbox-linux 产出的 wbox-linux.exe（本 job 不重复构建）
     needs: build-wbox-linux
     defaults:
@@ -242,6 +252,7 @@ jobs:
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
+    timeout-minutes: 30  # 构建 release + 打包 + 上传
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests]
     runs-on: windows-latest
