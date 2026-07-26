@@ -25,12 +25,13 @@ wbox/
 ├── Cargo.toml / Cargo.lock   # 单 crate（workspace 根即 crate 根），edition 2021
 ├── src/
 │   ├── main.rs               # CLI 解析（手写，无 clap）与命令分发、退出码约定
-│   ├── cli/                  # args.rs / run.rs / image.rs（run 与 image 子命令实现）
+│   ├── cli/                  # mod.rs(分发+USAGE) / args.rs / run.rs / image.rs
 │   ├── job.rs                # Job Object RAII（KILL_ON_JOB_CLOSE/内存/CPU rate/进程数）[Windows]
 │   ├── token.rs              # AppContainer profile、capability SID、Low IL [Windows]
 │   ├── sandbox.rs            # attribute-list 启动编排（挂起创建→入Job→恢复→等待→转发退出码）[Windows]
 │   ├── acl.rs                # rootfs 目录 ACL 下放（Low IL 可读）[Windows]
 │   ├── error.rs              # 带退出码语义的错误类型（1参数/2profile/3job/4进程创建/5镜像）
+│   ├── testenv.rs            # [cfg(test)] 环境变量互斥+自动还原（并行用例共享进程环境）
 │   ├── backend/              # 运行目标分流：native.rs（Windows 原生）/ blink.rs（Linux ELF）/ env.rs（环境合并）
 │   └── oci/                  # OCI Distribution v2 客户端：mod(引用解析/缓存) / registry(HTTP+Bearer) /
 │                             #   image(digest校验/tar解包/whiteout/symlink防护) / config(Entrypoint×Cmd合并)
@@ -41,7 +42,7 @@ wbox/
 ├── tests/                    # guest C 回归套件：run-guest-tests.sh + KNOWN-FAILURES.md（基线台账）
 ├── docs/testing.md           # 三层测试体系与发布门禁
 ├── docs-architecture.md      # 架构总览
-└── .github/workflows/ci.yml  # 5 job + tag 发布门禁（见 §5）
+└── .github/workflows/ci.yml  # 6 门禁 job + tag 发布 job（见 §5）
 ```
 
 依赖红线（SPEC 继承）：不加 tokio、不加 clap；HTTP 用 ureq+native-tls
@@ -88,7 +89,7 @@ WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
 ## 3. 验证三层（发布门禁的本地复现）
 
 ```bash
-cargo test --locked                                          # ① Rust 单测（Linux 可全跑；141 passed 基线）
+cargo test --locked                                          # ① Rust 单测（Linux 可全跑；144 passed 基线）
 rustup target add x86_64-pc-windows-msvc
 cargo check --locked --target x86_64-pc-windows-msvc         # ② Win32 编译门禁（要求 0 warning）
 scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox   # ③ 真机矩阵
@@ -121,17 +122,18 @@ wbox image list / image rm
 
 ## 5. CI（.github/workflows/ci.yml）
 
-触发：push main、tag `v*`、PR、nightly（cron）、手动。5 个 job：
+触发：push main、tag `v*`、PR、nightly（cron）、手动。6 个门禁 job：
 
 | Job | Runner | 作用 |
 |---|---|---|
 | `test-linux` | ubuntu | Rust 单测（当前测试主体） |
+| `test-windows` | windows | 同一套 `cargo test`，但在 windows 上跑——`cfg(windows)` 模块（sandbox/acl/job/token）的测试只有这里才编译得到 |
 | `check-windows-msvc` | ubuntu(+target) | Win32 专属代码编译期门禁 |
 | `smoke-windows` | windows | build + `--help`/`image list`/AppContainer 内 cmd 冒烟 + 真机 `image pull`（registry 不可达标黄不红） |
 | `build-wbox-linux` | windows+MSYS2 | MinGW 构建 wbox-linux.exe + 完整验收矩阵（**PR 只跑冒烟**，矩阵留给 main/tag/nightly） |
-| `guest-tests` | windows | 契约 `tests/run.sh` 存在才执行，否则 SKIP 不阻塞（⚠️ 入口名与实际不符，见 §7） |
+| `guest-tests` | windows | 前置齐备才执行，否则 `::notice::` SKIP 不阻塞。前置有两项：`tests/run.sh`（已落地）与 `wbox-linux.exe`（本 job 不构建，故当前恒 SKIP，见 §7.3） |
 
-tag `v*` 时 `release` job needs 全部 5 job 全绿，打包
+tag `v*` 时 `release` job needs 全部 6 个门禁 job 全绿，打包
 wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 ## 6. 当前状态（v1.0.0-rc2 基线）
@@ -151,9 +153,12 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 1. **开发沙箱是 Linux**：无法跑 Windows 功能测试；Win32 代码靠
    `cargo check --target x86_64-pc-windows-msvc` 门禁，真机信号靠 CI。
 2. **别用 MSVC 编 vendor/blink**：GNU 扩展必须 MinGW/zig cc。
-3. **guest 测试入口名不一致**：CI/testing.md 契约是 `tests/run.sh`，
-   实际文件是 `tests/run-guest-tests.sh` → CI guest-tests 恒 SKIP（见
-   docs 矛盾审查，待统一）。
+3. **guest-tests job 当前恒 SKIP（原因已变）**：入口 `tests/run.sh` 已落地
+   （包装 `run-guest-tests.sh`），入口名问题不复存在。现在 SKIP 的原因是
+   运行前置缺失——该 job 既不构建 `wbox-linux.exe`，也没有 zig（guest 用例
+   要交叉编译成 x86_64-linux-musl 静态 ELF）。补齐路径：取
+   build-wbox-linux 的 artifact + 装 zig。矩阵 F 组已在 build-wbox-linux
+   内跑同一套 guest 套件。
 4. **文档状态口径分散**：能力声明以 CHANGELOG rc2 + KNOWN-FAILURES 基线
    为准；README/WIN32-PORT.md 个别段落滞后（如 apt-get update 状态、
    MAP_SHARED 写回），见矛盾审查报告。

@@ -1,10 +1,15 @@
 # wbox 架构设计 — 无硬件虚拟化环境下的 Portable Windows 容器
 
-> 版本：v3 ｜ 日期：2026-07-23
+> 版本：v4 ｜ 日期：2026-07-26
 > **实现状态总览**（防止"文档承诺 ≠ 代码现状"）：
-> - ✅ 已实现：§1–§5 Windows 进程容器（AppContainer+Job）、OCI 镜像拉取（`wbox image pull/list`，§9.2 前端部分）
-> - 🔨 进行中：§9 Linux 后端（BlinkBackend Win32 移植，win32-port 分支）、Backend trait 骨架
-> - 📐 纯设计未实现：§6 路线图各项、§8.4 v2/v3 层、§9.2 的 Wsl1Backend/PicoBackend
+> - ✅ 已实现：§1–§5 Windows 进程容器（AppContainer+Job，**真机冒烟已过 CI**）、
+>   OCI 镜像拉取（`image pull/list/show/rm`）、`Backend` trait 与
+>   Native/Blink 双后端分派（`src/backend/`，已非骨架）
+> - 🔨 进行中：§9 Linux 后端的**真机收尾**——`wbox-linux.exe` 已能在真 Windows 上
+>   构建并正确执行 guest 程序，但退出码传播存在缺陷（恒 127，wine 下不复现，
+>   CI 探针取证中）；快照式 fork 已落地，§9.2 中"真 fork 不支持"的旧结论作废
+> - 📐 纯设计未实现：§6 路线图各项、§8.4 v2/v3 层、§9.2 的 Wsl1Backend/PicoBackend、
+>   §10 多宿主后端
 
 ## 1. 问题定义
 
@@ -202,3 +207,56 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 **性能修正**：JIT 9–12x 慢、fork/exec 16x 慢、**纯解释 78x 慢**——§9.5 原先"10–50x"过于乐观，JIT 是必需品而非优化项。
 
 **两个利好**：`jit.h` 已内建 Win64 ABI（JIT 移植成本大幅降低）；guest `execve` 是进程内重建 Machine，不依赖宿主 exec（fork+exec 特判的工程量比预判小）。
+
+## 10. 多宿主后端（设计，未实现）
+
+> 起因：wbox 当前只做「Windows 宿主」。把宿主维度打开后，`Backend` trait
+> 天然可以承载更多组合。本节记录**评估结论与优先级**，避免把"能做"当成
+> "该做"。
+
+### 10.1 维度拆解
+
+隔离/执行是两个正交维度：**宿主 OS** × **客户程序 ABI**。
+
+| 宿主 \ 客户 | Windows PE | Linux ELF |
+|---|---|---|
+| Windows | ✅ `NativeBackend`（AppContainer+Job） | ✅ `BlinkBackend`（wbox-linux 仿真） |
+| Linux | 📐 `WineBackend`（见 10.3） | 📐 `LinuxNativeBackend`（见 10.2） |
+
+前端（CLI、OCI 拉取/解包/config 合并）与宿主无关，**已经是跨平台纯 Rust
+且在 Linux 上编译与单测**——这是多宿主最大的既有资产。
+
+### 10.2 `LinuxNativeBackend`：Linux 上跑 Linux 容器（优先级最高）
+
+- **复用面**：`src/oci/`（拉取、digest 链校验、层解包、whiteout、symlink
+  逃逸防护、`config.json` 合并）、`src/cli/`、`backend/env.rs` 的环境策略
+  全部原样可用；只需新增一个实现 `Backend { prepare, spawn }` 的后端。
+- **需要新写**：user/mount/pid/net namespace（`clone`/`unshare`）、
+  `uid_map`/`gid_map`（rootless）、`pivot_root` + overlayfs 挂载 rootfs、
+  cgroup v2 限额（对齐现有 `--memory`/`--cpu-pct`/`--max-procs` 语义）。
+- **定位必须诚实**：**不以对标 docker/podman 的功能面为目标**。它们的护城河
+  在网络/卷/compose/镜像构建/生态，那是人年级工程。wbox 的可辩护位置与它在
+  Windows 上一致——**单文件、无 daemon、rootless、给 Agent/CI 当执行沙箱**。
+- **差异化组合**：Linux 上同样可以走 `BlinkBackend`，于是能在 **arm64 Linux
+  上跑 x86-64 镜像**而不依赖 qemu-user。「单 exe + 跨架构 + rootless」这个
+  组合目前市面上确实缺。
+
+### 10.3 `WineBackend`：Linux 上跑 Windows 程序（集成，不自研）
+
+- **结论：不自研 Win32 实现，不以"超越 wine"为目标。** 方向是相反的——
+  wine 是把 Win32 API 实现在 POSIX 上（三十年、千万行，难点在
+  GDI/DirectX/COM/注册表的海量语义）；`vendor/blink/win32/` 那 ~8k 行做的是
+  把 POSIX 实现在 Win32 上。两者没有可复用部分，自研等于从零再造一个 wine。
+- **划算的做法**：把 wine 当执行器，包进 10.2 的 namespace 沙箱里，
+  用户得到统一 CLI 与统一隔离语义，而我们不碰 Win32 语义这个无底洞。
+
+### 10.4 排序与前置条件
+
+1. 先把 Windows 链路的可信度补齐（真机退出码缺陷、CI 全绿）——当前所有
+   Windows 侧结论都压在它上面；
+2. `LinuxNativeBackend`（复用最多、风险最低、与既有定位自洽）；
+3. Linux + blink 跨架构（差异化）；
+4. `WineBackend`（便利集成）；
+5. 自研 Win32 —— **不做**。
+
+注意成本：每加一个宿主，CI 矩阵与测试面翻倍。在 ① 达成前不宜开新宿主线。

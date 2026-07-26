@@ -14,10 +14,11 @@ env:
   CARGO_TERM_COLOR: always
 
 # 发布门禁说明（详见 docs/testing.md §发布门禁）：
-#   tag v* 的 release job needs 全部五个 job——
-#   test-linux（Rust 单测）+ check-windows-msvc（Win32 编译门禁）+
+#   tag v* 的 release job needs 全部六个门禁 job——
+#   test-linux（Rust 单测）+ test-windows（同一套单测在 windows 上跑，
+#   覆盖 cfg(windows) 模块）+ check-windows-msvc（Win32 编译门禁）+
 #   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
-#   guest-tests（guest 测试，tests/ 未就绪时 SKIP 标黄不阻塞）——
+#   guest-tests（guest 测试，前置未就绪时 SKIP 标黄不阻塞）——
 #   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
 
 jobs:
@@ -216,7 +217,7 @@ jobs:
           echo "发现 tests/run.sh 与 $exe，执行 guest 测试"
           WBOX_LINUX=$exe bash tests/run.sh
 
-  # ⑥ tag 发布门禁：needs 全部五个 job 全绿才创建 Release；
+  # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
     if: startsWith(github.ref, 'refs/tags/v')

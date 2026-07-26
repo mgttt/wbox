@@ -8,7 +8,8 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 
 ### 1. Rust 单测（`src/**` 内 `#[cfg(test)]`）
 
-- 位置：就近写在各模块的 `mod tests`（`src/oci/*`、`src/backend/*`、`src/main.rs`）。
+- 位置：就近写在各模块的 `mod tests`（`src/oci/*`、`src/backend/*`、`src/cli/*`、
+  `src/testenv.rs`，以及 `cfg(windows)` 的 `src/sandbox.rs` 等）。
 - 覆盖面：
   - `oci/mod.rs`——ImageRef 解析边界（digest 引用、registry 端口、多级路径、
     大写/localhost 现状、非法引用拒绝表）、缓存路径布局（`:` → `_`、缓存键含
@@ -43,9 +44,17 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 
 ### 2. guest 测试（`tests/`）
 
-- 由独立工作流维护；入口契约：**`tests/run.sh`**（退出码即测试结果）。
-- CI job `guest-tests`：入口存在则执行；`tests/` 未就绪时记 `::notice::` SKIP
-  并成功退出（不阻塞门禁）。入口一旦落地即自动并入发布门禁。
+- 入口契约：**`tests/run.sh`**（退出码即测试结果）。该文件已落地，是
+  `tests/run-guest-tests.sh` 的薄包装（透传参数、原样转发退出码）。
+- 运行前置**两项，缺一不可**：
+  1. `wbox-linux.exe`（被测运行时；由 `build-wbox-linux` 产出）；
+  2. `zig`（`tests/guest/build.sh` 要把 `t_*.c` 交叉编译成
+     **x86_64-linux-musl 静态 Linux ELF**，MinGW/MSVC 都做不到）。
+- CI job `guest-tests`：前置齐备才执行，否则记 `::notice::` SKIP 并成功退出
+  （不阻塞门禁）。该 job 自身不构建 exe、不装 zig，故**当前恒 SKIP**；
+  补齐路径是取 `build-wbox-linux` 的 artifact + 装 zig。
+- 在此之前，同一套 guest 套件已由**矩阵 F 组**在 `build-wbox-linux` 内执行
+  （那里 exe 刚构建好，zig 也已安装），故覆盖并未真空。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 
@@ -80,16 +89,22 @@ bash tests/run.sh
 ```
 tag v* push
   └─ release job（needs 全绿才执行）：
-       ① test-linux          Rust 单测
-       ② check-windows-msvc  Win32 编译门禁
-       ③ smoke-windows       真机冒烟（AppContainer 链路）
-       ④ build-wbox-linux    wbox-linux 构建 + 完整真机矩阵
-       ⑤ guest-tests         guest 测试（未就绪 = SKIP，就绪后自动生效）
+       ① test-linux          Rust 单测（Linux）
+       ② test-windows        同一套单测在 windows 上跑——cfg(windows) 模块
+                             （sandbox/acl/job/token）的测试只有这里编译得到
+       ③ check-windows-msvc  Win32 编译门禁
+       ④ smoke-windows       真机冒烟（AppContainer 链路）
+       ⑤ build-wbox-linux    wbox-linux 构建 + 完整真机矩阵
+       ⑥ guest-tests         guest 测试（前置未就绪 = SKIP，补齐后自动生效）
   └─ 产出：wbox.exe + wbox-linux.exe + wbox-portable-windows-x64.zip
            + SHA256SUMS.txt（两 exe + zip 的 sha256，必附）
 ```
 
 - 任一门禁 job FAIL → 不创建 Release；guest-tests SKIP（黄）不算 FAIL。
+- `test-linux` 与 `test-windows` 跑的是同一条 `cargo test --locked`；
+  差别只在 target——Windows 专属模块在 Linux 上整段不编译，其单测
+  自然也不会执行（`image_dir_layout_segments` 这类只在 Windows 上
+  暴露的缺陷曾长期被 Linux CI 掩盖）。
 - PR/push 常规 CI 保持快速：①②③ + ④的构建冒烟核心组；完整矩阵在
   push main / tag / nightly（每日 02:17 UTC）/ workflow_dispatch 跑。
 
