@@ -92,10 +92,25 @@ printf 'nameserver %s\n' "${WBOX_MATRIX_DNS:-223.5.5.5}" > "$WORK/etc/resolv.con
 WBOX_ABS=$(cd "$(dirname "$WBOX_LINUX")" && pwd)/$(basename "$WBOX_LINUX")
 cd "$WORK" || die "无法进入工作目录"
 
+# 单项超时：真机实测 B 组（fork 依赖）可能整项挂死，而本脚本原先没有任何
+# 上界——一次挂死就把整个 CI job 吃满（run 24 实测：B1 卡 18 分钟直到被取消）。
+# 挂死应表现为该项 FAIL(rc=124)，而不是让其余项永远得不到执行。
+# timeout 缺失时（极简环境）自动退化为不加限制。
+MATRIX_TIMEOUT=${WBOX_MATRIX_TIMEOUT:-60}
+if command -v timeout >/dev/null 2>&1 && [ "$MATRIX_TIMEOUT" != 0 ]; then
+  TMO=(timeout "$MATRIX_TIMEOUT")
+else
+  TMO=()
+fi
+
 # bb <args...> —— 跑 busybox 小程序，输出捕获到 $OUT，返回 rc
 bb() {
-  OUT=$("${RUN[@]}" "$WBOX_ABS" busybox "$@" 2>&1)
+  OUT=$("${TMO[@]}" "${RUN[@]}" "$WBOX_ABS" busybox "$@" 2>&1)
   rc=$?
+  # 124 = timeout 杀死；把它变成可读的 FAIL 详情而非神秘退出码
+  if [ "$rc" -eq 124 ]; then
+    OUT="（超时 ${MATRIX_TIMEOUT}s 被终止）$OUT"
+  fi
   # 剥 \r：真 Windows 下控制台/管道输出可能带 CRLF
   OUT=$(printf '%s' "$OUT" | tr -d '\r')
   # 剥 blink 固有的 stderr INFO 日志行（blink/vfs.c LogInfo "Initializing VFS"

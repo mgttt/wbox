@@ -23,6 +23,21 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
   WINEDEBUG=-all wine /path/to/wbox-linux.exe ./<t_xxx>
 ```
 
+## W1 真 Windows 专有：fork 依赖项挂死（**新增，2026-07-26 CI 首测**）
+
+| # | 现象 | 证据 | 状态 |
+|---|------|------|------|
+| W1 | 验收矩阵 **B 组（shell 矩阵，fork 依赖）第一项 `echo hello \| cat` 整项挂死** | CI run 24：A 组 11/11 于 08:25:04 全 PASS，随后 B 组标题打印后再无输出，直到 08:42:59 被取消（18 分钟无进展） | 未修复；wine 下 B 组 8/8 通过，属真机专有 |
+
+背景：同一次 CI 首次证明**堆损坏修复生效**——A 组 11 项全过，含
+A8「退出码转发 (0/1/7)」（此前 true/false/exit 7 全塌成 127，根因是
+`posix_memalign` 用 `_aligned_malloc` 却被 `free()` 释放，见 w32proc.c）。
+即基础执行链路在真 Windows 上已经正确，**残留问题集中在快照式 fork 路径**。
+
+排查提示：B1 是最简单的管道（一次 fork + 两端 pipe），比 B2/B3 更易缩小范围；
+`WBOX_DEBUG_FORK=1` 可打快照/回收页诊断。矩阵现已有单项超时
+（`WBOX_MATRIX_TIMEOUT`，默认 60s），挂死会记 `rc=124` 而非拖死整个 job。
+
 ## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 
 | # | 现象 | 期望 | 实测现状 |
