@@ -112,7 +112,9 @@ impl ImageRef {
 
     /// 缓存目录名中的 name 部分（`/` → `_`）。
     pub fn cache_name(&self) -> String {
-        self.repo.replace('/', "_")
+        // 先扁平化 `/`（多级仓库名 org/team/app → org_team_app），再过一遍
+        // 净化：repo 也可能含 `\` 或纯点段，同样不得改变路径层级。
+        sanitize_segment(&self.repo.replace('/', "_"))
     }
 
     /// 供展示的 `repo:tag`（digest 引用为 `repo@digest`）形式。
@@ -134,10 +136,33 @@ pub fn cache_root() -> crate::error::Result<PathBuf> {
     Ok(PathBuf::from(home).join(".wbox").join("images"))
 }
 
-/// 缓存目录路径段的净化：`:` 在 Windows 上是非法文件名字符
-/// （registry 可能带端口、digest 引用形如 `sha256:...`），统一替换为 `_`（M4）。
+/// 缓存目录路径段的净化。
+///
+/// 这是 [`image_dir`] 的**安全边界**：`image pull` 往该目录解包、
+/// `image rm` 对它**递归删除**，所以任何一段都不得改变路径层级。
+/// 原实现只把 `:` 换成 `_`（Windows 非法文件名字符：registry 带端口、
+/// digest 形如 `sha256:...`），对 `..` 一概放行——而 `..` 含点，会被
+/// registry 判定当作主机名，于是 `wbox image rm ../evil` 的目标变成
+/// `<缓存根>/../evil`，逃出缓存根（单测 image_dir_never_escapes_cache_root
+/// 实测捕获）。
+///
+/// 故此处额外消灭两类形态：
+/// - 路径分隔符 `/` 与 `\`（`\` 在 Windows 上同样是分隔符）；
+/// - 纯点段 `.` / `..` / `...`（前缀 `_` 降级为普通名字；全点名在
+///   Windows 上本就有额外限制）。
 fn sanitize_segment(s: &str) -> String {
-    s.replace(':', "_")
+    let out: String = s
+        .chars()
+        .map(|c| match c {
+            ':' | '/' | '\\' => '_',
+            c => c,
+        })
+        .collect();
+    if out.is_empty() || out.chars().all(|c| c == '.') {
+        format!("_{}", out)
+    } else {
+        out
+    }
 }
 
 /// 某个镜像引用的缓存目录。缓存键包含 registry（M5），
@@ -353,6 +378,49 @@ mod tests {
         let r = ImageRef::parse("LOCALHOST/app:1", None).unwrap();
         assert_eq!(r.registry, DEFAULT_REGISTRY);
         assert_eq!(r.repo, "LOCALHOST/app");
+    }
+
+    /// `image rm` 会对 `image_dir()` 的返回值做**递归删除**，因此"解析后的
+    /// 引用不可能指到缓存根之外"是一条安全边界，必须有测试守住。
+    ///
+    /// 断言两条：路径里不得出现 `..` 组件（仅靠 `starts_with` 会被
+    /// `<root>/a/../../evil` 骗过——它按组件比较，前缀确实匹配），
+    /// 且必须落在 `<root>/.wbox/images` 之内。
+    #[test]
+    fn image_dir_never_escapes_cache_root() {
+        use std::path::Component;
+        let home = crate::cli::TempHome::new("oci-escape");
+        let root = home.dir.join(".wbox").join("images");
+        for hostile in [
+            "../evil",
+            "../../etc",
+            "a/../../evil",
+            "..",
+            "ubuntu:../../evil",
+            "reg.io/../../evil",
+            "reg.io/ns/../../../evil",
+            "./evil",
+            "evil/./x",
+            r"..\evil",
+        ] {
+            let Ok(r) = ImageRef::parse(hostile, None) else {
+                continue; // 被解析拒绝同样满足安全要求
+            };
+            let dir = image_dir(&r).unwrap();
+            assert!(
+                !dir.components().any(|c| c == Component::ParentDir),
+                "引用 {:?} 的缓存目录含 `..` 组件：{}",
+                hostile,
+                dir.display()
+            );
+            assert!(
+                dir.starts_with(&root),
+                "引用 {:?} 的缓存目录逃出缓存根：{}（根 {}）",
+                hostile,
+                dir.display(),
+                root.display()
+            );
+        }
     }
 
     #[test]
