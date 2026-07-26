@@ -149,7 +149,15 @@ if [ "$fails" -ne 0 ]; then
 fi
 
 echo "linking..."
-$CC -O2 -o "$BUILD/wbox-linux.exe" @"$OBJLIST" -lws2_32 -lwinmm -lbcrypt
+# -static: 静态链接 mingw runtime（含 libwinpthread），让产物真正 portable，
+# 不依赖目标机器上是否装了 mingw UCRT64 工具链的 libwinpthread-1.dll。
+# 实证：本机 Windows Server 2022 直接跑构建产物（不在 msys2 shell 里）时，
+# wbox-linux.exe 因缺 libwinpthread-1.dll 触发 STATUS_DLL_NOT_FOUND (0xC0000135)，
+# bash 把该 NT 状态码翻译成 rc=127（command not found），CI 上则因为
+# D:\a\_temp\msys64\ucrt64\bin 恰在 PATH 里能找到 DLL 而掩盖了这个问题。
+# -static 让 libgcc/libwinpthread/libmsvcrt 都 statically link 进 exe，
+# 代价是 exe 体积略增，但 wbox 的 portable 定位要求这一层。
+$CC -O2 -static -o "$BUILD/wbox-linux.exe" @"$OBJLIST" -lws2_32 -lwinmm -lbcrypt
 PRE=$(wc -c <"$BUILD/wbox-linux.exe")
 # strip debug/symbol residue when a PE-capable strip is at hand (mingw
 # gcc builds carry a symbol table; zig cc -g0 output is already
