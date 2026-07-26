@@ -129,6 +129,24 @@ FAIL fork/failure-$stage: rc=$prc $(printf '%s' "$PROBE" | tail -2 | head -c 160
       probe_detail="${probe_detail}${probe_detail:+,}$stage"
     done
   fi
+  if [ "$name" = t_mmap ] && [ "$rc" -eq 0 ]; then
+    for stage in msync munmap munmap-second split fixed; do
+      fault=writeback
+      [ "$stage" = munmap-second ] && fault=writeback-second
+      [ "$stage" = split ] && fault=split
+      PROBE=$(env WBOX_TEST_FSHARE_FAIL="$fault" \
+        timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
+        "--writeback-failure-$stage" 2>&1)
+      prc=$?
+      if [ "$prc" -ne 0 ]; then
+        OUT="$OUT
+FAIL mmap/writeback-failure-$stage: rc=$prc $(printf '%s' "$PROBE" | tail -2 | head -c 160)"
+        rc=$prc
+        break
+      fi
+      probe_detail="${probe_detail}${probe_detail:+,}$stage"
+    done
+  fi
   nfail=$(printf '%s\n' "$OUT" | grep -c '^FAIL ' || true)
   if [ "$rc" -eq 124 ]; then
     report FAIL "$name" "timeout ${TIMEOUT}s"
@@ -144,8 +162,12 @@ FAIL fork/failure-$stage: rc=$prc $(printf '%s' "$PROBE" | tail -2 | head -c 160
     sum=$(printf '%s\n' "$OUT" | grep '^SUMMARY ' | tail -1)
     report PASS "$name" "$sum"
     [ "$LIST" = 1 ] || printf '    %s\n' "$sum"
-    [ "$LIST" = 1 ] || [ -z "$probe_detail" ] ||
-      printf '    fork failure probes: %s\n' "$probe_detail"
+    if [ "$LIST" != 1 ] && [ -n "$probe_detail" ]; then
+      case $name in
+        t_fork_mem) printf '    fork failure probes: %s\n' "$probe_detail" ;;
+        t_mmap) printf '    fshare failure probes: %s\n' "$probe_detail" ;;
+      esac
+    fi
   fi
 done
 

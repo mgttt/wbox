@@ -981,8 +981,12 @@ i64 ReserveVirtual(struct System *s, i64 virt, i64 size, u64 flags, int fd,
                      (fd == -1 ? MAP_ANONYMOUS_ : 0) |      //
                      (shared ? MAP_SHARED : MAP_PRIVATE)),  //
                     fd, offset, "linear")) != want) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      if (got == MAP_FAILED && !mutated) {
+#else
       if (got == MAP_FAILED && errno == ENOMEM && !mutated) {
-        LOGF("host system returned ENOMEM");
+#endif
+        LOGF("host system rejected mmap without changing tracked memory");
         return -1;
       } else if (got != MAP_FAILED && !want) {
         virt = ToGuest(got);

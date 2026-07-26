@@ -23,6 +23,8 @@ uintptr_t WboxMemHandleBase(void *);
 uintptr_t WboxMemHandleLimit(void *);
 int WboxMemSnapshotWindow(void *srcwin, void **dstout);
 void WboxMemWipeWindow(void);
+int WboxMemPrepareUnmap(uintptr_t, size_t);
+void WboxMemFinishUnmap(void);
 // destroy an arbitrary window handle (fork failure paths; the normal exit
 // path uses WboxMemReleaseWindow which also switches TLS back)
 void WboxMemDestroyWindow(void *win);

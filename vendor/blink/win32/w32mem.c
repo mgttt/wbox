@@ -39,6 +39,16 @@ struct Fshares {
   size_t n;
 };
 
+// SysMunmap preflights writeback and any metadata split before guest page
+// tables change. These fields carry that transaction into the host munmap.
+static _Thread_local uintptr_t g_prepared_unmap_lo;
+static _Thread_local uintptr_t g_prepared_unmap_hi;
+static _Thread_local size_t g_prepared_split_src;
+static _Thread_local size_t g_prepared_split_dst;
+static _Thread_local int g_prepared_split_fd;
+static _Thread_local int g_prepared_split;
+static _Thread_local int g_prepared_unmap;
+
 static int FshareFindFree(struct Fshares *table, size_t *slot) {
   struct Fshare *p;
   size_t i, n;
@@ -90,8 +100,31 @@ static int FshareRegister(struct Fshares *table, uintptr_t lo, uintptr_t hi,
   return 0;
 }
 
+static int FshareShouldFailWriteback(void) {
+  static LONG calls;
+  static LONG once;
+  const char *stage = getenv("WBOX_TEST_FSHARE_FAIL");
+  if (!stage) return 0;
+  if (!strcmp(stage, "writeback")) {
+    return InterlockedCompareExchange(&once, 1, 0) == 0;
+  }
+  if (!strcmp(stage, "writeback-second")) {
+    return InterlockedIncrement(&calls) == 2;
+  }
+  return 0;
+}
+
+static int FshareShouldFailSplit(void) {
+  static LONG once;
+  const char *stage = getenv("WBOX_TEST_FSHARE_FAIL");
+  return stage && !strcmp(stage, "split") &&
+         InterlockedCompareExchange(&once, 1, 0) == 0;
+}
+
 // write back the overlap of [a,b) with every registered shared mapping
-static void FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
+static int FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
+  int result = 0;
+  int saved_errno = 0;
   size_t i;
   for (i = 0; i < table->n; ++i) {
     uintptr_t lo, hi, p;
@@ -99,6 +132,11 @@ static void FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
     lo = a > table->p[i].lo ? a : table->p[i].lo;
     hi = b < table->p[i].hi ? b : table->p[i].hi;
     if (lo >= hi) continue;
+    if (FshareShouldFailWriteback()) {
+      result = -1;
+      if (!saved_errno) saved_errno = EIO;
+      continue;
+    }
     for (p = lo; p < hi;) {
       MEMORY_BASIC_INFORMATION mbi;
       uintptr_t end;
@@ -107,6 +145,8 @@ static void FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
       size_t done = 0;
       if (!VirtualQuery((void *)p, &mbi, sizeof(mbi)) ||
           mbi.State != MEM_COMMIT) {
+        result = -1;
+        if (!saved_errno) saved_errno = EIO;
         break;
       }
       end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
@@ -116,7 +156,11 @@ static void FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
             (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
              PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
              PAGE_EXECUTE_WRITECOPY))) {
-        if (!VirtualProtect((void *)p, end - p, PAGE_READONLY, &old)) break;
+        if (!VirtualProtect((void *)p, end - p, PAGE_READONLY, &old)) {
+          result = -1;
+          if (!saved_errno) saved_errno = EIO;
+          break;
+        }
         changed = 1;
       }
       while (done < (size_t)(end - p)) {
@@ -125,17 +169,28 @@ static void FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
                    (size_t)(end - p) - done,
                    table->p[i].off + (off_t)(p - table->p[i].lo) +
                        (off_t)done);
-        if (rc <= 0) break;
+        if (rc <= 0) {
+          result = -1;
+          if (!saved_errno) {
+            saved_errno = rc < 0 && errno ? errno : EIO;
+          }
+          break;
+        }
         done += (size_t)rc;
       }
       if (changed) {
         DWORD ignored;
-        VirtualProtect((void *)p, end - p, old, &ignored);
+        if (!VirtualProtect((void *)p, end - p, old, &ignored)) {
+          result = -1;
+          if (!saved_errno) saved_errno = EIO;
+        }
       }
       if (done != (size_t)(end - p)) break;
       p = end;
     }
   }
+  if (result == -1) errno = saved_errno;
+  return result;
 }
 
 // drop [a,b) from the registry (munmap), trimming/splitting entries
@@ -160,8 +215,16 @@ static int FshareRemove(struct Fshares *table, uintptr_t a, uintptr_t b) {
       // free slot with its own dup() so either can be closed alone
       int d;
       size_t j;
-      if (FshareFindFree(table, &j) == -1 ||
-          (d = dup(table->p[i].fd)) == -1) return -1;
+      if (g_prepared_split && i == g_prepared_split_src &&
+          a >= g_prepared_unmap_lo && b <= g_prepared_unmap_hi) {
+        j = g_prepared_split_dst;
+        d = g_prepared_split_fd;
+        g_prepared_split_fd = -1;
+        g_prepared_split = 0;
+      } else if (FshareFindFree(table, &j) == -1 ||
+                 (d = dup(table->p[i].fd)) == -1) {
+        return -1;
+      }
       table->p[j] = table->p[i];
       table->p[j].lo = lo;
       table->p[j].hi = a;
@@ -176,7 +239,7 @@ static int FshareRemove(struct Fshares *table, uintptr_t a, uintptr_t b) {
 
 static void FshareClear(struct Fshares *table, int writeback) {
   size_t i;
-  if (writeback) FshareWriteback(table, 0, UINTPTR_MAX);
+  if (writeback) (void)FshareWriteback(table, 0, UINTPTR_MAX);
   for (i = 0; i < table->n; ++i) {
     if (table->p[i].used) close(table->p[i].fd);
   }
@@ -398,6 +461,64 @@ void WboxShsegSyncToParent(void) {
   ShsegSync(w);
 }
 
+int WboxMemPrepareUnmap(uintptr_t a, size_t len) {
+  int rc;
+  size_t i;
+  struct WboxWindow *w = g_win;
+  g_prepared_unmap = 0;
+  if (g_prepared_split) {
+    close(g_prepared_split_fd);
+    g_prepared_split = 0;
+  }
+  if (!w || len > UINTPTR_MAX - a) {
+    errno = EINVAL;
+    return -1;
+  }
+  AcquireSRWLockExclusive(&w->lock);
+  rc = FshareWriteback(&w->fshare, a, a + len);
+  if (rc == 0) {
+    for (i = 0; i < w->fshare.n; ++i) {
+      int d;
+      size_t j;
+      if (!w->fshare.p[i].used ||
+          a <= w->fshare.p[i].lo ||
+          a + len >= w->fshare.p[i].hi) {
+        continue;
+      }
+      if (FshareShouldFailSplit()) {
+        errno = EMFILE;
+        rc = -1;
+        break;
+      }
+      if (FshareFindFree(&w->fshare, &j) == -1 ||
+          (d = dup(w->fshare.p[i].fd)) == -1) {
+        rc = -1;
+        break;
+      }
+      g_prepared_split_src = i;
+      g_prepared_split_dst = j;
+      g_prepared_split_fd = d;
+      g_prepared_split = 1;
+      break;
+    }
+  }
+  ReleaseSRWLockExclusive(&w->lock);
+  if (rc == 0) {
+    g_prepared_unmap_lo = a;
+    g_prepared_unmap_hi = a + len;
+    g_prepared_unmap = 1;
+  }
+  return rc;
+}
+
+void WboxMemFinishUnmap(void) {
+  g_prepared_unmap = 0;
+  if (g_prepared_split) {
+    close(g_prepared_split_fd);
+    g_prepared_split = 0;
+  }
+}
+
 // copy shared segments of window `w` back into its snapshot parent
 static void ShsegSync(struct WboxWindow *w) {
   struct WboxWindow *p;
@@ -420,7 +541,7 @@ static void ShsegSync(struct WboxWindow *w) {
   AcquireSRWLockShared(&p->lock);
   ReleaseSRWLockShared(&g_windows_lock);
   AcquireSRWLockShared(&w->lock);
-  FshareWriteback(&w->fshare, 0, UINTPTR_MAX);
+  (void)FshareWriteback(&w->fshare, 0, UINTPTR_MAX);
   FshareSync(&w->fshare, &p->fshare);
   for (i = 0; i < w->shn; ++i) {
     uintptr_t off = w->sh[i].off, len = w->sh[i].len, q;
@@ -1060,7 +1181,10 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
     // clobber: decommit any overlapping committed pages
     if (IvOverlaps(a, a + len)) {
-      FshareWriteback(&g_win->fshare, a, a + len);
+      if (FshareWriteback(&g_win->fshare, a, a + len) == -1) {
+        ReleaseSRWLockExclusive(&g_lock);
+        return MAP_FAILED;
+      }
       if (FshareRemove(&g_win->fshare, a, a + len) == -1) {
         ReleaseSRWLockExclusive(&g_lock);
         return MAP_FAILED;
@@ -1129,6 +1253,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
 
 int munmap(void *addr, size_t len) {
   uintptr_t a = (uintptr_t)addr;
+  int prepared;
   if (!len) {
     errno = EINVAL;
     return -1;
@@ -1147,8 +1272,14 @@ int munmap(void *addr, size_t len) {
     errno = EINVAL;
     return -1;
   }
-  FshareWriteback(&g_win->fshare, a,
-                  a + len);  // flush MAP_SHARED file mappings first
+  prepared = g_prepared_unmap &&
+             a >= g_prepared_unmap_lo &&
+             a + len <= g_prepared_unmap_hi;
+  if (!prepared &&
+      FshareWriteback(&g_win->fshare, a, a + len) == -1) {
+    ReleaseSRWLockExclusive(&g_lock);
+    return -1;
+  }
   if (FshareRemove(&g_win->fshare, a, a + len) == -1) {
     ReleaseSRWLockExclusive(&g_lock);
     return -1;
@@ -1193,6 +1324,7 @@ int mprotect(void *addr, size_t len, int prot) {
 
 int msync(void *addr, size_t len, int flags) {
   MEMORY_BASIC_INFORMATION mbi;
+  int rc;
   // H7: wrap guard only (see mprotect)
   if (len > (size_t)1 << 48) {
     errno = EINVAL;
@@ -1204,10 +1336,10 @@ int msync(void *addr, size_t len, int flags) {
     return -1;
   }
   AcquireSRWLockExclusive(&g_lock);
-  FshareWriteback(&g_win->fshare, (uintptr_t)addr,
-                  (uintptr_t)addr + len);
+  rc = FshareWriteback(&g_win->fshare, (uintptr_t)addr,
+                       (uintptr_t)addr + len);
   ReleaseSRWLockExclusive(&g_lock);
-  return 0;
+  return rc;
 }
 
 int madvise(void *addr, size_t len, int advice) {

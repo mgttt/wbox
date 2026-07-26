@@ -75,7 +75,7 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   `t_net_sockopt @wine`。模式专有缺陷可用 `@native` / `@wine` 标注；
   真机首次执行发现的 W1（fork 挂死）与 W3
   （长路径），以及最后两项 N1（AF_UNIX）均已修复并从基线移除。
-  当前真机断言级结果为 **907 pass / 0 fail / 9 skip**；文件映射覆盖
+  当前真机断言级结果为 **909 pass / 0 fail / 9 skip**；文件映射覆盖
   fork 后父窗口可见性、磁盘写回、私有/共享 mremap、exec 地址复用、
   MAP_FIXED 清理及内部 fd 0；另以 160 个并存 MAP_SHARED 文件映射验证
   动态注册表的写回、fork 快照克隆和父窗口同步。
@@ -84,6 +84,11 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   验证 fork 建立失败不会损坏父窗口、误删父 VFS/Fshare 条目或阻断后续 fork。
   这四次故障注入不进入 `wtest` 断言统计，但任一失败都会把 `t_fork_mem`
   判为 FAIL。
+- `t_mmap` 另由 runner 以 `WBOX_TEST_FSHARE_FAIL` 重跑五次轻量探针，
+  覆盖 `msync`、`munmap` 首次写回失败、预写回后不重复 I/O，以及
+  中间拆分分配失败和 `MAP_FIXED` 覆盖失败；要求错误返回 guest、原映射
+  保持可用且重试后数据可落盘。这些探针同样不进入断言统计，任一失败都会
+  判 `t_mmap` 为 FAIL。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 

@@ -10,7 +10,81 @@
 
 #define PGSZ 4096
 
-int main(void) {
+static int writeback_failure_probe(const char *operation) {
+  size_t maplen = !strcmp(operation, "split") ? PGSZ * 3 : PGSZ;
+  unsigned char value = 0;
+  int fd = open("t_mmap_writeback_failure.bin",
+                O_RDWR | O_CREAT | O_TRUNC, 0600);
+  if (fd == -1 || ftruncate(fd, maplen) == -1) return 1;
+  unsigned char *map =
+      mmap(NULL, maplen, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (map == MAP_FAILED) return 2;
+  map[0] = 0xa7;
+  errno = 0;
+  if (!strcmp(operation, "msync")) {
+    if (msync(map, PGSZ, MS_SYNC) != -1 || errno != EIO) return 3;
+    if (map[0] != 0xa7) return 4;
+    if (msync(map, PGSZ, MS_SYNC) == -1) return 5;
+    if (munmap(map, PGSZ) == -1) return 6;
+  } else if (!strcmp(operation, "munmap")) {
+    if (munmap(map, PGSZ) != -1 || errno != EIO) return 9;
+    if (map[0] != 0xa7) return 10;
+    if (munmap(map, PGSZ) == -1) return 11;
+  } else if (!strcmp(operation, "munmap-second")) {
+    if (munmap(map, PGSZ) == -1) return 17;
+  } else if (!strcmp(operation, "split")) {
+    unsigned char values[3] = {0};
+    map[0] = 0xa1;
+    map[PGSZ] = 0xa2;
+    map[PGSZ * 2] = 0xa3;
+    if (munmap(map + PGSZ, PGSZ) != -1 || errno != EMFILE) return 18;
+    if (map[0] != 0xa1 || map[PGSZ] != 0xa2 ||
+        map[PGSZ * 2] != 0xa3) {
+      return 19;
+    }
+    if (munmap(map + PGSZ, PGSZ) == -1) return 20;
+    if (munmap(map, PGSZ) == -1 ||
+        munmap(map + PGSZ * 2, PGSZ) == -1) {
+      return 21;
+    }
+    for (int i = 0; i < 3; ++i) {
+      if (pread(fd, values + i, 1, (off_t)i * PGSZ) != 1) return 22;
+    }
+    if (values[0] != 0xa1 || values[1] != 0xa2 || values[2] != 0xa3) {
+      return 23;
+    }
+    if (close(fd) == -1 ||
+        unlink("t_mmap_writeback_failure.bin") == -1) {
+      return 24;
+    }
+    return 0;
+  } else if (!strcmp(operation, "fixed")) {
+    void *replacement =
+        mmap(map, PGSZ, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (replacement != MAP_FAILED || errno != EIO) return 12;
+    if (map[0] != 0xa7) return 13;
+    replacement =
+        mmap(map, PGSZ, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (replacement != map || map[0] != 0) return 14;
+    if (munmap(map, PGSZ) == -1) return 15;
+  } else {
+    return 16;
+  }
+  if (pread(fd, &value, 1, 0) != 1 || value != 0xa7) return 7;
+  if (close(fd) == -1 || unlink("t_mmap_writeback_failure.bin") == -1) {
+    return 8;
+  }
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 &&
+      !strncmp(argv[1], "--writeback-failure-", 20)) {
+    return writeback_failure_probe(argv[1] + 20);
+  }
+
   /* --- anonymous private --- */
   T_BEGIN("mmap/anon-private-zeroed");
   char *p = mmap(NULL, PGSZ * 4, PROT_READ | PROT_WRITE,
@@ -238,6 +312,8 @@ int main(void) {
     fm = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     T_ASSERT(fm != MAP_FAILED);
     if (fm != MAP_FAILED) {
+      T_ASSERT_ERRNO(msync(fm + 1, PGSZ - 1, MS_SYNC), EINVAL);
+      T_ASSERT_ERRNO(msync(fm, PGSZ, MS_SYNC | MS_ASYNC), EINVAL);
       fm[0] = (char)0xAA;
       T_ASSERT_OK(msync(fm, PGSZ, MS_SYNC));
       fm[1] = (char)0xBB;

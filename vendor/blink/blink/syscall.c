@@ -1563,7 +1563,24 @@ static int SysMunmap(struct Machine *m, i64 virt, u64 size) {
   int rc;
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // The Win32 host shim writes MAP_SHARED files during munmap. Preflight
+  // before FreeVirtual removes guest page-table entries so an I/O failure
+  // leaves the mapping intact and can be reported to the guest.
+  if (!IsValidAddrSize(virt, size)) {
+    rc = einval();
+    goto Finished;
+  }
+  if (WboxMemPrepareUnmap((uintptr_t)ToHost(virt), size) == -1) {
+    rc = -1;
+    goto Finished;
+  }
+#endif
   rc = FreeVirtual(m->system, virt, size);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  WboxMemFinishUnmap();
+Finished:
+#endif
   unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);
   END_NO_PAGE_FAULTS;
@@ -2035,6 +2052,10 @@ static int XlatMsyncFlags(int flags) {
   int sysflags;
   if (flags & ~(MS_ASYNC_LINUX | MS_SYNC_LINUX | MS_INVALIDATE_LINUX)) {
     LOGF("unsupported msync() flags %#x", flags);
+    return einval();
+  }
+  if ((flags & (MS_ASYNC_LINUX | MS_SYNC_LINUX)) ==
+      (MS_ASYNC_LINUX | MS_SYNC_LINUX)) {
     return einval();
   }
   // According to POSIX, either MS_SYNC or MS_ASYNC must be specified
