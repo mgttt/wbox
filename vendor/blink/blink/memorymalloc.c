@@ -287,6 +287,12 @@ struct System *NewSystem(struct XedMachineMode mode) {
 
 static void FreeMachineUnlocked(struct Machine *m) {
   THR_LOGF("pid=%d tid=%d FreeMachine", m->system->pid, m->tid);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  // single choke point for machine destruction (FreeMachine and
+  // RemoveOtherThreads alike): the live registry must drop the pointer
+  // BEFORE free() poisons/reuses it
+  W32MachineUntrack(m);
+#endif
   UnlockRobustFutexes(m);
   if (IsMakingPath(m)) {
     AbandonJit(&m->system->jit, m->path.jb);
@@ -441,6 +447,9 @@ struct Machine *NewMachine(struct System *system, struct Machine *parent) {
   // TODO(jart): Child thread should add itself to system.
   dll_make_first(&system->machines, &m->elem);
   UNLOCK(&system->machines_lock);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  W32MachineTrack(m);  // SIGCHLD/kill weak-pointer revalidation
+#endif
   THR_LOGF("new machine thread pid=%d tid=%d", m->system->pid, m->tid);
   return m;
 }

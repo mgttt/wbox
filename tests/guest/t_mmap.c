@@ -79,8 +79,9 @@ int main(void) {
     T_ASSERT_OK(munmap(m, PGSZ * 4));
   }
 
-  T_BEGIN("munmap/invalid-EINVAL");
-  T_ASSERT_ERRNO(munmap((void *)0x1000, PGSZ), EINVAL);
+  T_BEGIN("munmap/unmapped-succeeds");
+  /* real Linux: munmap of an unmapped (but valid) range succeeds */
+  T_ASSERT_OK(munmap((void *)0x1000, PGSZ));
 
   /* --- huge (2MiB) aligned anonymous map --- */
   T_BEGIN("mmap/huge-2m-aligned");
@@ -138,15 +139,21 @@ int main(void) {
   T_BEGIN("mmap/len-zero-EINVAL");
   T_ASSERT_ERRNO(mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0), EINVAL);
 
-  T_BEGIN("mmap/anon-with-fd-flag-mix");
-  /* MAP_ANONYMOUS requires fd == -1 on Linux */
+  T_BEGIN("mmap/anon-fd-ignored");
+  /* real Linux: fd is ignored when MAP_ANONYMOUS is set */
   {
     int d = open("/dev/null", O_RDONLY);
     errno = 0;
-    void *r = mmap(NULL, PGSZ, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, d, 0);
-    if (r == MAP_FAILED && errno == EBADF) wtest_pass++, printf("PASS %s\n", wtest_cur);
-    else { wtest_fail++; printf("FAIL %s: anon+fd=%d => %p errno=%d\n",
-                                wtest_cur, d, r, errno); }
+    void *r = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, d, 0);
+    if (r != MAP_FAILED) {
+      ((char *)r)[0] = 1;
+      wtest_pass++, printf("PASS %s\n", wtest_cur);
+      munmap(r, PGSZ);
+    } else {
+      wtest_fail++; printf("FAIL %s: anon+fd=%d => %p errno=%d\n",
+                            wtest_cur, d, r, errno);
+    }
     close(d);
   }
 

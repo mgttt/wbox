@@ -23,6 +23,9 @@ void WboxMemWipeWindow(void);
 // path uses WboxMemReleaseWindow which also switches TLS back)
 void WboxMemDestroyWindow(void *win);
 int WboxMemRecommitIfOurs(void *);
+// MAP_SHARED|MAP_ANONYMOUS tracking across snapshot fork (w32mem.c)
+void WboxShsegRegister(uintptr_t host_addr, size_t len);
+void WboxShsegSyncToParent(void);
 // blink core hook (memorymalloc.c): drop recycled host pages in [lo,hi)
 void WboxPurgeHostPagesInRange(uintptr_t lo, uintptr_t hi);
 
@@ -37,6 +40,13 @@ int W32ChildVpid(struct W32Child *);
 int W32ChildExited(struct W32Child *);
 void W32ChildSignalExec(struct W32Child *);
 void W32ChildSignalExit(struct W32Child *, int status);
+void W32ChildSignalKilled(struct W32Child *, int sig);
+// live Machine registry: weak parent/child pointers in the vpid table are
+// re-validated under the table lock before dereference (SIGCHLD UAF fix)
+void W32MachineTrack(void *);
+void W32MachineUntrack(void *);
+int W32MachineLiveLocked(const void *);
+void W32ChildReparent(void *old_machine, void *new_machine);
 void W32VforkWaitParent(struct W32Child *);
 // SIGCHLD delivery: the child record remembers the parent's Machine (as an
 // opaque pointer) so the exit path can enqueue SIGCHLD into the parent's

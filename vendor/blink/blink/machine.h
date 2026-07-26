@@ -298,6 +298,7 @@ struct System {
   u64 cr3;
   u64 cr4;
   i64 brk;
+  i64 brkfloor;  // wbox: initial break after load; SysBrk never shrinks below
   i64 automap;
   i64 memchurn;
   i64 codestart;

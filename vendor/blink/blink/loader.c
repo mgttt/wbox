@@ -824,6 +824,7 @@ error: unsupported executable; we need:\n\
       exit(EXIT_FAILURE_EXEC_FAILED);
     }
     m->system->loaded = true;  // in case rwx stack is smc write-protected :'(
+    m->system->brkfloor = m->system->brk;  // wbox: brk() may never go below
     LoadArgv(m, execfn, prog, args, vars, elf->rng);
   }
   pagesize = FLAG_pagesize;

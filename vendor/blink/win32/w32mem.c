@@ -17,6 +17,89 @@
 
 #define W32PAGE 4096ULL
 
+// MAP_SHARED file mappings: dup'd fd + file offset per committed range,
+// written back on msync()/munmap(). The shim populates shared mappings by
+// pread() just like private ones, so without this registry guest writes
+// to a MAP_SHARED file mapping never reached the host file.
+#define W32MAXFSHARE 128
+struct Fshare {
+  uintptr_t lo, hi;  // committed range (page aligned)
+  int fd;            // dup() of the mapping fd; closed when fully unmapped
+  off_t off;         // file offset corresponding to lo
+};
+static struct Fshare g_fshare[W32MAXFSHARE];
+
+static void FshareRegister(uintptr_t lo, uintptr_t hi, int fd, off_t off) {
+  int i, d;
+  for (i = 0; i < W32MAXFSHARE && g_fshare[i].fd; ++i)
+    ;
+  if (i == W32MAXFSHARE) return;  // table full: degrade to no-writeback
+  if ((d = dup(fd)) == -1) return;
+  g_fshare[i].lo = lo;
+  g_fshare[i].hi = hi;
+  g_fshare[i].fd = d;
+  g_fshare[i].off = off;
+}
+
+// write back the overlap of [a,b) with every registered shared mapping
+static void FshareWriteback(uintptr_t a, uintptr_t b) {
+  int i;
+  for (i = 0; i < W32MAXFSHARE; ++i) {
+    uintptr_t lo, hi;
+    size_t done;
+    if (!g_fshare[i].fd) continue;
+    lo = a > g_fshare[i].lo ? a : g_fshare[i].lo;
+    hi = b < g_fshare[i].hi ? b : g_fshare[i].hi;
+    if (lo >= hi) continue;
+    done = 0;
+    while (done < (size_t)(hi - lo)) {
+      ssize_t rc = pwrite(g_fshare[i].fd, (void *)(lo + done),
+                          (size_t)(hi - lo) - done,
+                          g_fshare[i].off + (off_t)(lo - g_fshare[i].lo) +
+                              (off_t)done);
+      if (rc <= 0) break;
+      done += (size_t)rc;
+    }
+  }
+}
+
+// drop [a,b) from the registry (munmap), trimming/splitting entries
+static void FshareRemove(uintptr_t a, uintptr_t b) {
+  int i;
+  for (i = 0; i < W32MAXFSHARE; ++i) {
+    uintptr_t lo, hi;
+    if (!g_fshare[i].fd) continue;
+    if (g_fshare[i].lo >= b || g_fshare[i].hi <= a) continue;
+    lo = g_fshare[i].lo;
+    hi = g_fshare[i].hi;
+    if (a <= lo && b >= hi) {
+      close(g_fshare[i].fd);
+      g_fshare[i].fd = 0;
+    } else if (a <= lo) {
+      g_fshare[i].off += (off_t)(b - lo);
+      g_fshare[i].lo = b;
+    } else if (b >= hi) {
+      g_fshare[i].hi = a;
+    } else {
+      // punch a hole: keep the tail in this slot, move the head to a
+      // free slot with its own dup() so either can be closed alone
+      int j, d;
+      for (j = 0; j < W32MAXFSHARE && g_fshare[j].fd; ++j)
+        ;
+      if (j == W32MAXFSHARE || (d = dup(g_fshare[i].fd)) == -1) {
+        g_fshare[i].hi = a;  // lose tail writeback rather than corrupt
+      } else {
+        g_fshare[j].lo = lo;
+        g_fshare[j].hi = a;
+        g_fshare[j].fd = d;
+        g_fshare[j].off = g_fshare[i].off;
+        g_fshare[i].off += (off_t)(b - lo);
+        g_fshare[i].lo = b;
+      }
+    }
+  }
+}
+
 // runtime guest->host skew (base of the reserved guest VA window).
 // Declared extern in blink/tunables.h for the win32 build.
 // THREAD-LOCAL since the fork work: each guest "process" (vfork child
@@ -27,6 +110,11 @@ _Thread_local uint64_t kSkew;
 // committed interval table, sorted by start
 struct Iv {
   uintptr_t a, b;
+};
+
+struct WboxShseg {
+  uintptr_t off;  // guest offset from window base
+  uintptr_t len;
 };
 
 // Per-window allocator state. Guest address spaces of different Systems
@@ -43,6 +131,16 @@ struct WboxWindow {
   struct Iv *iv;        // committed interval table, sorted by start
   size_t ivn, ivcap;
   int index;            // slot in g_windows
+  // MAP_SHARED|MAP_ANONYMOUS segments (guest offsets). The snapshot-fork
+  // model gives every fork child a private host window, so true aliasing
+  // of shared pages would require carving VA out of the reservation
+  // (MapViewOfFileEx cannot overlay a MEM_RESERVE). L1 semantics instead:
+  // the child inherits this list at snapshot and its segment contents are
+  // synced back to the parent window when the child exits (before its
+  // exit status becomes waitable). Concurrent visibility is NOT provided.
+  struct WboxShseg *sh;
+  size_t shn, shcap;
+  struct WboxWindow *sparent;  // snapshot parent window (weak, see sync)
 };
 
 #define WBOX_MAX_WINDOWS 64
@@ -57,6 +155,131 @@ static _Thread_local struct WboxWindow *g_win;
 #define g_limit (g_win->limit)
 #define g_lock (g_win->lock)
 #define g_hinttop (g_win->hinttop)
+
+// ---- MAP_SHARED|MAP_ANONYMOUS segment tracking (snapshot fork) ----
+
+// register [a,a+len) (host address inside the CURRENT window) as a shared
+// anonymous segment. Called from blink/map.c after a MAP_SHARED temp-file
+// anon mmap succeeds.
+void WboxShsegRegister(uintptr_t a, size_t len) {
+  struct WboxWindow *w = g_win;
+  struct WboxShseg *ns;
+  if (!w) return;
+  AcquireSRWLockExclusive(&w->lock);
+  if (w->shn == w->shcap) {
+    size_t nc = w->shcap ? w->shcap * 2 : 16;
+    if (!(ns = realloc(w->sh, nc * sizeof(*ns)))) {
+      ReleaseSRWLockExclusive(&w->lock);
+      return;  // degrade: mapping works, just won't sync across fork
+    }
+    w->sh = ns;
+    w->shcap = nc;
+  }
+  w->sh[w->shn].off = a - w->base;
+  w->sh[w->shn].len = len;
+  ++w->shn;
+  ReleaseSRWLockExclusive(&w->lock);
+}
+
+// drop the overlap of host range [a,b) from the current window's shared
+// segment list (munmap / MAP_FIXED clobber)
+static void WboxShsegRemove(uintptr_t a, uintptr_t b) {
+  struct WboxWindow *w = g_win;
+  size_t i;
+  if (!w || !w->sh) return;
+  // caller holds w->lock on the munmap path
+  for (i = 0; i < w->shn;) {
+    uintptr_t s = w->base + w->sh[i].off;
+    uintptr_t e = s + w->sh[i].len;
+    if (e <= a || s >= b) {
+      ++i;
+      continue;
+    }
+    if (s >= a && e <= b) {
+      memmove(w->sh + i, w->sh + i + 1, (w->shn - i - 1) * sizeof(*w->sh));
+      --w->shn;
+      continue;
+    }
+    if (s < a && e > b) {
+      // split: tail stays, head appended
+      if (w->shn < w->shcap) {
+        w->sh[w->shn].off = w->sh[i].off;
+        w->sh[w->shn].len = a - s;
+        ++w->shn;
+      }
+      w->sh[i].off += b - s;
+      w->sh[i].len = e - b;
+      continue;
+    }
+    if (s < a) {
+      w->sh[i].len = a - s;
+    } else {
+      w->sh[i].off += b - s;
+      w->sh[i].len = e - b;
+    }
+    ++i;
+  }
+}
+
+// Copy the current (child) window's shared segments back into the
+// snapshot parent's window. Must run BEFORE the child's exit status
+// becomes visible to waitpid (see W32ChildExit) so a parent that reads
+// the shared pages right after reaping sees the child's writes.
+// Pages the parent has since unmapped are skipped (POSIX: writes to a
+// mapping the parent no longer holds are simply not observable).
+static void ShsegSync(struct WboxWindow *w);
+void WboxShsegSyncToParent(void) {
+  struct WboxWindow *w = g_win;
+  ShsegSync(w);
+}
+
+// copy shared segments of window `w` back into its snapshot parent
+static void ShsegSync(struct WboxWindow *w) {
+  struct WboxWindow *p;
+  size_t i;
+  if (!w || !(p = w->sparent)) return;
+  // liveness: sparent dangles once the parent window is destroyed. The
+  // destroy path detaches from g_windows under g_windows_lock exclusive
+  // before freeing, so verify membership while holding it shared, and pin
+  // the parent with its own lock (destroy takes it exclusive) across the
+  // copy. The g_windows_lock is held until p->lock is acquired so the
+  // parent cannot disappear in between.
+  AcquireSRWLockShared(&g_windows_lock);
+  for (i = 0; i < WBOX_MAX_WINDOWS && g_windows[i] != p; ++i)
+    ;
+  if (i == WBOX_MAX_WINDOWS) {
+    ReleaseSRWLockShared(&g_windows_lock);
+    w->sparent = 0;
+    return;
+  }
+  AcquireSRWLockShared(&p->lock);
+  ReleaseSRWLockShared(&g_windows_lock);
+  AcquireSRWLockShared(&w->lock);
+  for (i = 0; i < w->shn; ++i) {
+    uintptr_t off = w->sh[i].off, len = w->sh[i].len, q;
+    for (q = off; q < off + len; q += 4096) {
+      MEMORY_BASIC_INFORMATION mbi;
+      if (!VirtualQuery((LPCVOID)(p->base + q), &mbi, sizeof(mbi)) ||
+          mbi.State != MEM_COMMIT) {
+        continue;  // parent unmapped the page: nothing to observe
+      }
+      // the parent's protection is per-mapping: a PROT_READ parent page
+      // must still receive the shared content (only the parent's own
+      // writes fault), so drop to RW around the copy and restore.
+      if (mbi.Protect & (PAGE_READONLY | PAGE_EXECUTE_READ |
+                         PAGE_EXECUTE_READWRITE)) {
+        DWORD old;
+        VirtualProtect((LPVOID)(p->base + q), 4096, PAGE_READWRITE, &old);
+        memcpy((void *)(p->base + q), (void *)(w->base + q), 4096);
+        VirtualProtect((LPVOID)(p->base + q), 4096, mbi.Protect, &old);
+      } else if (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY)) {
+        memcpy((void *)(p->base + q), (void *)(w->base + q), 4096);
+      }
+    }
+  }
+  ReleaseSRWLockShared(&w->lock);
+  ReleaseSRWLockShared(&p->lock);
+}
 
 static int IvInsert(uintptr_t a, uintptr_t b) {
   size_t i = 0;
@@ -244,6 +467,10 @@ int WboxMemInit(void) {
   g_win = w;
   kSkew = (uint64_t)w->base;
   g_vabits = w->bits;
+  // wbox: install the VEH + console ctrl handler. This was previously
+  // never called anywhere, so a guest page fault went straight to the
+  // wine default handler and killed the whole process.
+  WboxSigInit();
   return 0;
 }
 
@@ -295,6 +522,10 @@ void WboxMemDestroyWindow(void *win) {
   struct WboxWindow *w = (struct WboxWindow *)win;
   size_t i;
   if (!w || w->index == 0) return;
+  // flush this window's shared-anon segments to its snapshot parent
+  // before the pages go away (failure paths; the normal exit path synced
+  // earlier via WboxShsegSyncToParent while guest pages were still live)
+  ShsegSync(w);
   // H5 (security-audit): detach from the global table first, then take
   // the window lock exclusively before touching the interval table and
   // freeing — a concurrent WboxMemSnapshotWindow holds src->lock shared
@@ -302,6 +533,14 @@ void WboxMemDestroyWindow(void *win) {
   // exclusive. Releasing the reservation without the lock raced both.
   AcquireSRWLockExclusive(&g_windows_lock);
   g_windows[w->index] = 0;
+  // any window naming this one as its snapshot parent now has a dangling
+  // sparent: clear it while the table lock makes the pointer check race-
+  // free against ShsegSync's membership scan
+  for (i = 0; i < WBOX_MAX_WINDOWS; ++i) {
+    if (g_windows[i] && g_windows[i]->sparent == w) {
+      g_windows[i]->sparent = 0;
+    }
+  }
   ReleaseSRWLockExclusive(&g_windows_lock);
   AcquireSRWLockExclusive(&w->lock);
   // MEM_RELEASE fails when ANY page in the reservation is still committed.
@@ -314,6 +553,7 @@ void WboxMemDestroyWindow(void *win) {
   w->ivn = 0;
   ReleaseSRWLockExclusive(&w->lock);
   VirtualFree((LPVOID)w->base, 0, MEM_RELEASE);
+  free(w->sh);
   free(w->iv);
   free(w);
 }
@@ -364,6 +604,16 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
     return -1;
   }
   AcquireSRWLockShared(&src->lock);
+  // inherit shared-anon segments (same guest offsets). The child gets a
+  // private copy of the contents like every other page; its writes are
+  // synced back into THIS window when the child exits (ShsegSync).
+  dst->sparent = src;
+  if (src->shn) {
+    if ((dst->sh = malloc(src->shn * sizeof(*dst->sh)))) {
+      memcpy(dst->sh, src->sh, src->shn * sizeof(*dst->sh));
+      dst->shn = dst->shcap = src->shn;
+    }
+  }
   n = src->ivn;
   if (!(dst->iv = malloc((n ? n : 1) * sizeof(*dst->iv)))) {
     ReleaseSRWLockShared(&src->lock);
@@ -444,6 +694,7 @@ fail:
   g_windows[dst->index] = 0;
   ReleaseSRWLockExclusive(&g_windows_lock);
   VirtualFree((LPVOID)dst->base, 0, MEM_RELEASE);
+  free(dst->sh);
   free(dst->iv);
   free(dst);
   errno = ENOMEM;
@@ -464,6 +715,8 @@ void WboxMemWipeWindow(void) {
     VirtualFree((LPVOID)w->iv[i].a, w->iv[i].b - w->iv[i].a, MEM_DECOMMIT);
   }
   w->ivn = 0;
+  w->shn = 0;      // exec replaces all guest mappings, shared ones too
+  w->sparent = 0;  // nothing to sync back at this window's later exit
   w->hinttop = w->base + 0x10000000;
   ReleaseSRWLockExclusive(&w->lock);
   if (getenv("WBOX_DEBUG_MEM"))
@@ -574,6 +827,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
     // clobber: decommit any overlapping committed pages
     if (IvOverlaps(a, a + len)) {
+      WboxShsegRemove(a, a + len);
       IvRemove(a, a + len);
       VirtualFree((LPVOID)a, len, MEM_DECOMMIT);
     }
@@ -598,6 +852,9 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = ENOMEM;
     return MAP_FAILED;
   }
+  if ((flags & MAP_SHARED) && !(flags & MAP_ANONYMOUS) && fd >= 0) {
+    FshareRegister(a, a + len, fd, off);
+  }
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mmap: a=%p len=%#zx prot=%d flags=%#x fd=%d off=%lld\n",
             (void *)a, len, prot, flags, fd, (long long)off);
@@ -621,7 +878,6 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
       DWORD old;
       VirtualProtect((LPVOID)r, len, W32Prot(prot), &old);
     }
-    // NB: MAP_SHARED writeback not implemented (L1 gap)
   }
   return r;
 }
@@ -646,6 +902,9 @@ int munmap(void *addr, size_t len) {
     errno = EINVAL;
     return -1;
   }
+  FshareWriteback(a, a + len);  // flush MAP_SHARED file mappings first
+  FshareRemove(a, a + len);
+  WboxShsegRemove(a, a + len);
   IvRemove(a, a + len);
   // decommit subrange; ignore failure (may straddle uncommitted)
   uintptr_t p;
@@ -695,6 +954,9 @@ int msync(void *addr, size_t len, int flags) {
     errno = ENOMEM;
     return -1;
   }
+  AcquireSRWLockExclusive(&g_lock);
+  FshareWriteback((uintptr_t)addr, (uintptr_t)addr + len);
+  ReleaseSRWLockExclusive(&g_lock);
   return 0;
 }
 

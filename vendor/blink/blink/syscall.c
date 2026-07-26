@@ -352,7 +352,7 @@ static void ClearChildTid(struct Machine *m) {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 // wbox win32 snapshot-fork child exit path (defined further below)
-_Noreturn static void W32ChildExit(struct Machine *, int);
+_Noreturn static void W32ChildExit(struct Machine *, int, int);
 #endif
 
 _Noreturn void SysExitGroup(struct Machine *m, int rc) {
@@ -361,7 +361,7 @@ _Noreturn void SysExitGroup(struct Machine *m, int rc) {
   // wbox win32: a snapshot-fork child must not exit the host process;
   // record its exit code in the virtual pid table and end only its thread.
   if (m->system->w32child) {
-    W32ChildExit(m, rc);
+    W32ChildExit(m, rc, 0);
   }
 #endif
   ClearChildTid(m);
@@ -593,6 +593,7 @@ static int W32Fork(struct Machine *m) {
   memcpy(s2->hands, m->system->hands, sizeof(s2->hands));
   s2->blinksigs = m->system->blinksigs;
   s2->brk = m->system->brk;
+  s2->brkfloor = m->system->brkfloor;
   s2->automap = m->system->automap;
   s2->ender = m->system->ender;
   s2->codestart = m->system->codestart;
@@ -699,12 +700,20 @@ unlock_and_abandon:
 // record the exit code in the virtual pid table, free the System,
 // release the guest VA window, and terminate only this thread.
 // Never returns.
-_Noreturn static void W32ChildExit(struct Machine *m, int rc) {
+_Noreturn static void W32ChildExit(struct Machine *m, int rc, int termsig) {
   struct W32Child *rec = m->system->w32child;
   uintptr_t lo = WboxMemWindowBase();
   uintptr_t hi = WboxMemLimit();
   W32ForkDbg("child exit", rc, 0);
-  W32ChildSignalExit(rec, rc);
+  // flush MAP_SHARED anon pages back to the parent window BEFORE the
+  // exit status becomes waitable, while our guest pages are still mapped
+  WboxShsegSyncToParent();
+  if (termsig) {
+    // waitpid must report WIFSIGNALED/WTERMSIG, not a 128+sig exit code
+    W32ChildSignalKilled(rec, termsig);
+  } else {
+    W32ChildSignalExit(rec, rc);
+  }
   // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
   // into the parent's guest signal set (busybox ash's wait loop depends on
   // it). C3 (security-audit): the parent Machine is NOT necessarily alive
@@ -715,7 +724,12 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   W32ChildLock();
   {
     struct Machine *pm = (struct Machine *)W32ChildParent(rec);
-    if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
+    // pm is a WEAK reference: in an A->B->C chain with B exiting first,
+    // B's FreeMachine may already have poisoned/freed the memory the
+    // record points at (apt method process exit hit this: page fault
+    // inside EnqueueSignal). Re-validate against the live-machine
+    // registry under the same lock before dereferencing.
+    if (pm && W32MachineLiveLocked(pm)) EnqueueSignal(pm, SIGCHLD_LINUX);
   }
   W32ChildUnlock();
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
@@ -729,10 +743,10 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
 
 // Guest death by unhandled signal inside a snapshot-fork child: the stock
 // TerminateSignal would kill(getpid(), sig) and take down the whole host
-// process (parent included). Exit only the child, with the conventional
-// 128+sig status so wait4 reports a signal death.
+// process (parent included). Exit only the child as a signal death so
+// wait4 reports WIFSIGNALED/WTERMSIG.
 _Noreturn void W32ChildSignalDeath(struct Machine *m, int sig) {
-  W32ChildExit(m, 128 + (sig & 0x7f));
+  W32ChildExit(m, 128 + (sig & 0x7f), sig & 0x7f);
 }
 #endif /* _WIN32 snapshot fork */
 
@@ -1471,8 +1485,13 @@ static i64 SysBrk(struct Machine *m, i64 addr) {
              GetMaxRss(m->system));
       }
     } else if (addr < m->system->brk) {
-      if (FreeVirtual(m->system, addr, m->system->brk - addr) != -1) {
-        m->system->brk = addr;
+      // wbox: Linux refuses to lower the break below its post-load minimum
+      // (brk returns the current, unchanged break); without the floor a
+      // guest could shrink into the loaded image and corrupt it.
+      if (addr >= m->system->brkfloor) {
+        if (FreeVirtual(m->system, addr, m->system->brk - addr) != -1) {
+          m->system->brk = addr;
+        }
       }
     }
   }
@@ -5503,6 +5522,12 @@ static int SysKill(struct Machine *m, int pid, int sig) {
       if (!sig) {
         W32ChildUnlock();
         return 0;  // existence probe
+      }
+      if (!W32MachineLiveLocked(cm)) {
+        // stale weak pointer (freed via a path without unlink): the
+        // child is effectively gone; report success like a zombie kill
+        W32ChildUnlock();
+        return 0;
       }
       if (sig == SIGKILL_LINUX) {
         W32ChildUnlock();

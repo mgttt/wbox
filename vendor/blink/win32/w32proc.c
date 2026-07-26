@@ -89,7 +89,8 @@ struct W32Child {
   HANDLE thread;      // waitable handle of the child's host thread
   HANDLE exec_event;  // manual-reset: set when child execs or exits
   volatile LONG exited;
-  volatile LONG status;  // raw guest exit code (0..255)
+  volatile LONG status;   // raw guest exit code (0..255)
+  volatile LONG termsig;  // killing guest signal (0 = exited normally)
   int reaped;
   void *parent_machine;  // parent's struct Machine (for SIGCHLD enqueue)
   void *child_machine;   // child's own struct Machine (for kill signal)
@@ -116,6 +117,59 @@ static void W32ChildrenLock(void) {
 
 static void W32ChildrenUnlock(void) {
   LeaveCriticalSection(&g_children_lock);
+}
+
+// ---- live Machine registry (SIGCHLD UAF fix) ----
+// vpid records hold WEAK struct Machine pointers (parent_machine for the
+// SIGCHLD enqueue, child_machine for cross-pid kill). FreeMachine clears
+// them via W32ChildUnlinkMachine, but that only covers records already
+// linked at that moment and nothing covers a Machine freed through
+// RemoveOtherThreads (no unlink) or memory poisoned/reused between the
+// record lookup and the dereference. Track every live Machine so a weak
+// pointer can be re-validated under the table lock right before use.
+static void **g_live_machines;
+static size_t g_live_n, g_live_cap;
+
+// called from NewMachine(); takes the table lock itself
+void W32MachineTrack(void *m) {
+  void **nl;
+  W32ChildrenLock();
+  if (g_live_n == g_live_cap) {
+    size_t nc = g_live_cap ? g_live_cap * 2 : 64;
+    if (!(nl = realloc(g_live_machines, nc * sizeof(*nl)))) {
+      W32ChildrenUnlock();
+      fprintf(stderr, "wbox: live machine registry OOM\n");
+      abort();
+    }
+    g_live_machines = nl;
+    g_live_cap = nc;
+  }
+  g_live_machines[g_live_n++] = m;
+  W32ChildrenUnlock();
+}
+
+// called from FreeMachineUnlocked() — the single choke point for ALL
+// machine destruction (FreeMachine, RemoveOtherThreads)
+void W32MachineUntrack(void *m) {
+  size_t i;
+  W32ChildrenLock();
+  for (i = 0; i < g_live_n; ++i) {
+    if (g_live_machines[i] == m) {
+      g_live_machines[i] = g_live_machines[--g_live_n];
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+}
+
+// caller MUST hold the table lock (W32ChildLock): 1 iff `m` is a live
+// Machine whose memory may be dereferenced
+int W32MachineLiveLocked(const void *m) {
+  size_t i;
+  for (i = 0; i < g_live_n; ++i) {
+    if (g_live_machines[i] == m) return 1;
+  }
+  return 0;
 }
 
 // Allocate a child record with a fresh virtual pid and the vfork
@@ -161,6 +215,21 @@ void W32ChildPublish(struct W32Child *c, void *thread_handle) {
 
 void W32ChildSetParent(struct W32Child *c, void *parent_machine) {
   c->parent_machine = parent_machine;
+}
+
+// execve() replaces the parent System's machine in place: every vpid
+// record that named the OLD machine as parent must follow to the new
+// one, or the children's SIGCHLD enqueue on exit is silently lost
+// (the unlink in FreeMachine would otherwise NULL it out for good).
+void W32ChildReparent(void *old_machine, void *new_machine) {
+  struct W32Child *c;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (c->parent_machine == old_machine) {
+      c->parent_machine = new_machine;
+    }
+  }
+  W32ChildrenUnlock();
 }
 
 void *W32ChildParent(struct W32Child *c) {
@@ -239,6 +308,9 @@ int W32ChildTerminate(int vpid, int status) {
   }
   TerminateThread(c->thread, (DWORD)(128 + (status & 0x7f)));
   InterlockedExchange(&c->status, 128 + (status & 0x7f));
+  // terminated by a signal (SIGKILL or a wedged catchable kill): report
+  // WIFSIGNALED to waitpid
+  InterlockedExchange(&c->termsig, status & 0x7f);
   InterlockedExchange(&c->exited, 1);
   SetEvent(c->exec_event);
   W32ChildrenUnlock();
@@ -297,6 +369,15 @@ void W32ChildSignalExec(struct W32Child *c) {
 // Child exited (before or after exec): record status, wake everyone.
 void W32ChildSignalExit(struct W32Child *c, int status) {
   InterlockedExchange(&c->status, status & 0xff);
+  InterlockedExchange(&c->exited, 1);
+  SetEvent(c->exec_event);
+}
+
+// Child killed by an unhandled guest signal: waitpid must report
+// WIFSIGNALED/WTERMSIG, not a 128+sig exit code (POSIX wait status).
+void W32ChildSignalKilled(struct W32Child *c, int sig) {
+  InterlockedExchange(&c->status, 128 + (sig & 0x7f));
+  InterlockedExchange(&c->termsig, sig & 0x7f);
   InterlockedExchange(&c->exited, 1);
   SetEvent(c->exec_event);
 }
@@ -372,15 +453,24 @@ pid_t waitpid(pid_t pid, int *status, int flags) {
   }
   vpid = c->vpid;
   code = c->status;
-  W32ChildrenLock();
-  for (cp = &g_children; *cp; cp = &(*cp)->next) {
-    if (*cp == c) {
-      *cp = c->next;
-      break;
+  {
+    int ts = c->termsig;
+    W32ChildrenLock();
+    for (cp = &g_children; *cp; cp = &(*cp)->next) {
+      if (*cp == c) {
+        *cp = c->next;
+        break;
+      }
+    }
+    W32ChildrenUnlock();
+    if (status) {
+      if (ts) {
+        *status = ts & 0x7f;  // WIFSIGNALED encoding (no core flag)
+      } else {
+        *status = (code & 0xff) << 8;  // WIFEXITED encoding
+      }
     }
   }
-  W32ChildrenUnlock();
-  if (status) *status = (code & 0xff) << 8;  // WIFEXITED encoding
   CloseHandle(c->thread);
   CloseHandle(c->exec_event);
   free(c);
@@ -415,9 +505,14 @@ int waitid(idtype_t t, id_t id, siginfo_t *si, int flags) {
   if (si) {
     memset(si, 0, sizeof(*si));
     si->si_signo = 20;                     // SIGCHLD
-    si->si_code = 1;                       // CLD_EXITED
     si->si_pid = r;
-    si->si_status = (status >> 8) & 0xff;
+    if (WIFSIGNALED(status)) {
+      si->si_code = CLD_KILLED;
+      si->si_status = status & 0x7f;
+    } else {
+      si->si_code = CLD_EXITED;
+      si->si_status = (status >> 8) & 0xff;
+    }
   }
   return 0;
 }

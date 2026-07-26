@@ -4,6 +4,7 @@
 // A VEH converts host synchronous exceptions to a diagnostic abort, and
 // Ctrl+C/Close console events terminate the process.
 #include <errno.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -242,18 +243,72 @@ static void WboxVehDiagnose(EXCEPTION_POINTERS *ep) {
 
 static LONG WINAPI WboxVeh(EXCEPTION_POINTERS *ep) {
   DWORD code = ep->ExceptionRecord->ExceptionCode;
+  struct Machine *m;
+  siginfo_t si;
+  int sig;
   switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
-    case EXCEPTION_ILLEGAL_INSTRUCTION:
-    case EXCEPTION_INT_DIVIDE_BY_ZERO:
-    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
     case EXCEPTION_STACK_OVERFLOW:
-      WboxVehDiagnose(ep);
-      ExitProcess(128 + SIGSEGV);
-      return EXCEPTION_CONTINUE_SEARCH;
+      sig = SIGSEGV;
+      break;
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+      sig = SIGILL;
+      break;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_INT_OVERFLOW:
+      sig = SIGFPE;
+      break;
+    case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+      sig = SIGFPE;
+      break;
     default:
       return EXCEPTION_CONTINUE_SEARCH;
   }
+  // Guest fault redirect: mirror the POSIX SA_SIGINFO path in blink.c
+  // (OnFatalSystemSignal). A fault raised while guest code runs (canhalt)
+  // is a GUEST page fault, not a host crash: forge the siginfo POSIX would
+  // have delivered and siglongjmp back to the machine loop, which routes
+  // it through HandleFatalSystemSignal -> DeliverSignalToUser. Without
+  // this, every guest segfault killed the whole wine process.
+  m = g_machine;  // thread-local of the crashing thread
+  if (m && m->canhalt) {
+    memset(&si, 0, sizeof(si));
+    si.si_signo = sig;
+    if (sig == SIGSEGV) {
+      uintptr_t fa =
+          (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1];
+      MEMORY_BASIC_INFORMATION mbi;
+      si.si_addr = (void *)fa;
+      // committed/reserved-but-denied is a protection fault (ACCERR);
+      // never-reserved is MAPERR, like the host kernel would report.
+      si.si_code =
+          (VirtualQuery((LPCVOID)fa, &mbi, sizeof(mbi)) &&
+           mbi.State != MEM_FREE)
+              ? SEGV_ACCERR
+              : SEGV_MAPERR;
+    } else if (sig == SIGILL) {
+      si.si_addr = (void *)ep->ExceptionRecord->ExceptionAddress;
+      si.si_code = ILL_ILLOPC;
+    } else {
+      si.si_addr = (void *)ep->ExceptionRecord->ExceptionAddress;
+      si.si_code = (code == EXCEPTION_INT_DIVIDE_BY_ZERO) ? FPE_INTDIV
+                                                          : FPE_FLTDIV;
+    }
+#ifndef DISABLE_JIT
+    // JIT self-modifying-code tracking: unprotect the code page and let
+    // the faulting write retry, exactly like the POSIX handler.
+    if (IsSelfModifyingCodeSegfault(m, &si)) {
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
+#endif
+    g_siginfo = si;
+    siglongjmp(m->onhalt, kMachineFatalSystemSignal);
+    // not reached
+  }
+  // fault in host code (or no live machine): diagnose + die
+  WboxVehDiagnose(ep);
+  ExitProcess(128 + sig);
+  return EXCEPTION_CONTINUE_SEARCH;
 }
 
 static BOOL WINAPI WboxCtrlHandler(DWORD type) {

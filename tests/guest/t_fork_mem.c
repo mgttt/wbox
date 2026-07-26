@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <sys/syscall.h>
 #include "wtest.h"
 
 static int wait_status_ok(pid_t pid, int expect_code) {
@@ -83,8 +84,9 @@ int main(void) {
   /* --- brk-grown region isolation across fork --- */
   T_BEGIN("fork/brk-region-isolation");
   {
-    void *base = sbrk(0);
-    if (brk((char *)base + 8192) == 0) {
+    /* raw SYS_brk: zig-musl brk() is an -ENOMEM stub (see t_brk.c) */
+    void *base = (void *)syscall(SYS_brk, 0);
+    if (syscall(SYS_brk, (char *)base + 8192) == (long)((char *)base + 8192)) {
       ((char *)base)[100] = 42;
       pid = fork();
       if (pid == 0) {
@@ -96,7 +98,8 @@ int main(void) {
         T_ASSERT(((char *)base)[100] == 42);
       }
     } else {
-      T_ASSERT_OK(brk((char *)base + 8192)); /* FAIL line */
+      T_ASSERT(syscall(SYS_brk, (char *)base + 8192) ==
+               (long)((char *)base + 8192)); /* FAIL line */
       T_SKIP("fork/brk-region-isolation-data", "brk grow failed");
     }
   }
