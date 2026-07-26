@@ -239,3 +239,116 @@ impl Drop for OwnedHandle {
         }
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+mod real_windows_tests {
+    use super::*;
+
+    /// 唯一 tag：避免并发跑同一 suite 时 profile 名相撞（DeleteAppContainerProfile
+    /// 在 Drop 里清，但中途可能重叠）。process id + 静态计数器双重保险。
+    fn unique_name(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "wboxtest_{}_{}_{}",
+            std::process::id(),
+            n,
+            label
+        )
+    }
+
+    /// 真机 round-trip：create → sid 字符串非空 → keep → Drop 后 derive 找不到。
+    /// 不跑 spawn，只测 profile 生命周期 API。`#[ignore]` 因依赖真 Win32。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 AppContainer profile 生命周期"]
+    fn appcontainer_profile_create_keep_delete_roundtrip() {
+        let name = unique_name("rt");
+        let caps: Vec<CapabilitySid> = Vec::new();
+        let mut p = AppContainerProfile::create(&name, &caps).unwrap();
+        // SID 字符串形如 S-1-15-2-...
+        let sid = p.sid_string().unwrap();
+        assert!(
+            sid.starts_with("S-1-15-2-"),
+            "AppContainer SID 应为 S-1-15-2-... 前缀，实得 {}",
+            sid
+        );
+        assert!(sid.len() > "S-1-15-2-".len());
+
+        // keep 后再 derive：profile 应已注册，derive 能找到 SID
+        p.keep();
+        let deriv_sid_ptr = AppContainerProfile::derive_sid(&name).unwrap();
+        // 不要 leak
+        unsafe { FreeSid(deriv_sid_ptr) };
+
+        // 现在手动删除（因为 keep 跳过了 Drop 的 Delete）
+        let nw = to_wide(&name);
+        let hr = unsafe { DeleteAppContainerProfile(nw.as_ptr()) };
+        assert!(
+            hr >= 0,
+            "DeleteAppContainerProfile({}) 失败 hr=0x{:08X}",
+            name,
+            hr as u32
+        );
+    }
+
+    /// profile 已存在时 create 走 ERROR_ALREADY_EXISTS 回退路径，derive 拿 SID。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 AppContainer profile ERROR_ALREADY_EXISTS 回���"]
+    fn appcontainer_profile_already_exists_falls_back_to_derive() {
+        let name = unique_name("ae");
+        let caps: Vec<CapabilitySid> = Vec::new();
+
+        // 第一次 create + keep（保留 profile）
+        let mut p1 = AppContainerProfile::create(&name, &caps).unwrap();
+        p1.keep();
+        let sid1 = p1.sid_string().unwrap();
+        drop(p1);
+
+        // 第二次 create 同名 → HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) = 0x800700B7
+        // 代码里走 derive 路径取回 SID。
+        let p2 = AppContainerProfile::create(&name, &caps).unwrap();
+        let sid2 = p2.sid_string().unwrap();
+        assert_eq!(sid1, sid2, "两次 create 的 SID 必须一致（同一 profile）");
+        // p2 Drop 会 DeleteAppContainerProfile，清理掉保留的 profile
+    }
+
+    /// INTERNET_CLIENT capability SID 构造 + 字符串校验。
+    /// S-1-15-3-1 是 well-known INTERNET_CLIENT。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 CreateWellKnownSid(InternetClient)"]
+    fn capability_sid_internet_client_has_correct_form() {
+        let cap = CapabilitySid::internet_client().unwrap();
+        // 取回 SID 字符串需 PSID -> 通过 sid_to_string 私有 fn
+        let s = sid_to_string(cap.sid).unwrap();
+        assert!(
+            s.starts_with("S-1-15-3-"),
+            "INTERNET_CLIENT capability SID 应为 S-1-15-3-... 前缀，实得 {}",
+            s
+        );
+        assert_eq!(cap.desc(), "INTERNET_CLIENT");
+    }
+
+    /// profile 名超长（>64 字符）应在 create 阶段报错（如果上游加了前置校验），
+    /// 或者 PE 内核返回 E_INVALIDARG。无论哪条路都不能 panic / unwrap 漏出来。
+    /// 当前实现是直接调 API，记现状：超长名由 API 自己拒（0x80070057）。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 profile 名长度边界"]
+    fn appcontainer_profile_overlong_name_is_rejected() {
+        let too_long: String = "a".repeat(65); // 文档上限 64
+        let caps: Vec<CapabilitySid> = Vec::new();
+        let res = AppContainerProfile::create(&too_long, &caps);
+        match res {
+            Ok(_) => panic!("65 字符的 profile 名应被拒，但 create 成功了"),
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(
+                    msg.contains("CreateAppContainerProfile") || msg.contains("profile"),
+                    "错误信息应指向 profile 问题，实得：{}",
+                    msg
+                );
+            }
+        }
+    }
+}

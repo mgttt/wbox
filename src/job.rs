@@ -126,3 +126,67 @@ impl Job {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+mod real_windows_tests {
+    use super::*;
+
+    /// Job 创建 + KILL_ON_JOB_CLOSE 必开 + Drop 时关闭句柄不阻塞。
+    /// 不分配子进程，只验证 Job Object 内核对象的创建路径。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 Job Object 创建"]
+    fn job_create_default_succeeds() {
+        let job = Job::create(JobLimits::default()).unwrap();
+        // 句柄非空即视为成功（OwnedHandle 内部 RAII，Drop 时 CloseHandle）
+        assert!(!job.handle.raw().is_null());
+    }
+
+    /// 三项限额同时下发：memory_mb / cpu_pct / max_procs。
+    /// 验证 SetInformationJobObject 在合理值下都成功（Win8+ CPU rate control）。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 Job 三项限额下发"]
+    fn job_create_with_all_limits() {
+        let limits = JobLimits {
+            memory_mb: 256,
+            cpu_pct: 50,
+            max_procs: 10,
+        };
+        let job = Job::create(limits).unwrap();
+        assert!(!job.handle.raw().is_null());
+    }
+
+    /// 内存上限边界：0 = 不限（不挂 JOB_OBJECT_LIMIT_PROCESS_MEMORY flag）。
+    /// JobLimits 默认实现是全 0，本测试断言 0 不触发任何限额下发。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 Job memory_mb=0 不挂限额"]
+    fn job_zero_limits_means_unlimited() {
+        // 不 panic 即可（apply_limits 内部对 0 跳过对应 flag）
+        let _job = Job::create(JobLimits {
+            memory_mb: 0,
+            cpu_pct: 0,
+            max_procs: 0,
+        })
+        .unwrap();
+    }
+
+    /// memory_mb 上限的算术溢出保护：apply_limits 内 checked_mul(1024*1024)。
+    /// 极大值（如 u64::MAX）应走溢出错误分支而非静默 wrap。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 Job memory_mb 极���值溢出保护"]
+    fn job_huge_memory_limit_is_caught_as_overflow() {
+        let limits = JobLimits {
+            memory_mb: u64::MAX,
+            cpu_pct: 0,
+            max_procs: 0,
+        };
+        let err = Job::create(limits).err().expect("应报溢出错误");
+        let msg = format!("{}", err);
+        // anyhow context "内存上限溢出" 来自源码，断言它出现在错误链里
+        assert!(
+            msg.contains("溢出") || msg.contains("memory") || msg.contains("内存"),
+            "应报溢出，实得：{}",
+            msg
+        );
+    }
+}
