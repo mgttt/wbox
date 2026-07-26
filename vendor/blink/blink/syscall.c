@@ -1778,9 +1778,12 @@ static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
     }
   } else if (offset < 0) {
     return einval();
-  } else if (offset > NUMERIC_MAX(off_t)) {
+  }
+#if !defined(_WIN32) || defined(__CYGWIN__)
+  else if (offset > NUMERIC_MAX(off_t)) {
     return eoverflow();
   }
+#endif
   if (fildes != -1) {
     if ((oflags = GetOflags(m, fildes)) == -1) return -1;
     if ((oflags & O_ACCMODE) == O_WRONLY ||  //
@@ -1880,7 +1883,7 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
   u64 mapid;
   i64 result, destination, delta;
   int mapfd, mapflags;
-  off_t mapoff;
+  i64 mapoff;
   bool fixed, maymove, file_backed, shared;
 
   if (flags & ~(MREMAP_MAYMOVE_LINUX | MREMAP_FIXED_LINUX)) return einval();
@@ -1945,8 +1948,13 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
       goto Finished;
     }
     shared = !!(mapflags & MAP_SHARED);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (mapoff < 0 || old_size > INT64_MAX ||
+        mapoff > INT64_MAX - (i64)old_size) {
+#else
     if (mapoff < 0 ||
         (u64)mapoff > (u64)NUMERIC_MAX(off_t) - old_size) {
+#endif
       eoverflow();
       goto Finished;
     }
@@ -3810,12 +3818,24 @@ static int SysFadvise(struct Machine *m, u32 fd, u64 offset, u64 len,
 
 static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
   i64 rc;
+  int hostwhence;
   struct Fd *fd;
+#if !defined(_WIN32) || defined(__CYGWIN__)
   if (offset > NUMERIC_MAX(off_t)) return eoverflow();
   if (offset < -NUMERIC_MAX(off_t) - 1) return eoverflow();
+#endif
   if (!(fd = GetAndLockFd(m, fildes))) return -1;
   if (!fd->dirstream) {
-    rc = VfsSeek(fd->hostfd, offset, XlatWhence(whence));
+    if ((hostwhence = XlatWhence(whence)) == -1) {
+      rc = -1;
+    } else {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      int crtfd = VfsHostFileFd(fd->hostfd);
+      rc = crtfd == -1 ? -1 : W32Lseek64(crtfd, offset, hostwhence);
+#else
+      rc = VfsSeek(fd->hostfd, offset, hostwhence);
+#endif
+    }
   } else if (whence == SEEK_SET_LINUX) {
     if (!offset) {
       VfsRewinddir(fd->dirstream);
@@ -3839,12 +3859,19 @@ static i64 SysLseek(struct Machine *m, i32 fildes, i64 offset, int whence) {
 static i64 SysFtruncate(struct Machine *m, i32 fildes, i64 length) {
   i64 rc;
   if (length < 0) return einval();
+#if !defined(_WIN32) || defined(__CYGWIN__)
   if (length > NUMERIC_MAX(off_t)) return eoverflow();
-  if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
-  #if defined(_WIN32) && !defined(__CYGWIN__)
-  fildes = HostFdOf(m->system, fildes);
 #endif
+  if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if ((fildes = W32ResolveFd(m->system, fildes, 0)) == -1 ||
+      (fildes = VfsHostFileFd(fildes)) == -1) {
+    return -1;
+  }
+  RESTARTABLE(rc = W32Ftruncate64(fildes, length));
+#else
   RESTARTABLE(rc = VfsFtruncate(fildes, length));
+#endif
   return rc;
 }
 
@@ -4440,15 +4467,26 @@ static int SysChmod(struct Machine *m, i64 path, u32 mode) {
 }
 
 static int SysTruncate(struct Machine *m, i64 pathaddr, i64 length) {
-  int rc, fd;
+  int rc, fd, saved_errno;
   const char *path;
   if (length < 0) return einval();
+#if !defined(_WIN32) || defined(__CYGWIN__)
   if (length > NUMERIC_MAX(off_t)) return eoverflow();
+#endif
   if (!(path = LoadStr(m, pathaddr))) return -1;
   RESTARTABLE(fd = VfsOpen(AT_FDCWD, path, O_RDWR | O_CLOEXEC, 0));
   if (fd == -1) return -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  {
+    int crtfd = VfsHostFileFd(fd);
+    rc = crtfd == -1 ? -1 : W32Ftruncate64(crtfd, length);
+  }
+#else
   rc = VfsFtruncate(fd, length);
+#endif
+  saved_errno = errno;
   VfsClose(fd);
+  errno = saved_errno;
   return rc;
 }
 

@@ -94,7 +94,7 @@ int HostfsUtime(struct VfsInfo *, const char *, const struct timespec[2], int);
 int HostfsFutime(struct VfsInfo *, const struct timespec[2]);
 int HostfsSymlink(const char *, struct VfsInfo *, const char *);
 
-void *HostfsMmap(struct VfsInfo *, void *, size_t, int, int, off_t);
+void *HostfsMmap(struct VfsInfo *, void *, size_t, int, int, int64_t);
 int HostfsMunmap(struct VfsInfo *, void *, size_t);
 int HostfsMprotect(struct VfsInfo *, void *, size_t, int);
 int HostfsMsync(struct VfsInfo *, void *, size_t, int);

@@ -75,13 +75,16 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   `t_net_sockopt @wine`。模式专有缺陷可用 `@native` / `@wine` 标注；
   真机首次执行发现的 W1（fork 挂死）与 W3
   （长路径），以及最后两项 N1（AF_UNIX）均已修复并从基线移除。
-  当前真机断言级结果为 **955 pass / 0 fail / 9 skip**；文件映射覆盖
+  当前真机断言级结果为 **980 pass / 0 fail / 9 skip**；文件映射覆盖
   fork 后父窗口可见性、磁盘写回、私有/共享 mremap、exec 地址复用、
   MAP_FIXED 清理及内部 fd 0；另以 160 个并存 MAP_SHARED 文件映射验证
   动态注册表的写回、fork 快照克隆和父窗口同步；160 个匿名共享映射另行
   验证 Windows 临时文件 backing 也统一走 Fshare，而不依赖重复地址表。
   子进程在退出前执行 `msync`、`munmap` 或 `MAP_FIXED` 时也会按范围更新
   父窗口，测试分别覆盖仍存活时的即时可见性和条目提前移除后的可见性。
+  稀疏文件回归另在 4 GiB+ offset 验证 `lseek`、`truncate`/`ftruncate`、
+  MAP_SHARED 初始填充、mremap 扩容和 msync 写回，并确认低 32 位别名页
+  不会被误读或覆盖。
 - `t_fork_mem` 文件级结果之外，runner 会用
   `WBOX_TEST_FORK_FAIL=system|machine|args|thread` 各重跑一次轻量探针，
   验证 fork 建立失败不会损坏父窗口、误删父 VFS/Fshare 条目或阻断后续 fork。

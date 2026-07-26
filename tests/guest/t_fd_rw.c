@@ -23,6 +23,9 @@ int main(void) {
   char rb[sizeof magic];
   T_ASSERT_EQ(pread(fd, rb, sizeof rb, far), sizeof rb);
   T_ASSERT_EQ(memcmp(rb, magic, sizeof magic), 0);
+  T_ASSERT_EQ(lseek(fd, far, SEEK_SET), far);
+  T_ASSERT_EQ(read(fd, rb, sizeof rb), sizeof rb);
+  T_ASSERT_EQ(memcmp(rb, magic, sizeof magic), 0);
   /* hole reads back as zeros */
   char hole[16];
   memset(hole, 0x5A, sizeof hole);
@@ -36,6 +39,9 @@ int main(void) {
   T_ASSERT_EQ(pread(fd, rb, sizeof rb, far), sizeof rb);
   T_ASSERT_EQ(read(fd, &b1, 1), 1);
   T_ASSERT(b1 == 0); /* position still 0 -> hole byte */
+  T_ASSERT_OK(truncate("t_frw_big", far + 4096));
+  T_ASSERT_OK(fstat(fd, &st));
+  T_ASSERT(st.st_size == far + 4096);
   close(fd);
   unlink("t_frw_big");
 
@@ -112,6 +118,7 @@ int main(void) {
   T_ASSERT_EQ(lseek(fd, 2, SEEK_CUR), 9);
   T_ASSERT_EQ(lseek(fd, 100, SEEK_SET), 100); /* beyond EOF allowed */
   T_ASSERT_ERRNO(lseek(fd, -100, SEEK_SET), EINVAL);
+  T_ASSERT_ERRNO(lseek(fd, 0, 9999), EINVAL);
   close(fd);
   unlink("t_frw_s");
 

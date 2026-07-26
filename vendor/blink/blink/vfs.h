@@ -114,7 +114,7 @@ struct VfsOps {
   int (*Utime)(struct VfsInfo *, const char *, const struct timespec[2], int);
   int (*Futime)(struct VfsInfo *, const struct timespec[2]);
   int (*Symlink)(const char *, struct VfsInfo *, const char *);
-  void *(*Mmap)(struct VfsInfo *, void *, size_t, int, int, off_t);
+  void *(*Mmap)(struct VfsInfo *, void *, size_t, int, int, int64_t);
   int (*Munmap)(struct VfsInfo *, void *, size_t);
   int (*Mprotect)(struct VfsInfo *, void *, size_t, int);
   int (*Msync)(struct VfsInfo *, void *, size_t, int);
@@ -274,11 +274,11 @@ int VfsTcflush(int, int);
 int VfsSockatmark(int);
 int VfsExecve(const char *, char *const *, char *const *);
 
-void *VfsMmap(void *, size_t, int, int, int, off_t);
+void *VfsMmap(void *, size_t, int, int, int, int64_t);
 int VfsMunmap(void *, size_t);
 int VfsMprotect(void *, size_t, int);
 int VfsMsync(void *, size_t, int);
-int VfsDupMapFd(void *, size_t, off_t *, int *, u64 *);
+int VfsDupMapFd(void *, size_t, int64_t *, int *, u64 *);
 int VfsSetMapId(void *, size_t, u64);
 int VfsCloneMapRange(void *, void *, size_t);
 void VfsForgetMapRange(void *, size_t);

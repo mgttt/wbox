@@ -121,14 +121,20 @@ void WboxSignalfdClear(int fd, int sig);
 int WboxSignalfdRead(int fd, uint32_t *signals, uint32_t *pids,
                      int32_t *codes, size_t count);
 
-// w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
-// the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets
-// (>2GiB) through these instead of VfsPreadv/VfsPwritev.
+// w32fd.c: 64-bit file operations. The VFS chain uses the 32-bit MinGW
+// off_t, so syscall and mmap paths resolve hostfs descriptors and route
+// offsets directly through these helpers.
 struct iovec;
+int64_t W32Lseek64(int fd, int64_t off, int whence);
+int W32Ftruncate64(int fd, int64_t len);
+ssize_t W32Pread64(int fd, void *buf, size_t n, int64_t off);
+ssize_t W32Pwrite64(int fd, const void *buf, size_t n, int64_t off);
 ssize_t W32Preadv64(int fd, const struct iovec *iov, int n, int64_t off);
 ssize_t W32Pwritev64(int fd, const struct iovec *iov, int n, int64_t off);
 // F3: true 64-bit file size (struct stat.st_size is 32-bit on win32)
 int W32FileSize64(int fd, int64_t *out);
+// w32mem.c: file mappings retain their full Linux 64-bit page offset.
+void *W32Mmap64(void *, size_t, int, int, int, int64_t);
 
 // ---------------------------------------------------------------- sock
 // w32sock.c (feat/net): hooks used by w32fd.c. Types kept opaque here so

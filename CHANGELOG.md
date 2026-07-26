@@ -101,6 +101,14 @@
   和匿名共享 munmap、固定覆盖及子进程存活期间 msync 四组回归；
   `t_fork_mem` 增至 117 项，完整套件现为
   **20/20 文件通过，955 pass / 0 fail / 9 skip**。
+- **Win32 文件偏移全链路扩展到 64 位**：MinGW host `off_t` 为 32 位，旧
+  路径会让 guest 的 4 GiB+ `lseek`/`truncate`/`ftruncate` 返回
+  `EOVERFLOW`，文件 `mmap` 也无法建立；映射填充、Fshare 写回及 mremap
+  backing 元数据另有截断风险。现由 Win32 专用 helper 直接使用
+  `SetFilePointerEx` 和 64 位 positioned I/O，VFS 映射 offset 与 Fshare
+  注册统一保存 `int64_t`。新增稀疏文件高位映射、扩容、`msync` 写回及低位
+  别名隔离回归；`t_fd_rw` 增至 50 项，`t_mmap` 增至 140 项，完整套件现为
+  **20/20 文件通过，980 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

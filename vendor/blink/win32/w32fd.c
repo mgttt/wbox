@@ -1602,7 +1602,7 @@ int close(int fd) {
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
 
-off_t lseek(int fd, off_t off, int whence) {
+int64_t W32Lseek64(int fd, int64_t off, int whence) {
   if (IsSpecial(fd)) return 0;
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
@@ -1613,10 +1613,19 @@ off_t lseek(int fd, off_t off, int whence) {
     errno = EBADF;
     return -1;
   }
+  DWORD m;
   LARGE_INTEGER d, r;
   d.QuadPart = off;
-  DWORD m = whence == SEEK_SET ? FILE_BEGIN : whence == SEEK_CUR ? FILE_CURRENT
-                                                                 : FILE_END;
+  if (whence == SEEK_SET) {
+    m = FILE_BEGIN;
+  } else if (whence == SEEK_CUR) {
+    m = FILE_CURRENT;
+  } else if (whence == SEEK_END) {
+    m = FILE_END;
+  } else {
+    errno = EINVAL;
+    return -1;
+  }
   if (!SetFilePointerEx(h, d, &r, m)) {
     errno = W32Err();
     return -1;
@@ -1624,7 +1633,15 @@ off_t lseek(int fd, off_t off, int whence) {
   return r.QuadPart;
 }
 
-ssize_t pread(int fd, void *buf, size_t n, off_t off) {
+off_t lseek(int fd, off_t off, int whence) {
+  return (off_t)W32Lseek64(fd, off, whence);
+}
+
+ssize_t W32Pread64(int fd, void *buf, size_t n, int64_t off) {
+  if (off < 0) {
+    errno = EINVAL;
+    return -1;
+  }
   if (IsSpecial(fd)) return read(fd, buf, n);
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
@@ -1636,10 +1653,18 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     return -1;
   }
   if (W32EspipeIfPipe(h)) return -1;
-  return W32PreadAt(h, buf, n, (uint64_t)(uint32_t)off);
+  return W32PreadAt(h, buf, n, (uint64_t)off);
 }
 
-ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
+ssize_t pread(int fd, void *buf, size_t n, off_t off) {
+  return W32Pread64(fd, buf, n, off);
+}
+
+ssize_t W32Pwrite64(int fd, const void *buf, size_t n, int64_t off) {
+  if (off < 0) {
+    errno = EINVAL;
+    return -1;
+  }
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
@@ -1657,9 +1682,13 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
       errno = W32Err();
       return -1;
     }
-    off = (off_t)end.QuadPart;
+    off = end.QuadPart;
   }
-  return W32PwriteAt(h, buf, n, (uint64_t)(uint32_t)off);
+  return W32PwriteAt(h, buf, n, (uint64_t)off);
+}
+
+ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
+  return W32Pwrite64(fd, buf, n, off);
 }
 
 // F3: 64-bit-offset variants for the syscall layer. The VFS/hostfs chain
@@ -1940,7 +1969,11 @@ int fdatasync(int fd) {
   return fsync(fd);
 }
 
-int ftruncate(int fd, off_t len) {
+int W32Ftruncate64(int fd, int64_t len) {
+  if (len < 0) {
+    errno = EINVAL;
+    return -1;
+  }
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1952,12 +1985,25 @@ int ftruncate(int fd, off_t len) {
     return -1;
   }
   pos.QuadPart = len;
-  if (!SetFilePointerEx(h, pos, &r, FILE_BEGIN) || !SetEndOfFile(h)) {
+  if (!SetFilePointerEx(h, pos, &r, FILE_BEGIN)) {
     errno = W32Err();
     return -1;
   }
-  SetFilePointerEx(h, cur, &r, FILE_BEGIN);
+  if (!SetEndOfFile(h)) {
+    int err = W32Err();
+    SetFilePointerEx(h, cur, &r, FILE_BEGIN);
+    errno = err;
+    return -1;
+  }
+  if (!SetFilePointerEx(h, cur, &r, FILE_BEGIN)) {
+    errno = W32Err();
+    return -1;
+  }
   return 0;
+}
+
+int ftruncate(int fd, off_t len) {
+  return W32Ftruncate64(fd, len);
 }
 
 int truncate(const char *path, off_t len) {

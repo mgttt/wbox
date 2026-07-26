@@ -61,7 +61,7 @@ static void *PortableMmap(void *addr,     //
                           int prot,       //
                           int flags,      //
                           int fd,         //
-                          off_t offset) {
+                          i64 offset) {
   void *res;
 #ifdef HAVE_MAP_ANONYMOUS
   res = VfsMmap(addr, length, prot, flags, fd, offset);
@@ -88,7 +88,11 @@ static void *PortableMmap(void *addr,     //
     if (!ftruncate(tfd, length)) {
       // On Win32 the unlinked file also gives snapshot-fork a stable
       // Fshare identity, so anonymous and regular shared maps use one path.
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      res = W32Mmap64(addr, length, prot, flags & ~MAP_ANONYMOUS_, tfd, 0);
+#else
       res = mmap(addr, length, prot, flags & ~MAP_ANONYMOUS_, tfd, 0);
+#endif
     } else {
       res = MAP_FAILED;
     }
@@ -186,7 +190,7 @@ void *Mmap(void *addr,     //
            int prot,       //
            int flags,      //
            int fd,         //
-           off_t offset,   //
+           i64 offset,     //
            const char *owner) {
   void *res;
 #if LOG_MEM

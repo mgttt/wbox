@@ -34,6 +34,9 @@
 #include "blink/macros.h"
 #include "blink/syscall.h"
 #include "blink/vfs.h"
+#if defined(_WIN32) && !defined(__CYGWIN__)
+#include "win32.h"
+#endif
 
 #ifndef DISABLE_VFS
 
@@ -1614,14 +1617,14 @@ int HostfsSymlink(const char *target, struct VfsInfo *info, const char *name) {
 }
 
 void *HostfsMmap(struct VfsInfo *info, void *addr, size_t len, int prot,
-                 int flags, off_t offset) {
+                 int flags, int64_t offset) {
 #ifdef __CYGWIN__
   struct stat st;
 #endif
   void *ret;
   int fd;
-  VFS_LOGF("HostfsMmap(%p, %p, %zu, %d, %d, %zd)", info, addr, len, prot, flags,
-           offset);
+  VFS_LOGF("HostfsMmap(%p, %p, %zu, %d, %d, %" PRId64 ")", info, addr, len,
+           prot, flags, offset);
   if (info == NULL) {
     efault();
     return MAP_FAILED;
@@ -1637,9 +1640,13 @@ void *HostfsMmap(struct VfsInfo *info, void *addr, size_t len, int prot,
     }
   }
 #endif
-  ret = mmap(addr, len, prot, flags, fd, offset);
-  VFS_LOGF("mmap(%p, %zu, %d, %d, %d, %zd) -> %p", addr, len, prot, flags, fd,
-           offset, ret);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  ret = W32Mmap64(addr, len, prot, flags, fd, offset);
+#else
+  ret = mmap(addr, len, prot, flags, fd, (off_t)offset);
+#endif
+  VFS_LOGF("mmap(%p, %zu, %d, %d, %d, %" PRId64 ") -> %p", addr, len, prot,
+           flags, fd, offset, ret);
   return ret;
 }
 

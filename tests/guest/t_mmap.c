@@ -483,6 +483,49 @@ int main(int argc, char **argv) {
     unlink("t_mmap_many.bin");
   }
 
+  T_BEGIN("mmap/file-shared-offset-gt4GB");
+  {
+    const off_t high = (off_t)4 * 1024 * 1024 * 1024 + PGSZ;
+    unsigned char low_byte = 0x31;
+    unsigned char high_byte = 0x47;
+    unsigned char next_byte = 0x6b;
+    int largefd = open("t_mmap_large_offset.bin",
+                       O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(largefd >= 0);
+    if (largefd >= 0) {
+      T_ASSERT_EQ(lseek(largefd, 123, SEEK_SET), 123);
+      T_ASSERT_OK(ftruncate(largefd, high + PGSZ * 2));
+      T_ASSERT_EQ(lseek(largefd, 0, SEEK_CUR), 123);
+      T_ASSERT_EQ(pwrite(largefd, &low_byte, 1, PGSZ), 1);
+      T_ASSERT_EQ(pwrite(largefd, &high_byte, 1, high), 1);
+      T_ASSERT_EQ(pwrite(largefd, &next_byte, 1, high + PGSZ), 1);
+      unsigned char *large =
+          mmap(NULL, PGSZ, PROT_READ | PROT_WRITE, MAP_SHARED, largefd, high);
+      T_ASSERT(large != MAP_FAILED);
+      if (large != MAP_FAILED) {
+        T_ASSERT(large[0] == high_byte);
+        unsigned char *grown =
+            mremap(large, PGSZ, PGSZ * 2, MREMAP_MAYMOVE);
+        T_ASSERT(grown != MAP_FAILED);
+        if (grown != MAP_FAILED) {
+          large = grown;
+          T_ASSERT(large[PGSZ] == next_byte);
+          large[0] = 0x59;
+          T_ASSERT_OK(msync(large, PGSZ * 2, MS_SYNC));
+          T_ASSERT_OK(munmap(large, PGSZ * 2));
+          T_ASSERT_EQ(pread(largefd, &low_byte, 1, PGSZ), 1);
+          T_ASSERT(low_byte == 0x31);
+          T_ASSERT_EQ(pread(largefd, &high_byte, 1, high), 1);
+          T_ASSERT(high_byte == 0x59);
+        } else {
+          T_ASSERT_OK(munmap(large, PGSZ));
+        }
+      }
+      T_ASSERT_OK(close(largefd));
+    }
+    unlink("t_mmap_large_offset.bin");
+  }
+
   /* --- invalid combos must fail --- */
   T_BEGIN("mmap/file-badfd-EBADF");
   T_ASSERT_ERRNO(mmap(NULL, PGSZ, PROT_READ, MAP_PRIVATE, 9999, 0), EBADF);

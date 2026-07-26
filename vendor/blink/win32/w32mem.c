@@ -27,7 +27,7 @@ struct Fshare {
   uintptr_t lo, hi;  // committed range (page aligned)
   int fd;            // dup() of the mapping fd; closed when fully unmapped
   int used;
-  off_t off;         // file offset corresponding to lo
+  int64_t off;       // file offset corresponding to lo
   DWORD volume;
   DWORD file_hi;
   DWORD file_lo;
@@ -85,7 +85,7 @@ static void FshareIdentify(struct Fshare *entry) {
 }
 
 static int FshareRegister(struct Fshares *table, uintptr_t lo, uintptr_t hi,
-                          int fd, off_t off) {
+                          int fd, int64_t off) {
   int d;
   size_t i;
   if (FshareFindFree(table, &i) == -1) return -1;
@@ -164,11 +164,11 @@ static int FshareWriteback(struct Fshares *table, uintptr_t a, uintptr_t b) {
         changed = 1;
       }
       while (done < (size_t)(end - p)) {
-        ssize_t rc =
-            pwrite(table->p[i].fd, (void *)(p + done),
-                   (size_t)(end - p) - done,
-                   table->p[i].off + (off_t)(p - table->p[i].lo) +
-                       (off_t)done);
+        ssize_t rc = W32Pwrite64(
+            table->p[i].fd, (void *)(p + done),
+            (size_t)(end - p) - done,
+            table->p[i].off + (int64_t)(p - table->p[i].lo) +
+                (int64_t)done);
         if (rc <= 0) {
           result = -1;
           if (!saved_errno) {
@@ -206,7 +206,7 @@ static int FshareRemove(struct Fshares *table, uintptr_t a, uintptr_t b) {
       close(table->p[i].fd);
       table->p[i].used = 0;
     } else if (a <= lo) {
-      table->p[i].off += (off_t)(b - lo);
+      table->p[i].off += (int64_t)(b - lo);
       table->p[i].lo = b;
     } else if (b >= hi) {
       table->p[i].hi = a;
@@ -230,7 +230,7 @@ static int FshareRemove(struct Fshares *table, uintptr_t a, uintptr_t b) {
       table->p[j].hi = a;
       table->p[j].fd = d;
       table->p[j].off = table->p[i].off;
-      table->p[i].off += (off_t)(b - lo);
+      table->p[i].off += (int64_t)(b - lo);
       table->p[i].lo = b;
     }
   }
@@ -1057,9 +1057,15 @@ static uintptr_t W32FindHole(uintptr_t hint, size_t len) {
   return p;
 }
 
-void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
+                int64_t off) {
   uintptr_t a;
   if (!len) {
+    errno = EINVAL;
+    return MAP_FAILED;
+  }
+  if (!(flags & MAP_ANONYMOUS) && fd >= 0 &&
+      (off < 0 || (off & (W32PAGE - 1)))) {
     errno = EINVAL;
     return MAP_FAILED;
   }
@@ -1148,7 +1154,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
       VirtualProtect((LPVOID)r, len, PAGE_READWRITE, &old);
     }
     while (done < len) {
-      ssize_t rc = pread(fd, p + done, len - done, off + (off_t)done);
+      ssize_t rc = W32Pread64(fd, p + done, len - done, off + (int64_t)done);
       if (rc <= 0) break;
       done += (size_t)rc;
     }
@@ -1158,6 +1164,10 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
   }
   return r;
+}
+
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
+  return W32Mmap64(addr, len, prot, flags, fd, off);
 }
 
 int munmap(void *addr, size_t len) {

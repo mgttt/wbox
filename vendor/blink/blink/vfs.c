@@ -54,7 +54,7 @@ struct VfsMap {
   struct VfsInfo *data;
   void *addr;
   size_t len;
-  off_t offset;
+  int64_t offset;
   u64 id;
   int prot;
   int flags;
@@ -2603,13 +2603,13 @@ void VfsForgetMapRange(void *addr, size_t len) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int VfsDupMapFd(void *addr, size_t len, off_t *offset, int *flags,
+int VfsDupMapFd(void *addr, size_t len, int64_t *offset, int *flags,
                 u64 *mapid) {
   struct VfsInfo *info, *newinfo;
   struct VfsMap *map;
   struct Dll *e;
   uintptr_t start, end, p, mapend;
-  off_t baseoff;
+  int64_t baseoff;
   u64 id;
   int fd, mapflags;
   if (!addr || !len || !offset || !flags || !mapid) return einval();
@@ -2645,7 +2645,7 @@ int VfsDupMapFd(void *addr, size_t len, off_t *offset, int *flags,
       mapflags = map->flags;
     } else if (map->id != id ||
                map->offset + (p - (uintptr_t)map->addr) !=
-                   baseoff + (off_t)(p - start)) {
+                   baseoff + (int64_t)(p - start)) {
       if (getenv("WBOX_DEBUG_VFS"))
         fprintf(stderr,
                 "VfsDupMapFd: discontinuity at %p id=%llu/%llu "
@@ -2653,7 +2653,7 @@ int VfsDupMapFd(void *addr, size_t len, off_t *offset, int *flags,
                 (void *)p, (unsigned long long)map->id,
                 (unsigned long long)id,
                 (long long)(map->offset + (p - (uintptr_t)map->addr)),
-                (long long)(baseoff + (off_t)(p - start)));
+                (long long)(baseoff + (int64_t)(p - start)));
       break;
     }
     p = MIN(mapend, end);
@@ -2724,13 +2724,13 @@ int VfsSetMapId(void *addr, size_t len, u64 id) {
 }
 
 void *VfsMmap(void *addr, size_t len, int prot, int flags, int fd,
-              off_t offset) {
+              int64_t offset) {
   struct VfsInfo *info;
   struct VfsMap *map, *newmap;
   void *ret;
   struct Dll *e, *original, *modified, *before;
-  VFS_LOGF("VfsMmap(%p, %zu, %d, %d, %d, %ld)", addr, len, prot, flags, fd,
-           offset);
+  VFS_LOGF("VfsMmap(%p, %zu, %d, %d, %d, %" PRId64 ")", addr, len, prot,
+           flags, fd, offset);
   LOCK(&g_vfs.mapslock);
   info = NULL;
   original = modified = NULL;
