@@ -23,60 +23,33 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
   WINEDEBUG=-all wine /path/to/wbox-linux.exe ./<t_xxx>
 ```
 
-## W1 真 Windows 专有：fork 依赖项挂死（**新增，2026-07-26 CI 首测**）
+## W1 ~~fork 依赖项挂死~~ → **已修复**（2026-07-26）
 
-| # | 现象 | 证据 | 状态 |
+| # | 现象 | 根因 | 状态 |
 |---|------|------|------|
-| W1 | **第一次真正的 `fork()`（syscall 57）挂死在 fork 实现内部**，导致所有 fork 依赖项超时 | 见下方 run 32 探针与矩阵结果 | 未修复；wine 下 B/C 组全通过，属真机专有 |
+| W1 | 一切依赖 `fork()` 的用例永久挂死（矩阵 B/C 两组 8 项，真 Windows 与 wine 9.0 均复现） | 快照对整个区间做一次 `memcpy`，而区间只验证过 `MEM_COMMIT`——**已提交 ≠ 可读**，撞上 `PAGE_NOACCESS`（guest PROT_NONE）页即触发访问违例；fork 期间 `m->canhalt` 为假，故障指令被反复重试 | ✅ 已修（按区域拷贝，跳过不可读页） |
 
-**run 32 矩阵（已加 60s 单项超时）**：PASS=14 FAIL=9 SKIP=2
+**定位过程**（方法论上值得留档）：先后排除 8 条静态假设（guest close 延迟、
+父子共享 fd、子退出不销毁 System、`VirtualQuery` 自旋、1TB 提交计费、
+`IvInsert` 跨空洞合并、VEH 自死锁、锁泄漏），全部落空。转折点是**在 Linux
+沙箱装 wine 做出本地复现**（见 docs/DEVELOPMENT.md §3.1）：迭代从 10 分钟
+一轮变成几十秒，逐步加打点半小时收敛到指令级。
 
-- A 基础 11 项 **全 PASS**（含 A8 退出码转发 0/1/7）
-- D 网络 **PASS**——guest 内 wget 公网下载 + md5 精确匹配，网络栈真机可用
-- B5/B6（`/dev/null` 读写）PASS；B4 rc=127 `sh: cat: not found`（另一问题，非挂死）
-- **B1/B2/B3/B7/B8 + C1/C2/C3 全部 rc=124 超时**——无一例外都依赖 fork
+决定性的两行日志对比：
 
-**run 32 分层探针**（定位到层次）：
+```
+修复前： snapshot: iv[4] [00007EEF6B880000,00007EEF6B882000) 8192 bytes
+         snapshot:   committed dst=00007DEF5B880000, memcpy..      ← 卡死
+修复后： snapshot: skip unreadable [00007F1BE4C80000,00007F1BE4C81000) prot=0x1
+         [w32fork] snapshot done → child thread enter → child thread blink
+```
 
-| 探针 | 结果 | 含义 |
-|---|---|---|
-| P1 `echo hi`（无 fork） | rc=0 ✅ | 基础执行链路完好 |
-| P2 `(echo sub)`（子 shell） | rc=0 ✅ | **但无 `[w32fork]` 日志**——busybox 把这层 fork 优化掉了，未真正 fork |
-| P3 `true & wait` | 挂死 ❌ | 日志停在 `[w32fork] syscall a=57` + `fork enter a=0 b=0` 之后 |
+`prot=0x1` = `PAGE_NOACCESS`：8KB 区间里夹着一页 PROT_NONE，就这一页把整个
+fork 钉死。**教训**：Windows 上"已提交"只说明有物理承诺，不代表当前保护属性
+允许读；任何按区间批量读 guest 内存的地方都要先按区域看 `mbi.Protect`。
 
-即：**卡在 `fork enter` 与下一条日志之间**。该区间的代码是
-`blink/syscall.c` 里依次取六把锁（exec/sig/mmap/pagelocks/futexes/jit）
-后调用 `WboxMemSnapshotWindow`（同步快照全部已提交页）。两个候选：
-某把锁死锁，或快照在真 Windows 上极慢/卡死（默认 guest VA 窗口
-`WBOX_VA_BITS=40` = 1TB，wine 的内存管理器可能偷懒而真机不会）。
-
-下一轮 CI 探针（Q1/Q2/Q3）已就位以区分：Q1 开 `WBOX_DEBUG_MEM=1` 看快照
-是否有进展（有日志=在拷贝 → 性能问题；无日志=卡在锁 → 死锁）；
-Q2 把 VA 窗口降到 38 位看是否显著变化；Q3 关 JIT 排除 `jit.lock`。
-
-背景：同一次 CI 首次证明**堆损坏修复生效**——A 组 11 项全过，含
-A8「退出码转发 (0/1/7)」（此前 true/false/exit 7 全塌成 127，根因是
-`posix_memalign` 用 `_aligned_malloc` 却被 `free()` 释放，见 w32proc.c）。
-即基础执行链路在真 Windows 上已经正确，**残留问题集中在快照式 fork 路径**。
-
-排查提示：B1 是最简单的管道（一次 fork + 两端 pipe），比 B2/B3 更易缩小范围；
-`WBOX_DEBUG_FORK=1` 可打快照/回收页诊断。矩阵现已有单项超时
-（`WBOX_MATRIX_TIMEOUT`，默认 60s），挂死会记 `rc=124` 而非拖死整个 job。
-CI 另有分层探针（build-wbox-linux 的「fork/管道挂死分层取证」步骤）：
-P1 无 fork / P2 纯 fork 子 shell / P3 fork+wait / P4 fork+管道，各 30s 上界，
-用通过-挂死的组合定位层次。
-
-**已排除的假设**（静态查证，勿重复走）：
-
-| 假设 | 结论 | 依据 |
-|---|---|---|
-| guest `close()` 只是延迟标记，host 写端要等 System 销毁才关，故读端永不 EOF | ❌ 不成立 | `blink/close.c` 的 `SysClose → CloseFd` 立即调 `fd->cb->close(fd->hostfd)` |
-| fork 后父子共享同一 host 描述符，一方 close 影响另一方 | ❌ 不成立 | `blink/syscall.c` fork 路径对每个 fd 做 `VfsDup`，子表持有自己的 host 副本 |
-| 快照 fork 子进程退出时不销毁 System，其 dup 出的写端泄漏到被 reap 为止 | ❌ 不成立 | `W32ChildExit` 末尾调 `FreeMachine(m)` → `FreeSystem` → `DestroyFds`，逐个关闭 host fd |
-
-已定位的**唯一无界等待**：`win32/w32proc.c` 的 `waitpid` 在子未退出时走
-`WaitForSingleObject(c->thread, INFINITE)`。它本身未必是根因，但只要子线程
-因任何原因卡住，父进程就会永久挂起——探针数据到手后应优先确认子线程状态。
+修复后矩阵：**PASS=14 → PASS=35 FAIL=3 SKIP=2**，剩余 3 个 FAIL 即下方
+N1/E1/E2 既有基线。
 
 ## W2 ~~真 Windows 专有：sh 内 applet 解析失败~~ → **判定为测试用例缺陷，已修**
 

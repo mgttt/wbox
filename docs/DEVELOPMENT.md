@@ -97,6 +97,41 @@ WBOX_MATRIX_NET_SKIP=1 scripts/test-matrix.sh ...            #    网络用例�
 WINE=wine WBOX_LINUX=build/wbox-linux.exe bash tests/run-guest-tests.sh    # guest C 套件（wine）
 ```
 
+### 3.1 在 Linux 沙箱里跑 wbox-linux（wine，强烈建议装）
+
+Linux 开发机上装个 wine 就能**本地跑 guest 侧的一切**——矩阵、guest C 套件、
+fork 调试——不必每次盲等 10 分钟的 CI。W1（fork 永久挂死）正是靠它破案的：
+在没有本地复现前，连着 8 条静态假设全部落空；装上 wine 后几十秒一轮迭代，
+逐步打点半小时定位到指令级。
+
+```sh
+apt-get install -y --no-install-recommends wine64
+# 注意：Ubuntu 的 wine64 装在 /usr/lib/wine/wine64，**不在 PATH 上**
+export WINE=/usr/lib/wine/wine64
+export WINEPREFIX=/tmp/wp WINEDEBUG=-all      # 静默 + 独立 prefix
+
+# 单点跑
+$WINE vendor/blink/build-win32/wbox-linux.exe ./busybox echo hi
+# 完整矩阵（脚本按 OSTYPE 自动选 wine 模式，认 $WINE）
+WBOX_MATRIX_NET_SKIP=1 bash scripts/test-matrix.sh \
+  vendor/blink/build-win32/wbox-linux.exe ./busybox
+```
+
+**wine 与真 Windows 的差异必须记住**：wine 下通过 ≠ 真机通过，反之亦然。
+已实证的两类偏差——
+
+- **真机独有的缺陷**：堆损坏（`posix_memalign` 配 `free()`）、DLL 缺失
+  （`libwinpthread-1.dll`，已用 `-static` 修）在 wine 下都不显形；
+- **wine 独有的假绿**：矩阵不设 `BLINK_PREFIX` 时 guest 的 `/` 直通宿主 `/`，
+  裸 `cat`/`grep` 会命中宿主 coreutils 而"通过"（见 KNOWN-FAILURES W2）。
+  **新增用例一律用工作目录内的相对路径**（`./busybox <applet>`）。
+
+调试 guest 侧问题时按需打开：`WBOX_DEBUG_FORK`（fork 各阶段 + 快照逐区间）、
+`WBOX_DEBUG_MEM`（窗口/mmap）、`WBOX_DEBUG_NET`、`WBOX_DEBUG_VFS`。
+注意 `[w32fork]` 行走 `WriteFile` 直写不带缓冲，而 `wbox mem:` 行走
+`fprintf(stderr)`——输出重定向到文件时**必须带 fflush 才不会在挂死被 kill
+时整段丢失**（源码里已补，改动诊断代码时别退回去）。
+
 约定：网络用例 registry 不可达时 **SKIP 不 fail**；严格失败路径一律用
 本地构造输入覆盖。测试临时目录用 `pid()+tag` 拼唯一名、末清理；
 需 HOME 的用例走 TempHome 脚手架。
