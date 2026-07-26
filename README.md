@@ -32,20 +32,31 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$PWD/win32-link-zig.sh \
 
 ## 用法
 
-```
-wbox run [OPTIONS] -- <CMD> [ARGS...]
+> 以 `wbox --help` 的输出为准（唯一文本源在 `src/cli/mod.rs` 的 `USAGE`）。
 
-  --name <NAME>     容器名（AppContainer profile 名），默认 "wbox-<pid>"
+```
+wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本地 Windows 程序
+wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Linux 后端）
+
+  --name <NAME>     容器名（AppContainer profile 名），默认 "wbox-<pid>"（1..=64 字符）
   --memory <MB>     每进程内存上限（MB），0 = 不限，默认 0
   --cpu-pct <N>     CPU 硬性百分比上限 1-100（Job Object CPU rate control），默认 0 = 不限
   --max-procs <N>   最大进程数，默认 0 = 不限
   --allow-network   授予 INTERNET_CLIENT capability（默认不授予网络能力）
   --no-network      显式声明不授予网络（默认行为，预留）
-  --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录
+  --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
+  --rm              显式声明退出即清理（默认行为，docker 习惯写法）
   --interactive     连接 stdio（当前默认且唯一支持的模式；--detach 预留）
+  --pull            run 目标为镜像时，本地无缓存则先 pull
+  --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
   -V, --verbose     打印隔离配置摘要
 ```
+
+**子进程环境**：默认**不透传**宿主环境，只给一份最小白名单（`SystemRoot` 等），
+避免把宿主机密（如 `WBOX_REGISTRY_PASS`）带进容器；`--env-pass-all` 可放开，
+但 `BLINK_*` / `WBOX_*` 这类隔离旋钮始终剥离，镜像 Env 里的 `BLINK_PREFIX`
+也会被强制覆盖为 rootfs。
 
 示例：
 
@@ -81,7 +92,9 @@ wbox run -V --keep-profile -- cmd.exe /c whoami /all
 
 ```
 wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
-wbox image list
+wbox image list                 列出本地缓存的镜像
+wbox image show <REF>           打印已 pull 镜像的 config 摘要（敏感值脱敏）
+wbox image rm <REF> [--yes]     删除本地缓存（默认交互确认，--yes 跳过）
 ```
 
 - **引用补全规则**：`ubuntu:24.04` → `registry-1.docker.io/library/ubuntu:24.04`；无 tag 默认 `latest`；显式前缀如 `quay.io/prometheus/busybox:latest` 直接识别。
@@ -162,19 +175,34 @@ SPEC 允许两条路径启动子进程：
 
 ## 代码结构
 
-`src/oci/` 为 OCI 镜像拉取模块（`mod.rs` 引用解析与缓存布局、`registry.rs` HTTP/Bearer 认证、`image.rs` digest 校验与层解包/whiteout），纯 Rust 依赖（ureq+native-tls / tar / flate2 / sha2 / serde_json / base64），跨平台可编译。其余模块：
+分三层：**CLI**（`cli/`，纯逻辑跨平台可测）→ **后端抽象**（`backend/`，按目标分派 Native/Blink）→ **Win32 隔离原语**（`token/job/sandbox/acl`，仅 Windows 编译）。`oci/` 为 OCI 镜像拉取模块，纯 Rust 依赖（ureq+native-tls / tar / flate2 / sha2 / serde_json / base64），跨平台可编译。
 
 ```
 src/
-├── main.rs        # CLI 解析（手写，无 clap）与命令分发（run / image）、退出码约定
+├── main.rs        # 模块声明 + 错误→退出码的唯一映射点
+├── error.rs       # 带退出码语义的错误类型（1/2/3/4/5）
+├── cli/
+│   ├── mod.rs     # 子命令分发（run / image）与 USAGE
+│   ├── args.rs    # 手写参数解析的共享原语（无 clap）
+│   ├── run.rs     # run 子命令：参数 → RunSpec
+│   └── image.rs   # image pull / list / show / rm
+├── backend/
+│   ├── mod.rs     # Backend trait、classify_target（本地 exe vs 镜像引用）、环境构造/命令校验单一出口
+│   ├── native.rs  # NativeBackend：AppContainer + Job 直接跑 Windows 程序
+│   ├── blink.rs   # BlinkBackend：拉起 wbox-linux.exe 跑 Linux ELF（BLINK_PREFIX 强制指向 rootfs）
+│   └── env.rs     # 子进程环境构造：白名单 / 保留键剥离 / forced 覆盖 / 打印脱敏
+├── oci/
+│   ├── mod.rs     # 镜像引用解析（library/ 补全）、缓存目录布局、pull/list 编排
+│   ├── registry.rs# Distribution v2 HTTP 客户端、匿名 Bearer token 流程、manifest/blob 拉取
+│   ├── image.rs   # manifest list 平台选择、digest 链校验、gzip/纯 tar 解包、whiteout/硬链接、symlink 逃逸防护与降级复制
+│   └── config.rs  # 镜像 config.json：Entrypoint/Cmd/Env/WorkingDir 的 docker 式合并
 ├── job.rs         # Job Object RAII 封装（KILL_ON_JOB_CLOSE / 内存 / CPU rate / 进程数）[仅 Windows]
 ├── token.rs       # AppContainer profile 创建/删除、capability SID、Low IL 说明 [仅 Windows]
 ├── sandbox.rs     # attribute-list 启动编排（挂起创建 → 入 Job → 恢复 → 等待 → 转发退出码）[仅 Windows]
-├── error.rs       # 带退出码语义的错误类型（1/2/3/4/5）
-└── oci/
-    ├── mod.rs     # 镜像引用解析（library/ 补全）、缓存目录布局、pull/list 编排
-    ├── registry.rs# Distribution v2 HTTP 客户端、匿名 Bearer token 流程、manifest/blob 拉取
-    └── image.rs   # manifest list 平台选择、digest 链校验、gzip/纯 tar 解包、whiteout/硬链接、symlink 逃逸防护与降级复制
+├── acl.rs         # rootfs 授予 ALL APPLICATION PACKAGES 读/执行 ACE，使 AppContainer 子进程读得到镜像 [仅 Windows]
+└── testenv.rs     # 测试脚手架：环境变量互斥 + Drop 自动还原（并行用例共享进程环境，见 docs/testing.md）[仅 cfg(test)]
 ```
 
-所有 unsafe Win32 调用集中在 `token.rs` / `job.rs` / `sandbox.rs` 并附 `# Safety` 注释。
+所有 unsafe Win32 调用集中在 `token.rs` / `job.rs` / `sandbox.rs` / `acl.rs` 并附 `# Safety` 注释。
+
+Linux 运行时 `wbox-linux.exe`（blink 的 Win32 移植）在 `vendor/blink/`，其移植层架构与已知限制见 `vendor/blink/WIN32-PORT.md`。
