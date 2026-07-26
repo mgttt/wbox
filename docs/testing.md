@@ -50,11 +50,24 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   1. `wbox-linux.exe`（被测运行时；由 `build-wbox-linux` 产出）；
   2. `zig`（`tests/guest/build.sh` 要把 `t_*.c` 交叉编译成
      **x86_64-linux-musl 静态 Linux ELF**，MinGW/MSVC 都做不到）。
-- CI job `guest-tests`：前置齐备才执行，否则记 `::notice::` SKIP 并成功退出
-  （不阻塞门禁）。该 job 自身不构建 exe、不装 zig，故**当前恒 SKIP**；
-  补齐路径是取 `build-wbox-linux` 的 artifact + 装 zig。
-- 在此之前，同一套 guest 套件已由**矩阵 F 组**在 `build-wbox-linux` 内执行
-  （那里 exe 刚构建好，zig 也已安装），故覆盖并未真空。
+- CI job `guest-tests`：`needs: build-wbox-linux`，取其 artifact 拿到 exe，
+  并经 msys2 装 zig，然后真正执行套件。artifact 缺失时仍按契约
+  `::notice::` SKIP 不阻塞。
+- **不与矩阵 F 组重复**：CI 的矩阵步骤设 `WBOX_GUEST_SKIP=1` 整组跳过 F，
+  guest 套件由本 job 独家承担。本地跑 `test-matrix.sh` 不设该变量，
+  F 组照常执行（本地一条命令跑全量的便利保留）。
+- **已知失败基线**（`tests/known-failures.txt`，机器可读）：套件本身就有
+  3 个用例文件整体失败（AF_UNIX ENOSYS ×2、errno 精度 ×1），若沿用
+  "任一失败即非零"，它永远无法充当门禁。故 runner 改为与基线比对：
+
+  | 情况 | 退出码 | 含义 |
+  |---|---|---|
+  | 失败集合 ⊆ 基线 | 0 | 已知失败，放行（打印清单） |
+  | 出现基线外的新失败 | 1 | **回归** |
+  | 基线内的用例变成通过 | 1 | **基线过期**，必须同步收紧 |
+
+  最后一条是刻意的，与 §四 "行为修复时测试会变红，强制同步更新" 同一原则——
+  否则修好的东西会被基线继续掩盖。`WBOX_GUEST_NO_BASELINE=1` 可回到原始语义。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 
@@ -110,7 +123,10 @@ tag v* push
 
 ## 四、KNOWN-FAILURES 约定
 
-- 已知失败用例**不得**写成"预期失败但放行"的测试。约定做法二选一：
+- guest C 套件（`tests/`）的已知失败走 `tests/known-failures.txt` 基线，
+  语义见 §一.2；叙述与裁决理由留在 `tests/KNOWN-FAILURES.md`。两者必须
+  同步：基线是门禁读的，Markdown 是人读的。
+- Rust 单测的已知失败**不得**写成"预期失败但放行"的测试。约定做法二选一：
   1. 测试中断言**当前实际行为**并在注释中标注 `记录现状`（如大写引用不
      规范化、`--pull` 下 `C:\` 盘符冒号被当 tag 分隔符）——行为修复时测试
      会变红，强制同步更新；

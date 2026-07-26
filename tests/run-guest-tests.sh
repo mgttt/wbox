@@ -56,12 +56,23 @@ fi
 
 LIST=${WBOX_GUEST_LIST:-0}
 pass=0; fail=0; skip=0
+# 基线判定需要按名字比对，故 report 同时记录名字（空格分隔集合）。
+passed_names=; failed_names=
 report() { # report <status> <name> [detail]
   case $1 in
-    PASS) pass=$((pass+1)); [ "$LIST" = 1 ] && echo "PASS $2" || printf 'PASS  %s\n' "$2" ;;
+    PASS) pass=$((pass+1)); passed_names="$passed_names $2"
+          [ "$LIST" = 1 ] && echo "PASS $2" || printf 'PASS  %s\n' "$2" ;;
     SKIP) skip=$((skip+1)); [ "$LIST" = 1 ] && echo "SKIP $2" || printf 'SKIP  %s%s\n' "$2" "${3:+ —— $3}" ;;
-    FAIL) fail=$((fail+1)); [ "$LIST" = 1 ] && echo "FAIL $2" || printf 'FAIL  %s%s\n' "$2" "${3:+ —— $3}" ;;
+    FAIL) fail=$((fail+1)); failed_names="$failed_names $2"
+          [ "$LIST" = 1 ] && echo "FAIL $2" || printf 'FAIL  %s%s\n' "$2" "${3:+ —— $3}" ;;
   esac
+}
+
+# in_set <name> <set...> —— 名字是否在空格分隔集合中
+in_set() {
+  needle=$1; shift
+  for x in $*; do [ "$x" = "$needle" ] && return 0; done
+  return 1
 }
 
 if [ "${WBOX_GUEST_SKIP:-0}" = 1 ]; then
@@ -121,4 +132,42 @@ for b in "$WORK"/t_*; do
 done
 
 [ "$LIST" = 1 ] || echo "guest-suite: PASS=$pass FAIL=$fail SKIP=$skip"
-[ "$fail" -eq 0 ]
+
+# ---- 已知失败基线判定 ----
+# 基线本身就有若干整体 FAIL 的用例（AF_UNIX ENOSYS、errno 精度），若沿用
+# "任一失败即非零"，本套件永远无法充当 CI 门禁。故改为与基线比对：
+#   失败 ⊆ 基线                 → 0（已知失败，放行）
+#   出现基线外的新失败           → 1（回归）
+#   基线内的用例变成通过         → 1（基线过期，必须同步收紧；见 docs/testing.md §四）
+BASELINE=${WBOX_GUEST_BASELINE:-$DIR/known-failures.txt}
+if [ "${WBOX_GUEST_NO_BASELINE:-0}" = 1 ] || [ ! -f "$BASELINE" ]; then
+  [ "$LIST" = 1 ] || {
+    [ -f "$BASELINE" ] || echo "guest-suite: 未找到基线文件 $BASELINE —— 按'任一失败即非零'判定"
+  }
+  [ "$fail" -eq 0 ]
+  exit $?
+fi
+
+known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' | tr '\n' ' ')
+regressions=; fixed=
+for n in $failed_names; do
+  in_set "$n" "$known" || regressions="$regressions $n"
+done
+for n in $known; do
+  in_set "$n" "$passed_names" && fixed="$fixed $n"
+done
+
+rc=0
+if [ -n "$regressions" ]; then
+  echo "guest-suite: ✗ 基线外的新失败（回归）：$regressions" >&2
+  rc=1
+fi
+if [ -n "$fixed" ]; then
+  echo "guest-suite: ✗ 基线内用例已通过，基线过期：$fixed" >&2
+  echo "guest-suite:   请从 $BASELINE 移除这些条目，并同步 KNOWN-FAILURES.md" >&2
+  rc=1
+fi
+if [ "$rc" = 0 ] && [ -n "$failed_names" ]; then
+  echo "guest-suite: ✓ 失败项均在已知基线内（$failed_names）"
+fi
+exit $rc

@@ -1,5 +1,10 @@
 # wbox-linux 已知失败清单（C 层回归套件基线）
 
+> **机器可读基线在 `tests/known-failures.txt`**（CI 门禁读它）。本文件是
+> 人读的叙述与裁决理由。两者必须同步：从基线移除条目时，也要在此把对应
+> 行改成"已修复"。判定语义（失败 ⊆ 基线放行 / 基线外新失败为回归 /
+> 基线内用例变通过视为基线过期）见 `docs/testing.md` §一.2。
+
 基线来源：`tests/run-guest-tests.sh`（wine 模式，wbox-linux v1.0，wine 11.11）。
 基线统计（v1.0 全绿基线，2026-07-26 实测）：**16 个用例文件：13 PASS / 3 FAIL；
 断言 433 条：pass=419 fail=4 skip=10**（skip 均为 symlink EPERM 宿主限制降级与

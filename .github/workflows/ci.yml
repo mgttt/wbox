@@ -164,6 +164,12 @@ jobs:
       #   push main / tag / nightly / 手动 → 完整矩阵（门禁算入 release needs）。
       - name: 验收矩阵 —— scripts/test-matrix.sh（真 Windows native 模式，PR 跳过）
         if: github.event_name != 'pull_request'
+        # F 组（guest C 套件）在 CI 里交给专职的 guest-tests job，这里整组 SKIP：
+        # 一来避免两个 job 跑同一套用例，二来 F 组是按**单个用例文件**逐条计入
+        # 矩阵成败的，已知失败（AF_UNIX/errno 精度，见 tests/known-failures.txt）
+        # 会让矩阵永远红。本地跑 test-matrix.sh 时不设该变量，F 组照常执行。
+        env:
+          WBOX_GUEST_SKIP: 1
         run: |
           scripts/test-matrix.sh \
             vendor/blink/build-win32/wbox-linux.exe ./busybox 2>&1 | tee matrix.log
@@ -199,22 +205,38 @@ jobs:
   #    是前置缺失，故此处显式判定并回到契约规定的 SKIP。
   guest-tests:
     runs-on: windows-latest
+    # 需要 build-wbox-linux 产出的 wbox-linux.exe（本 job 不重复构建）
+    needs: build-wbox-linux
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - name: guest 测试（入口与运行前置齐备才执行，否则 SKIP）
-        shell: bash
+      # guest 用例要交叉编译成 x86_64-linux-musl **静态 Linux ELF**
+      # （tests/guest/build.sh），MinGW/MSVC 都做不到，故装 zig。
+      - name: 准备 MSYS2 + zig（guest 用例交叉编译用）
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-zig
+      - name: 取 wbox-linux.exe（build-wbox-linux 的 artifact）
+        uses: actions/download-artifact@v4
+        with:
+          name: wbox-linux.exe
+          path: vendor/blink/build-win32
+      # 退出码即测试结果。判定经 tests/known-failures.txt 基线：
+      #   失败 ⊆ 基线 → 0；出现基线外新失败 → 1（回归）；
+      #   基线内用例变通过 → 1（基线过期，强制同步收紧）。
+      # 前置缺失时仍按契约 SKIP 不阻塞（见 docs/testing.md §一.2）。
+      - name: guest C 回归套件（基线判定）
         run: |
-          if [ ! -f tests/run.sh ]; then
-            echo "::notice::tests/run.sh 尚未就绪——guest 测试 SKIP，不阻塞门禁"
-            exit 0
-          fi
-          exe=${WBOX_LINUX:-vendor/blink/build-win32/wbox-linux.exe}
+          exe=vendor/blink/build-win32/wbox-linux.exe
           if [ ! -f "$exe" ]; then
-            echo "::notice::未找到 wbox-linux.exe（$exe）——guest 测试 SKIP，不阻塞门禁。"
-            echo "::notice::补齐方式：本 job 取 build-wbox-linux 的 artifact，并装 zig（pip install ziglang）后再执行 tests/run.sh。"
+            echo "::notice::未取到 $exe —— guest 测试 SKIP，不阻塞门禁"
             exit 0
           fi
-          echo "发现 tests/run.sh 与 $exe，执行 guest 测试"
+          chmod +x "$exe" || true
           WBOX_LINUX=$exe bash tests/run.sh
 
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；

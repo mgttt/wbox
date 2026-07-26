@@ -1,0 +1,21 @@
+# guest C 回归套件的**已知失败基线**（机器可读版；叙述与裁决见 KNOWN-FAILURES.md）
+#
+# 语义：这里列出的用例文件**预期整体 FAIL**。runner（run-guest-tests.sh）据此判定：
+#   - 失败集合 ⊆ 本基线            → 退出 0（打印"已知失败"摘要）
+#   - 出现基线外的新失败            → 退出 1（回归）
+#   - 基线内的用例**变成通过**      → 退出 1（基线过期，必须同步收紧）
+# 最后一条是刻意的：docs/testing.md §四 约定"行为修复时测试会变红，强制同步更新"，
+# 否则修好的东西会被基线继续掩盖。
+#
+# 每行一个用例文件名（不含路径与扩展名）；# 起始为注释；空行忽略。
+# 用 WBOX_GUEST_NO_BASELINE=1 可关闭基线判定，回到"任一失败即非零"的原始语义。
+
+# N1：win32 宿主无 AF_UNIX —— socket(AF_UNIX,…)/socketpair(AF_UNIX) 返回 ENOSYS(38)。
+#     返回码干净、语义明确，本期不实现。
+t_net_epoll
+t_net_sockopt
+
+# E1/E2：errno 精度未校准（真缺陷，低优先级，不影响功能正确性）。
+#     E1 read(目录fd) 期望 EISDIR(21)，实测 EINVAL(22)
+#     E2 write(只读fd=stdin) 期望 EBADF(9)，实测 EACCES(13)
+t_negative
