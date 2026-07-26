@@ -715,6 +715,59 @@ struct W32FdStatus {
   int nonblock;
 };
 static struct W32FdStatus *g_fdstatus[W32_FDTRACK_MAX];
+
+union W32IoStatusValue {
+  LONG status;
+  void *pointer;
+};
+struct W32IoStatusBlock {
+  union W32IoStatusValue value;
+  ULONG_PTR information;
+};
+struct W32PipeLocalInfo {
+  ULONG named_pipe_type;
+  ULONG named_pipe_configuration;
+  ULONG maximum_instances;
+  ULONG current_instances;
+  ULONG inbound_quota;
+  ULONG read_data_available;
+  ULONG outbound_quota;
+  ULONG write_quota_available;
+  ULONG named_pipe_state;
+  ULONG named_pipe_end;
+};
+#define W32_FILE_PIPE_LOCAL_INFORMATION 24
+#define W32_FILE_PIPE_DISCONNECTED_STATE 1
+#define W32_FILE_PIPE_CLOSING_STATE 4
+typedef LONG(NTAPI *W32NtQueryInformationFile)(
+    HANDLE, struct W32IoStatusBlock *, void *, ULONG, int);
+static INIT_ONCE g_pipequery_once = INIT_ONCE_STATIC_INIT;
+static W32NtQueryInformationFile g_pipequery;
+
+static BOOL CALLBACK W32InitPipeQuery(PINIT_ONCE once, PVOID param,
+                                      PVOID *context) {
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  (void)once;
+  (void)param;
+  (void)context;
+  if (ntdll) {
+    g_pipequery = (W32NtQueryInformationFile)GetProcAddress(
+        ntdll, "NtQueryInformationFile");
+  }
+  return TRUE;
+}
+
+static int W32QueryPipe(HANDLE h, struct W32PipeLocalInfo *info) {
+  struct W32IoStatusBlock iosb;
+  InitOnceExecuteOnce(&g_pipequery_once, W32InitPipeQuery, NULL, NULL);
+  if (!g_pipequery) return 0;
+  memset(info, 0, sizeof(*info));
+  // Win32 has no public write-end equivalent of PeekNamedPipe. This stable
+  // NT information class exposes both queued bytes and remaining write quota.
+  return g_pipequery(h, &iosb, info, sizeof(*info),
+                     W32_FILE_PIPE_LOCAL_INFORMATION) >= 0;
+}
+
 // Access mode is needed by F_GETFL. MinGW's CRT doesn't expose a query for
 // the mode passed to _open_osfhandle(), and reporting O_RDWR unconditionally
 // makes blink treat stdin and read-only files as writable.
@@ -739,15 +792,22 @@ static int W32IsAppend(int fd) {
          (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
 }
 static void W32SetNonblock(int fd, int on) {
+  DWORD mode;
+  HANDLE h;
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
   if (g_fdstatus[fd]) {
     g_fdstatus[fd]->nonblock = !!on;
-    return;
-  }
-  if (on) {
-    g_fdnonblock[fd >> 3] |= 1u << (fd & 7);
   } else {
-    g_fdnonblock[fd >> 3] &= ~(1u << (fd & 7));
+    if (on) {
+      g_fdnonblock[fd >> 3] |= 1u << (fd & 7);
+    } else {
+      g_fdnonblock[fd >> 3] &= ~(1u << (fd & 7));
+    }
+  }
+  h = W32Handle(fd);
+  if (h != INVALID_HANDLE_VALUE && GetFileType(h) == FILE_TYPE_PIPE) {
+    mode = on ? PIPE_NOWAIT : PIPE_WAIT;
+    SetNamedPipeHandleState(h, &mode, NULL, NULL);
   }
 }
 static int W32IsNonblock(int fd) {
@@ -1611,6 +1671,10 @@ ssize_t read(int fd, void *buf, size_t n) {
     DWORD e = GetLastError();
     if (e == ERROR_BROKEN_PIPE) return EpollIoResult(fd, 0);
     if (e == ERROR_HANDLE_EOF) return EpollIoResult(fd, 0);
+    if (e == ERROR_NO_DATA && W32IsNonblock(fd)) {
+      errno = EAGAIN;
+      return EpollIoResult(fd, -1);
+    }
     errno = W32Err();
     return EpollIoResult(fd, -1);
   }
@@ -1643,6 +1707,10 @@ ssize_t write(int fd, const void *buf, size_t n) {
   if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, NULL)) {
     errno = W32Err();
     if (errno == 0) errno = EIO;
+    return EpollIoResult(fd, -1);
+  }
+  if (!put && n && W32IsNonblock(fd) && GetFileType(h) == FILE_TYPE_PIPE) {
+    errno = EAGAIN;
     return EpollIoResult(fd, -1);
   }
   return EpollIoResult(fd, put);
@@ -2679,7 +2747,7 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2],
 // here. The per-class readiness semantics live in exactly one place:
 // sockets are level-triggered WSAPoll (w32sock.c, sliced so the non-socket
 // fds are re-checked regularly), files/consoles are always ready, pipes are
-// PeekNamedPipe'd with a handle-wait fallback for wine fifos.
+// queried for native read/write quotas with a handle-wait fallback for wine.
 int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
   DWORD deadline = timeout >= 0 ? GetTickCount() + timeout : 0;
   int nsock = 0;
@@ -2711,31 +2779,40 @@ int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
           HANDLE h = (HANDLE)fi.handle;
           DWORD ft = GetFileType(h);
           if (ft == FILE_TYPE_PIPE) {
-            DWORD avail = 0;
-            if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
-              if (avail) p->revents |= p->events & POLLIN;
-              p->revents |= p->events & POLLOUT;
+            struct W32PipeLocalInfo pi;
+            if (W32QueryPipe(h, &pi)) {
+              int access = W32GetAccess(p->fd) & O_ACCMODE;
+              if (access != O_WRONLY && pi.read_data_available)
+                p->revents |= p->events & POLLIN;
+              if (access != O_RDONLY && pi.write_quota_available)
+                p->revents |= p->events & POLLOUT;
+              if (pi.named_pipe_state == W32_FILE_PIPE_DISCONNECTED_STATE ||
+                  pi.named_pipe_state == W32_FILE_PIPE_CLOSING_STATE) {
+                p->revents |= access == O_WRONLY ? POLLERR : POLLHUP;
+              }
             } else {
-              // feat/listener: wine cannot PeekNamedPipe stdio handles that
-              // wrap a unix fifo/socketpair (ERROR_NOT_SUPPORTED). Reporting
-              // POLLERR made guests (busybox nc) read(0) and block forever
-              // on an empty fifo while socket data went unserviced. Fall
-              // back to the handle wait state: wine pipes/fifos are signaled
-              // when data is available or the writer is gone.
-              DWORD werr = GetLastError();
-              if (werr == ERROR_PIPE_NOT_CONNECTED ||
-                  werr == ERROR_BAD_PIPE || werr == ERROR_BROKEN_PIPE ||
-                  werr == ERROR_NO_DATA) {
-                p->revents = POLLHUP;
+              DWORD avail = 0;
+              if (PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+                if (avail) p->revents |= p->events & POLLIN;
+                p->revents |= p->events & POLLOUT;
               } else {
-                DWORD wrc = WaitForSingleObject(h, 0);
-                if (wrc == WAIT_OBJECT_0) {
-                  // readable or hung up; read() disambiguates (0 == EOF)
-                  p->revents |= p->events & (POLLIN | POLLOUT);
-                } else if (wrc == WAIT_TIMEOUT) {
-                  p->revents = 0;
+                // Wine cannot always inspect stdio handles that wrap a unix
+                // fifo/socketpair. Fall back to the handle wait state.
+                DWORD werr = GetLastError();
+                if (werr == ERROR_PIPE_NOT_CONNECTED ||
+                    werr == ERROR_BAD_PIPE || werr == ERROR_BROKEN_PIPE ||
+                    werr == ERROR_NO_DATA) {
+                  p->revents = POLLHUP;
                 } else {
-                  p->revents = POLLERR;
+                  DWORD wrc = WaitForSingleObject(h, 0);
+                  if (wrc == WAIT_OBJECT_0) {
+                    // readable or hung up; read() disambiguates (0 == EOF)
+                    p->revents |= p->events & (POLLIN | POLLOUT);
+                  } else if (wrc == WAIT_TIMEOUT) {
+                    p->revents = 0;
+                  } else {
+                    p->revents = POLLERR;
+                  }
                 }
               }
             }

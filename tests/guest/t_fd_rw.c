@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/sendfile.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 #include <sys/uio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -125,6 +126,72 @@ int main(void) {
     T_ASSERT_EQ(ch, 'p');
     close(alias);
     close(pp[0]);
+    close(pp[1]);
+  }
+
+  T_BEGIN("pipe2/nonblock-initial");
+  {
+    int pp[2];
+    char block[4096] = {0};
+    struct iovec one = {.iov_base = block, .iov_len = sizeof(block)};
+    struct pollfd pfd;
+    ssize_t n = 0;
+    size_t total = 0;
+    T_ASSERT_OK(pipe2(pp, O_NONBLOCK | O_CLOEXEC));
+    T_ASSERT(fcntl(pp[0], F_GETFL) & O_NONBLOCK);
+    T_ASSERT(fcntl(pp[1], F_GETFL) & O_NONBLOCK);
+    T_ASSERT(fcntl(pp[0], F_GETFD) & FD_CLOEXEC);
+    T_ASSERT(fcntl(pp[1], F_GETFD) & FD_CLOEXEC);
+    T_ASSERT_ERRNO(read(pp[0], block, 1), EAGAIN);
+    while (total < 1024 * 1024) {
+      n = write(pp[1], block, sizeof(block));
+      if (n <= 0) break;
+      total += n;
+    }
+    T_ASSERT(total > 0 && total < 1024 * 1024);
+    T_ASSERT(n == -1 && errno == EAGAIN);
+    T_ASSERT_ERRNO(writev(pp[1], &one, 1), EAGAIN);
+    pfd.fd = pp[1];
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 0);
+    T_ASSERT_EQ(read(pp[0], block, sizeof(block)), sizeof(block));
+    pfd.revents = 0;
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 1);
+    T_ASSERT(pfd.revents & POLLOUT);
+    close(pp[0]);
+    close(pp[1]);
+  }
+
+  T_BEGIN("pipe/poll-hup-err");
+  {
+    int pp[2];
+    char ch;
+    struct pollfd pfd;
+    T_ASSERT_OK(pipe(pp));
+    pfd.fd = pp[0];
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 0);
+    T_ASSERT_EQ(write(pp[1], "h", 1), 1);
+    close(pp[1]);
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 1);
+    T_ASSERT(pfd.revents & POLLIN);
+    T_ASSERT(pfd.revents & POLLHUP);
+    T_ASSERT_EQ(read(pp[0], &ch, 1), 1);
+    T_ASSERT_EQ(ch, 'h');
+    pfd.revents = 0;
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 1);
+    T_ASSERT(pfd.revents & POLLHUP);
+    close(pp[0]);
+
+    T_ASSERT_OK(pipe(pp));
+    close(pp[0]);
+    pfd.fd = pp[1];
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    T_ASSERT_EQ(poll(&pfd, 1, 0), 1);
+    T_ASSERT(pfd.revents & POLLERR);
     close(pp[1]);
   }
 
