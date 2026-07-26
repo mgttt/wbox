@@ -4867,9 +4867,14 @@ static void GetResourceLimit_(struct Machine *m, int resource,
 static int SetResourceLimit(struct Machine *m, int resource,
                             const struct rlimit_linux *lux) {
   int rc;
+  u64 cur, max, oldmax;
   LOCK(&m->system->mmap_lock);
-  if (Read64(lux->cur) <= Read64(m->system->rlim[resource].max) &&
-      Read64(lux->max) <= Read64(m->system->rlim[resource].max)) {
+  cur = Read64(lux->cur);
+  max = Read64(lux->max);
+  oldmax = Read64(m->system->rlim[resource].max);
+  if (cur > max) {
+    rc = einval();
+  } else if (max <= oldmax) {
     memcpy(m->system->rlim + resource, lux, sizeof(*lux));
     rc = 0;
   } else {

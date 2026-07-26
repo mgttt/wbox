@@ -3,6 +3,7 @@
  * guest SIGSEGV surfaces as FAIL instead of aborting the whole suite. */
 #define _GNU_SOURCE
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -64,6 +65,31 @@ static int chk_prot_none_read(void) {
   return ok ? 0 : 1;
 }
 
+static int check_rlimit_unchanged(const struct rlimit *before) {
+  struct rlimit after;
+  return getrlimit(RLIMIT_NOFILE, &after) == 0 &&
+         after.rlim_cur == before->rlim_cur &&
+         after.rlim_max == before->rlim_max;
+}
+
+static int chk_setrlimit_cur_above_max(void) {
+  struct rlimit before;
+  struct rlimit lim = {1, 0};
+  if (getrlimit(RLIMIT_NOFILE, &before) == -1) return 1;
+  errno = 0;
+  if (setrlimit(RLIMIT_NOFILE, &lim) != -1 || errno != EINVAL) return 1;
+  return check_rlimit_unchanged(&before) ? 0 : 1;
+}
+
+static int chk_prlimit_cur_above_max(void) {
+  struct rlimit before;
+  struct rlimit lim = {1, 0};
+  if (getrlimit(RLIMIT_NOFILE, &before) == -1) return 1;
+  errno = 0;
+  if (prlimit(0, RLIMIT_NOFILE, &lim, NULL) != -1 || errno != EINVAL) return 1;
+  return check_rlimit_unchanged(&before) ? 0 : 1;
+}
+
 int main(void) {
   char b[16];
   struct stat st;
@@ -119,6 +145,11 @@ int main(void) {
   in_child(chk_badbuf_write);
   T_BEGIN("neg/efault-read-prot-none");
   in_child(chk_prot_none_read);
+
+  T_BEGIN("neg/setrlimit-soft-above-hard");
+  in_child(chk_setrlimit_cur_above_max);
+  T_BEGIN("neg/prlimit-soft-above-hard");
+  in_child(chk_prlimit_cur_above_max);
 
   /* --- syscall arg edges --- */
   T_BEGIN("neg/unknown-open-flag");
