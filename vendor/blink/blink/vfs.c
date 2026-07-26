@@ -125,6 +125,31 @@ int VfsInit(const char *prefix) {
       bprefix = NULL;
     }
   }
+#ifdef _WIN32
+  // wbox win32 C2 (security-audit): jail-by-default. With no valid
+  // BLINK_PREFIX the upstream identity mapping (guest "/" == host "/")
+  // lets absolute guest paths and intermediate ".." components reach
+  // arbitrary host files (tests/guest/t_sec_path*.c). Confine the guest
+  // to the launch cwd instead. The win32 fd layer keys its own textual
+  // jail (W32Path/W32ResolveAt) off WBOX_ROOT, so publish the SAME root
+  // there — one jail root for every path entry. (This env hand-off is
+  // the 雏形 of the planned unified path-egress entry point; the win32
+  // side additionally re-verifies every resolved host path against it.)
+  int jailed_default = 0;
+  if (!bprefix) {
+    bprefix = realpath(".", NULL);
+    jailed_default = bprefix != NULL;
+  }
+  if (bprefix) {
+    // _putenv updates the CRT environment (getenv in w32fd.c);
+    // SetEnvironmentVariableA alone does not, but is still needed so
+    // wine child processes inherit the same jail root.
+    static char wrootenv[PATH_MAX + 16];
+    snprintf(wrootenv, sizeof(wrootenv), "WBOX_ROOT=%s", bprefix);
+    _putenv(wrootenv);
+    SetEnvironmentVariableA("WBOX_ROOT", bprefix);
+  }
+#endif
   if (bprefix) {
     unassert(!VfsMount(bprefix, "/", "hostfs", 0, NULL));
   } else {
@@ -141,7 +166,12 @@ int VfsInit(const char *prefix) {
   // win32: 无 BLINK_PREFIX 时 guest 根直接落在宿主根（wine 下 Z:\ 映射
   // Linux /，通常只读），VfsMkdir(SystemRoot) 会 EACCES；SystemRoot 挂载
   // 仅用于在 guest 内回看宿主根，降级为 best-effort。
-  if (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) != -1 || errno == EEXIST) {
+  // C2: jail-by-default 时跳过该挂载——它会把整个宿主根重新暴露进
+  // 沙箱（连 readdir 都泄漏宿主文件名）。显式 BLINK_PREFIX 的生产路径
+  // （wbox run）保留原行为。
+  if (!jailed_default &&
+      (VfsMkdir(AT_FDCWD, VFS_SYSTEM_ROOT_MOUNT, 0755) != -1 ||
+       errno == EEXIST)) {
     VfsMount("/", VFS_SYSTEM_ROOT_MOUNT, "hostfs", 0, NULL);
   }
 #else
@@ -168,7 +198,18 @@ int VfsInit(const char *prefix) {
 
   // Initialize the current working directory
   unassert(getcwd(hostcwd, sizeof(hostcwd)));
-  if (bprefix && !strncmp(hostcwd, bprefix, (prefixlen = strlen(bprefix)))) {
+#ifdef _WIN32
+  // win32 getcwd() drops the drive letter ("Z:\x" -> "/x") while
+  // realpath() keeps it ("Z:/x") — compare against the drive-less form.
+  const char *bprefix_cmp = bprefix;
+  if (bprefix_cmp && bprefix_cmp[0] && bprefix_cmp[1] == ':') {
+    bprefix_cmp += 2;
+  }
+#else
+  const char *bprefix_cmp = bprefix;
+#endif
+  if (bprefix_cmp &&
+      !strncmp(hostcwd, bprefix_cmp, (prefixlen = strlen(bprefix_cmp)))) {
     hostcwdlen = strlen(hostcwd);
     if (hostcwdlen == prefixlen) {
       cwd = strdup("/");
@@ -626,7 +667,14 @@ static int VfsTraverseStackBuild(struct VfsInfo **stack, const char *path,
   unassert(!VfsTraverseMount(stack, NULL));
   return 0;
 cleananddie:
-  while (*stack != origin) {
+  // wbox C2 (security-audit, S4 crash): *stack may have descended BELOW
+  // origin (".." pops in HostfsTraverse consume the entry reference and
+  // move it up the parent chain). Walking parents can then overrun the
+  // topmost info (g_initialrootinfo, parent == NULL) and NULL-deref.
+  // Each pop/unwind step just moves one reference upward, so stopping
+  // at the first parentless node keeps refcounts balanced; the caller's
+  // final VfsFreeInfo releases it.
+  while (*stack != origin && (*stack)->parent != NULL) {
     unassert(!VfsAcquireInfo((*stack)->parent, &next));
     unassert(!VfsFreeInfo(*stack));
     *stack = next;
@@ -982,11 +1030,20 @@ static int VfsHandleDirfdName(int dirfd, const char *name,
   if (VfsTraverseStackBuild(&dir, parentname, g_rootinfo, true, 0) == -1) {
     goto cleananddie;
   }
-  if (!strcmp(q, "..") && dir->parent) {
+  // wbox C2 (S3): a trailing ".." may not pop above the guest root —
+  // previously openat(dirfd, "../..") walked dir->parent past g_rootinfo
+  // and HostfsOpen then resolved ".." on the HOST (sandbox escape).
+  // POSIX chroot semantics: ".." at the root is the root itself.
+  if (!strcmp(q, "..") && dir != g_rootinfo && dir->parent) {
     unassert(!VfsAcquireInfo(dir->parent, &tmp));
     unassert(!VfsFreeInfo(dir));
     dir = tmp;
     memcpy(leaf, ".", 2);
+  } else if (!strcmp(q, "..") && dir == g_rootinfo) {
+    // wbox C2: trailing ".." at the guest root is an escape attempt —
+    // deny instead of clamping (see HostfsTraverse).
+    unassert(!VfsFreeInfo(dir));
+    return eacces();
   } else {
     memcpy(leaf, q, p - q + 1);
   }

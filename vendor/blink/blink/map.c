@@ -73,7 +73,15 @@ static void *PortableMmap(void *addr,     //
   _Static_assert(!(MAP_ANONYMOUS_ & MAP_SHARED), "");
   _Static_assert(!(MAP_ANONYMOUS_ & MAP_PRIVATE), "");
   int tfd;
+#ifdef _WIN32
+  // wbox win32: C2 jail-by-default confines absolute paths to WBOX_ROOT,
+  // so "/tmp" may not exist inside the jail. The process cwd is always a
+  // writable work dir (jail root) at this point; the file is unlinked
+  // immediately below either way.
+  char path[] = "blink.dat.XXXXXX";
+#else
   char path[] = "/tmp/blink.dat.XXXXXX";
+#endif
   if (~flags & MAP_ANONYMOUS_) {
     res = VfsMmap(addr, length, prot, flags, fd, offset);
   } else if ((tfd = mkstemp(path)) != -1) {

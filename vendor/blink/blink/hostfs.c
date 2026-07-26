@@ -423,7 +423,13 @@ int HostfsTraverse(struct VfsInfo **dir, const char **path,
                currentpath[1] == '.') {
       currentpath = nextpath;
       if (*dir == root || (*dir)->parent == NULL) {
-        continue;
+        // wbox C2: a ".." that would pop above the guest root is an
+        // escape ATTEMPT — deny it (EACCES) rather than silently
+        // clamping to the root (audit C2; tests/guest/t_sec_path*.c
+        // treat a successful open of "/..", "../../.." etc. as a
+        // sandbox escape).
+        eacces();
+        goto cleananddie;
       }
       unassert(!VfsAcquireInfo((*dir)->parent, &next));
       unassert(!VfsFreeInfo(*dir));
@@ -500,7 +506,10 @@ int HostfsTraverse(struct VfsInfo **dir, const char **path,
   *path = currentpath;
   return 0;
 cleananddie:
-  while (original != *dir) {
+  // wbox C2 (S4): same overrun guard as VfsTraverseStackBuild —
+  // *dir may sit below original after ".." pops; stop at the first
+  // parentless node instead of dereferencing NULL->parent.
+  while (original != *dir && (*dir)->parent != NULL) {
     unassert(!VfsAcquireInfo((*dir)->parent, &next));
     unassert(!VfsFreeInfo(*dir));
     *dir = next;

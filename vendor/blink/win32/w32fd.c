@@ -108,6 +108,65 @@ static int W32RootComps(const wchar_t *root) {
   return n;
 }
 
+// C2 (security-audit): THE jail root. Every host path that reaches a
+// Win32 API must textually resolve inside this directory — this is the
+// single egress check shared by all path entries (W32Path for cwd-based
+// and absolute paths, W32ResolveAt for the dirfd-anchored *at family).
+// It is the 雏形 of the planned unified path-normalization entry point:
+// VfsInit publishes the VFS root via WBOX_ROOT (BLINK_PREFIX, or the
+// launch cwd under jail-by-default), so the VFS layer and this fd layer
+// never disagree about what "outside the sandbox" means.
+static const wchar_t *W32JailRoot(int *comps) {
+  static wchar_t root[MAX_PATH];
+  static int root_init, root_comps;
+  if (!root_init) {
+    char *r = getenv("WBOX_ROOT");
+    if (!r || !*r) {
+      // jail-by-default fallback (VfsInit not run yet): the launch cwd
+      DWORD m = GetCurrentDirectoryW(MAX_PATH, root);
+      if (!m || m >= MAX_PATH) {
+        wcscpy(root, L"Z:\\");  // last resort: wine unix fs root
+      }
+    } else {
+      root[0] = 0;
+      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, MAX_PATH - 1);
+      root[MAX_PATH - 1] = 0;
+    }
+    for (int n = 0; root[n]; ++n)
+      if (root[n] == L'/') root[n] = L'\\';
+    // strip trailing backslashes ("Z:\" keeps its root slash)
+    size_t l = wcslen(root);
+    while (l > 3 && root[l - 1] == L'\\') root[--l] = 0;
+    root_comps = W32RootComps(root);
+    root_init = 1;
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32jailroot] root='%S' comps=%d env='%s'\n", root,
+              root_comps, r ? r : "(null)");
+  }
+  if (comps) *comps = root_comps;
+  return root;
+}
+
+// C2: case-insensitive check that the NORMALIZED ABSOLUTE path `abs`
+// ("X:\..." drive-prefixed) resolves inside the jail root.
+static int W32WithinRoot(const wchar_t *abs) {
+  const wchar_t *root = W32JailRoot(NULL);
+  size_t rl = wcslen(root);
+  if (rl >= 2 && root[1] == L':' && rl == 2) {
+    // bare drive root "Z:" — everything on the drive is inside
+    return !_wcsnicmp(abs, root, 2) ? 0 : -1;
+  }
+  if (_wcsnicmp(abs, root, rl)) return -1;
+  wchar_t c = abs[rl];
+  return (c == 0 || c == L'\\') ? 0 : -1;
+}
+
+// DOS device names that must not be jail-checked (they are not paths).
+static int W32IsDeviceName(const wchar_t *w) {
+  return !wcscmp(w, L"NUL") || !wcscmp(w, L"CON") || !wcscmp(w, L"CONIN$") ||
+         !wcscmp(w, L"CONOUT$") || !wcscmp(w, L"CONSOLE$");
+}
+
 static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
   int n;
   wchar_t tmp[MAX_PATH];
@@ -115,27 +174,18 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
   if (!path) return NULL;
   if (!strcmp(path, "/dev/null")) path = "NUL";
   if (path[0] == '/') {
-    // root via WBOX_ROOT (default Z:)
-    static wchar_t root[64];
-    static int root_init, root_comps;
-    if (!root_init) {
-      char *r = getenv("WBOX_ROOT");
-      if (!r || !*r) r = "Z:";
-      root[0] = 0;
-      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, 63);
-      root[63] = 0;
-      for (n = 0; root[n]; ++n)
-        if (root[n] == L'/') root[n] = L'\\';
-      root_comps = W32RootComps(root);
-      root_init = 1;
-    }
+    // absolute guest path: root at the jail root
+    int root_comps;
+    const wchar_t *root = W32JailRoot(&root_comps);
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32path] abs '%s'\n", path);
     n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
     if (n <= 0) return NULL;
     if (wcslen(root) + wcslen(tmp) + 2 >= MAX_PATH) return NULL;
     wcscpy(joined, root);
     wcscat(joined, tmp);
     // C2: component-level normalization; reject any result that escapes
-    // above WBOX_ROOT (e.g. "/../outside" reaching the host).
+    // above the jail root (e.g. "/../outside" reaching the host).
     if (W32NormalizeW(joined, buf, root_comps)) {
       SetLastError(ERROR_ACCESS_DENIED);
       return NULL;
@@ -151,6 +201,30 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
     if (W32NormalizeW(tmp, buf, 0)) {
       SetLastError(ERROR_ACCESS_DENIED);
       return NULL;
+    }
+    // C2 unified egress check: absolutize and prove the result stays
+    // inside the jail root (defense in depth — the VFS layer should
+    // never hand us ".." or absolute host paths outside the jail).
+    if (!W32IsDeviceName(buf)) {
+      if (buf[0] && buf[1] == L':') {
+        wcscpy(joined, buf);  // already drive-prefixed absolute
+      } else {
+        DWORD m = GetCurrentDirectoryW(MAX_PATH, joined);
+        if (!m || m >= MAX_PATH) return NULL;
+        if (wcslen(joined) + wcslen(buf) + 2 >= MAX_PATH) return NULL;
+        wcscat(joined, L"\\");
+        wcscat(joined, buf);
+      }
+      {
+        wchar_t full[MAX_PATH];
+        if (W32NormalizeW(joined, full, 0) || W32WithinRoot(full)) {
+          if (getenv("WBOX_DEBUG_PATH"))
+            fprintf(stderr, "[w32path] DENY rel '%s' full '%S' root '%S'\n",
+                    path, full, W32JailRoot(NULL));
+          SetLastError(ERROR_ACCESS_DENIED);
+          return NULL;
+        }
+      }
     }
   }
   // normalize slashes to backslashes (some win32 apis insist)
@@ -194,6 +268,15 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
   // (the VFS/hostfs layer already clamps ".." at the guest root — this
   // is defense in depth.)
   if (W32NormalizeW(joined, buf, 0)) {
+    SetLastError(ERROR_ACCESS_DENIED);
+    return NULL;
+  }
+  // C2 unified egress check: the resolved path must stay inside the
+  // jail root, no matter which directory the dirfd points at (S3).
+  if (W32WithinRoot(buf)) {
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32resolveat] DENY '%s' buf '%S' root '%S'\n", path,
+              buf, W32JailRoot(NULL));
     SetLastError(ERROR_ACCESS_DENIED);
     return NULL;
   }
