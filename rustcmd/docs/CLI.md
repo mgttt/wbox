@@ -80,8 +80,20 @@ target terminal viewport.
 & $r capture-pane --raw-escaped -t build
 & $r dump-cells -t build
 & $r dump-cells -t build -r 39
-& $r send-mouse -t build -x 10 -y 5 --button left --action press
-& $r send-mouse -t build -x 10 -y 5 --button left --action release
+& $r send-mouse -t build -x 10 -y 5 --button left
+& $r send-mouse -t build -x 10 -y 5 --button left --protocol native
+& $r send-mouse -t build -x 10 -y 5 --button left --action press --protocol sgr
+& $r send-mouse -t build -x 10 -y 5 --button left --action release --protocol sgr
+
+`auto`（默认）会优先兼容 Windows RMUX。若点击位于末三行且能识别出
+RMUX Byobu 的 `N:name` 与 `[N:name]`，则会通过已验证的 F3/F4 路径
+完成切换；这是当前 RMUX Windows attach 客户端不消费鼠标输入时的兼容桥。
+其余位置尝试 Win32 控制台鼠标记录，失败时回退到 xterm SGR。`native`
+强制 Win32 路径，`sgr` 强制转义序列路径。GUI 中的终端左键点击使用相同逻辑。
+
+开发或并行测试实例可设置 `RUSTCMD_IPC_ADDRESS=127.0.0.1:端口`。GUI
+及其 CLI 客户端必须使用同一个值；未设置时仍使用按 Windows 用户名派生的
+默认本机端口。
 ```
 
 `dump-cells` returns styled/non-empty cells as JSON. Mouse coordinates are

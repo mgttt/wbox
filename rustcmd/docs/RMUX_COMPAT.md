@@ -29,7 +29,7 @@ The active RMUX server has these options:
 
 ```text
 status 3
-status-format[0] "#(... rmux_byobu_status.ps1 -Row 0 ...)"
+status-format[0] "#{W:...}"
 status-format[1] "#(... rmux_byobu_status.ps1 -Row 1 ...)"
 status-format[2] "#(... rmux_byobu_status.ps1 -Row 2 ...)"
 ```
@@ -44,10 +44,16 @@ RMUX daemon renders status
         -> waits for daemon response
 ```
 
-The format job cannot complete normally, so RMUX emits styled blank rows. The
-fix belongs in the Byobu status provider: use RMUX-native formats, or read a
-cache maintained by an independent updater. A `#()` job must not synchronously
-call the same daemon that is waiting for that job.
+The recursive format job cannot complete normally, so RMUX emits styled blank
+rows. The Byobu status provider now reads files maintained by the independent
+`rmux_byobu_status_update.ps1` process. RMUX's Windows format jobs displayed
+`cmd.exe` output but returned empty output for equivalent `powershell.exe`
+jobs, so the live status format uses `cmd.exe /c type` to read the cache. A
+`#()` job must not synchronously call the same daemon that is waiting for it.
+
+The fixed screenshot and cell dump show row 0's window list and row 2's
+right-aligned CPU, disk, and clock text. Row 1 is intentionally empty while the
+session has ten or fewer windows.
 
 ## Fresh daemon constraint
 
@@ -75,4 +81,14 @@ Future automated coverage should also:
 - compare alternate-screen and normal-screen snapshots;
 - test SGR mouse press/release when RMUX mouse mode is enabled;
 - validate Unicode, wide glyphs, bold/dim/underline, and cursor shapes.
+第一行窗口列表使用 RMUX 原生 `#{W:...}` 循环和 `range=window`，因此
+F3/F4 后激活标记会立即更新，且在 `mouse on` 时具备可点击窗口范围。
+第二、三行仍由独立状态缓存提供，避免状态脚本递归调用当前 RMUX 守护进程。
 
+Windows 下 RMUX 客户端读取 Win32 控制台鼠标记录，而不是依赖它向宿主开启
+xterm SGR 鼠标模式。RustCmd 的 GUI 终端点击和 `send-mouse` 默认会通过
+`rmux-pty` 注入原生控制台点击；`--protocol sgr` 可用于明确要求 SGR 的程序。
+
+RMUX 0.9.1 的 Windows attach 客户端在 RustCmd 的 ConPTY 中暂未消费上述
+Win32 记录。为保证状态栏交互可用，RustCmd 会识别末三行的 `N:name` 标签及
+`[N:name]` 当前标签，并用 F3/F4 完成等价跳转；普通终端区域仍走通用鼠标协议。

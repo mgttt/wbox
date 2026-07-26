@@ -10,7 +10,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use rmux_pty::{ChildCommand, PtyChild, PtyMaster, TerminalSize};
+use rmux_pty::{
+    ChildCommand, ProcessId, PtyChild, PtyMaster, TerminalSize,
+    write_windows_console_mouse_drag,
+};
 use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
     Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
@@ -522,6 +525,86 @@ impl TerminalTab {
         }
     }
 
+    fn send_native_mouse_click(&mut self, x: u16, y: u16) -> Result<()> {
+        if self.exited.is_some() {
+            anyhow::bail!("process has exited");
+        }
+        let raw_pid = self.process_id.context("process id is unavailable")?;
+        let process_id = ProcessId::new(raw_pid).context("invalid process id")?;
+        let x = i16::try_from(x).context("mouse x coordinate is too large")?;
+        let y = i16::try_from(y).context("mouse y coordinate is too large")?;
+        write_windows_console_mouse_drag(process_id, x, y, x, y)
+            .context("WriteConsoleInputW click failed")?;
+        self.input_bytes += 3;
+        Ok(())
+    }
+
+    fn send_rmux_status_click(&mut self, x: u16, y: u16) -> bool {
+        let (rows, cols) = self.last_size;
+        if rows < 3 || y < rows - 3 || y >= rows {
+            return false;
+        }
+        let (target, active, mut windows) = {
+            let screen = self.parser.screen();
+            let mut target = None;
+            let mut active = None;
+            let mut windows = Vec::new();
+            for row in rows - 3..rows {
+                let mut line = String::with_capacity(cols as usize);
+                for col in 0..cols {
+                    let text = screen
+                        .cell(row, col)
+                        .map(|cell| cell.contents())
+                        .unwrap_or(" ");
+                    line.push(if text.is_empty() {
+                        ' '
+                    } else {
+                        text.chars().next().unwrap_or(' ')
+                    });
+                }
+                for status_window in parse_status_windows(&line) {
+                    if status_window.active {
+                        active = Some(status_window.index);
+                    }
+                    if row == y
+                        && usize::from(x) >= status_window.start
+                        && usize::from(x) < status_window.end
+                    {
+                        target = Some(status_window.index);
+                    }
+                    if !windows.contains(&status_window.index) {
+                        windows.push(status_window.index);
+                    }
+                }
+            }
+            (target, active, windows)
+        };
+        let (Some(target), Some(active)) = (target, active) else {
+            return false;
+        };
+        if target == active {
+            return true;
+        }
+        windows.sort_unstable();
+        let Some(active_position) = windows.iter().position(|index| *index == active) else {
+            return false;
+        };
+        let Some(target_position) = windows.iter().position(|index| *index == target) else {
+            return false;
+        };
+        let forward = (target_position + windows.len() - active_position) % windows.len();
+        let backward = (active_position + windows.len() - target_position) % windows.len();
+        let (key, repeats) = if forward <= backward {
+            (b"\x1bOS".as_slice(), forward)
+        } else {
+            (b"\x1bOR".as_slice(), backward)
+        };
+        for _ in 0..repeats {
+            self.send(key);
+        }
+        true
+    }
+
     fn close_process(&mut self) {
         if self.exited.is_none() {
             let _ = self.child.terminate_forcefully();
@@ -673,6 +756,13 @@ impl AppState {
     fn click(&mut self, x: i32, y: i32) {
         if x >= SIDEBAR_WIDTH {
             unsafe { SetFocus(self.window) };
+            if let Some((column, row)) = self.terminal_cell_at(x, y)
+                && let Some(position) = self.active_position()
+                && !self.tabs[position].send_rmux_status_click(column, row)
+                && let Err(error) = self.tabs[position].send_native_mouse_click(column, row)
+            {
+                self.last_error = Some(format!("native mouse input failed: {error}"));
+            }
             return;
         }
         if y >= 12 && y <= 46 && x >= SIDEBAR_WIDTH - 48 {
@@ -701,6 +791,38 @@ impl AppState {
             SetFocus(self.window);
             InvalidateRect(self.window, ptr::null(), 0);
         }
+    }
+
+    fn terminal_cell_at(&self, x: i32, y: i32) -> Option<(u16, u16)> {
+        let mut client: RECT = unsafe { mem::zeroed() };
+        unsafe { GetClientRect(self.window, &mut client) };
+        if x < SIDEBAR_WIDTH
+            || y < 0
+            || y >= client.bottom.saturating_sub(COMPOSER_HEIGHT)
+        {
+            return None;
+        }
+
+        let device = unsafe { GetDC(self.window) };
+        if device.is_null() {
+            return None;
+        }
+        let font = unsafe { GetStockObject(SYSTEM_FIXED_FONT) as HFONT };
+        let previous_font = unsafe { SelectObject(device, font as HGDIOBJ) };
+        let mut metrics: TEXTMETRICW = unsafe { mem::zeroed() };
+        let mut extent: SIZE = unsafe { mem::zeroed() };
+        let sample = ['W' as u16];
+        unsafe {
+            GetTextMetricsW(device, &mut metrics);
+            GetTextExtentPoint32W(device, sample.as_ptr(), 1, &mut extent);
+            SelectObject(device, previous_font);
+            ReleaseDC(self.window, device);
+        }
+        let cell_width = extent.cx.max(7);
+        let cell_height = (metrics.tmHeight + metrics.tmExternalLeading).max(14);
+        let column = ((x - SIDEBAR_WIDTH) / cell_width).clamp(0, u16::MAX as i32) as u16;
+        let row = (y / cell_height).clamp(0, u16::MAX as i32) as u16;
+        Some((column, row))
     }
 
     fn character(&mut self, codepoint: u32) {
@@ -1314,7 +1436,8 @@ impl AppState {
                 else {
                     return IpcResponse::failure("send-mouse requires numeric -y");
                 };
-                let button = match option_value(args, "--button").unwrap_or("left") {
+                let button_name = option_value(args, "--button").unwrap_or("left");
+                let button = match button_name {
                     "left" => 0,
                     "middle" => 1,
                     "right" => 2,
@@ -1327,6 +1450,27 @@ impl AppState {
                 } else {
                     'M'
                 };
+                let protocol = option_value(args, "--protocol").unwrap_or("auto");
+                if protocol == "auto" && self.tabs[position].send_rmux_status_click(x, y) {
+                    return IpcResponse::success("");
+                }
+                if protocol != "sgr" && button_name == "left" {
+                    return match self.tabs[position].send_native_mouse_click(x, y) {
+                        Ok(()) => IpcResponse::success(""),
+                        Err(error) if protocol == "native" => {
+                            IpcResponse::failure(format!("{error:#}"))
+                        }
+                        Err(_) => {
+                            self.tabs[position].send(
+                                format!("\x1b[<{button};{};{}{suffix}", x + 1, y + 1).as_bytes(),
+                            );
+                            IpcResponse::success("")
+                        }
+                    };
+                }
+                if protocol != "auto" && protocol != "sgr" && protocol != "native" {
+                    return IpcResponse::failure(format!("unknown mouse protocol: {protocol}"));
+                }
                 self.tabs[position].send(
                     format!("\x1b[<{button};{};{}{suffix}", x + 1, y + 1).as_bytes(),
                 );
@@ -1513,6 +1657,57 @@ impl AppState {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct StatusWindow {
+    index: u32,
+    start: usize,
+    end: usize,
+    active: bool,
+}
+
+fn parse_status_windows(line: &str) -> Vec<StatusWindow> {
+    let bytes = line.as_bytes();
+    let mut windows = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        let bracketed = bytes[position] == b'[';
+        let digit_start = position + usize::from(bracketed);
+        if digit_start >= bytes.len() || !bytes[digit_start].is_ascii_digit() {
+            position += 1;
+            continue;
+        }
+        let mut colon = digit_start;
+        while colon < bytes.len() && bytes[colon].is_ascii_digit() {
+            colon += 1;
+        }
+        if colon >= bytes.len() || bytes[colon] != b':' {
+            position = colon.max(position + 1);
+            continue;
+        }
+        let mut end = colon + 1;
+        while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b']' {
+            end += 1;
+        }
+        if end == colon + 1 {
+            position = end;
+            continue;
+        }
+        if bracketed && end < bytes.len() && bytes[end] == b']' {
+            end += 1;
+        }
+        if let Ok(index) = line[digit_start..colon].parse::<u32>() {
+            windows.push(StatusWindow {
+                index,
+                start: position,
+                end,
+                active: bracketed,
+            });
+        }
+        position = end;
+    }
+    windows
+}
+
 fn fill(device: HDC, rect: &RECT, color: COLORREF) {
     let brush = unsafe { CreateSolidBrush(color) };
     unsafe {
@@ -1592,6 +1787,11 @@ fn wide(value: &str) -> Vec<u16> {
 }
 
 fn ipc_address() -> String {
+    if let Ok(address) = env::var("RUSTCMD_IPC_ADDRESS")
+        && !address.trim().is_empty()
+    {
+        return address;
+    }
     let user = env::var("USERNAME").unwrap_or_else(|_| "default".to_owned());
     let hash = user.bytes().fold(2_166_136_261_u32, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
