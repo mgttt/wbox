@@ -74,16 +74,18 @@ int main(void) {
   T_ASSERT_OK(close(fd));
   unlink("t_frw_big");
 
-  /* --- negative offset / on pipe ---
-   * NOTE: pread on an EMPTY pipe hangs wbox-linux (bug, see KNOWN-FAILURES);
-   * write a byte first so the probe is deterministic. */
+  /* --- negative offset / positioned I/O on an empty pipe --- */
   T_BEGIN("pread/negative-ESPIPE-EINVAL");
   {
     int pp[2];
+    struct iovec one = {.iov_base = rb, .iov_len = 1};
     T_ASSERT_OK(pipe(pp));
-    T_ASSERT_EQ(write(pp[1], "x", 1), 1);
     T_ASSERT_ERRNO(pread(pp[0], rb, 1, 0), ESPIPE);
-    close(pp[0]); close(pp[1]);
+    T_ASSERT_ERRNO(pwrite(pp[1], "x", 1, 0), ESPIPE);
+    T_ASSERT_ERRNO(preadv(pp[0], &one, 1, 0), ESPIPE);
+    T_ASSERT_ERRNO(pwritev(pp[1], &one, 1, 0), ESPIPE);
+    T_ASSERT_OK(close(pp[0]));
+    T_ASSERT_OK(close(pp[1]));
     fd = open("t_frw_x", O_RDWR | O_CREAT | O_TRUNC, 0600);
     T_ASSERT(fd >= 0);
     T_ASSERT_ERRNO(pread(fd, rb, 1, -1), EINVAL);

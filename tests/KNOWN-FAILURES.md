@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1005 条：pass=996 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1009 条：pass=1000 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -139,7 +139,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F1 | `O_CREAT 0604` 权限位 | ✅ t_fd_open 全过（进程内 mode 仿真表） |
 | F2 | `O_APPEND` 未生效 | ✅ t_fd_rw 全过（write/pwrite 强制追加到 EOF） |
 | F3 | >4GiB `pwrite`/`fstat`/`pread` | ✅ t_fd_rw 全过（全程 64 位偏移与尺寸） |
-| F4 | `pread(pipe)` 当 read 用/空管道挂死 | ✅ t_fd_rw 全过（返 ESPIPE） |
+| F4 | positioned I/O 把 pipe 当普通流/空管道挂死 | ✅ t_fd_rw 在空管道覆盖 pread/pwrite/preadv/pwritev（均立即返 ESPIPE） |
 | F5 | `unlink(打开中文件)` | ✅ t_fd_open 全过（重命名隐藏临时名再删） |
 | F6 | `unlink(目录)` 非 EISDIR | ✅ t_fd_open 全过 |
 | F7 | UTF-8 文件名 | ✅ t_path 全过（宿主名 %XXXX 纯 ASCII 转义） |
