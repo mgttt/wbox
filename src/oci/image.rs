@@ -895,4 +895,232 @@ mod tests {
         assert!(rootfs.join("x.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    // ---- digest 校验失败路径细分 ----
+
+    #[test]
+    fn verify_digest_rejects_unsupported_algorithm() {
+        let e = verify_digest("sha512:abcd", b"x").unwrap_err();
+        assert!(e.to_string().contains("不支持的 digest 算法"), "{}", e);
+        // 无算法前缀
+        assert!(verify_digest("deadbeef", b"x").is_err());
+        // 空 hex 段（sha256: 后为空）→ 不匹配
+        assert!(verify_digest("sha256:", b"x").is_err());
+    }
+
+    #[test]
+    fn verify_digest_mismatch_reports_expected_and_actual() {
+        let e = verify_digest(&sha256_hex_prefixed(b"a"), b"b").unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("digest 不匹配"), "{}", msg);
+        assert!(msg.contains(&hex_sha256(b"a")), "期望含 expected：{}", msg);
+        assert!(msg.contains(&hex_sha256(b"b")), "期望含 actual：{}", msg);
+    }
+
+    // ---- select_manifest ----
+
+    fn index_with(platforms: &[(&str, &str, &str)]) -> serde_json::Value {
+        let manifests: Vec<serde_json::Value> = platforms
+            .iter()
+            .map(|(os, arch, digest)| {
+                serde_json::json!({
+                    "digest": digest,
+                    "platform": {"os": os, "architecture": arch}
+                })
+            })
+            .collect();
+        serde_json::json!({"manifests": manifests})
+    }
+
+    #[test]
+    fn select_manifest_picks_matching_platform() {
+        let idx = index_with(&[
+            ("linux", "arm64", "sha256:arm"),
+            ("linux", "amd64", "sha256:amd"),
+            ("windows", "amd64", "sha256:win"),
+        ]);
+        assert_eq!(select_manifest(&idx, "linux", "amd64").unwrap(), "sha256:amd");
+        assert_eq!(select_manifest(&idx, "linux", "arm64").unwrap(), "sha256:arm");
+    }
+
+    #[test]
+    fn select_manifest_skips_attestation_entries() {
+        // attestations 条目 platform 为 unknown/unknown：不得匹配
+        let idx = index_with(&[("unknown", "unknown", "sha256:att"), ("linux", "amd64", "sha256:real")]);
+        assert_eq!(select_manifest(&idx, "linux", "amd64").unwrap(), "sha256:real");
+        // 全部 unknown 平台时查询 unknown/unknown 会命中第一条（记录现状）
+        let idx = index_with(&[("unknown", "unknown", "sha256:att")]);
+        assert_eq!(select_manifest(&idx, "unknown", "unknown").unwrap(), "sha256:att");
+    }
+
+    #[test]
+    fn select_manifest_no_match_lists_available_platforms() {
+        let idx = index_with(&[("linux", "arm64", "sha256:arm"), ("windows", "amd64", "sha256:w")]);
+        let e = select_manifest(&idx, "linux", "amd64").unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("linux/amd64"), "{}", msg);
+        assert!(msg.contains("linux/arm64") && msg.contains("windows/amd64"), "{}", msg);
+    }
+
+    #[test]
+    fn select_manifest_missing_manifests_array() {
+        let e = select_manifest(&serde_json::json!({"schemaVersion": 2}), "linux", "amd64").unwrap_err();
+        assert!(e.to_string().contains("manifests"), "{}", e);
+    }
+
+    #[test]
+    fn select_manifest_match_without_digest_is_error() {
+        let idx = serde_json::json!({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}}]});
+        let e = select_manifest(&idx, "linux", "amd64").unwrap_err();
+        assert!(e.to_string().contains("digest"), "{}", e);
+    }
+
+    // ---- 压缩格式嗅探 ----
+
+    #[test]
+    fn magic_sniffing_helpers() {
+        let gz = gzip(b"abc");
+        assert!(is_gzip(&gz) && !is_zstd(&gz));
+        assert!(!is_gzip(b"\x1f")); // 太短
+        assert!(!is_gzip(b""));
+        assert!(is_zstd(&[0x28, 0xb5, 0x2f, 0xfd]));
+        assert!(!is_zstd(&[0x28, 0xb5, 0x2f])); // 太短
+    }
+
+    #[test]
+    fn decompress_layer_format_dispatch() {
+        let tar = make_tar(&[("f", b"x" as &[u8])]);
+        let gz = gzip(&tar);
+        // gzip mediaType（大小写不敏感）
+        assert_eq!(decompress_layer(&gz, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap(), tar);
+        assert_eq!(decompress_layer(&gz, "Application/Vnd.Oci.Image.Layer.V1.Tar+Gzip").unwrap(), tar);
+        // 空 mediaType 按 magic 嗅探 gzip
+        assert_eq!(decompress_layer(&gz, "").unwrap(), tar);
+        // 未知格式显式拒绝（mediaType 不含 tar/layer/gzip/zstd 关键词）
+        let e = decompress_layer(&tar, "application/x-brotli").unwrap_err();
+        assert!(e.to_string().contains("不支持的"), "{}", e);
+        // 记录现状：mediaType 含 "layer" 的未知压缩（如 ...layer.v1.brotli）
+        // 会被当未压缩 tar 放行——宽松匹配的历史行为，由 digest 校验兜底完整性。
+        // zstd mediaType（大小写不敏感）
+        assert!(decompress_layer(&tar, "x+zstd").is_err());
+        assert!(decompress_layer(&tar, "x+ZSTD").is_err());
+    }
+
+    #[test]
+    fn decompress_rejects_truncated_gzip() {
+        let gz = gzip(b"hello");
+        let truncated = &gz[..gz.len() / 2];
+        assert!(decompress_layer(truncated, "application/x+gzip").is_err());
+    }
+
+    // ---- index media type 判定 ----
+
+    #[test]
+    fn is_index_media_types() {
+        assert!(is_index("application/vnd.oci.image.index.v1+json"));
+        assert!(is_index("application/vnd.docker.distribution.manifest.list.v2+json"));
+        assert!(!is_index("application/vnd.oci.image.manifest.v1+json"));
+        assert!(!is_index("application/vnd.docker.distribution.manifest.v2+json"));
+        assert!(!is_index(""));
+    }
+
+    // ---- 硬链接与 whiteout 目录删除 ----
+
+    #[test]
+    fn unpack_hardlink_created_with_same_content() {
+        let dir = tmpdir("hardlink");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        // 手工构造含硬链接条目的 tar（目标先于链接出现；延迟创建也覆盖反序）
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(5);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, "bin/real", &b"hello"[..]).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Link);
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_link(&mut h, "bin/alias", "bin/real").unwrap();
+        let l = b.into_inner().unwrap();
+        unpack_layer(&l, &rootfs, "").unwrap();
+        assert_eq!(std::fs::read(rootfs.join("bin/alias")).unwrap(), b"hello");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpack_hardlink_with_traversal_target_rejected() {
+        let dir = tmpdir("hardlink-trav");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Link);
+        h.set_size(0);
+        h.set_cksum();
+        b.append_link(&mut h, "evil", "../../etc/passwd").unwrap();
+        let l = b.into_inner().unwrap();
+        unpack_layer(&l, &rootfs, "").unwrap();
+        assert!(!rootfs.join("evil").exists(), "穿越目标硬链接不得创建");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn whiteout_removes_directory_recursively() {
+        let dir = tmpdir("whdir");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(rootfs.join("d/sub")).unwrap();
+        std::fs::write(rootfs.join("d/sub/f.txt"), b"x").unwrap();
+        let l = make_tar(&[(".wh.d", b"" as &[u8])]);
+        unpack_layer(&l, &rootfs, "").unwrap();
+        assert!(!rootfs.join("d").exists(), "whiteout 应递归删除目录");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn whiteout_nonexistent_target_is_noop() {
+        let dir = tmpdir("whnoop");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let l = make_tar(&[(".wh.never-existed", b"" as &[u8]), ("ok.txt", b"o" as &[u8])]);
+        unpack_layer(&l, &rootfs, "").unwrap();
+        assert!(rootfs.join("ok.txt").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- symlink_target_in_scope 单元覆盖 ----
+
+    #[test]
+    fn symlink_target_scope_rules() {
+        use std::path::Path;
+        // 相对目标在同层/子层：允许
+        assert!(symlink_target_in_scope(Path::new("usr/bin"), Path::new("real")));
+        assert!(symlink_target_in_scope(Path::new("usr/bin"), Path::new("../lib/x")));
+        // 根级 symlink 的 ../x：弹出根 → 拒绝
+        assert!(!symlink_target_in_scope(Path::new(""), Path::new("../x")));
+        // 越出 rootfs 的 ..：拒绝
+        assert!(!symlink_target_in_scope(Path::new("a"), Path::new("../../x")));
+        // 绝对目标：拒绝
+        assert!(!symlink_target_in_scope(Path::new("a"), Path::new("/etc/passwd")));
+        // CurDir 组件无影响
+        assert!(symlink_target_in_scope(Path::new("a"), Path::new("./b")));
+    }
+
+    // ---- gzip + whiteout 组合、嵌套路径 ----
+
+    #[test]
+    fn unpack_nested_whiteout_in_subdir() {
+        let dir = tmpdir("whnest");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(rootfs.join("a/b")).unwrap();
+        std::fs::write(rootfs.join("a/b/gone"), b"g").unwrap();
+        std::fs::write(rootfs.join("a/keep"), b"k").unwrap();
+        let l = make_tar(&[("a/b/.wh.gone", b"" as &[u8])]);
+        unpack_layer(&gzip(&l), &rootfs, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap();
+        assert!(!rootfs.join("a/b/gone").exists());
+        assert!(rootfs.join("a/keep").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

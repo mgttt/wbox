@@ -235,4 +235,130 @@ mod tests {
         assert_eq!(redact_value("AWS_SECRET_ACCESS_KEY", "abc"), "***");
         assert_eq!(redact_value("PATH", "/usr/bin"), "/usr/bin");
     }
+
+    // ---- 脱敏全分支：SENSITIVE 子串全覆盖 + 大小写 + 非敏感直通 ----
+
+    #[test]
+    fn redact_all_sensitive_substrings() {
+        for key in [
+            "PASS",
+            "DB_PASSWD",
+            "SECRET",
+            "MY_SECRET_KEY",
+            "TOKEN",
+            "GH_TOKEN",
+            "CREDENTIAL",
+            "AWS_CREDENTIALS",
+            "PRIVATE",
+            "RSA_PRIVATE_KEY",
+            "mypass", // 大小写不敏感
+            "Secret",
+        ] {
+            assert_eq!(redact_value(key, "v"), "***", "{}", key);
+        }
+        assert_eq!(redact_value("PATH", ""), ""); // 空值原样
+        assert_eq!(redact_value("LANG", "C.UTF-8"), "C.UTF-8");
+        // 含 PASS 子串的键（误伤面，记录现状：宁可多脱敏）
+        assert_eq!(redact_value("PASSPORT_NUM", "X"), "***");
+    }
+
+    // ---- 白名单构造的其余分支 ----
+
+    #[test]
+    fn whitelist_alias_dedup_keeps_first_with_value() {
+        // SystemRoot 与 SYSTEMROOT 同时存在时只保留第一个取到值的别名
+        std::env::set_var("SystemRoot", r"C:\Windows");
+        std::env::set_var("SYSTEMROOT", r"C:\OtherWindows");
+        let env = build_child_env(&[], &[], false);
+        let matches: Vec<&(String, String)> = env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
+            .collect();
+        assert_eq!(matches.len(), 1, "大小写别名必须去重：{:?}", matches);
+        std::env::remove_var("SYSTEMROOT");
+    }
+
+    #[test]
+    fn whitelist_systemroot_fallback_injected() {
+        // 宿主无 SystemRoot 时注入 C:\Windows 兜底
+        let saved = std::env::var_os("SystemRoot");
+        std::env::remove_var("SystemRoot");
+        std::env::remove_var("SYSTEMROOT");
+        let env = build_child_env(&[], &[], false);
+        let v = env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(v, Some(r"C:\Windows"));
+        if let Some(s) = saved {
+            std::env::set_var("SystemRoot", s);
+        }
+    }
+
+    #[test]
+    fn image_env_overrides_whitelist_case_insensitive() {
+        // Windows 语义：大小写不敏感覆盖；镜像的 "path" 覆盖白名单的 "PATH"
+        std::env::set_var("PATH", "/host/bin");
+        let img = vec![("path".to_string(), "/img/bin".to_string())];
+        let env = build_child_env(&img, &[], false);
+        let paths: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("path"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(paths, vec!["/img/bin"], "PATH 必须唯一且被镜像覆盖");
+    }
+
+    #[test]
+    fn forced_overrides_image_env() {
+        let img = vec![("FOO".to_string(), "img".to_string())];
+        let forced = vec![("foo".to_string(), "forced".to_string())]; // 大小写不敏感
+        let env = build_child_env(&img, &forced, false);
+        let vals: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("foo"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(vals, vec!["forced"]);
+    }
+
+    #[test]
+    fn sanitize_image_env_edge_keys() {
+        let env = vec![
+            ("".to_string(), "v".to_string()),       // 空键
+            ("A=B".to_string(), "v".to_string()),    // 键含 '='
+            ("OK".to_string(), "a=b".to_string()),   // 值含 '=' 合法
+            ("WBOX_X".to_string(), "v".to_string()), // 保留键
+            ("blink_y".to_string(), "v".to_string()),// 保留键小写
+            ("AWBOX_X".to_string(), "v".to_string()),// 非前缀，保留
+        ];
+        let (kept, dropped) = sanitize_image_env(&env);
+        assert_eq!(
+            kept,
+            vec![
+                ("OK".to_string(), "a=b".to_string()),
+                ("AWBOX_X".to_string(), "v".to_string()),
+            ]
+        );
+        assert_eq!(dropped, vec!["", "A=B", "WBOX_X", "blink_y"]);
+    }
+
+    #[test]
+    fn pass_all_includes_host_but_reserved_stripped_and_no_systemroot_fallback_needed() {
+        // pass_all 分支：不注入 SystemRoot 兜底逻辑（直通宿主全集），
+        // 保留键 stripped；forced 仍最终覆盖。
+        std::env::set_var("WBOX_H2_KNOB", "1");
+        std::env::set_var("PASS_ALL_MARKER", "yes");
+        let forced = vec![("PASS_ALL_MARKER".to_string(), "overridden".to_string())];
+        let env = build_child_env(&[], &forced, true);
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_H2_KNOB"));
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k == "PASS_ALL_MARKER")
+                .map(|(_, v)| v.as_str()),
+            Some("overridden")
+        );
+        std::env::remove_var("WBOX_H2_KNOB");
+        std::env::remove_var("PASS_ALL_MARKER");
+    }
 }

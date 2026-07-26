@@ -5,9 +5,20 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  # 完整真机矩阵的 nightly 回归（PR 只跑核心组，见 build-wbox-linux 的条件步骤）
+  schedule:
+    - cron: "17 2 * * *" # 每日 02:17 UTC
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+# 发布门禁说明（详见 docs/testing.md §发布门禁）：
+#   tag v* 的 release job needs 全部五个 job——
+#   test-linux（Rust 单测）+ check-windows-msvc（Win32 编译门禁）+
+#   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
+#   guest-tests（guest 测试，tests/ 未就绪时 SKIP 标黄不阻塞）——
+#   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
 
 jobs:
   # ① Linux 单测：oci/config/backend 纯逻辑在 Linux 即可跑（当前测试主体）
@@ -84,19 +95,25 @@ jobs:
         run: .\vendor\blink\build-win32\wbox-linux.exe --help || ver > nul
       # 矩阵需要 Linux x86_64 **静态** busybox（busybox-w32 是 Windows 原生版，
       # 不适用——这里要的是被模拟执行的 Linux ELF）。busybox.net 官方二进制：
+      # （PR 核心组不跑矩阵，跳过下载省时间。）
       - name: 下载 Linux x86_64 静态 busybox（矩阵用）
+        if: github.event_name != 'pull_request'
         run: |
           curl -fsSL --retry 3 -o busybox \
             https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
       # 真机验收矩阵：11 项基础 + 8 项 shell + fork 矩阵 + wget md5 +
       # epoll 单测（CI 无预编译静态二进制，脚本自动 SKIP 并提示）。
       # msys2 shell 下 OSTYPE=msys → native 模式直接执行 wbox-linux.exe。
-      - name: 验收矩阵 —— scripts/test-matrix.sh（真 Windows native 模式）
+      # 收窄策略（矩阵脚本无子集开关，不改动 scripts/）：
+      #   PR                     → 只跑上面的 exe 冒烟（核心组），本步骤跳过；
+      #   push main / tag / nightly / 手动 → 完整矩阵（门禁算入 release needs）。
+      - name: 验收矩阵 —— scripts/test-matrix.sh（真 Windows native 模式，PR 跳过）
+        if: github.event_name != 'pull_request'
         run: |
           scripts/test-matrix.sh \
             vendor/blink/build-win32/wbox-linux.exe ./busybox 2>&1 | tee matrix.log
       - name: 上传验收矩阵日志
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: wbox-linux-test-matrix
@@ -108,10 +125,31 @@ jobs:
           path: vendor/blink/build-win32/wbox-linux.exe
           retention-days: 30
 
-  # ⑤ tag 发布：打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ sha256 校验和
+  # ⑤ guest 测试：tests/ 目录下的 guest 级测试（另一工作流维护中）。
+  #    契约：tests/run.sh 存在则执行（退出码即测试结果）；
+  #    tests/ 未就绪时本 job 记 ::notice:: SKIP 并成功退出——
+  #    不阻塞发布门禁，但门禁 needs 列表包含本 job（一旦落地即自动生效）。
+  guest-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: guest 测试（tests/run.sh 存在才执行，否则 SKIP）
+        shell: bash
+        run: |
+          if [ -f tests/run.sh ]; then
+            echo "发现 tests/run.sh，执行 guest 测试"
+            bash tests/run.sh
+          elif [ -d tests ]; then
+            echo "::notice::tests/ 已存在但无 run.sh 入口——SKIP（待测试入口落地）"
+          else
+            echo "::notice::tests/ 尚未就绪——guest 测试 SKIP，不阻塞门禁"
+          fi
+
+  # ⑥ tag 发布门禁：needs 全部五个 job 全绿才创建 Release；
+  #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, check-windows-msvc, smoke-windows, build-wbox-linux]
+    needs: [test-linux, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests]
     runs-on: windows-latest
     permissions:
       contents: write

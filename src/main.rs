@@ -514,4 +514,225 @@ mod tests {
         cmd.extend(o.cmd.iter().cloned());
         assert_eq!(cmd, vec!["cmd.exe", "/c", "echo", "hi"]);
     }
+
+    // ---- 其余选项解析 ----
+
+    #[test]
+    fn parse_env_pass_all_and_network_flags() {
+        let o = parse(&["--env-pass-all", "--allow-network", "--workdir", r"C:\app", "--", "x"]).unwrap();
+        assert!(o.env_pass_all);
+        assert!(o.allow_network);
+        assert_eq!(o.workdir.as_deref(), Some(r"C:\app"));
+        // --no-network 显式回退默认
+        let o = parse(&["--allow-network", "--no-network", "--", "x"]).unwrap();
+        assert!(!o.allow_network);
+    }
+
+    #[test]
+    fn parse_max_procs_and_numeric_bounds() {
+        let o = parse(&["--max-procs", "64", "--", "x"]).unwrap();
+        assert_eq!(o.limits.max_procs, 64);
+        assert!(parse(&["--max-procs", "-1", "--", "x"]).is_err());
+        assert!(parse(&["--max-procs", "abc", "--", "x"]).is_err());
+        assert!(parse(&["--cpu-pct", "100", "--", "x"]).is_ok());
+        // 选项缺值一律报错
+        for args in [&["--name"][..], &["--cpu-pct"][..], &["--max-procs"][..], &["--workdir"][..]] {
+            assert!(parse(args).is_err(), "{:?}", args);
+        }
+    }
+
+    #[test]
+    fn parse_interactive_flag_accepted() {
+        let o = parse(&["--interactive", "--", "x"]).unwrap();
+        assert_eq!(o.cmd, vec!["x"]);
+    }
+
+    // ---- image 子命令参数错误 ----
+
+    #[test]
+    fn image_subcommand_arg_errors() {
+        // 缺子命令 / 未知子命令
+        assert!(cmd_image(&[]).is_err());
+        assert!(cmd_image(&["bogus".to_string()]).is_err());
+        // pull 缺引用 / 未知选项 / 多余参数
+        assert!(cmd_image_pull(&[]).is_err());
+        assert!(cmd_image_pull(&["--bogus".to_string(), "x".to_string()]).is_err());
+        assert!(cmd_image_pull(&["a".to_string(), "b".to_string()]).is_err());
+        // show 缺引用 / 多余参数 / 未知选项
+        assert!(cmd_image_show(&[]).is_err());
+        assert!(cmd_image_show(&["a".to_string(), "b".to_string()]).is_err());
+        assert!(cmd_image_show(&["-V".to_string()]).is_err());
+    }
+
+    #[test]
+    fn image_show_uncached_ref_is_registry_error() {
+        // 未 pull 的镜像 show：报"未 pull"（退出码 5 = registry 类）
+        let home = TempHome::new("show-uncached");
+        let e = cmd_image_show(&["definitely-not-pulled-image:0.0".to_string()]).unwrap_err();
+        assert!(format!("{}", e).contains("未 pull"), "{}", e);
+        drop(home);
+    }
+
+    // ---- 集成：临时 HOME 下的假缓存全链（list → show → run prepare）----
+
+    /// 临时 HOME 脚手架：构造期间把 HOME 指向独立临时目录，Drop 时恢复并清理。
+    /// （cache_root 优先 USERPROFILE，故同时摘掉它；仅测试进程内生效。）
+    struct TempHome {
+        dir: std::path::PathBuf,
+        saved_home: Option<std::ffi::OsString>,
+        saved_userprofile: Option<std::ffi::OsString>,
+    }
+
+    impl TempHome {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "wbox-test-home-{}-{}",
+                std::process::id(),
+                tag
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let saved_home = std::env::var_os("HOME");
+            let saved_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", &dir);
+            std::env::remove_var("USERPROFILE");
+            Self { dir, saved_home, saved_userprofile }
+        }
+
+        /// 在缓存布局中安放一个假镜像（rootfs + 元数据），返回缓存目录。
+        fn plant_fake_image(&self, registry: &str, name_flat: &str, tag: &str) -> std::path::PathBuf {
+            let dir = self
+                .dir
+                .join(".wbox/images")
+                .join(registry)
+                .join(name_flat)
+                .join(tag);
+            std::fs::create_dir_all(dir.join("rootfs/bin")).unwrap();
+            std::fs::write(dir.join("rootfs/bin/sh"), b"fake").unwrap();
+            std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
+            std::fs::write(dir.join("layers.json"), r#"["sha256:l1","sha256:l2"]"#).unwrap();
+            std::fs::write(
+                dir.join("config.json"),
+                r#"{"config":{"Env":["PATH=/usr/bin","APP_TOKEN=hunter2"],"Cmd":["-l"],"Entrypoint":["/bin/sh"],"WorkingDir":"/root"}}"#,
+            )
+            .unwrap();
+            dir
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.saved_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.saved_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn integration_list_show_run_prepare_chain() {
+        let home = TempHome::new("chain");
+        home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
+
+        // 1. list：扫描到已缓存镜像（返回 Ok 即不报错；输出人工可查）
+        oci::list().unwrap();
+
+        // 2. show：打印 config 摘要（含脱敏路径）
+        cmd_image_show(&["fake:latest".to_string()]).unwrap();
+
+        // 3. classify：按真实缓存判定（与 cmd_run 相同的闭包）
+        let target = backend::classify_target(Some("fake"), false, |iref| {
+            oci::image_dir(iref)
+                .map(|d| d.join("rootfs").is_dir())
+                .unwrap_or(false)
+        })
+        .unwrap();
+        let iref = match target {
+            backend::RunTarget::Image(r) => r,
+            other => panic!("已缓存镜像必须判为 Image，得到 {:?}", other),
+        };
+        assert_eq!(iref.repo, "library/fake");
+
+        // 4. run-prepare：config 合并 + BlinkBackend 执行计划（不 spawn）
+        let dir = oci::image_dir(&iref).unwrap();
+        let cfg = oci::config::ImageConfig::load(&dir).unwrap().unwrap();
+        let merged = cfg.merged_command(&[]); // 无显式 cmd：Entrypoint + Cmd
+        assert_eq!(merged, vec!["/bin/sh", "-l"]);
+        assert_eq!(cfg.working_dir.as_deref(), Some("/root"));
+
+        let fake_exe = std::env::current_exe().unwrap();
+        // WBOX_LINUX 环境变量（blink::LINUX_EXE_ENV，模块私有故此处用字面量）
+        std::env::set_var("WBOX_LINUX", &fake_exe);
+        let spec = backend::RunSpec {
+            name: "t".to_string(),
+            limits: Default::default(),
+            allow_network: false,
+            keep_profile: false,
+            workdir: dir.join("rootfs"),
+            cmd: merged,
+            env: cfg.env.clone(),
+            verbose: false,
+            env_pass_all: false,
+        };
+        let prepared = backend::BlinkBackend.prepare(&spec).unwrap();
+        std::env::remove_var("WBOX_LINUX");
+        // 执行计划：wbox-linux + 合并命令；BLINK_PREFIX 指向 rootfs
+        assert_eq!(prepared.cmd[0], fake_exe.to_string_lossy());
+        assert_eq!(&prepared.cmd[1..], &["/bin/sh", "-l"]);
+        assert!(prepared
+            .env
+            .iter()
+            .any(|(k, v)| k == "BLINK_PREFIX" && v == &dir.join("rootfs").to_string_lossy()));
+        // 镜像 Env 注入，敏感键仍在（脱敏只发生在打印路径）
+        assert!(prepared.env.iter().any(|(k, v)| k == "APP_TOKEN" && v == "hunter2"));
+        // resolv.conf 已注入（rootfs 原本没有）
+        let resolv = std::fs::read_to_string(dir.join("rootfs/etc/resolv.conf")).unwrap();
+        assert!(resolv.contains("nameserver"), "{}", resolv);
+    }
+
+    #[test]
+    fn integration_uncached_then_plant_then_classify() {
+        // 未缓存 → Native；构造缓存后 → Image（classify 实时看磁盘）
+        let home = TempHome::new("promote");
+        let is_pulled = |iref: &oci::ImageRef| {
+            oci::image_dir(iref)
+                .map(|d| d.join("rootfs").is_dir())
+                .unwrap_or(false)
+        };
+        assert_eq!(
+            backend::classify_target(Some("fake"), false, is_pulled).unwrap(),
+            backend::RunTarget::Native
+        );
+        home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
+        match backend::classify_target(Some("fake"), false, is_pulled).unwrap() {
+            backend::RunTarget::Image(_) => {}
+            other => panic!("期望 Image，得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn integration_pull_hello_world_or_skip_when_network_unreachable() {
+        // 真实网络拉取：registry 不可达时 SKIP（不 fail）；可达时校验全链落盘。
+        let _home = TempHome::new("realpull"); // HOME 指向临时目录，Drop 时恢复
+        let r = oci::ImageRef::parse("hello-world", None).unwrap();
+        match oci::pull("hello-world", "linux", "amd64", None, false) {
+            Ok(()) => {
+                let dir = oci::image_dir(&r).unwrap();
+                assert!(dir.join("manifest.json").is_file());
+                assert!(dir.join("config.json").is_file());
+                assert!(dir.join("layers.json").is_file());
+                assert!(dir.join("rootfs").is_dir());
+                oci::list().unwrap();
+                cmd_image_show(&["hello-world".to_string()]).unwrap();
+            }
+            Err(e) => {
+                eprintln!("SKIP：registry 不可达（{}），真实 pull 链路不判失败", e);
+            }
+        }
+    }
 }

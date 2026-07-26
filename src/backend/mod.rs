@@ -168,4 +168,88 @@ mod tests {
             );
         }
     }
+
+    // ---- classify_target 边界：ubuntu vs ./ubuntu vs ubuntu:latest vs 绝对路径 ----
+
+    #[test]
+    fn classify_bare_name_tagged_and_path_forms() {
+        let pulled_ubuntu = |r: &crate::oci::ImageRef| r.repo == "library/ubuntu";
+        // "ubuntu"（无 tag → latest）已缓存 → Image
+        match classify_target(Some("ubuntu"), false, pulled_ubuntu).unwrap() {
+            RunTarget::Image(r) => assert_eq!(r.reference, "latest"),
+            other => panic!("期望 Image，得到 {:?}", other),
+        }
+        // "ubuntu:latest" 同样 → Image
+        match classify_target(Some("ubuntu:latest"), false, pulled_ubuntu).unwrap() {
+            RunTarget::Image(r) => assert_eq!(r.reference, "latest"),
+            other => panic!("期望 Image，得到 {:?}", other),
+        }
+        // 未缓存时全部回退 Native
+        for s in ["ubuntu", "ubuntu:latest", "./ubuntu", "/usr/bin/ubuntu", r"C:\ubuntu\app.exe"] {
+            assert_eq!(
+                classify_target(Some(s), false, never_pulled).unwrap(),
+                RunTarget::Native,
+                "未缓存的 {} 必须回退 Native",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn classify_relative_path_parsed_but_needs_pull() {
+        // "./ubuntu" 语法上可被 ImageRef 接受（首段 "." 含点 → 视作 registry）；
+        // 未缓存时仍回退 Native，只有显式 --pull 才提升为 Image（记录现状）。
+        assert_eq!(
+            classify_target(Some("./ubuntu"), false, never_pulled).unwrap(),
+            RunTarget::Native
+        );
+        match classify_target(Some("./ubuntu"), true, never_pulled).unwrap() {
+            RunTarget::Image(r) => {
+                assert_eq!(r.registry, ".");
+                assert_eq!(r.repo, "ubuntu");
+            }
+            other => panic!("期望 Image，得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_absolute_path_never_image_without_pull() {
+        // 绝对路径未 pull 恒为 Native（v1 兼容的关键保证）
+        for s in ["/usr/bin/foo", r"C:\x\y.exe", r"D:\tools"] {
+            assert_eq!(
+                classify_target(Some(s), false, never_pulled).unwrap(),
+                RunTarget::Native,
+                "{}",
+                s
+            );
+        }
+        // 记录现状：带 --pull 时 Windows 路径的盘符冒号被当作 tag 分隔符，
+        // "C:\x\y.exe" 解析为 repo="C"、reference="\x\y.exe" → 被判为镜像。
+        // （--pull 即用户显式声明目标是镜像，此行为可接受但值得注意。）
+        match classify_target(Some(r"C:\x\y.exe"), true, never_pulled).unwrap() {
+            RunTarget::Image(r) => assert_eq!(r.repo, "library/C"), // docker hub 补全照常
+            other => panic!("期望 Image，得到 {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_none_positional_with_pull_is_native() {
+        // 无位置参数 + --pull：仍 Native（-- 后命令）
+        assert_eq!(classify_target(None, true, never_pulled).unwrap(), RunTarget::Native);
+    }
+
+    #[test]
+    fn classify_is_pulled_receives_parsed_ref() {
+        // is_pulled 回调收到的必须是完整解析后的引用（含 library/ 补全与 tag）
+        let seen = std::cell::RefCell::new(None);
+        let spy = |r: &crate::oci::ImageRef| {
+            *seen.borrow_mut() = Some(r.clone());
+            false
+        };
+        let _ = classify_target(Some("ubuntu:24.04"), false, spy).unwrap();
+        let r = seen.borrow().clone().expect("is_pulled 应被调用");
+        assert_eq!(r.registry, crate::oci::DEFAULT_REGISTRY);
+        assert_eq!(r.repo, "library/ubuntu");
+        assert_eq!(r.reference, "24.04");
+    }
 }
