@@ -41,6 +41,14 @@
 
 ### Notes
 
+- **guest C 套件正式成为 CI 门禁**（此前 `guest-tests` 一直走 SKIP 空转，
+  从未真正执行过）。补齐三层前置后首次真跑，随即抓到一个 wine 掩盖的真机
+  缺陷（W3：长路径超 `MAX_PATH`，真机 ENOENT / wine 通过）——门禁的价值
+  在它上线的第一轮就兑现了。相应地，`known-failures.txt` 的条目新增
+  `@native` / `@wine` 模式标注：同一份基线要同时服务两种宿主环境，而
+  两者的失败集合确实不同。
+  真机基线：16 个用例 12 PASS / 4 FAIL；wine：13 PASS / 3 FAIL。
+
 - **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
   在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils
   而"通过"——即历史基线含**假绿**。已改为 `./busybox <applet>`。

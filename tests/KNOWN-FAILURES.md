@@ -5,10 +5,20 @@
 > 行改成"已修复"。判定语义（失败 ⊆ 基线放行 / 基线外新失败为回归 /
 > 基线内用例变通过视为基线过期）见 `docs/testing.md` §一.2。
 
-基线来源：`tests/run-guest-tests.sh`（wine 模式，wbox-linux v1.0，wine 11.11）。
-基线统计（v1.0 全绿基线，2026-07-26 实测）：**16 个用例文件：13 PASS / 3 FAIL；
-断言 433 条：pass=419 fail=4 skip=10**（skip 均为 symlink EPERM 宿主限制降级与
-t_exec/t_net_epoll 内个别环境降级项）。
+基线来源：`tests/run-guest-tests.sh`。**两种宿主环境的基线不同**，故
+`known-failures.txt` 的条目支持 `@native` / `@wine` 标注（无标注 = 两者都算）。
+
+| 环境 | 统计（2026-07-26 实测） | 失败项 |
+|---|---|---|
+| 真 Windows（CI run 54，native） | 16 个用例：**12 PASS / 4 FAIL / 0 SKIP** | t_negative、t_net_epoll、t_net_sockopt、**t_path（W3，仅真机）** |
+| wine 9.0（Linux 沙箱，wine 模式） | 16 个用例：**13 PASS / 3 FAIL / 0 SKIP** | t_negative、t_net_epoll、t_net_sockopt |
+
+两者只差 `t_path`：W3 长路径超 `MAX_PATH`，wine 不施加该限制故通过。
+断言级统计（wine 11.11 历史基线）：433 条 pass=419 fail=4 skip=10，
+skip 均为 symlink EPERM 宿主限制降级与 t_exec/t_net_epoll 内个别环境降级项。
+
+**guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
+build-wbox-linux 的 artifact + zig 交叉编译 + 基线判定），不再是 SKIP 空转。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
 残留仅下表 2 类共 4 条断言失败。
