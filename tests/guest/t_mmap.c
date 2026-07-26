@@ -83,6 +83,100 @@ int main(void) {
   /* real Linux: munmap of an unmapped (but valid) range succeeds */
   T_ASSERT_OK(munmap((void *)0x1000, PGSZ));
 
+  /* --- mremap anonymous mappings --- */
+  T_BEGIN("mremap/shrink-in-place");
+  char *mr = mmap(NULL, PGSZ * 3, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  T_ASSERT(mr != MAP_FAILED);
+  if (mr != MAP_FAILED) {
+    mr[0] = 17;
+    mr[PGSZ - 1] = 23;
+    char *shrunk = mremap(mr, PGSZ * 3, PGSZ, 0);
+    T_ASSERT(shrunk == mr);
+    if (shrunk != MAP_FAILED) {
+      T_ASSERT(shrunk[0] == 17 && shrunk[PGSZ - 1] == 23);
+      T_ASSERT_OK(munmap(shrunk, PGSZ));
+    } else {
+      T_ASSERT_OK(munmap(mr, PGSZ * 3));
+    }
+  }
+
+  T_BEGIN("mremap/grow-in-place");
+  mr = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  T_ASSERT(mr != MAP_FAILED);
+  if (mr != MAP_FAILED) {
+    mr[PGSZ - 1] = 29;
+    T_ASSERT_OK(munmap(mr + PGSZ, PGSZ));
+    char *grown = mremap(mr, PGSZ, PGSZ * 2, 0);
+    T_ASSERT(grown == mr);
+    if (grown != MAP_FAILED) {
+      T_ASSERT(grown[PGSZ - 1] == 29);
+      T_ASSERT(grown[PGSZ] == 0 && grown[PGSZ * 2 - 1] == 0);
+      T_ASSERT_OK(munmap(grown, PGSZ * 2));
+    } else {
+      T_ASSERT_OK(munmap(mr, PGSZ));
+    }
+  }
+
+  T_BEGIN("mremap/maymove-preserves-data");
+  mr = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  T_ASSERT(mr != MAP_FAILED);
+  if (mr != MAP_FAILED) {
+    mr[0] = 31;
+    mr[PGSZ - 1] = 47;
+    T_ASSERT_OK(mprotect(mr, PGSZ, PROT_READ));
+    char *blocker = mmap(mr + PGSZ, PGSZ, PROT_NONE,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    T_ASSERT(blocker == mr + PGSZ);
+    char *moved = mremap(mr, PGSZ, PGSZ * 2, MREMAP_MAYMOVE);
+    T_ASSERT(moved != MAP_FAILED && moved != mr);
+    if (moved != MAP_FAILED) {
+      T_ASSERT(moved[0] == 31 && moved[PGSZ - 1] == 47);
+      T_ASSERT(moved[PGSZ] == 0 && moved[PGSZ * 2 - 1] == 0);
+      T_ASSERT_OK(munmap(moved, PGSZ * 2));
+    } else {
+      T_ASSERT_OK(munmap(mr, PGSZ));
+    }
+    T_ASSERT_OK(munmap(blocker, PGSZ));
+  }
+
+  T_BEGIN("mremap/fixed-move");
+  mr = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  char *target = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  T_ASSERT(mr != MAP_FAILED && target != MAP_FAILED);
+  if (mr != MAP_FAILED && target != MAP_FAILED) {
+    mr[123] = 61;
+    char *moved = mremap(mr, PGSZ, PGSZ * 2,
+                         MREMAP_MAYMOVE | MREMAP_FIXED, target);
+    T_ASSERT(moved == target);
+    if (moved != MAP_FAILED) {
+      T_ASSERT(moved[123] == 61 && moved[PGSZ] == 0);
+      T_ASSERT_OK(munmap(moved, PGSZ * 2));
+    } else {
+      T_ASSERT_OK(munmap(mr, PGSZ));
+      T_ASSERT_OK(munmap(target, PGSZ * 2));
+    }
+  } else {
+    if (mr != MAP_FAILED) T_ASSERT_OK(munmap(mr, PGSZ));
+    if (target != MAP_FAILED) T_ASSERT_OK(munmap(target, PGSZ * 2));
+  }
+
+  T_BEGIN("mremap/invalid-arguments");
+  mr = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  T_ASSERT(mr != MAP_FAILED);
+  if (mr != MAP_FAILED) {
+    T_ASSERT_ERRNO(mremap(mr + 1, PGSZ, PGSZ, 0), EINVAL);
+    T_ASSERT_ERRNO(mremap(mr, PGSZ, 0, 0), EINVAL);
+    T_ASSERT_ERRNO(mremap(mr, PGSZ, PGSZ, 0x40000000), EINVAL);
+    T_ASSERT_ERRNO(mremap(mr, PGSZ, PGSZ, MREMAP_FIXED, mr), EINVAL);
+    T_ASSERT_OK(munmap(mr, PGSZ));
+  }
+
   /* --- huge (2MiB) aligned anonymous map --- */
   T_BEGIN("mmap/huge-2m-aligned");
   size_t big = 2 * 1024 * 1024;

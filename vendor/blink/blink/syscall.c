@@ -1813,11 +1813,141 @@ static i64 SysMmap(struct Machine *m, i64 virt, u64 size, int prot, int flags,
 
 static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
                      u64 new_size, int flags, i64 new_address) {
-  // would be nice to have
-  // avoid being noisy in the logs
-  // hope program has fallback for failure
-  LOG_ONCE(MEM_LOGF("mremap() not supported yet"));
-  return enomem();
+  u8 *protections;
+  char buf[4096];
+  u64 i, copy_size, pages;
+  i64 result, destination, delta;
+  bool fixed, maymove, file_backed;
+
+  if (flags & ~(MREMAP_MAYMOVE_LINUX | MREMAP_FIXED_LINUX)) return einval();
+  fixed = !!(flags & MREMAP_FIXED_LINUX);
+  maymove = !!(flags & MREMAP_MAYMOVE_LINUX);
+  if (fixed && !maymove) return einval();
+  if (!old_size || !new_size || old_size > 0x1000000000000 - 4095 ||
+      new_size > 0x1000000000000 - 4095) {
+    return einval();
+  }
+  old_size = ROUNDUP(old_size, 4096);
+  new_size = ROUNDUP(new_size, 4096);
+  if (!IsValidAddrSize(old_address, old_size)) return einval();
+  if (fixed && !IsValidAddrSize(new_address, new_size)) return einval();
+  if (fixed && new_address < old_address + old_size &&
+      old_address < new_address + new_size) {
+    return einval();
+  }
+
+  result = -1;
+  protections = 0;
+  BEGIN_NO_PAGE_FAULTS;
+  LOCK(&m->system->mmap_lock);
+  if (!IsFullyMapped(m->system, old_address, old_size)) {
+    efault();
+    goto Finished;
+  }
+  if (!fixed && old_size == new_size) {
+    result = old_address;
+    goto Finished;
+  }
+  if (!fixed && new_size < old_size) {
+    if (FreeVirtual(m->system, old_address + new_size,
+                    old_size - new_size) != -1) {
+      result = old_address;
+    }
+    goto Finished;
+  }
+
+  pages = old_size / 4096;
+  if (!(protections = (u8 *)malloc(pages))) {
+    enomem();
+    goto Finished;
+  }
+  file_backed = false;
+  for (i = 0; i < pages; ++i) {
+    u64 pte = FindPageTableEntry(m, old_address + i * 4096);
+    protections[i] = GetProtection(pte);
+    file_backed |= !!(pte & PAGE_FILE);
+  }
+  if (file_backed) {
+    // FileMap records are descriptive and don't retain a reopenable fd, so a
+    // moved or enlarged file mapping can't be reconstructed without changing
+    // MAP_SHARED / MAP_PRIVATE semantics.
+    enomem();
+    goto Finished;
+  }
+
+  delta = new_size - old_size;
+  if (delta > 0 &&
+      (delta / 4096 + m->system->vss > GetMaxVss(m->system) ||
+       m->system->rss >= GetMaxRss(m->system))) {
+    enomem();
+    goto Finished;
+  }
+
+  if (!fixed && IsFullyUnmapped(m->system, old_address + old_size, delta)) {
+    if (ReserveVirtual(m->system, old_address + old_size, delta,
+                       SetProtection(protections[pages - 1]), -1, 0, false,
+                       false) != -1) {
+      result = old_address;
+    }
+    goto Finished;
+  }
+  if (!maymove) {
+    enomem();
+    goto Finished;
+  }
+
+  if (fixed) {
+    destination = new_address;
+  } else if ((destination = FindVirtual(m->system, m->system->automap,
+                                        new_size)) == -1) {
+    goto Finished;
+  }
+  if (ReserveVirtual(m->system, destination, new_size,
+                     PAGE_RW | PAGE_U | PAGE_XD, -1, 0, false, fixed) == -1) {
+    goto Finished;
+  }
+
+  copy_size = MIN(old_size, new_size);
+  for (i = 0; i < copy_size; i += sizeof(buf)) {
+    u64 amount = MIN(sizeof(buf), copy_size - i);
+    if (CopyFromUser(m, buf, old_address + i, amount) == -1 ||
+        CopyToUser(m, destination + i, buf, amount) == -1) {
+      FreeVirtual(m->system, destination, new_size);
+      efault();
+      goto Finished;
+    }
+  }
+  for (i = 0; i < new_size / 4096;) {
+    u64 start = i;
+    int prot = protections[MIN(i, pages - 1)];
+    do {
+      ++i;
+    } while (i < new_size / 4096 &&
+             protections[MIN(i, pages - 1)] == prot);
+    if (ProtectVirtual(m->system, destination + start * 4096,
+                       (i - start) * 4096, prot, false) == -1) {
+      FreeVirtual(m->system, destination, new_size);
+      goto Finished;
+    }
+  }
+  if (FreeVirtual(m->system, old_address, old_size) == -1) {
+    FreeVirtual(m->system, destination, new_size);
+    goto Finished;
+  }
+  if (!fixed) {
+    m->system->automap = ROUNDUP(destination + new_size, FLAG_pagesize);
+    if (m->system->automap >= FLAG_automapend) {
+      m->system->automap = FLAG_automapstart;
+    }
+  }
+  result = destination;
+
+Finished:
+  free(protections);
+  unassert(CheckMemoryInvariants(m->system));
+  UNLOCK(&m->system->mmap_lock);
+  END_NO_PAGE_FAULTS;
+  return result;
 }
 
 static int XlatMsyncFlags(int flags) {
