@@ -205,6 +205,46 @@ else
 fi
 
 echo
+echo "=== F. guest C 回归套件（tests/run-guest-tests.sh）==="
+# 每个 t_* 测试二进制映射为一条 F 项。zig 可用则现场编译；
+# CI 真 Windows 无 zig 时设 WBOX_GUEST_PREBUILT=1 使用预编译产物（artifact 上传）。
+# WBOX_GUEST_SKIP=1 整组 SKIP。
+RUNNER=tests/run-guest-tests.sh
+if [ ! -f "$RUNNER" ] && [ -f "$OLDPWD/tests/run-guest-tests.sh" ]; then
+  RUNNER=$OLDPWD/tests/run-guest-tests.sh
+fi
+if [ "${WBOX_GUEST_SKIP:-0}" = 1 ]; then
+  report SKIP "F1  guest 套件" "WBOX_GUEST_SKIP=1"
+elif [ ! -f "$RUNNER" ]; then
+  report SKIP "F1  guest 套件" "tests/run-guest-tests.sh 不存在"
+else
+  guest_out=$(cd "$OLDPWD" 2>/dev/null && \
+    WBOX_LINUX="$WBOX_ABS" WBOX_MATRIX_MODE="$MODE" WINE="${WINE:-wine}" \
+    WBOX_GUEST_LIST=1 WBOX_GUEST_PREBUILT="${WBOX_GUEST_PREBUILT:-0}" \
+    bash "$RUNNER" 2>&1)
+  guest_rc=$?
+  # LIST 模式逐行 "PASS t_foo" / "FAIL t_foo" / "SKIP t_foo"
+  fi=0
+  while IFS= read -r line; do
+    case $line in
+      PASS\ t_*|FAIL\ t_*|SKIP\ t_*)
+        fi=$((fi+1))
+        st=${line%% *}; nm=${line#* }
+        report "$st" "F$fi  $nm" ;;
+    esac
+  done <<EOF
+$guest_out
+EOF
+  if [ "$fi" -eq 0 ]; then
+    if [ "$guest_rc" -eq 0 ]; then
+      report SKIP "F1  guest 套件" "runner 无输出（无 t_* 用例？）"
+    else
+      report FAIL "F1  guest 套件" "runner 失败 rc=$guest_rc：$(printf '%s' "$guest_out" | tail -2 | head -c 200)"
+    fi
+  fi
+fi
+
+echo
 echo "==================================="
 echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
 [ "$fail" -eq 0 ] || exit 1
