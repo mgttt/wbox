@@ -238,3 +238,197 @@ pub fn build_cmdline(cmd: &[String]) -> Result<String> {
     }
     Ok(s)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- build_cmdline：程序名总是加引号，其余参数按需加引号 ----
+
+    #[test]
+    fn build_cmdline_empty_is_error() {
+        assert!(build_cmdline(&[]).is_err());
+    }
+
+    #[test]
+    fn build_cmdline_single_program_quoted() {
+        // 即使程序名无空格也加引号（与 cmd.exe 风格一致）
+        assert_eq!(build_cmdline(&["cmd.exe".to_string()]).unwrap(), r#""cmd.exe""#);
+    }
+
+    #[test]
+    fn build_cmdline_program_with_spaces_in_name() {
+        // 程序名本身含空格：当前实现只在外围加引号，不转义内部字符
+        // （记录现状：用户传 "C:\Program Files\app.exe" 时直接得 '"C:\Program Files\app.exe"'）
+        let s = build_cmdline(&["C:\\Program Files\\app.exe".to_string()]).unwrap();
+        assert_eq!(s, r#""C:\Program Files\app.exe""#);
+    }
+
+    #[test]
+    fn build_cmdline_plain_args_unquoted() {
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo".to_string(),
+            "hello".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" /c echo hello"#);
+    }
+
+    #[test]
+    fn build_cmdline_arg_with_space_is_quoted() {
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            "/c".to_string(),
+            "echo hello world".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" /c "echo hello world""#);
+    }
+
+    #[test]
+    fn build_cmdline_arg_with_tab_is_quoted() {
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            "a\tb".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" "a	b""#);
+    }
+
+    #[test]
+    fn build_cmdline_empty_arg_is_quoted() {
+        // 空参数必须加引号，���则 CommandLineToArgvW 会丢失它
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            "".to_string(),
+            "x".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" "" x"#);
+    }
+
+    #[test]
+    fn build_cmdline_embedded_quote_is_escaped() {
+        // 内嵌引号 → \" 转义 + 整体加引号
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            r#"he said "hi""#.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" "he said \"hi\"""#);
+    }
+
+    #[test]
+    fn build_cmdline_records_known_limitation_backslash_trailing() {
+        // 记录现状：以 \ 结尾的参数，本简化规则不追加额外反斜杠来"保护"闭合引号，
+        // 与标准 CommandLineToArgvW 行为不同。钉死现状，未来若按标准修复会变红。
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            r"C:\path\".to_string(),
+        ])
+        .unwrap();
+        // 该参数无空格/引号/制表符 → 原样输出（不加引号、不加反斜杠）
+        assert_eq!(s, r#""cmd.exe" C:\path\"#);
+    }
+
+    #[test]
+    fn build_cmdline_records_known_limitation_backslash_quote_sequence() {
+        // 记录现状：输入 x\"y（x + \ + " + y），当前规则：
+        // - 不识别 \ 对 " 的转义前缀，\ 原样保留
+        // - " → \" 转义
+        // - 整体加引号
+        // 故结果字面量内为 x + \ + \" + y = x\\"y（标准 CommandLineToArgvW 会解析回 x\"y，
+        // 但简化实现不改 \，解析后变为 x\ + y 两段）。钉死现状。
+        let s = build_cmdline(&[
+            "cmd.exe".to_string(),
+            r#"x\"y"#.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(s, r#""cmd.exe" "x\\"y""#);
+    }
+
+    // ---- build_env_block：CreateProcessW lpEnvironment 的双 NUL 结尾 UTF-16 块 ----
+
+    fn env_block_to_string(env: &[(String, String)]) -> String {
+        // 把 UTF-16 环境块转回字符串便于断言（NUL 用显式标记表示）
+        let wide = build_env_block(env);
+        let mut out = String::new();
+        for &u in &wide {
+            if u == 0 {
+                out.push_str("<NUL>");
+            } else {
+                out.push(char::from_u32(u as u32).unwrap_or('?'));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn env_block_basic_key_value_pairs() {
+        let s = env_block_to_string(&[
+            ("FOO".to_string(), "bar".to_string()),
+            ("BAZ".to_string(), "qux".to_string()),
+        ]);
+        assert_eq!(s, "FOO=bar<NUL>BAZ=qux<NUL><NUL>");
+    }
+
+    #[test]
+    fn env_block_double_nul_terminator() {
+        // 空输入也必须有双 NUL 结尾（CreateProcessW 据此判断环境块结束）
+        let wide = build_env_block(&[]);
+        assert_eq!(wide, vec![0u16]);
+    }
+
+    #[test]
+    fn env_block_empty_key_is_dropped() {
+        // 空键无法构成 "KEY=VAL"，防御性跳过
+        let s = env_block_to_string(&[("".to_string(), "v".to_string())]);
+        assert_eq!(s, "<NUL>");
+    }
+
+    #[test]
+    fn env_block_key_with_equals_is_dropped() {
+        // 键含 '=' 会污染解析，跳过
+        let s = env_block_to_string(&[("K=E".to_string(), "v".to_string())]);
+        assert_eq!(s, "<NUL>");
+    }
+
+    #[test]
+    fn env_block_key_with_nul_is_dropped() {
+        let s = env_block_to_string(&[("K\0X".to_string(), "v".to_string())]);
+        assert_eq!(s, "<NUL>");
+    }
+
+    #[test]
+    fn env_block_value_with_nul_is_dropped() {
+        let s = env_block_to_string(&[("K".to_string(), "v\0x".to_string())]);
+        assert_eq!(s, "<NUL>");
+    }
+
+    #[test]
+    fn env_block_value_with_equals_is_kept() {
+        // 值含 '=' 合法（只看第一个 = 分割 KEY/VAL）
+        let s = env_block_to_string(&[("PATH".to_string(), "a=b;c".to_string())]);
+        assert_eq!(s, "PATH=a=b;c<NUL><NUL>");
+    }
+
+    #[test]
+    fn env_block_mixed_valid_and_invalid_only_keeps_valid() {
+        let s = env_block_to_string(&[
+            ("".to_string(), "drop".to_string()),
+            ("GOOD".to_string(), "keep".to_string()),
+            ("K=E".to_string(), "drop".to_string()),
+            ("ALSO_GOOD".to_string(), "v=1".to_string()),
+        ]);
+        assert_eq!(s, "GOOD=keep<NUL>ALSO_GOOD=v=1<NUL><NUL>");
+    }
+
+    #[test]
+    fn env_block_unicode_value_round_trip() {
+        // UTF-16 环境块：非 ASCII 字符直接 encode_utf16
+        let s = env_block_to_string(&[("NAME".to_string(), "中文".to_string())]);
+        assert_eq!(s, "NAME=中文<NUL><NUL>");
+    }
+}
