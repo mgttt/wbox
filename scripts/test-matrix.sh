@@ -182,7 +182,10 @@ check_rc_out "B3  后台任务 sleep & wait" 0 ""     sh -c 'sleep 0.1 & wait'
 # 上则 not found。写死相对路径后两种模式测的是同一件事。
 check_rc_out "B4  重定向链 && cat"       0 x      sh -c 'echo x > f && ./busybox cat f'
 check_rc_out "B5  写 /dev/null"          0 ""     sh -c 'echo n > /dev/null'
-check_rc_out "B6  读 /dev/null"          0 ok     sh -c 'cat /dev/null; echo ok'
+# 同 B4 的理由用 ./busybox cat；另外原写法 `cat /dev/null; echo ok` 的断言
+# 太弱——cat 缺失也不影响最后 `echo ok` 的退出码，applet 解析坏掉时照样 PASS。
+# 改为让 cat 处在退出码路径上（&&），读 /dev/null 失败即整条失败。
+check_rc_out "B6  读 /dev/null"          0 ok     sh -c './busybox cat /dev/null && echo ok'
 check_rc_out "B7  管道 + grep 退出码"    0 ""     sh -c 'echo a | ./busybox grep a'
 # B8 fork 子 exec 外部 applet（回归保护项，md5("hello")）
 check_rc_out "B8  fork 子 exec md5sum"   0 5d41402abc4b2a76b9719d911017c592 \
