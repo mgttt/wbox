@@ -20,6 +20,9 @@ use windows_sys::Win32::Security::{
 
 use crate::error::{ErrKind, KindExt, Result};
 
+/// `CreateAppContainerProfile` 对 `pszAppContainerName` 的长度上限（字符）。
+pub(crate) const MAX_PROFILE_NAME_CHARS: usize = 64;
+
 /// RAII 包装：AppContainer profile（命名内核隔离配置）。
 ///
 /// 除非调用 `keep()`（对应 --keep-profile），Drop 时自动删除 profile。
@@ -35,7 +38,21 @@ impl AppContainerProfile {
     ///
     /// `capabilities` 为 capability SID 列表（可空）。
     pub fn create(name: &str, capabilities: &[CapabilitySid]) -> Result<Self> {
+        // 前置校验：profile 名超长同样只返回 E_INVALIDARG，与描述缺失无法区分。
+        // 这里先给出可读错误，避免用户对着 0x80070057 猜。
+        // 限制见 CreateAppContainerProfile 文档：pszAppContainerName ≤ 64 字符。
+        let name_len = name.chars().count();
+        if name_len == 0 || name_len > MAX_PROFILE_NAME_CHARS {
+            return Err(crate::error::WboxError::args(format!(
+                "容器名长度非法（{} 字符）：AppContainer profile 名须为 1..={} 字符",
+                name_len, MAX_PROFILE_NAME_CHARS
+            )));
+        }
         let name_wide = to_wide(name);
+        // pszDescription 是**必填**参数（文档：最长 2048 字符的描述）；传 NULL
+        // 会让 CreateAppContainerProfile 直接返回 E_INVALIDARG(0x80070057)——
+        // 真机冒烟即因此在隔离主路径上失败。此处给出固定描述。
+        let description_wide = to_wide(&format!("wbox 进程容器：{}", name));
         let mut attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
             .iter()
             .map(|c| SID_AND_ATTRIBUTES {
@@ -46,14 +63,15 @@ impl AppContainerProfile {
         let mut sid: PSID = std::ptr::null_mut();
 
         // # Safety
-        // - name_wide 为以 NUL 结尾的 UTF-16 缓冲区，生命周期覆盖整个调用；
+        // - name_wide / description_wide 为以 NUL 结尾的 UTF-16 缓冲区，
+        //   生命周期覆盖整个调用；
         // - attrs 指针在 capability 数为 0 时传 null，否则指向有效数组；
         // - sid 为有效的输出指针；成功时返回的 SID 由本结构在 Drop 中 FreeSid。
         let hr = unsafe {
             CreateAppContainerProfile(
                 name_wide.as_ptr(),
-                name_wide.as_ptr(), // DisplayName 复用 profile 名
-                std::ptr::null(),   // 无描述
+                name_wide.as_ptr(),        // DisplayName 复用 profile 名
+                description_wide.as_ptr(), // Description：必填，不可为 NULL
                 if attrs.is_empty() {
                     std::ptr::null()
                 } else {

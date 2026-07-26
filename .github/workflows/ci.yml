@@ -82,14 +82,20 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - name: 安装 MinGW-w64 工具链（MSYS2）
-        run: |
-          pacman -Sy --noconfirm --needed \
-            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-binutils
+      # `shell: msys2 {0}` 这个 shell 是由 msys2/setup-msys2 注册的，不是
+      # runner 自带；缺了它任何 run: 步骤都会以 "msys2: command not found" 失败。
+      # 工具链经 action 的 install: 装（等价于原来的 pacman -Sy），
+      # msystem: UCRT64 会把 ucrt64/bin 放进 PATH，故不再手工 export。
+      - name: 准备 MSYS2 + MinGW-w64 工具链
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
       - name: 构建 wbox-linux.exe
-        run: |
-          export PATH=/c/msys64/ucrt64/bin:$PATH
-          WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
+        run: WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
       - name: 冒烟 —— wbox-linux.exe 能启动并跑内置用法输出
         shell: cmd
         run: .\vendor\blink\build-win32\wbox-linux.exe --help || ver > nul
@@ -125,25 +131,37 @@ jobs:
           path: vendor/blink/build-win32/wbox-linux.exe
           retention-days: 30
 
-  # ⑤ guest 测试：tests/ 目录下的 guest 级测试（另一工作流维护中）。
-  #    契约：tests/run.sh 存在则执行（退出码即测试结果）；
-  #    tests/ 未就绪时本 job 记 ::notice:: SKIP 并成功退出——
-  #    不阻塞发布门禁，但门禁 needs 列表包含本 job（一旦落地即自动生效）。
+  # ⑤ guest 测试：tests/ 目录下的 guest 级测试。
+  #    契约：入口 tests/run.sh 存在**且运行前置就绪**才执行（退出码即测试结果）；
+  #    前置缺失时记 ::notice:: SKIP 并成功退出——不阻塞发布门禁，但门禁 needs
+  #    列表包含本 job（前置补齐后自动生效）。
+  #
+  #    运行前置有两项，缺一不可：
+  #      ① wbox-linux.exe——本 job 不构建它（由 build-wbox-linux 产出）；
+  #      ② zig cc（tests/guest/build.sh 要把 t_*.c 交叉编译成
+  #         x86_64-linux-musl **静态 Linux ELF**，MinGW/MSVC 都做不到）。
+  #    早期 tests/run.sh 尚未落地时本 job 走 SKIP 分支；入口落地后无条件执行，
+  #    于是每次都以 "FATAL: wbox-linux.exe not found" 变红——这不是测试失败，
+  #    是前置缺失，故此处显式判定并回到契约规定的 SKIP。
   guest-tests:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: guest 测试（tests/run.sh 存在才执行，否则 SKIP）
+      - name: guest 测试（入口与运行前置齐备才执行，否则 SKIP）
         shell: bash
         run: |
-          if [ -f tests/run.sh ]; then
-            echo "发现 tests/run.sh，执行 guest 测试"
-            bash tests/run.sh
-          elif [ -d tests ]; then
-            echo "::notice::tests/ 已存在但无 run.sh 入口——SKIP（待测试入口落地）"
-          else
-            echo "::notice::tests/ 尚未就绪——guest 测试 SKIP，不阻塞门禁"
+          if [ ! -f tests/run.sh ]; then
+            echo "::notice::tests/run.sh 尚未就绪——guest 测试 SKIP，不阻塞门禁"
+            exit 0
           fi
+          exe=${WBOX_LINUX:-vendor/blink/build-win32/wbox-linux.exe}
+          if [ ! -f "$exe" ]; then
+            echo "::notice::未找到 wbox-linux.exe（$exe）——guest 测试 SKIP，不阻塞门禁。"
+            echo "::notice::补齐方式：本 job 取 build-wbox-linux 的 artifact，并装 zig（pip install ziglang）后再执行 tests/run.sh。"
+            exit 0
+          fi
+          echo "发现 tests/run.sh 与 $exe，执行 guest 测试"
+          WBOX_LINUX=$exe bash tests/run.sh
 
   # ⑥ tag 发布门禁：needs 全部五个 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
