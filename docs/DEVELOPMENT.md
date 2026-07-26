@@ -14,14 +14,14 @@ Linux 指令仿真），可在容器内直接运行 Linux ELF / OCI 镜像 rootf
 目标机：Windows 10/11 / Server，**无 VT-x（无 WSL2/Hyper-V）**、
 **默认不需要管理员**、不需要启用任何可选功能。单 exe 免安装。
 
-- 仓库：https://github.com/mgttt/k3-wbox
-- 克隆：`git clone https://github.com/mgttt/k3-wbox.git`
+- 仓库：https://github.com/mgttt/wbox
+- 克隆：`git clone https://github.com/mgttt/wbox.git`
 - 当前里程碑：**v1.0.0-rc2（终审通过）**，trunk 滚动开发，tag 自 v1.0-rc 起。
 
 ## 1. 仓库结构（冷启动必知）
 
 ```
-k3-wbox/
+wbox/
 ├── Cargo.toml / Cargo.lock   # 单 crate（workspace 根即 crate 根），edition 2021
 ├── src/
 │   ├── main.rs               # CLI 解析（手写，无 clap）与命令分发、退出码约定
