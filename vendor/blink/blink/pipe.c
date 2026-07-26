@@ -42,6 +42,10 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
   int oflags;
   int supported;
   u8 fds_linux[2][4];
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int guestfds[2];
+  struct Fd *fd;
+#endif
   supported = O_CLOEXEC_LINUX | O_NDELAY_LINUX;
   if (flags & ~supported) {
     LOGF("%s() unsupported flags: %d", "pipe2", flags & ~supported);
@@ -68,6 +72,39 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
       unassert(!VfsFcntl(fds[1], F_SETFL, O_NDELAY));
     }
 #endif
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    LOCK(&m->system->fds.lock);
+    guestfds[0] = AllocGuestFd(&m->system->fds, 0);
+    if (guestfds[0] >= lim) {
+      UNLOCK(&m->system->fds.lock);
+      VfsClose(fds[0]);
+      VfsClose(fds[1]);
+      rc = emfile();
+    } else {
+      unassert(fd = AddFd(&m->system->fds, guestfds[0],
+                          O_RDONLY | oflags));
+      fd->hostfd = fds[0];
+      guestfds[1] = AllocGuestFd(&m->system->fds, 0);
+      if (guestfds[1] >= lim) {
+        dll_remove(&m->system->fds.list, &fd->elem);
+        FreeFd(fd);
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(fds[0]);
+        VfsClose(fds[1]);
+        rc = emfile();
+      } else {
+        unassert(fd = AddFd(&m->system->fds, guestfds[1],
+                            O_WRONLY | oflags));
+        fd->hostfd = fds[1];
+        UNLOCK(&m->system->fds.lock);
+        Write32(fds_linux[0], guestfds[0]);
+        Write32(fds_linux[1], guestfds[1]);
+        unassert(
+            !CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
+        rc = 0;
+      }
+    }
+#else
     if (fds[0] >= lim || fds[1] >= lim) {
       close(fds[0]);
       close(fds[1]);
@@ -82,6 +119,7 @@ int SysPipe2(struct Machine *m, i64 pipefds_addr, i32 flags) {
       unassert(!CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
       rc = 0;
     }
+#endif
   } else {
     rc = -1;
   }

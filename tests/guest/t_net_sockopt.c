@@ -55,6 +55,9 @@ int main(void) {
   T_ASSERT(s >= 0);
   if (s >= 0) {
     T_ASSERT_ERRNO(lseek(s, 0, SEEK_CUR), ESPIPE);
+    T_ASSERT_ERRNO(ftruncate(s, 0), EINVAL);
+    T_ASSERT_ERRNO(fsync(s), EINVAL);
+    T_ASSERT_ERRNO(fdatasync(s), EINVAL);
     close(s);
   }
   s = socket(AF_INET, SOCK_DGRAM, 0);

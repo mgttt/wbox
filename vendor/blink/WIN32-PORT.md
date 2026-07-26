@@ -121,7 +121,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 | # | 缺口 | 裁决 |
 |---|---|---|
 | 1 | fork/vfork | ✅ 快照式 fork：子 Machine 独立 VA 窗口，按区域复制可读页并克隆文件映射 backing 元数据；guest fd 表独立、host fd dup，父子并发、fork 后文件 mremap 与 exec 可用（见 §7.4） |
-| 2 | 管道组合命令（`a \| b`） | ✅ pipe2 + 快照 fork 已打通；busybox shell 管道、命令替换、后台任务和多段重定向矩阵通过 |
+| 2 | 管道组合命令（`a \| b`） | ✅ pipe2 + 快照 fork 已打通；pipe 两端在 per-System 表分配最低 guest fd 并分别保存全局 VFS backing，fork 后编号分叉不泄漏；busybox shell 管道、命令替换、后台任务和多段重定向矩阵通过 |
 | 3 | socket 族 | ✅ Winsock2 映射：AF_INET/INET6 STREAM/DGRAM、pathname AF_UNIX stream、匿名 AF_UNIX stream/datagram socketpair、epoll/poll、errno 与 O_NONBLOCK。socketpair 内部 loopback 承载层在 Hostfs 对外保持未命名 AF_UNIX 身份 |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |

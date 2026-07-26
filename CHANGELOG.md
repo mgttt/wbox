@@ -127,6 +127,14 @@
   signalfd 的既有 no-op seek 语义。新增 pipe 两端及 AF_INET socket 回归；
   `t_fd_rw` 增至 72 项、`t_net_sockopt` 增至 79 项，完整套件现为
   **20/20 文件通过，1003 pass / 0 fail / 9 skip**。
+- **fork 子进程 pipe 使用独立 guest fd 编号**：快照 fork 后 guest fd 表
+  与全局 VFS fd 表已分离，但 `SysPipe2` 仍把 VFS 返回号直接暴露给 guest，
+  因此子进程关闭 stdin 后无法按 Linux 规则复用 fd 0。现与 socketpair
+  路径一致，分别分配两个最低可用 guest 号并保存 VFS backing，失败时完整
+  回滚。新增 fork 子进程 `pipe()` 最低 fd 回归，并补齐 pipe/socket 的
+  `ftruncate`、`fsync`、`fdatasync` 类型错误验证；`t_fd_open` 增至 48 项、
+  `t_fd_rw` 增至 75 项、`t_net_sockopt` 增至 82 项，完整套件现为
+  **20/20 文件通过，1013 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

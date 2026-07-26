@@ -2,6 +2,7 @@
  * O_TMPFILE, plus dup family semantics. */
 #define _GNU_SOURCE
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -139,6 +140,26 @@ int main(void) {
   T_ASSERT_EQ(read(d2, &c, 1), 1);
   T_ASSERT(c == '0');
   close(d2);
+
+  T_BEGIN("pipe/fork-child-lowest-fds");
+  {
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      int p[2] = {-1, -1};
+      close(STDIN_FILENO);
+      if (pipe(p) != 0) _exit(1);
+      if (p[0] != STDIN_FILENO) _exit(2);
+      if (p[1] != 3) _exit(3);
+      _exit(0);
+    }
+    if (pid > 0) {
+      int status = 0;
+      T_ASSERT_EQ(waitpid(pid, &status, 0), pid);
+      T_ASSERT(WIFEXITED(status));
+      T_ASSERT_EQ(WEXITSTATUS(status), 0);
+    }
+  }
 
   unlink("t_fo_a");
   unlink("t_fo_b");
