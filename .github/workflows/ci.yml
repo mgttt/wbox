@@ -163,6 +163,29 @@ jobs:
           echo [true JIT=0 expect 0] rc=%ERRORLEVEL%
           %EXE% busybox sh -c "exit 7"
           echo [exit7 JIT=0 expect 7] rc=%ERRORLEVEL%
+      # run 24 实测：A 组 11/11 全过（含退出码转发），随后 B 组第一项
+      # `echo hello | cat` 挂死 18 分钟。B 组整组依赖快照式 fork，故需先分清
+      # 到底卡在哪一层，再动 fork 代码。下面四个探针逐层加压，各带 30s 上界：
+      #   P1 无 fork 基准（sh -c echo）——若这条也卡，问题不在 fork；
+      #   P2 纯 fork 子 shell（无管道）——分离"fork 本身"与"管道";
+      #   P3 fork + wait（后台任务）——分离"子进程回收/waitpid";
+      #   P4 fork + 管道（复现项）——两端 pipe，最易因写端未关而永不 EOF。
+      # WBOX_DEBUG_FORK=1 打快照/回收页诊断。只取证，不判定成败。
+      - name: 诊断 —— fork/管道挂死分层取证（各 30s 上界，不判定成败）
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          exe=vendor/blink/build-win32/wbox-linux.exe
+          probe() { # probe <标签> <sh 脚本>
+            echo "--- $1"
+            WBOX_DEBUG_FORK=1 timeout 30 "$exe" ./busybox sh -c "$2" 2>&1 | head -40
+            echo "    rc=${PIPESTATUS[0]}（124 = 超时挂死）"
+          }
+          probe "P1 无 fork 基准：echo hi"        'echo hi'
+          probe "P2 纯 fork 子 shell：(echo sub)" '(echo sub)'
+          probe "P3 fork+wait：true & wait"       'true & wait'
+          probe "P4 fork+管道（复现项）：echo hello | cat" 'echo hello | cat'
+
       # 真机验收矩阵：11 项基础 + 8 项 shell + fork 矩阵 + wget md5 +
       # epoll 单测（CI 无预编译静态二进制，脚本自动 SKIP 并提示）。
       # msys2 shell 下 OSTYPE=msys → native 模式直接执行 wbox-linux.exe。
