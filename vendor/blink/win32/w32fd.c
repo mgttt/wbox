@@ -1753,8 +1753,13 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2],
 
 // ---------------------------------------------------------------- poll/select
 
-int poll(struct pollfd *pfds, nfds_t n, int timeout) {
-  // files & console always ready; pipes peeked; sockets via WSAPoll (feat/net)
+// THE shared wait primitive of the win32 port: poll/epoll_wait and (via
+// fd->cb->poll through the VFS) syscall.c's W32NonblockPoll gate all funnel
+// here. The per-class readiness semantics live in exactly one place:
+// sockets are level-triggered WSAPoll (w32sock.c, sliced so the non-socket
+// fds are re-checked regularly), files/consoles are always ready, pipes are
+// PeekNamedPipe'd with a handle-wait fallback for wine fifos.
+int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
   DWORD deadline = timeout >= 0 ? GetTickCount() + timeout : 0;
   int nsock = 0;
   for (nfds_t i = 0; i < n; ++i)
@@ -1837,6 +1842,10 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
     if (timeout > 0 && GetTickCount() >= deadline) return 0;
     if (!nsock) Sleep(timeout > 10 ? 10 : 1);
   }
+}
+
+int poll(struct pollfd *pfds, nfds_t n, int timeout) {
+  return W32WaitFds(pfds, n, timeout);
 }
 
 int ppoll(struct pollfd *pfds, nfds_t n, const struct timespec *ts,

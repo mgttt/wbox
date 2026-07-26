@@ -111,6 +111,12 @@ struct W32FdInfo {
 };
 int W32FdClassify(int fd, struct W32FdInfo *out);
 
+// ---------------------------------------------------------------- wait
+// Shared wait primitive (w32fd.c): readiness for an array of CRT-namespace
+// fds with a millisecond timeout (-1 = infinite). poll()/ppoll() and
+// w32sock.c's epoll_wait are thin wrappers over this single entry.
+int W32WaitFds(struct pollfd *pfds, unsigned long n, int timeout_ms);
+
 // w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
 // the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets
 // (>2GiB) through these instead of VfsPreadv/VfsPwritev.

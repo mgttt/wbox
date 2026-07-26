@@ -2873,6 +2873,8 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
 // command while apt waited for the fetch result). Sockets are excluded:
 // WboxSockFcntl applies real FIONBIO semantics for them.
 static int W32NonblockPoll(struct Fd *fd, short events) {
+  // zero-timeout slice of the shared wait primitive: fd->cb->poll chains
+  // through the VFS down to win32's W32WaitFds.
   struct pollfd pfd;
   // NB: discriminate sockets via Fd.socktype, NOT WboxSockIsFd(hostfd) —
   // hostfd is a *VFS* fd number while the socket table is keyed by *CRT*

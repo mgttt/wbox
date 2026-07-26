@@ -984,8 +984,9 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
   if (WsaInit() < 0) return 0;
   NET_LOGF("WboxSockPoll(nfds=%lu timeout=%d)", (unsigned long)n, timeout);
   struct wsa_pollfd stackw[32];
+  int stackidx[32];
   struct wsa_pollfd *w = stackw;
-  int *idx = NULL;
+  int *idx = stackidx;
   int nsock = 0;
   for (nfds_t i = 0; i < n; ++i)
     if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) ++nsock;
@@ -997,36 +998,6 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       return -1;
     }
     idx = (int *)(w + nsock);
-  } else {
-    int stackidx[32];
-    idx = stackidx;
-    // careful: stackidx must outlive the loop below; it does (same frame)
-    int k = 0;
-    for (nfds_t i = 0; i < n; ++i) {
-      if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) {
-        w[k].fd = SockFromFd(pfds[i].fd);
-        w[k].events = PollEventsToWs(pfds[i].events);
-        w[k].revents = 0;
-        idx[k] = (int)i;
-        ++k;
-      }
-    }
-    /* analyzer: idx[0..k) is fully initialized here and k == nsock
-       (same filter as the count pass above); the "uninitialized
-       subscript" warning below is a false positive. */
-    int rc = ws.WSAPoll(w, nsock, timeout);
-    if (rc < 0) {
-      errno = WsaErrno();
-      return -1;
-    }
-    int ready = 0;
-    for (int j = 0; j < nsock; ++j) {
-      if (w[j].revents) {
-        pfds[idx[j]].revents |= PollEventsFromWs(w[j].revents);
-        if (pfds[idx[j]].revents) ++ready;
-      }
-    }
-    return ready;
   }
   int k = 0;
   for (nfds_t i = 0; i < n; ++i) {
@@ -1038,9 +1009,12 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       ++k;
     }
   }
+  /* analyzer: idx[0..k) is fully initialized here and k == nsock
+     (same filter as the count pass above); the "uninitialized
+     subscript" warning below is a false positive. */
   int rc = ws.WSAPoll(w, nsock, timeout);
   if (rc < 0) {
-    free(w);
+    if (w != stackw) free(w);
     errno = WsaErrno();
     return -1;
   }
@@ -1051,7 +1025,7 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       if (pfds[idx[j]].revents) ++ready;
     }
   }
-  free(w);
+  if (w != stackw) free(w);
   return ready;
 }
 
@@ -1273,7 +1247,7 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
     pfds[i].events = (int16_t)(ep->ents[i].events & (EPOLLIN | EPOLLOUT | EPOLLPRI));
     pfds[i].revents = 0;
   }
-  int rc = poll(pfds, ep->n, timeout);
+  int rc = W32WaitFds(pfds, ep->n, timeout);  // shared wait primitive
   if (rc <= 0) {
     free(pfds);
     return rc < 0 ? -1 : 0;
