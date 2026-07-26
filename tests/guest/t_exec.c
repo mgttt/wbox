@@ -1,6 +1,7 @@
 /* t_exec.c — exec variants, argv/env passing, post-exec state. */
 #define _GNU_SOURCE
 #include <fcntl.h>
+#include <stdint.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -18,6 +19,18 @@ int main(int argc, char **argv) {
   if (argc >= 2 && strcmp(argv[1], "--child-mem") == 0) {
     /* this code only runs if exec replaced the image; exit 0 */
     _exit(0);
+  }
+  if (argc >= 2 && strcmp(argv[1], "--child-map-reuse") == 0) {
+    void *want = (void *)(uintptr_t)0x50000000;
+    int fd = open("t_exec_map_reuse.bin", O_RDONLY);
+    if (fd == -1) _exit(1);
+    unsigned char *p =
+        mmap(want, 4096, PROT_READ,
+             MAP_PRIVATE | MAP_FIXED_NOREPLACE, fd, 0);
+    int ok = p == want && p[0] == 0x5a;
+    if (p != MAP_FAILED && munmap(p, 4096) == -1) ok = 0;
+    if (close(fd) == -1) ok = 0;
+    _exit(ok ? 0 : 2);
   }
 
   char self[256];
@@ -97,6 +110,40 @@ int main(int argc, char **argv) {
       }
       T_ASSERT_OK(close(fd));
       T_ASSERT_OK(unlink("t_exec_shared.bin"));
+    }
+  }
+
+  /* --- exec removes inherited VFS map metadata before address reuse --- */
+  T_BEGIN("exec/file-map-address-reuse");
+  {
+    void *want = (void *)(uintptr_t)0x50000000;
+    int fd = open("t_exec_map_reuse.bin", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      T_ASSERT_OK(ftruncate(fd, 4096));
+      unsigned char value = 0x5a;
+      T_ASSERT_EQ(pwrite(fd, &value, 1, 0), 1);
+      unsigned char *p =
+          mmap(want, 4096, PROT_READ,
+               MAP_PRIVATE | MAP_FIXED_NOREPLACE, fd, 0);
+      T_ASSERT(p == want);
+      if (p == want) {
+        pid_t pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          execl(self, self, "--child-map-reuse", (char *)0);
+          _exit(111);
+        }
+        if (pid > 0) {
+          int st;
+          T_ASSERT_EQ(waitpid(pid, &st, 0), pid);
+          T_ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+          T_ASSERT(p[0] == 0x5a);
+        }
+        T_ASSERT_OK(munmap(p, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_exec_map_reuse.bin"));
     }
   }
 

@@ -250,6 +250,9 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     old->system->cr3 = 0;  // page tables lived in the wiped window
     old->system->memstat.tables = 0;
     WboxShsegSyncToParent();  // flush shared-anon writes made pre-exec
+#ifndef DISABLE_VFS
+    VfsForgetMapRange((void *)lo, hi - lo);
+#endif
     WboxMemWipeWindow();
     WboxPurgeHostPagesInRange(lo, hi);
   }

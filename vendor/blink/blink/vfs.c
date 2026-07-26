@@ -2523,6 +2523,84 @@ static void VfsMapListFree(struct Dll **tofree) {
   }
 }
 
+int VfsCloneMapRange(void *srcaddr, void *dstaddr, size_t len) {
+  struct Dll *e, *before, *cloned;
+  struct VfsMap *map, *copy;
+  uintptr_t src, dst, end;
+  if (!srcaddr || !dstaddr || !len) return einval();
+  src = (uintptr_t)srcaddr;
+  dst = (uintptr_t)dstaddr;
+  if (len > UINTPTR_MAX - src || len > UINTPTR_MAX - dst) return einval();
+  end = src + len;
+  cloned = NULL;
+  LOCK(&g_vfs.mapslock);
+  for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+    map = VFS_MAP_CONTAINER(e);
+    if (VfsMemoryRangeOverlap(map->addr, map->len, dstaddr, len)) {
+      UNLOCK(&g_vfs.mapslock);
+      return eexist();
+    }
+    if (VfsMemoryRangeOverlap(map->addr, map->len, srcaddr, len) &&
+        !VfsMemoryRangeContains(srcaddr, len, map->addr, map->len)) {
+      UNLOCK(&g_vfs.mapslock);
+      return efault();
+    }
+  }
+  for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+    map = VFS_MAP_CONTAINER(e);
+    if ((uintptr_t)map->addr < src || (uintptr_t)map->addr >= end) continue;
+    if (!(copy = (struct VfsMap *)malloc(sizeof(*copy)))) {
+      VfsMapListFree(&cloned);
+      UNLOCK(&g_vfs.mapslock);
+      return enomem();
+    }
+    copy->addr =
+        (void *)(dst + ((uintptr_t)map->addr - src));
+    copy->len = map->len;
+    copy->offset = map->offset;
+    copy->id = map->id;
+    copy->prot = map->prot;
+    copy->flags = map->flags;
+    unassert(!VfsAcquireInfo(map->data, &copy->data));
+    dll_init(&copy->elem);
+    dll_make_last(&cloned, &copy->elem);
+  }
+  before = NULL;
+  for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+    map = VFS_MAP_CONTAINER(e);
+    if ((uintptr_t)map->addr >= dst) break;
+    before = e;
+  }
+  VfsMapListJoin(&g_vfs.maps, &cloned, before);
+  UNLOCK(&g_vfs.mapslock);
+  return 0;
+}
+
+void VfsForgetMapRange(void *addr, size_t len) {
+  struct Dll *e, *next;
+  struct VfsMap *map;
+  uintptr_t start, end, mapstart;
+  if (!addr || !len) return;
+  start = (uintptr_t)addr;
+  if (len > UINTPTR_MAX - start) return;
+  end = start + len;
+  LOCK(&g_vfs.mapslock);
+  for (e = dll_first(g_vfs.maps); e; e = next) {
+    next = dll_next(g_vfs.maps, e);
+    map = VFS_MAP_CONTAINER(e);
+    mapstart = (uintptr_t)map->addr;
+    if (mapstart < start || mapstart >= end) continue;
+    if (map->len > end - mapstart) continue;
+    if (map->data->device->ops->Munmap) {
+      unassert(!map->data->device->ops->Munmap(map->data, map->addr,
+                                               map->len));
+    }
+    dll_remove(&g_vfs.maps, e);
+    unassert(!VfsMapFree(map));
+  }
+  UNLOCK(&g_vfs.mapslock);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 int VfsDupMapFd(void *addr, size_t len, off_t *offset, int *flags,

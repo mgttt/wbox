@@ -530,6 +530,9 @@ static int W32Fork(struct Machine *m) {
   int rc;
   int vpid;
   i64 delta;
+#ifndef DISABLE_VFS
+  bool clonedmaps;
+#endif
   HANDLE thr;
   uintptr_t lo, hi;
   void *srcwin, *dstwin;
@@ -548,6 +551,9 @@ static int W32Fork(struct Machine *m) {
   vpid = W32ChildVpid(rec);
   srcwin = WboxMemCurrentWindow();
   dstwin = 0;
+#ifndef DISABLE_VFS
+  clonedmaps = false;
+#endif
   // H4 (security-audit): take the upstream fork() lock set (same order:
   // exec before sig before mmap before pagelocks before fds/machines,
   // futexes+jit last) for the duration of the snapshot+page-table-fix
@@ -591,6 +597,14 @@ static int W32Fork(struct Machine *m) {
   lo = WboxMemHandleBase(srcwin);
   hi = WboxMemHandleLimit(srcwin);
   delta = (i64)(WboxMemHandleBase(dstwin) - lo);
+#ifndef DISABLE_VFS
+  if (VfsCloneMapRange((void *)lo, (void *)WboxMemHandleBase(dstwin),
+                       hi - lo) == -1) {
+    rc = eagain();
+    goto unlock_and_abandon;
+  }
+  clonedmaps = true;
+#endif
   // 2. build the child's own System
   if (!(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
     rc = enomem();  // snapshot window leaks (fatal ENOMEM anyway)
@@ -704,6 +718,11 @@ unlock_and_abandon:
   UNLOCK(&m->system->mmap_lock);
   UNLOCK(&m->system->sig_lock);
   UNLOCK(&m->system->exec_lock);
+#ifndef DISABLE_VFS
+  if (clonedmaps) {
+    VfsForgetMapRange((void *)WboxMemHandleBase(dstwin), hi - lo);
+  }
+#endif
   if (dstwin) WboxMemDestroyWindow(dstwin);  // M3: no snapshot window leak
   W32ChildAbandon(rec);
   return rc;

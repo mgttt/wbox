@@ -17,6 +17,8 @@
 
 #define W32PAGE 4096ULL
 
+intptr_t _get_osfhandle(int);
+
 // MAP_SHARED file mappings: dup'd fd + file offset per committed range,
 // written back on msync()/munmap(). The shim populates shared mappings by
 // pread() just like private ones, so without this registry guest writes
@@ -27,7 +29,23 @@ struct Fshare {
   int fd;            // dup() of the mapping fd; closed when fully unmapped
   int used;
   off_t off;         // file offset corresponding to lo
+  DWORD volume;
+  DWORD file_hi;
+  DWORD file_lo;
+  int identified;
 };
+
+static void FshareIdentify(struct Fshare *entry) {
+  BY_HANDLE_FILE_INFORMATION info;
+  intptr_t raw = _get_osfhandle(entry->fd);
+  if (raw != -1 &&
+      GetFileInformationByHandle((HANDLE)raw, &info)) {
+    entry->volume = info.dwVolumeSerialNumber;
+    entry->file_hi = info.nFileIndexHigh;
+    entry->file_lo = info.nFileIndexLow;
+    entry->identified = 1;
+  }
+}
 
 static int FshareRegister(struct Fshare *table, uintptr_t lo, uintptr_t hi,
                           int fd, off_t off) {
@@ -36,11 +54,13 @@ static int FshareRegister(struct Fshare *table, uintptr_t lo, uintptr_t hi,
     ;
   if (i == W32MAXFSHARE) return -1;
   if ((d = dup(fd)) == -1) return -1;
+  memset(table + i, 0, sizeof(table[i]));
   table[i].lo = lo;
   table[i].hi = hi;
   table[i].fd = d;
-  table[i].used = 1;
   table[i].off = off;
+  FshareIdentify(table + i);
+  table[i].used = 1;
   return 0;
 }
 
@@ -118,10 +138,10 @@ static void FshareRemove(struct Fshare *table, uintptr_t a, uintptr_t b) {
       if (j == W32MAXFSHARE || (d = dup(table[i].fd)) == -1) {
         table[i].hi = a;  // lose tail writeback rather than corrupt
       } else {
+        table[j] = table[i];
         table[j].lo = lo;
         table[j].hi = a;
         table[j].fd = d;
-        table[j].used = 1;
         table[j].off = table[i].off;
         table[i].off += (off_t)(b - lo);
         table[i].lo = b;
@@ -137,6 +157,81 @@ static void FshareClear(struct Fshare *table, int writeback) {
     if (table[i].used) close(table[i].fd);
   }
   memset(table, 0, W32MAXFSHARE * sizeof(*table));
+}
+
+static int FshareSameFile(const struct Fshare *a,
+                          const struct Fshare *b) {
+  return a->identified && b->identified &&
+         a->volume == b->volume &&
+         a->file_hi == b->file_hi &&
+         a->file_lo == b->file_lo;
+}
+
+static void FshareSync(struct Fshare *src, struct Fshare *dst) {
+  int i, j;
+  for (i = 0; i < W32MAXFSHARE; ++i) {
+    uint64_t srcoff, srcend;
+    if (!src[i].used) continue;
+    if (src[i].off < 0) continue;
+    srcoff = (uint64_t)src[i].off;
+    if (src[i].hi - src[i].lo > UINT64_MAX - srcoff) continue;
+    srcend = srcoff + (src[i].hi - src[i].lo);
+    for (j = 0; j < W32MAXFSHARE; ++j) {
+      uint64_t dstoff, dstend, off, end;
+      uintptr_t sa, da;
+      if (!dst[j].used || !FshareSameFile(src + i, dst + j)) continue;
+      if (dst[j].off < 0) continue;
+      dstoff = (uint64_t)dst[j].off;
+      if (dst[j].hi - dst[j].lo > UINT64_MAX - dstoff) continue;
+      dstend = dstoff + (dst[j].hi - dst[j].lo);
+      off = srcoff > dstoff ? srcoff : dstoff;
+      end = srcend < dstend ? srcend : dstend;
+      if (off >= end) continue;
+      sa = src[i].lo + (uintptr_t)(off - srcoff);
+      da = dst[j].lo + (uintptr_t)(off - dstoff);
+      while (off < end) {
+        MEMORY_BASIC_INFORMATION smbi, dmbi;
+        size_t amount =
+            (size_t)(end - off > W32PAGE ? W32PAGE : end - off);
+        DWORD sold = 0, dold = 0, ignored;
+        int schanged = 0, dchanged = 0;
+        if (!VirtualQuery((void *)sa, &smbi, sizeof(smbi)) ||
+            smbi.State != MEM_COMMIT ||
+            !VirtualQuery((void *)da, &dmbi, sizeof(dmbi)) ||
+            dmbi.State != MEM_COMMIT) {
+          goto next_page;
+        }
+        if ((smbi.Protect & PAGE_GUARD) ||
+            !(smbi.Protect &
+              (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+               PAGE_EXECUTE_WRITECOPY))) {
+          if (!VirtualProtect((void *)sa, amount, PAGE_READONLY, &sold)) {
+            goto next_page;
+          }
+          schanged = 1;
+        }
+        if ((dmbi.Protect & PAGE_GUARD) ||
+            !(dmbi.Protect &
+              (PAGE_READWRITE | PAGE_WRITECOPY |
+               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+          if (!VirtualProtect((void *)da, amount, PAGE_READWRITE, &dold)) {
+            if (schanged)
+              VirtualProtect((void *)sa, amount, sold, &ignored);
+            goto next_page;
+          }
+          dchanged = 1;
+        }
+        memcpy((void *)da, (void *)sa, amount);
+        if (dchanged) VirtualProtect((void *)da, amount, dold, &ignored);
+        if (schanged) VirtualProtect((void *)sa, amount, sold, &ignored);
+next_page:
+        sa += amount;
+        da += amount;
+        off += amount;
+      }
+    }
+  }
 }
 
 // runtime guest->host skew (base of the reserved guest VA window).
@@ -171,7 +266,7 @@ struct WboxWindow {
   size_t ivn, ivcap;
   int index;            // slot in g_windows
   struct Fshare fshare[W32MAXFSHARE];
-  // MAP_SHARED segments (guest offsets). The snapshot-fork
+  // MAP_SHARED|MAP_ANONYMOUS segments (guest offsets). The snapshot-fork
   // model gives every fork child a private host window, so true aliasing
   // of shared pages would require carving VA out of the reservation
   // (MapViewOfFileEx cannot overlay a MEM_RESERVE). L1 semantics instead:
@@ -196,10 +291,10 @@ static _Thread_local struct WboxWindow *g_win;
 #define g_lock (g_win->lock)
 #define g_hinttop (g_win->hinttop)
 
-// ---- MAP_SHARED segment tracking (snapshot fork) ----
+// ---- MAP_SHARED|MAP_ANONYMOUS segment tracking (snapshot fork) ----
 
 // register [a,a+len) (host address inside the CURRENT window) as a shared
-// segment. Caller must hold w->lock exclusively.
+// anonymous segment. Caller must hold w->lock exclusively.
 static void ShsegRegisterLocked(struct WboxWindow *w, uintptr_t a,
                                 size_t len) {
   struct WboxShseg *ns;
@@ -300,6 +395,8 @@ static void ShsegSync(struct WboxWindow *w) {
   AcquireSRWLockShared(&p->lock);
   ReleaseSRWLockShared(&g_windows_lock);
   AcquireSRWLockShared(&w->lock);
+  FshareWriteback(w->fshare, 0, UINTPTR_MAX);
+  FshareSync(w->fshare, p->fshare);
   for (i = 0; i < w->shn; ++i) {
     uintptr_t off = w->sh[i].off, len = w->sh[i].len, q;
     for (q = off; q < off + len; q += 4096) {
@@ -658,7 +755,7 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
     fprintf(stderr, "wbox mem: snapshot: src lock held, %zu intervals\n",
             (size_t)src->ivn);
     fflush(stderr);
-  // inherit shared segments (same guest offsets). The child gets a
+  // inherit shared-anon segments (same guest offsets). The child gets a
   // private copy of the contents like every other page; its writes are
   // synced back into THIS window when the child exits (ShsegSync).
   dst->sparent = src;
@@ -675,13 +772,12 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
       ReleaseSRWLockShared(&src->lock);
       goto fail;
     }
+    dst->fshare[i] = src->fshare[i];
     dst->fshare[i].lo =
         dst->base + (src->fshare[i].lo - src->base);
     dst->fshare[i].hi =
         dst->base + (src->fshare[i].hi - src->base);
     dst->fshare[i].fd = d;
-    dst->fshare[i].used = 1;
-    dst->fshare[i].off = src->fshare[i].off;
   }
   n = src->ivn;
   if (!(dst->iv = malloc((n ? n : 1) * sizeof(*dst->iv)))) {
@@ -959,7 +1055,6 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
   }
   if ((flags & MAP_SHARED) && !(flags & MAP_ANONYMOUS) && fd >= 0) {
     FshareRegister(g_win->fshare, a, a + len, fd, off);
-    ShsegRegisterLocked(g_win, a, len);
   }
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mmap: a=%p len=%#zx prot=%d flags=%#x fd=%d off=%lld\n",

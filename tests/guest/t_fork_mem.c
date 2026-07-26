@@ -156,6 +156,98 @@ int main(void) {
     }
   }
 
+  /* --- inherited file mapping keeps its backing for child mremap --- */
+  T_BEGIN("fork/file-private-mremap");
+  {
+    int fd = open("t_fork_mem_remap.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      unsigned char page[4096];
+      for (int i = 0; i < 3; ++i) {
+        memset(page, 0x30 + i, sizeof(page));
+        T_ASSERT_EQ(write(fd, page, sizeof(page)), sizeof(page));
+      }
+      unsigned char *fm =
+          mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+      T_ASSERT(fm != MAP_FAILED);
+      if (fm != MAP_FAILED) {
+        void *blocker = mmap(fm + 8192, 4096, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        T_ASSERT(blocker == fm + 8192);
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          unsigned char *moved = mremap(fm, 8192, 12288, MREMAP_MAYMOVE);
+          if (moved == MAP_FAILED || moved == fm || moved[8192] != 0x32) {
+            _exit(1);
+          }
+          moved[0] = 0x7f;
+          _exit(munmap(moved, 12288) == 0 ? 0 : 2);
+        }
+        if (pid > 0) {
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(fm[0] == 0x30);
+          unsigned char *moved =
+              mremap(fm, 8192, 12288, MREMAP_MAYMOVE);
+          T_ASSERT(moved != MAP_FAILED && moved != fm);
+          if (moved != MAP_FAILED) {
+            T_ASSERT(moved[8192] == 0x32);
+            T_ASSERT_OK(munmap(moved, 12288));
+          } else {
+            T_ASSERT_OK(munmap(fm, 8192));
+          }
+        } else {
+          T_ASSERT_OK(munmap(fm, 8192));
+        }
+        T_ASSERT_OK(munmap(blocker, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_remap.bin"));
+    }
+  }
+
+  /* --- moved shared mapping still updates the parent's original VA --- */
+  T_BEGIN("fork/file-shared-mremap-visible");
+  {
+    int fd = open("t_fork_mem_shared_remap.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      T_ASSERT_OK(ftruncate(fd, 12288));
+      unsigned char *fm =
+          mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(fm != MAP_FAILED);
+      if (fm != MAP_FAILED) {
+        void *blocker = mmap(fm + 8192, 4096, PROT_NONE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        T_ASSERT(blocker == fm + 8192);
+        fm[0] = 51;
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          unsigned char *moved = mremap(fm, 8192, 12288, MREMAP_MAYMOVE);
+          if (moved == MAP_FAILED || moved == fm) _exit(1);
+          moved[0] = 61;
+          moved[8192] = 62;
+          _exit(msync(moved, 12288, MS_SYNC) == 0 ? 0 : 2);
+        }
+        if (pid > 0) {
+          unsigned char ondisk[2] = {0};
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(fm[0] == 61);
+          T_ASSERT_EQ(pread(fd, ondisk, 1, 0), 1);
+          T_ASSERT_EQ(pread(fd, ondisk + 1, 1, 8192), 1);
+          T_ASSERT(ondisk[0] == 61 && ondisk[1] == 62);
+        }
+        T_ASSERT_OK(munmap(fm, 8192));
+        T_ASSERT_OK(munmap(blocker, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_shared_remap.bin"));
+    }
+  }
+
   /* --- exec memory cleanliness: anon page must not leak into new image ---
    * child writes a marker into an anon page then execs /bin/true-ish self;
    * if exec succeeds, the marker page is simply gone (process image replaced).
