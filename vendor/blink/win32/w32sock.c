@@ -24,6 +24,7 @@
 //   primitive so pipes/files/consoles and sockets compose.
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
 #include <stdint.h>
@@ -362,7 +363,7 @@ int socket(int domain, int type, int protocol) {
     return -1;
   }
   int wsd = FamToWs(domain);
-  if (wsd != WS_AF_INET && wsd != WS_AF_INET6) {
+  if (wsd != AF_UNIX && wsd != WS_AF_INET && wsd != WS_AF_INET6) {
     errno = EAFNOSUPPORT;
     return -1;
   }
@@ -384,13 +385,128 @@ int socket(int domain, int type, int protocol) {
   return fd;
 }
 
-int socketpair(int domain, int type, int protocol, int fds[2]) {
-  (void)domain;
-  (void)type;
-  (void)protocol;
-  (void)fds;
-  errno = ENOSYS;  // no AF_UNIX on winsock; loopback-tcp pair is L3
+// Winsock has no socketpair API. Use connected loopback sockets as the
+// transport; Hostfs preserves the externally visible unnamed AF_UNIX address.
+static int SocketPairFail(WSOCK a, WSOCK b, WSOCK c) {
+  int e = ws.WSAGetLastError();
+  if (a != WSOCK_INVALID) ws.closesocket(a);
+  if (b != WSOCK_INVALID) ws.closesocket(b);
+  if (c != WSOCK_INVALID) ws.closesocket(c);
+  ws.WSASetLastError(e);
+  errno = W32ErrFromWsa(e);
   return -1;
+}
+
+static int SocketPairStream(WSOCK pair[2]) {
+  WSOCK listener = WSOCK_INVALID;
+  WSOCK client = WSOCK_INVALID;
+  WSOCK server = WSOCK_INVALID;
+  struct sockaddr_in addr, clientaddr, peeraddr;
+  int len = sizeof(addr);
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = WS_AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  listener = ws.WSASocketW(WS_AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+  if (listener == WSOCK_INVALID ||
+      ws.bind(listener, (struct wsockaddr *)&addr, sizeof(addr)) ||
+      ws.getsockname(listener, (struct wsockaddr *)&addr, &len) ||
+      ws.listen(listener, 1)) {
+    return SocketPairFail(listener, client, server);
+  }
+  client = ws.WSASocketW(WS_AF_INET, SOCK_STREAM, 0, NULL, 0, 0);
+  if (client == WSOCK_INVALID ||
+      ws.connect(client, (struct wsockaddr *)&addr, len)) {
+    return SocketPairFail(listener, client, server);
+  }
+  len = sizeof(clientaddr);
+  if (ws.getsockname(client, (struct wsockaddr *)&clientaddr, &len)) {
+    return SocketPairFail(listener, client, server);
+  }
+  for (;;) {
+    int peerlen = sizeof(peeraddr);
+    server = ws.accept(listener, (struct wsockaddr *)&peeraddr, &peerlen);
+    if (server == WSOCK_INVALID) {
+      return SocketPairFail(listener, client, server);
+    }
+    if (peeraddr.sin_family == clientaddr.sin_family &&
+        peeraddr.sin_port == clientaddr.sin_port &&
+        peeraddr.sin_addr.s_addr == clientaddr.sin_addr.s_addr) {
+      break;
+    }
+    ws.closesocket(server);
+    server = WSOCK_INVALID;
+  }
+  ws.closesocket(listener);
+  pair[0] = server;
+  pair[1] = client;
+  return 0;
+}
+
+static int SocketPairDatagram(WSOCK pair[2]) {
+  WSOCK a = WSOCK_INVALID;
+  WSOCK b = WSOCK_INVALID;
+  struct sockaddr_in aa, ba;
+  int alen = sizeof(aa);
+  int blen = sizeof(ba);
+  memset(&aa, 0, sizeof(aa));
+  memset(&ba, 0, sizeof(ba));
+  aa.sin_family = ba.sin_family = WS_AF_INET;
+  aa.sin_addr.s_addr = ba.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  a = ws.WSASocketW(WS_AF_INET, SOCK_DGRAM, 0, NULL, 0, 0);
+  b = ws.WSASocketW(WS_AF_INET, SOCK_DGRAM, 0, NULL, 0, 0);
+  if (a == WSOCK_INVALID || b == WSOCK_INVALID ||
+      ws.bind(a, (struct wsockaddr *)&aa, sizeof(aa)) ||
+      ws.bind(b, (struct wsockaddr *)&ba, sizeof(ba)) ||
+      ws.getsockname(a, (struct wsockaddr *)&aa, &alen) ||
+      ws.getsockname(b, (struct wsockaddr *)&ba, &blen) ||
+      ws.connect(a, (struct wsockaddr *)&ba, blen) ||
+      ws.connect(b, (struct wsockaddr *)&aa, alen)) {
+    return SocketPairFail(a, b, WSOCK_INVALID);
+  }
+  pair[0] = a;
+  pair[1] = b;
+  return 0;
+}
+
+int socketpair(int domain, int type, int protocol, int fds[2]) {
+  WSOCK pair[2];
+  int rc;
+  if (!fds) {
+    errno = EFAULT;
+    return -1;
+  }
+  if (domain != AF_UNIX) {
+    errno = EAFNOSUPPORT;
+    return -1;
+  }
+  if (protocol) {
+    errno = EPROTONOSUPPORT;
+    return -1;
+  }
+  if (WsaInit() < 0) {
+    errno = EPROTONOSUPPORT;
+    return -1;
+  }
+  if (type == SOCK_STREAM) {
+    rc = SocketPairStream(pair);
+  } else if (type == SOCK_DGRAM) {
+    rc = SocketPairDatagram(pair);
+  } else {
+    errno = ESOCKTNOSUPPORT;
+    return -1;
+  }
+  if (rc == -1) return -1;
+  fds[0] = SockWrap(pair[0]);
+  if (fds[0] == -1) {
+    ws.closesocket(pair[1]);
+    return -1;
+  }
+  fds[1] = SockWrap(pair[1]);
+  if (fds[1] == -1) {
+    WboxSockClose(fds[0]);
+    return -1;
+  }
+  return 0;
 }
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len) {

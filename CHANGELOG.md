@@ -14,6 +14,11 @@
 
 ### Fixed
 
+- **AF_UNIX / socketpair（N1）**：现代 Windows 的 pathname AF_UNIX stream
+  socket 走原生 Winsock；匿名 stream/datagram pair 由 loopback 连接对承载，
+  同时在 Hostfs 层保留未命名 AF_UNIX 身份。修复 Win32 `SysSocketpair`
+  遗漏的 guest/host fd 映射，并覆盖 bind/connect/accept、双向收发、epoll、
+  NONBLOCK/CLOEXEC 与 getsockname/getpeername。guest 基线由 2 项收紧到空。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为
@@ -56,7 +61,8 @@
   门禁的价值在它上线的第一轮就兑现了。相应地，`known-failures.txt` 支持
   `@native` / `@wine` 模式标注：同一份基线要同时服务两种宿主环境，而
   环境专有缺陷仍可被精确登记。
-  W3 修复后，真机与 wine 基线均为 16 个用例 14 PASS / 2 FAIL。
+  W3 修复后基线收紧到 14 PASS / 2 FAIL；N1 随后修复，真机当前为
+  16 PASS / 0 FAIL，机器基线已为空。
 
 - **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
   在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils

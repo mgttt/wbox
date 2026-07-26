@@ -1,8 +1,7 @@
 /* t_net_epoll.c — epoll LT / ONESHOT / MOD / DEL / RDHUP semantics.
  *
  * Stream pairs use AF_UNIX socketpair when available; otherwise fall back
- * to a TCP loopback connection (wbox currently lacks AF_UNIX — recorded
- * by the explicit probe below). */
+ * to a TCP loopback connection. */
 #define _GNU_SOURCE
 #include <sys/epoll.h>
 #include <sys/socket.h>

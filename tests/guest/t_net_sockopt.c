@@ -2,6 +2,7 @@
  * (d7af906 regression), FIONREAD, poll timeout precision. */
 #define _GNU_SOURCE
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
 #include <sys/time.h>
@@ -19,8 +20,7 @@ static long now_ms(void) {
   return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* AF_UNIX socketpair with TCP-loopback fallback (wbox lacks AF_UNIX; the
- * explicit probe in t_net_epoll.c records that gap). */
+/* AF_UNIX socketpair with TCP-loopback fallback for other hosts. */
 static int have_afunix = 1;
 static int tcp_pair(int sv[2]) {
   int ls = socket(AF_INET, SOCK_STREAM, 0);
@@ -60,6 +60,77 @@ int main(void) {
   s = socket(AF_UNIX, SOCK_STREAM, 0);
   T_ASSERT(s >= 0);
   if (s >= 0) close(s);
+
+  /* --- AF_UNIX pathname and anonymous-pair semantics --- */
+  T_BEGIN("sock/afunix-path");
+  {
+    const char *path = "t_net_sockopt.sock";
+    struct sockaddr_un un = {0};
+    int ls = -1, cs = -1, as = -1;
+    char ch = 0;
+    unlink(path);
+    un.sun_family = AF_UNIX;
+    strcpy(un.sun_path, path);
+    T_ASSERT((ls = socket(AF_UNIX, SOCK_STREAM, 0)) >= 0);
+    if (ls >= 0) {
+      T_ASSERT_OK(bind(ls, (struct sockaddr *)&un, sizeof(un)));
+      T_ASSERT_OK(listen(ls, 1));
+      T_ASSERT((cs = socket(AF_UNIX, SOCK_STREAM, 0)) >= 0);
+      if (cs >= 0) T_ASSERT_OK(connect(cs, (struct sockaddr *)&un, sizeof(un)));
+      T_ASSERT((as = accept(ls, NULL, NULL)) >= 0);
+      if (cs >= 0 && as >= 0) {
+        T_ASSERT_EQ(write(cs, "u", 1), 1);
+        T_ASSERT_EQ(read(as, &ch, 1), 1);
+        T_ASSERT_EQ(ch, 'u');
+      }
+    }
+    if (as >= 0) close(as);
+    if (cs >= 0) close(cs);
+    if (ls >= 0) close(ls);
+    T_ASSERT_OK(unlink(path));
+  }
+
+  T_BEGIN("sockpair/dgram");
+  {
+    int sv[2] = {-1, -1};
+    char b[4] = {0};
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof(ss);
+    T_ASSERT_OK(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv));
+    if (sv[0] >= 0 && sv[1] >= 0) {
+      T_ASSERT_OK(getsockname(sv[0], (struct sockaddr *)&ss, &slen));
+      T_ASSERT_EQ(ss.ss_family, AF_UNIX);
+      slen = sizeof(ss);
+      T_ASSERT_OK(getpeername(sv[0], (struct sockaddr *)&ss, &slen));
+      T_ASSERT_EQ(ss.ss_family, AF_UNIX);
+      T_ASSERT_EQ(write(sv[0], "ab", 2), 2);
+      T_ASSERT_EQ(read(sv[1], b, sizeof(b)), 2);
+      T_ASSERT(!memcmp(b, "ab", 2));
+      T_ASSERT_EQ(write(sv[1], "z", 1), 1);
+      T_ASSERT_EQ(read(sv[0], b, sizeof(b)), 1);
+      T_ASSERT_EQ(b[0], 'z');
+      close(sv[0]);
+      close(sv[1]);
+    }
+  }
+
+  T_BEGIN("sockpair/flags-errors");
+  {
+    int sv[2] = {-1, -1};
+    T_ASSERT_OK(socketpair(AF_UNIX,
+                           SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                           0, sv));
+    if (sv[0] >= 0 && sv[1] >= 0) {
+      T_ASSERT(fcntl(sv[0], F_GETFL) & O_NONBLOCK);
+      T_ASSERT(fcntl(sv[1], F_GETFL) & O_NONBLOCK);
+      T_ASSERT(fcntl(sv[0], F_GETFD) & FD_CLOEXEC);
+      T_ASSERT(fcntl(sv[1], F_GETFD) & FD_CLOEXEC);
+      close(sv[0]);
+      close(sv[1]);
+    }
+    T_ASSERT_ERRNO(socketpair(AF_INET, SOCK_STREAM, 0, sv), EAFNOSUPPORT);
+    T_ASSERT_ERRNO(socketpair(AF_UNIX, SOCK_RAW, 0, sv), ESOCKTNOSUPPORT);
+  }
 
   /* --- sockopt get/set matrix on TCP socket --- */
   T_BEGIN("sockopt/reuseaddr");

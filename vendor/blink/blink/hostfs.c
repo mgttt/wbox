@@ -1855,6 +1855,8 @@ int HostfsSocketpair(int domain, int type, int protocol,
                      struct VfsInfo *infos[2]) {
   int i;
   int fds[2];
+  struct HostfsInfo *hostinfo;
+  socklen_t unlen = offsetof(struct sockaddr_un, sun_path);
   VFS_LOGF("HostfsSocketpair(%d, %d, %d, %p)", domain, type, protocol, infos);
   if (infos == NULL) {
     return efault();
@@ -1868,7 +1870,20 @@ int HostfsSocketpair(int domain, int type, int protocol,
     if (HostfsWrapFd(fds[i], false, &infos[i]) == -1) {
       goto cleananddie;
     }
-    ((struct HostfsInfo *)infos[i]->data)->socketfamily = domain;
+    hostinfo = (struct HostfsInfo *)infos[i]->data;
+    hostinfo->socketfamily = domain;
+    if (domain == AF_UNIX) {
+      hostinfo->socketaddr = calloc(1, unlen);
+      hostinfo->socketpeeraddr = calloc(1, unlen);
+      if (!hostinfo->socketaddr || !hostinfo->socketpeeraddr) {
+        enomem();
+        goto cleananddie;
+      }
+      hostinfo->socketaddr->sa_family = AF_UNIX;
+      hostinfo->socketaddrlen = unlen;
+      hostinfo->socketpeeraddr->sa_family = AF_UNIX;
+      hostinfo->socketpeeraddrlen = unlen;
+    }
   }
   return 0;
 cleananddie:

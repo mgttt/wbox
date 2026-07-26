@@ -2023,6 +2023,9 @@ static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
   struct Fd *fd;
   u8 fds_linux[2][4];
   int rc, lim, flags, sysflags, fds[2];
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int guestfds[2];
+#endif
   flags = type & (SOCK_NONBLOCK_LINUX | SOCK_CLOEXEC_LINUX);
   type &= ~(SOCK_NONBLOCK_LINUX | SOCK_CLOEXEC_LINUX);
   if ((type = XlatSocketType(type)) == -1) return -1;
@@ -2032,6 +2035,43 @@ static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if (flags) LOCK(&m->system->exec_lock);
   if ((rc = VfsSocketpair(family, type, protocol, fds)) != -1) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    FixupSock(fds[0], flags);
+    FixupSock(fds[1], flags);
+    LOCK(&m->system->fds.lock);
+    guestfds[0] = AllocGuestFd(&m->system->fds, 0);
+    if (guestfds[0] >= lim) {
+      UNLOCK(&m->system->fds.lock);
+      VfsClose(fds[0]);
+      VfsClose(fds[1]);
+      rc = emfile();
+    } else {
+      sysflags = O_RDWR;
+      if (flags & SOCK_CLOEXEC_LINUX) sysflags |= O_CLOEXEC;
+      if (flags & SOCK_NONBLOCK_LINUX) sysflags |= O_NDELAY;
+      unassert(fd = AddFd(&m->system->fds, guestfds[0], sysflags));
+      fd->hostfd = fds[0];
+      fd->socktype = type;
+      guestfds[1] = AllocGuestFd(&m->system->fds, 0);
+      if (guestfds[1] >= lim) {
+        dll_remove(&m->system->fds.list, &fd->elem);
+        FreeFd(fd);
+        UNLOCK(&m->system->fds.lock);
+        VfsClose(fds[0]);
+        VfsClose(fds[1]);
+        rc = emfile();
+      } else {
+        unassert(fd = AddFd(&m->system->fds, guestfds[1], sysflags));
+        fd->hostfd = fds[1];
+        fd->socktype = type;
+        UNLOCK(&m->system->fds.lock);
+        Write32(fds_linux[0], guestfds[0]);
+        Write32(fds_linux[1], guestfds[1]);
+        unassert(
+            !CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
+      }
+    }
+#else
     if (fds[0] >= lim || fds[1] >= lim) {
       VfsClose(fds[0]);
       VfsClose(fds[1]);
@@ -2052,6 +2092,7 @@ static int SysSocketpair(struct Machine *m, i32 family, i32 type, i32 protocol,
       Write32(fds_linux[1], fds[1]);
       unassert(!CopyToUserWrite(m, pipefds_addr, fds_linux, sizeof(fds_linux)));
     }
+#endif
   }
   if (flags) UNLOCK(&m->system->exec_lock);
   return rc;

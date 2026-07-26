@@ -12,7 +12,4 @@
 # 有些失败只在真 Windows 上出现（wine 不复现），反之亦然；不加标注 = 两种模式都算。
 # 用 WBOX_GUEST_NO_BASELINE=1 可关闭基线判定，回到"任一失败即非零"的原始语义。
 
-# N1：win32 宿主无 AF_UNIX —— socket(AF_UNIX,…)/socketpair(AF_UNIX) 返回 ENOSYS(38)。
-#     返回码干净、语义明确，本期不实现。
-t_net_epoll
-t_net_sockopt
+# 当前无已知失败项。

@@ -5,23 +5,23 @@
 > 行改成"已修复"。判定语义（失败 ⊆ 基线放行 / 基线外新失败为回归 /
 > 基线内用例变通过视为基线过期）见 `docs/testing.md` §一.2。
 
-基线来源：`tests/run-guest-tests.sh`。**两种宿主环境的基线不同**，故
-`known-failures.txt` 的条目支持 `@native` / `@wine` 标注（无标注 = 两者都算）。
+基线来源：`tests/run-guest-tests.sh`。当前两种宿主环境的机器基线均为空；
+格式仍支持 `@native` / `@wine` 标注，以便精确登记后续环境专有缺陷
+（无标注 = 两种模式都算）。
 
 | 环境 | 当前基线 | 失败项 |
 |---|---|---|
-| 真 Windows（本机，native） | 16 个用例：**14 PASS / 2 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt |
-| wine（wine 模式当前基线） | 16 个用例：**14 PASS / 2 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt |
+| 真 Windows（本机，native） | 16 个用例：**16 PASS / 0 FAIL / 0 SKIP** | 无 |
+| wine（wine 模式当前基线） | 16 个用例：**16 PASS / 0 FAIL / 0 SKIP** | 无 |
 
-真机断言级统计为 **436 条：pass=424 fail=2 skip=10**；两条失败断言均为
-N1，skip 均为 symlink EPERM 宿主限制降级与 t_exec/t_net_epoll 内个别
-环境降级项。
+真机断言级统计为 **463 条：pass=454 fail=0 skip=9**；skip 均为 symlink
+EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
 build-wbox-linux 的 artifact + zig 交叉编译 + 基线判定），不再是 SKIP 空转。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
-机器基线因此只保留 N1 两项。
+机器基线现已为空。
 
 复现方法（任一条目）：
 
@@ -151,11 +151,11 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | P1 | `kill`+`waitpid` 信号语义 | ✅ t_proc 全过（WIFSIGNALED/WTERMSIG 成立） |
 | P2 | `readlink("/proc/self/exe")` | ✅ t_proc/t_exec 全过 |
 
-## P1 网络 —— 1 项残留（won't fix，宿主限制）
+## P1 网络 —— ✅ 已全部修复（2026-07-26）
 
 | # | 现象 | 期望 | 实测现状 |
 |---|------|------|-----------|
-| N1 | `socket(AF_UNIX,…)` / `socketpair(AF_UNIX)` | 成功 | **ENOSYS(38)**——**仍成立**（v1.0 实测：t_net_epoll:55 socketpair ENOSYS、t_net_sockopt:61 socket(AF_UNIX,SOCK_STREAM) 失败）。win32 宿主无 AF_UNIX，返回码干净、语义明确，本期不实现 |
+| N1 | `socket(AF_UNIX,…)` / `socketpair(AF_UNIX)` | 成功 | ✅ 普通 AF_UNIX stream socket 走现代 Winsock 原生实现；匿名 stream/datagram pair 由仅 loopback 可达的 Winsock 连接对承载，并在 Hostfs 元数据层保持未命名 AF_UNIX 身份。pathname bind/connect/accept、双向收发、epoll、NONBLOCK/CLOEXEC、getsockname/getpeername 全部通过 |
 | N2 | `epoll_ctl(ADD)` pipe/TCP | 成功 | ✅ 已修复（fix/net-sem），t_net_epoll LT/ONESHOT/MOD/DEL/RDHUP 矩阵全过 |
 | N3 | `socket(9999,…)` errno | EAFNOSUPPORT | ✅ 已修复（xlat.c 校准），t_negative 全过该项 |
 
