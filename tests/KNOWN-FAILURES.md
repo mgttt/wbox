@@ -27,7 +27,32 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 
 | # | 现象 | 证据 | 状态 |
 |---|------|------|------|
-| W1 | 验收矩阵 **B 组（shell 矩阵，fork 依赖）第一项 `echo hello \| cat` 整项挂死** | CI run 24：A 组 11/11 于 08:25:04 全 PASS，随后 B 组标题打印后再无输出，直到 08:42:59 被取消（18 分钟无进展） | 未修复；wine 下 B 组 8/8 通过，属真机专有 |
+| W1 | **第一次真正的 `fork()`（syscall 57）挂死在 fork 实现内部**，导致所有 fork 依赖项超时 | 见下方 run 32 探针与矩阵结果 | 未修复；wine 下 B/C 组全通过，属真机专有 |
+
+**run 32 矩阵（已加 60s 单项超时）**：PASS=14 FAIL=9 SKIP=2
+
+- A 基础 11 项 **全 PASS**（含 A8 退出码转发 0/1/7）
+- D 网络 **PASS**——guest 内 wget 公网下载 + md5 精确匹配，网络栈真机可用
+- B5/B6（`/dev/null` 读写）PASS；B4 rc=127 `sh: cat: not found`（另一问题，非挂死）
+- **B1/B2/B3/B7/B8 + C1/C2/C3 全部 rc=124 超时**——无一例外都依赖 fork
+
+**run 32 分层探针**（定位到层次）：
+
+| 探针 | 结果 | 含义 |
+|---|---|---|
+| P1 `echo hi`（无 fork） | rc=0 ✅ | 基础执行链路完好 |
+| P2 `(echo sub)`（子 shell） | rc=0 ✅ | **但无 `[w32fork]` 日志**——busybox 把这层 fork 优化掉了，未真正 fork |
+| P3 `true & wait` | 挂死 ❌ | 日志停在 `[w32fork] syscall a=57` + `fork enter a=0 b=0` 之后 |
+
+即：**卡在 `fork enter` 与下一条日志之间**。该区间的代码是
+`blink/syscall.c` 里依次取六把锁（exec/sig/mmap/pagelocks/futexes/jit）
+后调用 `WboxMemSnapshotWindow`（同步快照全部已提交页）。两个候选：
+某把锁死锁，或快照在真 Windows 上极慢/卡死（默认 guest VA 窗口
+`WBOX_VA_BITS=40` = 1TB，wine 的内存管理器可能偷懒而真机不会）。
+
+下一轮 CI 探针（Q1/Q2/Q3）已就位以区分：Q1 开 `WBOX_DEBUG_MEM=1` 看快照
+是否有进展（有日志=在拷贝 → 性能问题；无日志=卡在锁 → 死锁）；
+Q2 把 VA 窗口降到 38 位看是否显著变化；Q3 关 JIT 排除 `jit.lock`。
 
 背景：同一次 CI 首次证明**堆损坏修复生效**——A 组 11 项全过，含
 A8「退出码转发 (0/1/7)」（此前 true/false/exit 7 全塌成 127，根因是
