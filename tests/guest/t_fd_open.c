@@ -132,6 +132,27 @@ int main(void) {
   }
   close(fd);
 
+  T_BEGIN("dup/shared-append-status");
+  {
+    char got[5] = {0};
+    fd = open("t_fo_append_dup", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    T_ASSERT_EQ(write(fd, "abc", 3), 3);
+    d2 = dup(fd);
+    T_ASSERT(d2 >= 0);
+    T_ASSERT_OK(fcntl(d2, F_SETFL, O_APPEND));
+    T_ASSERT(fcntl(fd, F_GETFL) & O_APPEND);
+    T_ASSERT_EQ(lseek(fd, 0, SEEK_SET), 0);
+    T_ASSERT_EQ(write(fd, "X", 1), 1);
+    T_ASSERT_EQ(pread(d2, got, 4, 0), 4);
+    T_ASSERT_EQ(memcmp(got, "abcX", 4), 0);
+    T_ASSERT_OK(fcntl(fd, F_SETFL, 0));
+    T_ASSERT(!(fcntl(d2, F_GETFL) & O_APPEND));
+    close(d2);
+    close(fd);
+    unlink("t_fo_append_dup");
+  }
+
   /* close original must not invalidate dup'd description's open file */
   T_BEGIN("dup/close-original-survives");
   fd = open("t_fo_b", O_RDONLY);

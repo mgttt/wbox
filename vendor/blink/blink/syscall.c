@@ -4399,14 +4399,15 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
     rc = (fd->oflags & O_CLOEXEC) ? FD_CLOEXEC_LINUX : 0;
   } else if (cmd == F_GETFL_LINUX) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
-    if (fd->eventfd) {
-      int hostflags = VfsFcntl(fd->hostfd, F_GETFL);
-      rc = hostflags == -1 ? -1 : UnXlatOpenFlags(hostflags);
-    } else
-#endif
     {
-      rc = UnXlatOpenFlags(fd->oflags);
+      int hostflags = VfsFcntl(fd->hostfd, F_GETFL);
+      if (!fd->eventfd && !fd->socktype)
+        hostflags |= fd->oflags & O_NDELAY;
+      rc = hostflags == -1 ? -1 : UnXlatOpenFlags(hostflags);
     }
+#else
+    rc = UnXlatOpenFlags(fd->oflags);
+#endif
   } else if (cmd == F_SETFD_LINUX) {
     if (!(arg & ~FD_CLOEXEC_LINUX)) {
       if (VfsFcntl(fd->hostfd, F_SETFD, arg ? FD_CLOEXEC : 0) != -1) {

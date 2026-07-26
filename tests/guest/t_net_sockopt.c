@@ -302,6 +302,10 @@ int main(void) {
     T_ASSERT_OK(mkpair(sv));
     int alias = dup(sv[0]);
     T_ASSERT(alias >= 0);
+    T_ASSERT_OK(fcntl(alias, F_SETFL, O_NONBLOCK));
+    T_ASSERT(fcntl(sv[0], F_GETFL) & O_NONBLOCK);
+    T_ASSERT_OK(fcntl(sv[0], F_SETFL, 0));
+    T_ASSERT(!(fcntl(alias, F_GETFL) & O_NONBLOCK));
     T_ASSERT_OK(close(sv[0]));
     T_ASSERT_OK(fstat(alias, &st));
     T_ASSERT(S_ISSOCK(st.st_mode));

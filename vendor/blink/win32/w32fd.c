@@ -706,6 +706,11 @@ static int IsSpecial(int fd) {
 // Atomicity is best-effort: seek-to-END immediately before the write.
 #define W32_FDTRACK_MAX 65536
 static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
+struct W32AppendState {
+  int refs;
+  int append;
+};
+static struct W32AppendState *g_fdappendstate[W32_FDTRACK_MAX];
 // Access mode is needed by F_GETFL. MinGW's CRT doesn't expose a query for
 // the mode passed to _open_osfhandle(), and reporting O_RDWR unconditionally
 // makes blink treat stdin and read-only files as writable.
@@ -713,6 +718,10 @@ static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
 static unsigned char g_fdaccess[W32_FDTRACK_MAX];
 static void W32SetAppend(int fd, int on) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  if (g_fdappendstate[fd]) {
+    g_fdappendstate[fd]->append = !!on;
+    return;
+  }
   if (on) {
     g_fdappend[fd >> 3] |= 1u << (fd & 7);
   } else {
@@ -720,7 +729,40 @@ static void W32SetAppend(int fd, int on) {
   }
 }
 static int W32IsAppend(int fd) {
-  return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdappendstate[fd])
+    return g_fdappendstate[fd]->append;
+  return fd >= 0 && fd < W32_FDTRACK_MAX &&
+         (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+}
+static void W32DropAppend(int fd) {
+  struct W32AppendState *state;
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  state = g_fdappendstate[fd];
+  g_fdappendstate[fd] = NULL;
+  if (state && !--state->refs) free(state);
+  g_fdappend[fd >> 3] &= ~(1u << (fd & 7));
+}
+static int W32EnsureAppendState(int fd) {
+  struct W32AppendState *state;
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return 0;
+  if (g_fdappendstate[fd]) return 0;
+  state = malloc(sizeof(*state));
+  if (!state) {
+    errno = ENOMEM;
+    return -1;
+  }
+  state->refs = 1;
+  state->append = (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+  g_fdappendstate[fd] = state;
+  return 0;
+}
+static void W32ShareAppendState(int fd, int fd2) {
+  if (fd < 0 || fd >= W32_FDTRACK_MAX || fd2 < 0 ||
+      fd2 >= W32_FDTRACK_MAX)
+    return;
+  W32DropAppend(fd2);
+  g_fdappendstate[fd2] = g_fdappendstate[fd];
+  ++g_fdappendstate[fd2]->refs;
 }
 static void W32SetAccess(int fd, int flags) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
@@ -1306,6 +1348,8 @@ static int EventfdDup2(int fd, int fd2) {
     errno = EBADF;
     return -1;
   }
+  W32DropAppend(fd2);
+  W32SetAccess(fd2, O_RDWR);
   if (EventfdMap(fd2, obj) == -1) {
     _close(fd2);
     EventfdRelease(obj);
@@ -1581,6 +1625,10 @@ ssize_t write(int fd, const void *buf, size_t n) {
 }
 
 int close(int fd) {
+  if (!IsSpecial(fd)) {
+    W32DropAppend(fd);
+    W32SetAccess(fd, -1);
+  }
   switch (W32FdClassify(fd, NULL)) {
     case W32FD_SOCKET:
       (void)WboxSockClose(fd);  // feat/net: socket fds (classified above)
@@ -1597,8 +1645,6 @@ int close(int fd) {
     case W32FD_SPECIAL:
       return 0;
   }
-  W32SetAppend(fd, 0);
-  W32SetAccess(fd, -1);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
 
@@ -1831,8 +1877,13 @@ int dup(int fd) {
     errno = W32Err();
     return -1;
   }
+  if (W32EnsureAppendState(fd) == -1) {
+    CloseHandle(duph);
+    return -1;
+  }
   int nfd = W32ToCrt(duph, W32GetAccess(fd));
-  W32SetAppend(nfd, W32IsAppend(fd));  // dup shares the file status flags
+  if (nfd == -1) return -1;
+  W32ShareAppendState(fd, nfd);
   return nfd;
 }
 
@@ -1870,14 +1921,20 @@ int dup2(int fd, int fd2) {
       return -1;
     }
     close(tmp);
+    W32DropAppend(fd2);
     W32SetAccess(fd2, O_RDWR);
     return fd2;
   }
+  if (W32Handle(fd) == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  if (W32EnsureAppendState(fd) == -1) return -1;
   if (_dup2(fd, fd2)) {
     errno = EBADF;
     return -1;
   }
-  W32SetAppend(fd2, W32IsAppend(fd));
+  W32ShareAppendState(fd, fd2);
   W32SetAccess(fd2, W32GetAccess(fd));
   return fd2;
 }
