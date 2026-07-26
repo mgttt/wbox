@@ -48,15 +48,29 @@ jobs:
   # ② Windows 目标编译检查：Win32 专属代码（job/token/sandbox/acl/backend native）
   #    只能在 windows target 下编译，作为 Windows 代码的编译期门禁
   check-windows-msvc:
-    timeout-minutes: 15  # 仅编译检查，正常 <2 分钟
+    timeout-minutes: 20  # 编译检查 + 双目标 clippy，正常 <5 分钟
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --locked --target x86_64-pc-windows-msvc
+      # docs/testing.md §二 与 DEVELOPMENT §3 把"0 warning"写成硬门槛，但此前
+      # CI 只跑 cargo check——check **不因 warning 失败**，且完全没跑 clippy，
+      # 于是该标准从未被真正强制过（实证：21730c1 引入的两条 clippy 告警
+      # cloned_ref_to_slice_refs / err_expect 一路合进 main 无人拦下）。
+      # 加 -D warnings 让门槛名副其实。
+      #
+      # 两个目标都要跑：cfg(windows) 模块（sandbox/token/job/acl）只在 windows
+      # target 下参与编译，host 侧 clippy 根本看不到它们——上述两条告警正是
+      # 出在 sandbox.rs，只有 windows target 的 clippy 能发现。
+      - name: clippy —— host 目标（-D warnings）
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: clippy —— windows-msvc 目标（-D warnings）
+        run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
 
   # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
   smoke-windows:

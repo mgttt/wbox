@@ -113,7 +113,17 @@ scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox
 bash tests/run.sh
 ```
 
-提交前最低门槛：`cargo test` 全绿 + windows-msvc check 0 warning。
+提交前最低门槛：`cargo test` 全绿 + **双目标 clippy 0 warning**：
+
+```bash
+cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+```
+
+两个目标缺一不可——`cfg(windows)` 模块（sandbox/token/job/acl）只在 windows
+target 下参与编译，host 侧 clippy 看不到它们。该门槛由 CI 的
+`check-windows-msvc` job 强制执行（此前只跑 `cargo check`，而 check 不因
+warning 失败，标准形同虚设）。
 
 ## 三、发布门禁（`.github/workflows/ci.yml`）
 

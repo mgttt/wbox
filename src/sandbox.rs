@@ -577,7 +577,8 @@ mod real_windows_tests {
         let env = minimal_process_env();
 
         // build_cmdline 把 exe 路径加引号
-        let cmdline = build_cmdline(&[exe.clone()]).unwrap();
+        // from_ref 而非 clone：无谓的 String 复制（clippy cloned_ref_to_slice_refs）
+        let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
         let rc = run_container(&profile, &caps, &cmdline, &workdir, &job, &env).unwrap();
         assert_eq!(rc, 0, "hostname.exe 在 AppContainer 内应返回 0");
     }
@@ -629,8 +630,7 @@ mod real_windows_tests {
         // 一个绝对不存在的路径
         let bogus = r"C:\wbox-definitely-does-not-exist-xyz-12345";
         let err = run_container(&profile, &[], &cmdline, bogus, &job, &[])
-            .err()
-            .expect("应报 spawn 错误");
+            .expect_err("应报 spawn 错误");
         let msg = format!("{}", err);
         assert!(
             msg.contains("CreateProcessW") || msg.contains("GetLastError"),
