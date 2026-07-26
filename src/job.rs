@@ -5,7 +5,6 @@
 //! - 可选：进程内存上限、CPU 硬性百分比上限（CPU rate control，Win8+）、最大进程数；
 //! - 不授予 breakaway 权限，子进程无法逃离 Job。
 
-use anyhow::Context as _;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
@@ -16,19 +15,14 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
 };
 
-use crate::error::{ErrKind, KindExt, Result};
+use crate::error::Result;
 use crate::token::OwnedHandle;
 
-/// Job 限额参数（0 = 不启用该项）。
-#[derive(Debug, Default, Clone, Copy)]
-pub struct JobLimits {
-    /// 每进程内存上限（MB），0 = 不限
-    pub memory_mb: u64,
-    /// CPU 硬性百分比上限 1..=100，0 = 不限
-    pub cpu_pct: u32,
-    /// 最大活动进程数，0 = 不限
-    pub max_procs: u32,
-}
+// 限额参数直接用 backend::Limits：原先 job.rs 另有一个 JobLimits，字段与
+// Limits 逐一对应，native.rs 每次都做一次纯拷贝式转换——两份定义容易漂移，
+// 且换算逻辑被困在 cfg(windows) 里测不到。现统一为一处，换算方法
+// （memory_limit_bytes / cpu_rate）挂在 Limits 上，跨平台可单测。
+use crate::backend::Limits as JobLimits;
 
 /// RAII 包装：匿名 Job Object。
 pub struct Job {
@@ -67,13 +61,11 @@ impl Job {
 
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         ext.BasicLimitInformation = basic;
-        if self.limits.memory_mb > 0 {
+        // MB→字节换算（含溢出检查）在 backend::Limits::memory_limit_bytes，
+        // 那里跨平台可测；此处只负责下发。
+        if let Some(bytes) = self.limits.memory_limit_bytes()? {
             ext.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-            // ProcessMemoryLimit 单位是字节（每进程上限）。
-            ext.ProcessMemoryLimit = (self.limits.memory_mb as usize)
-                .checked_mul(1024 * 1024)
-                .context("内存上限溢出")
-                .ctx(ErrKind::Job)?;
+            ext.ProcessMemoryLimit = bytes;
         }
         // # Safety: 结构体已完整初始化，句柄有效，尺寸与信息类匹配。
         let ok = unsafe {
@@ -93,13 +85,13 @@ impl Job {
         }
 
         // ---- CPU rate control（硬性上限，单位 = 百分比 × 100）----
-        if self.limits.cpu_pct > 0 {
+        // CpuRate 语义（百分比 × 100）在 backend::Limits::cpu_rate，跨平台可测。
+        if let Some(rate) = self.limits.cpu_rate() {
             let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
             cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
                 | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
-            // CpuRate 语义：N% × 100（每周期可用时间比例，Win8+ 原生支持，无需管理员）。
             // windows-sys 的 union 字段为 Copy 类型，写字段是安全操作；写入后不再读取其它变体。
-            cpu.Anonymous.CpuRate = self.limits.cpu_pct * 100;
+            cpu.Anonymous.CpuRate = rate;
             // # Safety: 结构体已初始化，句柄有效。
             let ok = unsafe {
                 SetInformationJobObject(

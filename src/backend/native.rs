@@ -78,12 +78,7 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
     }
 
     // ---- 3. Job Object ----
-    let limits = job::JobLimits {
-        memory_mb: spec.limits.memory_mb,
-        cpu_pct: spec.limits.cpu_pct,
-        max_procs: spec.limits.max_procs,
-    };
-    let job = job::Job::create(limits)?;
+    let job = job::Job::create(spec.limits)?;
 
     // ---- 4. verbose 摘要 ----
     if spec.verbose {
@@ -101,7 +96,7 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
         );
         println!(
             "  Job 限额     : KILL_ON_JOB_CLOSE=on, memory={}MB, cpu={}%, max-procs={}",
-            limits.memory_mb, limits.cpu_pct, limits.max_procs
+            spec.limits.memory_mb, spec.limits.cpu_pct, spec.limits.max_procs
         );
         println!("  工作目录     : {}", workdir);
         println!("  执行目标     : {}", target_desc);

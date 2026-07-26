@@ -36,6 +36,43 @@ pub struct Limits {
     pub max_procs: u32,
 }
 
+// 这两个换算只有 Windows 侧的 job.rs 消费（非 Windows 构建下无调用方），
+// 但**规则本身跨平台**，故定义与单测都留在这里——与 RunSpec/Prepared 同一处理。
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Limits {
+    /// Job Object 的 `ProcessMemoryLimit` 单位是**字节**（每进程上限）。
+    /// 返回 `None` 表示不限（`memory_mb == 0`）。
+    ///
+    /// 换算放在这里而非 job.rs：job.rs 是 `cfg(windows)` 且换算夹在 unsafe
+    /// Win32 调用中间，Linux 上既编译不到也测不了。溢出必须显式失败——
+    /// 静默回绕会把"上限 5 TB"变成一个很小的值，反而收紧限制且无从察觉。
+    pub(crate) fn memory_limit_bytes(&self) -> Result<Option<usize>> {
+        if self.memory_mb == 0 {
+            return Ok(None);
+        }
+        usize::try_from(self.memory_mb)
+            .ok()
+            .and_then(|mb| mb.checked_mul(1024 * 1024))
+            .map(Some)
+            .ok_or_else(|| {
+                crate::error::WboxError::job(format!(
+                    "内存上限溢出：{} MB 无法用本平台的 usize 表示为字节",
+                    self.memory_mb
+                ))
+            })
+    }
+
+    /// `JOBOBJECT_CPU_RATE_CONTROL_INFORMATION.CpuRate` 的语义是
+    /// **百分比 × 100**（每周期可用时间比例）。返回 `None` 表示不限。
+    pub(crate) fn cpu_rate(&self) -> Option<u32> {
+        if self.cpu_pct == 0 {
+            None
+        } else {
+            Some(self.cpu_pct * 100)
+        }
+    }
+}
+
 /// 一次 `run` 的完整规格（后端无关）。
 // 非 Windows 构建下 name/limits 等仅由 Windows 专属 spawn 读取。
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -341,6 +378,39 @@ mod tests {
         assert!(env.iter().any(|(k, v)| k == "LANG" && v == "C"));
         // SystemRoot 兜底存在（白名单路径）
         assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+    }
+
+    // ---- Limits → Win32 数值换算 ----
+
+    #[test]
+    fn memory_limit_zero_means_unlimited() {
+        let l = Limits { memory_mb: 0, ..Default::default() };
+        assert_eq!(l.memory_limit_bytes().unwrap(), None);
+    }
+
+    #[test]
+    fn memory_limit_converts_mb_to_bytes() {
+        let l = Limits { memory_mb: 256, ..Default::default() };
+        assert_eq!(l.memory_limit_bytes().unwrap(), Some(256 * 1024 * 1024));
+    }
+
+    #[test]
+    fn memory_limit_overflow_is_error_not_wraparound() {
+        // 静默回绕会把"极大上限"变成一个很小的值 —— 反而收紧限制且无从察觉，
+        // 故必须报错。错误须归类为 Job 错误（退出码 3）。
+        let l = Limits { memory_mb: u64::MAX, ..Default::default() };
+        let err = l.memory_limit_bytes().unwrap_err();
+        assert_eq!(err.exit_code(), 3, "{}", err);
+        assert!(format!("{}", err).contains("溢出"), "{}", err);
+    }
+
+    #[test]
+    fn cpu_rate_is_percent_times_100() {
+        assert_eq!(Limits { cpu_pct: 0, ..Default::default() }.cpu_rate(), None);
+        assert_eq!(Limits { cpu_pct: 1, ..Default::default() }.cpu_rate(), Some(100));
+        assert_eq!(Limits { cpu_pct: 50, ..Default::default() }.cpu_rate(), Some(5000));
+        // CLI 已把上限卡在 100（parse 时校验），此处确认边界不越出 Win32 的 10000
+        assert_eq!(Limits { cpu_pct: 100, ..Default::default() }.cpu_rate(), Some(10000));
     }
 
     // ---- 容器名校验（AppContainer profile 名 1..=64 字符）----
