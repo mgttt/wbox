@@ -111,6 +111,13 @@ jobs:
       - name: 冒烟 —— wbox-linux.exe 能启动并跑内置用法输出
         shell: cmd
         run: .\vendor\blink\build-win32\wbox-linux.exe --help || ver > nul
+      # guest C 套件（矩阵 F 组）要把 t_*.c 交叉编译成 x86_64-linux-musl 静态
+      # ELF，需要 zig；缺了它 F 组以 "no zig compiler found" 计 FAIL。
+      # 装不上不致命——F 组会自行 SKIP，其余组照跑。
+      - name: 安装 zig（矩阵 F 组交叉编译 guest 用例用）
+        run: |
+          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-zig ||
+            echo "::warning::zig 安装失败——验收矩阵 F 组（guest C 套件）将 SKIP"
       # 矩阵需要 Linux x86_64 **静态** busybox（busybox-w32 是 Windows 原生版，
       # 不适用——这里要的是被模拟执行的 Linux ELF）。busybox.net 官方二进制：
       # （PR 核心组不跑矩阵，跳过下载省时间。）
@@ -119,6 +126,35 @@ jobs:
         run: |
           curl -fsSL --retry 3 -o busybox \
             https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+      # 真机首跑（run 19）暴露：busybox 各项**输出全部正确**，但 wbox-linux.exe
+      # 的退出码恒为 127（true/false/exit 7 三者都塌成 127），wine 下不复现。
+      # 127 == EXIT_FAILURE_EXEC_FAILED（blink/machine.h），也是 w32proc.c 里
+      # 子进程状态的兜底值，两处都可疑，静态无法区分。下面这组探针只取证、
+      # 不判定成败（continue-on-error），用来区分：
+      #   ① cmd 直跑也是 127 → 与 msys2 bash 无关，是 exe 自身的退出码；
+      #   ② WBOX_JIT=0 恢复正常 → JIT 关闭路径（DisableJit/ShutdownJit）嫌疑；
+      #   ③ --version（不加载 guest）也非 0 → 进程退出码整体失效。
+      # 注意：每条 echo 单独成行——cmd 在 `( )` 块内按解析期展开
+      # %ERRORLEVEL%，而 runner 以 /V:OFF 启动 cmd，块内取值会恒为旧值。
+      - name: 诊断 —— 退出码传播探针（取证用，不判定成败）
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        shell: cmd
+        run: |
+          set EXE=vendor\blink\build-win32\wbox-linux.exe
+          %EXE% --version
+          echo [version] rc=%ERRORLEVEL%
+          %EXE% busybox true
+          echo [true expect 0] rc=%ERRORLEVEL%
+          %EXE% busybox false
+          echo [false expect 1] rc=%ERRORLEVEL%
+          %EXE% busybox sh -c "exit 7"
+          echo [exit7 expect 7] rc=%ERRORLEVEL%
+          set WBOX_JIT=0
+          %EXE% busybox true
+          echo [true JIT=0 expect 0] rc=%ERRORLEVEL%
+          %EXE% busybox sh -c "exit 7"
+          echo [exit7 JIT=0 expect 7] rc=%ERRORLEVEL%
       # 真机验收矩阵：11 项基础 + 8 项 shell + fork 矩阵 + wget md5 +
       # epoll 单测（CI 无预编译静态二进制，脚本自动 SKIP 并提示）。
       # msys2 shell 下 OSTYPE=msys → native 模式直接执行 wbox-linux.exe。
