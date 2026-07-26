@@ -1249,10 +1249,7 @@ int close(int fd) {
 
 off_t lseek(int fd, off_t off, int whence) {
   if (IsSpecial(fd)) return 0;
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
-    errno = ESPIPE;
-    return -1;
-  }
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) return 0;
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1271,10 +1268,8 @@ off_t lseek(int fd, off_t off, int whence) {
 
 ssize_t pread(int fd, void *buf, size_t n, off_t off) {
   if (IsSpecial(fd)) return read(fd, buf, n);
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
-    errno = ESPIPE;
-    return -1;
-  }
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+    return EventfdRead(fd, buf, n);
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1285,10 +1280,8 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
-  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
-    errno = ESPIPE;
-    return -1;
-  }
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+    return EventfdWrite(fd, buf, n);
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;

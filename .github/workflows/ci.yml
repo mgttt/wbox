@@ -193,7 +193,7 @@ jobs:
   #    是前置缺失，故此处显式判定并回到契约规定的 SKIP。
   guest-tests:
     runs-on: windows-latest
-    # 上界：16 个用例，runner 内部每例 120s 超时，最坏约 32 分钟；
+    # 上界：17 个用例，runner 内部每例 120s 超时，最坏约 34 分钟；
     # 留 40 分钟，超出即视为整体挂死。
     timeout-minutes: 40
     # 需要 build-wbox-linux 产出的 wbox-linux.exe（本 job 不重复构建）

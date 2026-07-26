@@ -26,6 +26,10 @@
   同时在 Hostfs 层保留未命名 AF_UNIX 身份。修复 Win32 `SysSocketpair`
   遗漏的 guest/host fd 映射，并覆盖 bind/connect/accept、双向收发、epoll、
   NONBLOCK/CLOEXEC 与 getsockname/getpeername。guest 基线由 2 项收紧到空。
+- **eventfd/eventfd2**：Win32 fd 层实现共享 64 位计数器、阻塞与 nonblock、
+  semaphore、dup/fork、readv/writev、poll/epoll 和 close purge 语义；新增
+  `t_eventfd` 覆盖旧/新 syscall 及溢出边界。真机 guest 套件增至
+  **17/17 文件通过，522 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为
@@ -69,7 +73,7 @@
   `@native` / `@wine` 模式标注：同一份基线要同时服务两种宿主环境，而
   环境专有缺陷仍可被精确登记。
   W3 修复后基线收紧到 14 PASS / 2 FAIL；N1 随后修复，真机当前为
-  16 PASS / 0 FAIL，机器基线已为空。
+  17 PASS / 0 FAIL，机器基线已为空。
 
 - **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
   在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils

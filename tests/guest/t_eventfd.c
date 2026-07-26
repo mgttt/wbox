@@ -4,7 +4,6 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdint.h>
-#include <string.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -28,8 +27,7 @@ int main(void) {
 
   T_BEGIN("eventfd/create-read-initial");
   {
-    int fd = efd(7, 0);
-    if (fd < 0) printf("INFO eventfd create errno=%d (%s)\n", errno, strerror(errno));
+    int fd = syscall(SYS_eventfd, 7);
     T_ASSERT(fd >= 0);
     value = 0;
     T_ASSERT_EQ(read(fd, &value, sizeof value), sizeof value);
@@ -104,6 +102,22 @@ int main(void) {
     T_ASSERT_EQ(read(fd, &value, sizeof value), sizeof value);
     T_ASSERT_EQ(value, 1);
     T_ASSERT_ERRNO(read(fd, &value, sizeof value), EAGAIN);
+    close(fd);
+  }
+
+  T_BEGIN("eventfd/noop-seek-and-positioned-io");
+  {
+    int fd = efd(4, 0);
+    uint64_t two = 2;
+    T_ASSERT(fd >= 0);
+    T_ASSERT_EQ(lseek(fd, 123, SEEK_SET), 0);
+    value = 0;
+    T_ASSERT_EQ(pread(fd, &value, sizeof value, 99), sizeof value);
+    T_ASSERT_EQ(value, 4);
+    T_ASSERT_EQ(pwrite(fd, &two, sizeof two, 77), sizeof two);
+    value = 0;
+    T_ASSERT_EQ(read(fd, &value, sizeof value), sizeof value);
+    T_ASSERT_EQ(value, 2);
     close(fd);
   }
 

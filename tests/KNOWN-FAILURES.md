@@ -11,10 +11,10 @@
 
 | 环境 | 当前基线 | 失败项 |
 |---|---|---|
-| 真 Windows（本机，native） | 16 个用例：**16 PASS / 0 FAIL / 0 SKIP** | 无 |
-| wine（wine 模式当前基线） | 16 个用例：**16 PASS / 0 FAIL / 0 SKIP** | 无 |
+| 真 Windows（本机，native） | 17 个用例：**17 PASS / 0 FAIL / 0 SKIP** | 无 |
+| wine（历史基线） | 16 个既有用例：**16 PASS / 0 FAIL / 0 SKIP** | 新增 `t_eventfd` 待复核 |
 
-真机断言级统计为 **463 条：pass=454 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **531 条：pass=522 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取

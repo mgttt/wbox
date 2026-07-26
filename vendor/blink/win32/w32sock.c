@@ -1111,7 +1111,7 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
 // ---------------------------------------------------------------- epoll
 // Level-triggered epoll over w32fd.c's poll(). EPOLLET is accepted but
 // behaves as level-triggered (known limitation); EPOLLONESHOT honored.
-// eventfd/signalfd are not supported (ENOSYS upstream in blink anyway).
+// signalfd is not supported (ENOSYS upstream in blink anyway).
 
 #define WBOX_MAXEPOLL 32
 
