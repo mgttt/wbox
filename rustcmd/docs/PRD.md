@@ -77,6 +77,11 @@ The product must be usable in two equal ways:
   places its status rows against the bottom edge on first attach.
 - [x] Minimizing the GUI does not shrink active ConPTY tabs to the iconic
   window rectangle.
+- [x] Structured UI state/actions expose focus, layout, modal, draft, and tab
+  process state through stable IDs.
+- [x] GUI close confirms live process termination; dead tabs close immediately.
+- [x] Composer supports lossless `--stdin` and `--file` input.
+- [x] UX public-interface feedback is covered by `tests/ux_smoke.ps1`.
 - [ ] Keyboard, mouse, resize, ANSI color, CJK, and long-output behavior have
   repeatable regression coverage.
 - [ ] High-throughput terminal rendering is visually verified with no flicker.
@@ -100,6 +105,8 @@ operations return an explicit error. One tab currently maps to one pane, so
 - Add `set-composer --stdin` and file input for lossless multiline drafts.
 - Add configurable shell, font, colors, working directory, and startup tabs.
 - Improve Unicode/CJK width and font rendering.
+- Complete the dynamic compact composer after RMUX Windows live-resize
+  compatibility is resolved.
 
 ### Multiplexer depth
 

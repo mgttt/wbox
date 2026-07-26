@@ -58,11 +58,36 @@ RustCmd also provides the shorter equivalent:
 
 ```powershell
 & $r set-composer -t build "cargo test"
+Get-Content .\command.txt -Raw | & $r set-composer -t build --stdin
+& $r set-composer -t build --file .\command.txt
 & $r show-composer -t build
 & $r send-composer -t build
 ```
 
-`send-composer` submits Enter and clears the stored draft.
+`--stdin` and `--file` preserve multiline content without shell argument
+joining. `send-composer` submits Enter and clears the stored draft.
+
+### Semantic UI automation
+
+```powershell
+& $r ui-snapshot
+& $r ui-action select-tab -t '@2'
+& $r focus composer -t '@2'
+& $r wait-ui --active '@2' --focus composer
+& $r ui-action close-tab -t '@2'
+& $r ui-action cancel
+& $r protocol-info
+```
+
+`ui-snapshot` reports window/layout geometry, focus, stable tab IDs, running /
+dead / error state, draft indicators, feedback, and a pending modal.
+`ui-action close-tab` models the GUI safety rule: a live tab produces a
+confirmation modal, while a dead tab closes immediately. The tmux-compatible
+`kill-window` remains an explicit immediate process-termination command.
+
+`wait-ui` currently supports `--active`, `--focus`, and
+`-t target --tab-state running|dead|error`. Timeouts include the last structured
+UI state.
 
 ### Screenshots
 
@@ -84,6 +109,7 @@ target terminal viewport.
 & $r send-mouse -t build -x 10 -y 5 --button left --protocol native
 & $r send-mouse -t build -x 10 -y 5 --button left --action press --protocol sgr
 & $r send-mouse -t build -x 10 -y 5 --button left --action release --protocol sgr
+```
 
 `auto`（默认）会优先兼容 Windows RMUX。若点击行能识别出
 RMUX Byobu 的 `N:name` 与 `[N:name]`，则会通过已验证的 F3/F4 路径
@@ -94,7 +120,6 @@ RMUX Byobu 的 `N:name` 与 `[N:name]`，则会通过已验证的 F3/F4 路径
 开发或并行测试实例可设置 `RUSTCMD_IPC_ADDRESS=127.0.0.1:端口`。GUI
 及其 CLI 客户端必须使用同一个值；未设置时仍使用按 Windows 用户名派生的
 默认本机端口。
-```
 
 `dump-cells` returns styled/non-empty cells as JSON. Mouse coordinates are
 zero-based terminal cells and use xterm SGR mouse encoding.

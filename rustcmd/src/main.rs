@@ -1,7 +1,7 @@
 use std::{
     env,
     ffi::c_void,
-    io::Write,
+    io::{Read, Write},
     mem,
     ptr,
     sync::mpsc::{self, Receiver, Sender},
@@ -28,7 +28,7 @@ use windows_sys::Win32::{
         TRANSPARENT,
     },
     System::LibraryLoader::GetModuleHandleW,
-    UI::Input::KeyboardAndMouse::SetFocus,
+    UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus},
     UI::Shell::ShellExecuteW,
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
@@ -37,7 +37,7 @@ use windows_sys::Win32::{
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
         TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW,
-        MB_ICONERROR, MB_OK, MSG, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_APP, WM_CHAR, WM_CLOSE,
+        MB_ICONERROR, MB_OK, MSG, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_APP, WM_CHAR, WM_CLOSE,
         WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
         WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
         WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
@@ -68,6 +68,8 @@ const COLOR_ACTIVE: COLORREF = rgb(53, 63, 80);
 const COLOR_GREEN: COLORREF = rgb(121, 215, 135);
 const COLOR_ORANGE: COLORREF = rgb(245, 190, 100);
 const COLOR_RED: COLORREF = rgb(240, 100, 95);
+const COLOR_BLUE: COLORREF = rgb(100, 155, 235);
+const COLOR_MODAL: COLORREF = rgb(38, 43, 54);
 
 const fn rgb(red: u8, green: u8, blue: u8) -> COLORREF {
     red as u32 | ((green as u32) << 8) | ((blue as u32) << 16)
@@ -237,6 +239,12 @@ fn run_gui() -> Result<()> {
 
     let mut message: MSG = unsafe { mem::zeroed() };
     while unsafe { GetMessageW(&mut message, ptr::null_mut(), 0, 0) } > 0 {
+        if message.message == WM_KEYDOWN
+            && let Some(state) = state_mut(window)
+            && state.handle_shortcut(message.wParam as u32)
+        {
+            continue;
+        }
         unsafe {
             TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -628,6 +636,8 @@ struct AppState {
     ipc_receiver: Receiver<IpcEnvelope>,
     last_error: Option<String>,
     close_requested: bool,
+    pending_close: Option<u64>,
+    feedback: Option<String>,
 }
 
 impl AppState {
@@ -645,6 +655,8 @@ impl AppState {
             ipc_receiver,
             last_error: None,
             close_requested: false,
+            pending_close: None,
+            feedback: None,
         };
         state.create_tab(None, Vec::new(), true)?;
         Ok(state)
@@ -699,6 +711,9 @@ impl AppState {
             .next()
             .unwrap_or(target)
             .trim_start_matches(['=', '%']);
+        if let Some(id) = target.strip_prefix('@').and_then(|value| value.parse::<u64>().ok()) {
+            return self.tabs.iter().position(|tab| tab.id == id);
+        }
         if let Ok(index) = target.parse::<u32>() {
             return self.tabs.iter().position(|tab| tab.index == index);
         }
@@ -720,6 +735,35 @@ impl AppState {
                 .map(|tab| tab.id);
         }
         self.load_active_composer();
+    }
+
+    fn request_close_tab(&mut self, id: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        if tab.exited.is_some() {
+            self.close_tab(id);
+            return;
+        }
+        self.pending_close = Some(id);
+        unsafe {
+            ShowWindow(self.edit, SW_HIDE);
+            ShowWindow(self.send_button, SW_HIDE);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
+    }
+
+    fn finish_close_confirmation(&mut self, confirm: bool) {
+        let pending = self.pending_close.take();
+        if confirm && let Some(id) = pending {
+            self.close_tab(id);
+        }
+        unsafe {
+            ShowWindow(self.edit, SW_SHOW);
+            ShowWindow(self.send_button, SW_SHOW);
+            SetFocus(self.window);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
     }
 
     fn tick(&mut self) -> bool {
@@ -748,15 +792,15 @@ impl AppState {
             MoveWindow(
                 self.edit,
                 SIDEBAR_WIDTH + 10,
-                (client.bottom - COMPOSER_HEIGHT + 10).max(0),
+                (client.bottom - COMPOSER_HEIGHT + 30).max(0),
                 edit_width,
-                COMPOSER_HEIGHT - 20,
+                COMPOSER_HEIGHT - 40,
                 1,
             );
             MoveWindow(
                 self.send_button,
                 SIDEBAR_WIDTH + 20 + edit_width,
-                (client.bottom - COMPOSER_HEIGHT + 23).max(0),
+                (client.bottom - COMPOSER_HEIGHT + 32).max(0),
                 74,
                 34,
                 1,
@@ -765,6 +809,20 @@ impl AppState {
     }
 
     fn click(&mut self, x: i32, y: i32) {
+        if self.pending_close.is_some() {
+            let mut client: RECT = unsafe { mem::zeroed() };
+            unsafe { GetClientRect(self.window, &mut client) };
+            let modal_left = SIDEBAR_WIDTH + (client.right - SIDEBAR_WIDTH - 460) / 2;
+            let modal_top = (client.bottom - 190) / 2;
+            if y >= modal_top + 125 && y <= modal_top + 163 {
+                if x >= modal_left + 238 && x <= modal_left + 432 {
+                    self.finish_close_confirmation(true);
+                } else if x >= modal_left + 126 && x <= modal_left + 224 {
+                    self.finish_close_confirmation(false);
+                }
+            }
+            return;
+        }
         if x >= SIDEBAR_WIDTH {
             unsafe { SetFocus(self.window) };
             if let Some((column, row)) = self.terminal_cell_at(x, y)
@@ -792,7 +850,7 @@ impl AppState {
         }
         let id = self.tabs[position].id;
         if x >= SIDEBAR_WIDTH - 36 {
-            self.close_tab(id);
+            self.request_close_tab(id);
         } else {
             self.save_active_composer();
             self.active = Some(id);
@@ -802,6 +860,60 @@ impl AppState {
             SetFocus(self.window);
             InvalidateRect(self.window, ptr::null(), 0);
         }
+    }
+
+    fn handle_shortcut(&mut self, virtual_key: u32) -> bool {
+        let control = unsafe { GetKeyState(0x11) } < 0;
+        let shift = unsafe { GetKeyState(0x10) } < 0;
+        let focused = unsafe { GetFocus() };
+
+        if self.pending_close.is_some() {
+            if virtual_key == 0x0d {
+                self.finish_close_confirmation(true);
+                return true;
+            }
+            if virtual_key == 0x1b {
+                self.finish_close_confirmation(false);
+                return true;
+            }
+            return true;
+        }
+
+        if focused == self.edit {
+            if control && virtual_key == 0x0d {
+                self.send_composer();
+                unsafe { SetFocus(self.window) };
+                self.feedback = self.active.map(|id| format!("Sent to @{id}"));
+                unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+                return true;
+            }
+            if virtual_key == 0x1b {
+                self.save_active_composer();
+                unsafe { SetFocus(self.window) };
+                return true;
+            }
+        }
+
+        if control && shift && virtual_key == b'T' as u32 {
+            if let Err(error) = self.create_tab(None, Vec::new(), true) {
+                self.last_error = Some(format!("{error:#}"));
+            }
+        } else if control && shift && virtual_key == b'W' as u32 {
+            if let Some(position) = self.active_position() {
+                self.request_close_tab(self.tabs[position].id);
+            }
+        } else if control && shift && virtual_key == b'I' as u32 {
+            unsafe { SetFocus(self.edit) };
+        } else if control && virtual_key == 0x09 {
+            let response = self.select_adjacent(if shift { -1 } else { 1 });
+            if !response.ok {
+                self.last_error = Some(response.error);
+            }
+        } else {
+            return false;
+        }
+        unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+        true
     }
 
     fn terminal_cell_at(&self, x: i32, y: i32) -> Option<(u16, u16)> {
@@ -916,6 +1028,7 @@ impl AppState {
         self.tabs[position].send(text.as_bytes());
         self.tabs[position].send(b"\r");
         self.tabs[position].composer.clear();
+        self.feedback = Some(format!("Sent to @{}", self.tabs[position].id));
         unsafe { SetWindowTextW(self.edit, wide("").as_ptr()) };
     }
 
@@ -985,9 +1098,21 @@ impl AppState {
         );
         draw_text(
             device,
-            "+",
+            &self.session_name,
             RECT {
-                left: SIDEBAR_WIDTH - 46,
+                left: 14,
+                top: 28,
+                right: SIDEBAR_WIDTH - 72,
+                bottom: 52,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_text(
+            device,
+            "+ New",
+            RECT {
+                left: SIDEBAR_WIDTH - 62,
                 top: 10,
                 right: SIDEBAR_WIDTH - 10,
                 bottom: 47,
@@ -1022,7 +1147,11 @@ impl AppState {
                 },
             );
             let label = match tab.exited {
+                Some(0) => format!("{}:{} [done]", tab.index, tab.title),
                 Some(code) => format!("{}:{} [exit {code}]", tab.index, tab.title),
+                None if !tab.composer.is_empty() => {
+                    format!("{}:{}  • draft", tab.index, tab.title)
+                }
                 None => format!("{}:{}", tab.index, tab.title),
             };
             draw_text(
@@ -1051,6 +1180,20 @@ impl AppState {
             );
         }
 
+        let exited = self.tabs.iter().filter(|tab| tab.exited.is_some()).count();
+        draw_text(
+            device,
+            &format!("{} tabs · {} exited", self.tabs.len(), exited),
+            RECT {
+                left: 14,
+                top: client.bottom - 34,
+                right: SIDEBAR_WIDTH - 10,
+                bottom: client.bottom - 8,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+
         if let Some(position) = self.active_position() {
             unsafe { SelectObject(device, terminal_font as HGDIOBJ) };
             self.paint_terminal(device, position, &client);
@@ -1069,6 +1212,86 @@ impl AppState {
             );
         }
 
+        if let Some(position) = self.active_position() {
+            let tab = &self.tabs[position];
+            draw_text(
+                device,
+                &format!("Compose input for {}:{}", tab.index, tab.title),
+                RECT {
+                    left: SIDEBAR_WIDTH + 10,
+                    top: client.bottom - COMPOSER_HEIGHT + 4,
+                    right: client.right - 210,
+                    bottom: client.bottom - COMPOSER_HEIGHT + 28,
+                },
+                if tab.exited.is_some() {
+                    COLOR_ORANGE
+                } else {
+                    COLOR_MUTED
+                },
+                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            draw_text(
+                device,
+                if tab.exited.is_some() {
+                    "Process exited · draft preserved"
+                } else {
+                    "Ctrl+Shift+I focus · Ctrl+Enter send · Esc terminal"
+                },
+                RECT {
+                    left: client.right - 390,
+                    top: client.bottom - COMPOSER_HEIGHT + 4,
+                    right: client.right - 10,
+                    bottom: client.bottom - COMPOSER_HEIGHT + 28,
+                },
+                COLOR_MUTED,
+                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        }
+
+        if let Some(position) = self.active_position()
+            && let Some(code) = self.tabs[position].exited
+        {
+            fill(
+                device,
+                &RECT {
+                    left: SIDEBAR_WIDTH,
+                    top: client.bottom - COMPOSER_HEIGHT - 30,
+                    right: client.right,
+                    bottom: client.bottom - COMPOSER_HEIGHT,
+                },
+                COLOR_MODAL,
+            );
+            draw_text(
+                device,
+                &format!(
+                    "Process exited with code {code}. Output and draft remain until you close this tab."
+                ),
+                RECT {
+                    left: SIDEBAR_WIDTH + 12,
+                    top: client.bottom - COMPOSER_HEIGHT - 30,
+                    right: client.right - 12,
+                    bottom: client.bottom - COMPOSER_HEIGHT,
+                },
+                COLOR_ORANGE,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+        }
+
+        if let Some(feedback) = &self.feedback {
+            draw_text(
+                device,
+                feedback,
+                RECT {
+                    left: SIDEBAR_WIDTH + 10,
+                    top: client.bottom - 25,
+                    right: client.right - 100,
+                    bottom: client.bottom - 3,
+                },
+                COLOR_GREEN,
+                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+        }
+
         if let Some(error) = &self.last_error {
             draw_text(
                 device,
@@ -1082,6 +1305,9 @@ impl AppState {
                 COLOR_RED,
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
             );
+        }
+        if let Some(id) = self.pending_close {
+            self.paint_close_confirmation(device, &client, id);
         }
         unsafe {
             if buffered {
@@ -1106,6 +1332,90 @@ impl AppState {
             }
             EndPaint(self.window, &paint);
         };
+    }
+
+    fn paint_close_confirmation(&self, device: HDC, client: &RECT, id: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return;
+        };
+        let left = SIDEBAR_WIDTH + (client.right - SIDEBAR_WIDTH - 460) / 2;
+        let top = (client.bottom - 190) / 2;
+        let rect = RECT {
+            left,
+            top,
+            right: left + 460,
+            bottom: top + 190,
+        };
+        fill(device, &rect, COLOR_MODAL);
+        let border = unsafe { CreateSolidBrush(COLOR_ORANGE) };
+        unsafe {
+            FrameRect(device, &rect, border);
+            DeleteObject(border as HGDIOBJ);
+        }
+        draw_text(
+            device,
+            "Terminate live process?",
+            RECT {
+                left: left + 26,
+                top: top + 18,
+                right: left + 430,
+                bottom: top + 52,
+            },
+            COLOR_TEXT,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        draw_text(
+            device,
+            &format!(
+                "Close “{}” and terminate PID {} and its child processes?",
+                tab.title,
+                tab.process_id
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ),
+            RECT {
+                left: left + 26,
+                top: top + 58,
+                right: left + 430,
+                bottom: top + 108,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        fill(
+            device,
+            &RECT {
+                left: left + 238,
+                top: top + 125,
+                right: left + 432,
+                bottom: top + 163,
+            },
+            COLOR_RED,
+        );
+        draw_text(
+            device,
+            "Terminate and close",
+            RECT {
+                left: left + 250,
+                top: top + 125,
+                right: left + 424,
+                bottom: top + 163,
+            },
+            COLOR_TEXT,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        draw_text(
+            device,
+            "Cancel",
+            RECT {
+                left: left + 142,
+                top: top + 125,
+                right: left + 212,
+                bottom: top + 163,
+            },
+            COLOR_BLUE,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
     }
 
     fn paint_terminal(&mut self, device: HDC, position: usize, client: &RECT) {
@@ -1213,6 +1523,94 @@ impl AppState {
                 DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
             );
         }
+    }
+
+    fn focus_surface(&self) -> &'static str {
+        let focused = unsafe { GetFocus() };
+        if focused == self.edit {
+            "composer"
+        } else {
+            "terminal"
+        }
+    }
+
+    fn ui_snapshot(&self) -> String {
+        let mut client: RECT = unsafe { mem::zeroed() };
+        unsafe { GetClientRect(self.window, &mut client) };
+        let active_draft = window_text(self.edit);
+        let tabs = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(position, tab)| {
+                let draft = if self.active == Some(tab.id) {
+                    !active_draft.is_empty()
+                } else {
+                    !tab.composer.is_empty()
+                };
+                serde_json::json!({
+                    "id": format!("@{}", tab.id),
+                    "index": tab.index,
+                    "name": tab.title,
+                    "active": self.active == Some(tab.id),
+                    "state": if tab.error.is_some() {
+                        "error"
+                    } else if tab.exited.is_some() {
+                        "dead"
+                    } else {
+                        "running"
+                    },
+                    "exit_code": tab.exited,
+                    "draft": draft,
+                    "bounds": {
+                        "x": 6,
+                        "y": TAB_TOP + position as i32 * TAB_HEIGHT,
+                        "width": SIDEBAR_WIDTH - 12,
+                        "height": TAB_HEIGHT - 3,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let (rows, cols) = self
+            .active_position()
+            .and_then(|position| self.tabs.get(position))
+            .map(|tab| tab.last_size)
+            .unwrap_or((0, 0));
+        serde_json::to_string_pretty(&serde_json::json!({
+            "protocol_version": 1,
+            "window": {
+                "client_width": client.right,
+                "client_height": client.bottom,
+                "minimized": unsafe { IsIconic(self.window) } != 0,
+            },
+            "layout": {
+                "sidebar": {"x": 0, "y": 0, "width": SIDEBAR_WIDTH, "height": client.bottom},
+                "terminal": {
+                    "x": SIDEBAR_WIDTH, "y": 0,
+                    "width": (client.right - SIDEBAR_WIDTH).max(0),
+                    "height": (client.bottom - COMPOSER_HEIGHT).max(0),
+                    "rows": rows, "cols": cols,
+                },
+                "composer": {
+                    "visible": self.pending_close.is_none(),
+                    "height": COMPOSER_HEIGHT,
+                }
+            },
+            "focus": {
+                "surface": self.focus_surface(),
+                "window_id": self.active.map(|id| format!("@{id}")),
+            },
+            "tabs": tabs,
+            "modal": self.pending_close.map(|id| serde_json::json!({
+                "kind": "confirm-close-live",
+                "window_id": format!("@{id}"),
+            })),
+            "feedback": {
+                "message": self.feedback.as_deref(),
+                "error": self.last_error.as_deref(),
+            }
+        }))
+        .unwrap_or_else(|error| format!(r#"{{"error":"{error}"}}"#))
     }
 
     fn execute_command(&mut self, args: &[String]) -> IpcResponse {
@@ -1501,6 +1899,110 @@ impl AppState {
                     &self.session_name,
                     true,
                 ))
+            }
+            "ui-snapshot" => IpcResponse::success(self.ui_snapshot()),
+            "protocol-info" => IpcResponse::success(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "protocol_version": 1,
+                    "rustcmd_version": env!("CARGO_PKG_VERSION"),
+                    "compatibility": {
+                        "tmux_rmux": [
+                            "new-session", "list-sessions", "has-session",
+                            "new-window", "list-windows", "select-window",
+                            "next-window", "previous-window", "rename-window",
+                            "kill-window", "list-panes", "capture-pane",
+                            "send-keys", "display-message", "show-options"
+                        ],
+                        "partial": ["kill-session", "kill-server"],
+                        "planned": ["split-window", "layouts"]
+                    },
+                    "extensions": [
+                        "ui-snapshot", "ui-action", "focus", "protocol-info",
+                        "inspect", "screenshot", "screenshot-pane", "dump-cells",
+                        "wait-pane", "send-mouse", "show-composer",
+                        "set-composer", "send-composer"
+                    ],
+                    "features": {
+                        "remain_on_exit": true,
+                        "live_close_confirmation": true,
+                        "rmux_status_click_bridge": true,
+                        "semantic_ui_automation": true
+                    }
+                }))
+                .unwrap_or_default(),
+            ),
+            "focus" => {
+                let surface = args.get(1).map(String::as_str).unwrap_or("terminal");
+                if let Some(position) = self.target_position(option_value(args, "-t")) {
+                    self.save_active_composer();
+                    self.active = Some(self.tabs[position].id);
+                    self.load_active_composer();
+                }
+                match surface {
+                    "terminal" => unsafe { SetFocus(self.window) },
+                    "composer" => unsafe { SetFocus(self.edit) },
+                    "sidebar" => unsafe { SetFocus(self.window) },
+                    other => {
+                        return IpcResponse::failure(format!("unknown focus surface: {other}"));
+                    }
+                };
+                unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+                IpcResponse::success(self.ui_snapshot())
+            }
+            "ui-action" => {
+                let Some(action) = args.get(1).map(String::as_str) else {
+                    return IpcResponse::failure("ui-action requires an action");
+                };
+                let response = match action {
+                    "new-tab" => match self.create_tab(None, Vec::new(), true) {
+                        Ok(_) => None,
+                        Err(error) => Some(IpcResponse::failure(format!("{error:#}"))),
+                    },
+                    "select-tab" => {
+                        let Some(position) = self.target_position(option_value(args, "-t")) else {
+                            return IpcResponse::failure("can't find tab");
+                        };
+                        self.save_active_composer();
+                        self.active = Some(self.tabs[position].id);
+                        self.load_active_composer();
+                        unsafe { SetFocus(self.window) };
+                        None
+                    }
+                    "close-tab" => {
+                        let Some(position) = self.target_position(option_value(args, "-t")) else {
+                            return IpcResponse::failure("can't find tab");
+                        };
+                        self.request_close_tab(self.tabs[position].id);
+                        None
+                    }
+                    "confirm" => {
+                        if self.pending_close.is_none() {
+                            return IpcResponse::failure("no confirmation is pending");
+                        }
+                        self.finish_close_confirmation(true);
+                        None
+                    }
+                    "cancel" => {
+                        if self.pending_close.is_none() {
+                            return IpcResponse::failure("no confirmation is pending");
+                        }
+                        self.finish_close_confirmation(false);
+                        None
+                    }
+                    "composer-send" => {
+                        self.send_composer();
+                        None
+                    }
+                    other => {
+                        return IpcResponse::failure(format!("unknown UI action: {other}"));
+                    }
+                };
+                if let Some(response) = response {
+                    response
+                } else {
+                    unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+                    IpcResponse::success(self.ui_snapshot())
+                }
             }
             "show-composer" => {
                 self.save_active_composer();
@@ -1885,7 +2387,42 @@ fn start_ipc_server(window: HWND) -> Result<Receiver<IpcEnvelope>> {
 }
 
 fn run_cli(arguments: Vec<String>) -> i32 {
+    let mut arguments = arguments;
+    if arguments.first().is_some_and(|command| command == "set-composer") {
+        let content = if let Some(position) = arguments.iter().position(|arg| arg == "--stdin") {
+            arguments.remove(position);
+            let mut content = String::new();
+            if let Err(error) = std::io::stdin().read_to_string(&mut content) {
+                eprintln!("failed to read composer content from stdin: {error}");
+                return 1;
+            }
+            Some(content)
+        } else if let Some(position) = arguments.iter().position(|arg| arg == "--file") {
+            if position + 1 >= arguments.len() {
+                eprintln!("set-composer --file requires a path");
+                return 1;
+            }
+            let path = arguments.remove(position + 1);
+            arguments.remove(position);
+            match std::fs::read_to_string(&path) {
+                Ok(content) => Some(content),
+                Err(error) => {
+                    eprintln!("failed to read composer file {path}: {error}");
+                    return 1;
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(content) = content {
+            arguments.push("--".to_owned());
+            arguments.push(content);
+        }
+    }
     let command = arguments.first().map(String::as_str).unwrap_or_default();
+    if command == "wait-ui" {
+        return run_wait_ui(&arguments);
+    }
     if matches!(command, "wait-pane" | "expect-pane") {
         return run_wait_pane(&arguments);
     }
@@ -1944,6 +2481,67 @@ fn run_cli(arguments: Vec<String>) -> i32 {
             eprintln!("{error:#}");
             1
         }
+    }
+}
+
+fn run_wait_ui(arguments: &[String]) -> i32 {
+    let timeout_ms = option_value(arguments, "--timeout-ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10_000);
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let expected_active = option_value(arguments, "--active");
+    let expected_focus = option_value(arguments, "--focus");
+    let expected_state = option_value(arguments, "--tab-state");
+    let target = option_value(arguments, "-t");
+    if expected_active.is_none() && expected_focus.is_none() && expected_state.is_none() {
+        eprintln!("wait-ui requires --active, --focus, or --tab-state");
+        return 1;
+    }
+    loop {
+        match send_ipc_request(vec!["ui-snapshot".to_owned()]) {
+            Ok(response) if response.ok => {
+                if let Ok(snapshot) = serde_json::from_str::<serde_json::Value>(&response.output) {
+                    let active_matches = expected_active.is_none_or(|expected| {
+                        snapshot["focus"]["window_id"].as_str() == Some(expected)
+                    });
+                    let focus_matches = expected_focus.is_none_or(|expected| {
+                        snapshot["focus"]["surface"].as_str() == Some(expected)
+                    });
+                    let state_matches = expected_state.is_none_or(|expected| {
+                        snapshot["tabs"].as_array().is_some_and(|tabs| {
+                            tabs.iter().any(|tab| {
+                                let target_matches = target.is_none_or(|selector| {
+                                    tab["id"].as_str() == Some(selector)
+                                        || tab["name"].as_str() == Some(selector)
+                                        || tab["index"].to_string() == selector
+                                });
+                                target_matches && tab["state"].as_str() == Some(expected)
+                            })
+                        })
+                    });
+                    if active_matches && focus_matches && state_matches {
+                        println!("{}", response.output);
+                        return 0;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        eprintln!(
+                            "wait-ui timed out after {timeout_ms}ms; last state:\n{}",
+                            response.output
+                        );
+                        return 1;
+                    }
+                }
+            }
+            Ok(response) => {
+                eprintln!("{}", response.error);
+                return 1;
+            }
+            Err(error) => {
+                eprintln!("{error:#}");
+                return 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -2029,6 +2627,7 @@ display-message (display)
 dump-cells
 has-session (has)
 inspect
+focus
 kill-server
 kill-session
 kill-window (killw)
@@ -2040,6 +2639,7 @@ new-session (new)
 new-window (neww)
 next-window (next)
 pane-snapshot
+protocol-info
 previous-window (prev)
 rename-session (rename)
 rename-window (renamew)
@@ -2052,7 +2652,10 @@ send-mouse
 set-composer
 show-composer
 show-options (show)
-start-server";
+start-server
+ui-action
+ui-snapshot
+wait-ui";
 
 fn print_help() {
     println!(
@@ -2077,8 +2680,14 @@ Usage:
   rustcmd screenshot-pane [-t target] [-o file.png]
   rustcmd show-composer [-t target]
   rustcmd set-composer [-t target] text
+  rustcmd set-composer [-t target] --stdin|--file path
   rustcmd send-composer [-t target]
   rustcmd send-mouse [-t target] -x col -y row [--button left] [--action press]
+  rustcmd ui-snapshot
+  rustcmd ui-action new-tab|select-tab|close-tab|confirm|cancel|composer-send
+  rustcmd focus terminal|composer|sidebar [-t target]
+  rustcmd wait-ui [--active @id] [--focus surface] [-t target --tab-state state]
+  rustcmd protocol-info
   rustcmd list-panes [-F format]
   rustcmd list-sessions | has-session | kill-server"
     );

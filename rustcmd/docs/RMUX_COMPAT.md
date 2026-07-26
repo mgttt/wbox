@@ -96,3 +96,7 @@ Win32 记录。为保证状态栏交互可用，RustCmd 会识别状态行的 `N
 RMUX 0.9.1 的 Windows attach 客户端不会可靠处理启动后的 ConPTY resize。
 RustCmd 因此让新 tab 继承当前 tab 已渲染的行列数，避免 RMUX
 锁定旧的 `100x30` 初始尺寸而把状态栏留在可视区域中间。
+
+完整的命令归属与实现状态见 [CAPABILITIES.md](CAPABILITIES.md)。左侧
+RustCmd tabs 属于外层 ConPTY 导航；RMUX status windows 始终属于终端内层，
+两者不会合并或重复显示。

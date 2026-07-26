@@ -56,6 +56,19 @@ The transport is intentionally behind command DTOs so it can later move to
 Windows named pipes and a versioned binary protocol without changing CLI
 semantics.
 
+The GUI model also exposes a semantic automation layer:
+
+- `ui-snapshot` serializes layout, focus, stable tab identity/state, drafts,
+  feedback, and modal state;
+- `ui-action` drives product actions rather than guessed pixel coordinates;
+- `focus` and `wait-ui` make focus/state transitions deterministic;
+- `protocol-info` lets clients discover supported compatibility and extension
+  features.
+
+GUI close and tmux-compatible kill are deliberately distinct. A user-facing
+close request confirms before terminating a live process tree; `kill-window`
+is already an explicit scripting action and remains immediate.
+
 ## Feedback testing loop
 
 The intended autonomous loop is:
@@ -69,6 +82,10 @@ The intended autonomous loop is:
 7. Exit the child and wait for `pane_dead`.
 8. Confirm the tab still exists.
 9. Explicitly close the test tab.
+
+`tests/ux_smoke.ps1` extends this with stable-ID discovery, composer file input,
+focus assertions, live-close confirmation/cancel, dead close, and protocol
+capability discovery.
 
 This tests the same public interfaces available to users instead of relying on
 private test hooks.
