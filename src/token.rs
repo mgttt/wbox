@@ -245,6 +245,19 @@ impl Drop for OwnedHandle {
 mod real_windows_tests {
     use super::*;
 
+    fn profile_or_skip(name: &str, caps: &[CapabilitySid]) -> Option<AppContainerProfile> {
+        match AppContainerProfile::create(name, caps) {
+            Ok(p) => Some(p),
+            Err(e) if format!("{}", e).contains("0x80070005") => {
+                eprintln!(
+                    "SKIP: 当前宿主拒绝 CreateAppContainerProfile（Access denied）：{}",
+                    e
+                );
+                None
+            }
+            Err(e) => panic!("创建 AppContainer profile 失败：{}", e),
+        }
+    }
     /// 唯一 tag：避免并发跑同一 suite 时 profile 名相撞（DeleteAppContainerProfile
     /// 在 Drop 里清，但中途可能重叠）。process id + 静态计数器双重保险。
     fn unique_name(label: &str) -> String {
@@ -266,7 +279,10 @@ mod real_windows_tests {
     fn appcontainer_profile_create_keep_delete_roundtrip() {
         let name = unique_name("rt");
         let caps: Vec<CapabilitySid> = Vec::new();
-        let mut p = AppContainerProfile::create(&name, &caps).unwrap();
+        let mut p = match profile_or_skip(&name, &caps) {
+            Some(p) => p,
+            None => return,
+        };
         // SID 字符串形如 S-1-15-2-...
         let sid = p.sid_string().unwrap();
         assert!(
@@ -301,7 +317,10 @@ mod real_windows_tests {
         let caps: Vec<CapabilitySid> = Vec::new();
 
         // 第一次 create + keep（保留 profile）
-        let mut p1 = AppContainerProfile::create(&name, &caps).unwrap();
+        let mut p1 = match profile_or_skip(&name, &caps) {
+            Some(p) => p,
+            None => return,
+        };
         p1.keep();
         let sid1 = p1.sid_string().unwrap();
         drop(p1);

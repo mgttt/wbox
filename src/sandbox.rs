@@ -144,9 +144,14 @@ pub fn run_container(
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
+        let hint = match err {
+            2 => "（找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
+            203 => "（环境变量未找到；请确认传入的环境块格式正确）",
+            _ => "",
+        };
         return Err(crate::error::WboxError::spawn(format!(
-                "CreateProcessW 失败，GetLastError={}（2=找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
-                err
+                "CreateProcessW 失败，GetLastError={}{}",
+                err, hint
             )));
     }
     let process = OwnedHandle(pi.hProcess);
@@ -185,16 +190,22 @@ pub fn run_container(
 /// （`KEY=VAL\0...KEY=VAL\0\0`）。非法键（空/含 '='）防御性跳过。
 fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
     let mut s = String::new();
+    let mut has_entry = false;
     for (k, v) in env {
         if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
             continue;
         }
+        has_entry = true;
         s.push_str(k);
         s.push('=');
         s.push_str(v);
         s.push('\0');
     }
-    s.push('\0'); // 双 NUL 结尾
+    // 非空块已有最后一项的 NUL；空块也必须显式形成两个 NUL。
+    if !has_entry {
+        s.push('\0');
+    }
+    s.push('\0');
     s.encode_utf16().collect()
 }
 
@@ -378,33 +389,33 @@ mod tests {
     fn env_block_double_nul_terminator() {
         // 空输入也必须有双 NUL 结尾（CreateProcessW 据此判断环境块结束）
         let wide = build_env_block(&[]);
-        assert_eq!(wide, vec![0u16]);
+        assert_eq!(wide, vec![0u16, 0u16]);
     }
 
     #[test]
     fn env_block_empty_key_is_dropped() {
         // 空键无法构成 "KEY=VAL"，防御性跳过
         let s = env_block_to_string(&[("".to_string(), "v".to_string())]);
-        assert_eq!(s, "<NUL>");
+        assert_eq!(s, "<NUL><NUL>");
     }
 
     #[test]
     fn env_block_key_with_equals_is_dropped() {
         // 键含 '=' 会污染解析，跳过
         let s = env_block_to_string(&[("K=E".to_string(), "v".to_string())]);
-        assert_eq!(s, "<NUL>");
+        assert_eq!(s, "<NUL><NUL>");
     }
 
     #[test]
     fn env_block_key_with_nul_is_dropped() {
         let s = env_block_to_string(&[("K\0X".to_string(), "v".to_string())]);
-        assert_eq!(s, "<NUL>");
+        assert_eq!(s, "<NUL><NUL>");
     }
 
     #[test]
     fn env_block_value_with_nul_is_dropped() {
         let s = env_block_to_string(&[("K".to_string(), "v\0x".to_string())]);
-        assert_eq!(s, "<NUL>");
+        assert_eq!(s, "<NUL><NUL>");
     }
 
     #[test]
@@ -430,5 +441,170 @@ mod tests {
         // UTF-16 环境块：非 ASCII 字符直接 encode_utf16
         let s = env_block_to_string(&[("NAME".to_string(), "中文".to_string())]);
         assert_eq!(s, "NAME=中文<NUL><NUL>");
+    }
+}
+
+/// 真机 Win32 集成测试：run_container 完整路径（AppContainer + Job + CreateProcess）。
+/// 需要真 Windows + 系统自带无害可执行（hostname.exe / write.exe 等）。
+#[cfg(test)]
+#[cfg(windows)]
+mod real_windows_tests {
+    use super::*;
+    use crate::backend::Limits;
+    use crate::job::Job;
+    use crate::token::{AppContainerProfile, CapabilitySid};
+
+    fn profile_or_skip(name: &str, caps: &[CapabilitySid]) -> Option<AppContainerProfile> {
+        match AppContainerProfile::create(name, caps) {
+            Ok(p) => Some(p),
+            Err(e) if format!("{}", e).contains("0x80070005") => {
+                eprintln!(
+                    "SKIP: 当前宿主拒绝 CreateAppContainerProfile（Access denied）：{}",
+                    e
+                );
+                None
+            }
+            Err(e) => panic!("创建 AppContainer profile 失败：{}", e),
+        }
+    }
+    /// 找一个系统自带的无害可执行：hostname.exe 最稳（打印主机名 + rc=0）。
+    /// 若系统找不到则 SKIP，不红。
+    fn hostname_exe() -> Option<String> {
+        for candidate in [
+            r"C:\Windows\System32\hostname.exe",
+            r"C:\Windows\system32\hostname.exe",
+        ] {
+            if std::path::Path::new(candidate).is_file() {
+                return Some(candidate.to_string());
+            }
+        }
+        // 兜底：从 SystemRoot 环境变量拼
+        if let Ok(root) = std::env::var("SystemRoot") {
+            let p = format!(r"{}\System32\hostname.exe", root);
+            if std::path::Path::new(&p).is_file() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    fn unique_name(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("wboxtest_{}_{}_{}", std::process::id(), n, label)
+    }
+
+    fn minimal_process_env() -> Vec<(String, String)> {
+        crate::backend::env::build_child_env(&[], &[], false)
+    }
+
+    /// 完整链路：在 AppContainer + Job 内起 hostname.exe，期望 rc=0。
+    /// 这条链覆盖 token/sandbox/job 三个模块的真实协作路径。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 run_container 完整链路"]
+    fn run_container_executes_hostname_in_sandbox() {
+        let exe = match hostname_exe() {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP: 未找到 hostname.exe");
+                return;
+            }
+        };
+
+        let profile = match profile_or_skip(&unique_name("rc"), &[]) {
+            Some(p) => p,
+            None => return,
+        };
+        let caps: Vec<CapabilitySid> = Vec::new();
+        let job = Job::create(Limits::default()).unwrap();
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+
+        // build_cmdline 把 exe 路径加引号
+        let cmdline = build_cmdline(&[exe.clone()]).unwrap();
+        let rc = run_container(&profile, &caps, &cmdline, &workdir, &job, &env).unwrap();
+        assert_eq!(rc, 0, "hostname.exe 在 AppContainer 内应返回 0");
+    }
+
+    /// 缺省（空 capabilities）状态下子进程无 INTERNET_CLIENT，AppContainer
+    /// 拒绝网络。这里只验证链路启动不因 caps=[] 失败（网络拒绝是后续 socket
+    /// 调用的事，不影响 hostname 启动）。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 run_container caps=[] 不影响启动"]
+    fn run_container_with_empty_caps_starts_process() {
+        let exe = match hostname_exe() {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP: 未找到 hostname.exe");
+                return;
+            }
+        };
+        let profile = match profile_or_skip(&unique_name("nc"), &[]) {
+            Some(p) => p,
+            None => return,
+        };
+        let job = Job::create(Limits {
+            memory_mb: 0,
+            cpu_pct: 0,
+            max_procs: 0,
+        })
+        .unwrap();
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+        let cmdline = build_cmdline(&[exe]).unwrap();
+        let rc = run_container(&profile, &[], &cmdline, &workdir, &job, &env).unwrap();
+        assert_eq!(rc, 0);
+    }
+
+    /// 命令行为空 → build_cmdline 报 args 错误（不调 CreateProcess）。
+    /// 这条不是真机测试，但它钉死了 run_container 入口的前置条件，
+    /// 放这里和上面的真机测试组成"完整链路 + 入口防御"对。
+    #[test]
+    fn build_cmdline_empty_propagates_as_args_error() {
+        let res = build_cmdline(&[]);
+        assert!(res.is_err());
+        let msg = format!("{}", res.unwrap_err());
+        // error.rs 里 args 类退出码 1，错误信息含\"缺少要执行的命令\"
+        assert!(msg.contains("缺少"), "应报\"缺少要执行的命令\"，实得：{}", msg);
+    }
+
+    /// workdir 不存在 → CreateProcessW 在 lpCurrentDirectory 阶段失败，
+    /// 报 spawn 错误。用 workdir = 显然不存在的路径。
+    #[test]
+    #[ignore = "DIAGNOSE: 真机 Win32 CreateProcess 缺失 workdir 报 spawn 错"]
+    fn run_container_missing_workdir_is_spawn_error() {
+        let exe = match hostname_exe() {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP: 未找到 hostname.exe");
+                return;
+            }
+        };
+        let profile = match profile_or_skip(&unique_name("mw"), &[]) {
+            Some(p) => p,
+            None => return,
+        };
+        let job = Job::create(Limits::default()).unwrap();
+        let cmdline = build_cmdline(&[exe]).unwrap();
+        // 一个绝对不存在的路径
+        let bogus = r"C:\wbox-definitely-does-not-exist-xyz-12345";
+        let err = run_container(&profile, &[], &cmdline, bogus, &job, &[])
+            .err()
+            .expect("应报 spawn 错误");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("CreateProcessW") || msg.contains("GetLastError"),
+            "应指向 CreateProcessW 失败，实得：{}",
+            msg
+        );
     }
 }
