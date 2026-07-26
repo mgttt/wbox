@@ -251,6 +251,74 @@ else
 fi
 
 echo
+echo "=== L3 生命周期（进程树收割）==="
+
+# 对齐 Windows 侧 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE：wbox 被 SIGKILL 后
+# 容器内不得留下还在跑的进程。实现是 PR_SET_PDEATHSIG 双段链（wbox → 中间
+# 进程 → 新 PID ns 的 PID 1），少任何一段都会漏。
+# 判定方式：kill 之前把 wbox 在**宿主视角**下的全部后代 pid 收集起来，
+# kill 之后逐个确认它们都没了。不按进程名匹配——名字匹配既会误伤宿主上同名的
+# 无关进程，也会漏掉换根后名字不同的情况（先前用重命名的 busybox 当标记，
+# 结果 busybox 按 argv[0] 分派 applet，认不出这个名字直接就退了，
+# 于是"guest 未起来"而不是"收割成功"）。
+descendants() { # $1=根 pid，输出全部后代（含自己）
+  local queue="$1" out="" p kids next
+  while [ -n "$queue" ]; do
+    next=""
+    for p in $queue; do
+      out="$out $p"
+      kids=$(ps -o pid= --ppid "$p" 2>/dev/null | tr -d ' ')
+      next="$next $kids"
+    done
+    queue=$next
+  done
+  echo $out
+}
+
+reap_check() {
+  # $1=用例名 $2..=wbox 参数（含 -- 与 guest 命令）
+  local name=$1; shift
+  HOME=$WORK/home setsid "$WBOX_ABS" run "$@" >/dev/null 2>&1 &
+  local wb=$!
+  # 从 job 表摘掉，否则 kill -9 之后 bash 会打一行 "Killed ..." 噪音
+  disown "$wb" 2>/dev/null || true
+  sleep 2
+  if ! kill -0 "$wb" 2>/dev/null; then
+    report SKIP "$name" "wbox 未能存活到 kill（可能 guest 起不来）"
+    return
+  fi
+  local tree n alive p
+  tree=$(descendants "$wb")
+  # 期望至少 3 个：wbox + 中间进程 + guest（还有后台的那个 sleep）
+  n=$(echo $tree | wc -w)
+  if [ "$n" -lt 3 ]; then
+    report SKIP "$name" "wbox 后代只有 $n 个（$tree），guest 疑似未起来"
+    kill -9 "$wb" 2>/dev/null
+    return
+  fi
+  kill -9 "$wb" 2>/dev/null
+  sleep 2
+  alive=""
+  for p in $tree; do
+    [ "$p" = "$wb" ] && continue
+    kill -0 "$p" 2>/dev/null && alive="$alive $p"
+  done
+  if [ -z "$alive" ]; then
+    report PASS "$name（kill 前进程树 $n 个，之后全部消失）"
+  else
+    report FAIL "$name" "SIGKILL wbox 后仍存活：$alive"
+    for p in $alive; do kill -9 "$p" 2>/dev/null; done
+  fi
+}
+
+# 宿主模式：guest 跑宿主自己的 sleep
+reap_check "L3.1 宿主模式 wbox 被 SIGKILL 后无残留进程" \
+  -- /bin/sh -c '/bin/sleep 300 & /bin/sleep 300'
+# 镜像模式：同一条语义必须在换根之后也成立（rootfs 内 sleep 是 busybox 软链）
+reap_check "L3.2 镜像模式 wbox 被 SIGKILL 后无残留进程" \
+  lbetest -- /bin/sh -c '/bin/sleep 300 & /bin/sleep 300'
+
+echo
 echo "==================================="
 echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
 [ "$fail" -eq 0 ]

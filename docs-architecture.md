@@ -333,8 +333,17 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
 | ✅ L2 资源限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`）；无 cgroup v2 时 `--memory`→`RLIMIT_AS`、`--max-procs`→`RLIMIT_NPROC` 兜底，而 **`--cpu-pct` 明确报错**（无 rlimit 对应物，不静默忽略） | **已完成并实测**（开发容器是 cgroup v1，故验的是兜底路径）：`--memory 16` 下 64MB 分配 `dd: out of memory`、不限时同样操作成功；`--max-procs 8` 下 fork 炸弹 `can't fork: Resource temporarily unavailable`；`--cpu-pct 50` 报错且退出码 1（参数错误）。**cgroup v2 首选路径目前无任何环境覆盖**，见下方"覆盖缺口" |
 | ✅ LN 网络默认一致 | 默认新建空 network namespace（`CLONE_NEWNET`），`--allow-network` 才共享宿主网络栈；新 netns 内把 `lo` 拉起来 | **已完成并实测**：默认下 `connect(1.1.1.1:53)` 得 `ENETUNREACH`、`getent hosts github.com` 无结果；加 `--allow-network` 后解析成功；默认下 `bind/connect 127.0.0.1` 仍可用（对照：裸 `unshare -Urn` 同样操作报 `Network is unreachable`，证明 `lo` 是 wbox 拉起来的） |
 | ✅ H 宿主程序模式 | `LinuxMode::Host`：`wbox run -- <本机程序>` 复用全部隔离原语但不 `pivot_root`；按宿主分派（`host_program_backend_kind`） | **已完成并实测**：宿主程序 `$$`=1；`ls /` 见宿主 `usr/etc`（与镜像模式相反）；`--workdir /etc` 后 `pwd`=`/etc`；退出码 9 原样转发；工作目录无 `.wbox_oldroot`/`dev` 残留 |
-| L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
+| ✅ L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺）。实现是 `PR_SET_PDEATHSIG(SIGKILL)` 的**双段链**：wbox → 中间进程 → 新 PID ns 的 PID 1；PID 1 一死内核清掉该 ns 内全部进程 | **已完成并实测**：修复前 SIGKILL wbox 后 `/bin/sh` 与两个 `sleep` 全部存活；修复后进程树（宿主视角 5 个 / 镜像模式 4 个）在 2 秒内全部消失。两种模式各一条断言（L3.1/L3.2） |
 | L4 跨架构 | 宿主 arch ≠ 镜像 arch 时自动切 `BlinkBackend`（arm64 上跑 x86-64 镜像） | arm64 CI 上 `wbox run --platform linux/amd64 alpine -- uname -m` 输出 `x86_64` |
+
+**L3 的两个坑**（都是实测踩出来的，不是设计时想到的）：
+1. **PDEATHSIG 不被 fork 继承**，孙进程必须自己再设一次。少了这一环，杀
+   wbox 只带走中间进程，guest 整棵树照样活着——而中间进程一死，看起来
+   "wbox 没了"，很容易误判成已经收割干净。
+2. **新 PID namespace 里 `getppid()` 恒为 0**（父进程在祖先 ns 中不可见），
+   所以"设完 PDEATHSIG 再比对 ppid 防竞态"这招对 PID 1 用不了——照抄会把
+   guest 当场杀掉（实测 rc=137）。中间进程能比对（父进程可见），PID 1 只能
+   接受 fork 到 prctl 之间那几条指令的极小窗口。
 
 **L2 的语义差异（必须如实告知，不能假装等价）**：cgroup/Job Object 限的是
 实际占用（RSS / page charge），`RLIMIT_AS` 限的是**虚拟地址空间总量**，对

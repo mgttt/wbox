@@ -67,6 +67,10 @@ struct NsPlan {
     unshare_flags: libc::c_int,
     /// 是否新建 network namespace（决定要不要把 `lo` 拉起来）。
     new_netns: bool,
+    /// fork 前的 wbox 自身 pid。用于 `PR_SET_PDEATHSIG` 的竞态自查：
+    /// 若 prctl 之前父进程就已经死了，信号永远不会来，只能靠比对 `getppid()`
+    /// 发现并自杀。
+    expect_ppid: libc::pid_t,
     /// 换根计划。`None` = 宿主程序模式（[`LinuxMode::Host`]）：不 `pivot_root`，
     /// 宿主文件系统照常可见，只做身份/进程/网络/限额隔离。
     new_root: Option<NewRoot>,
@@ -172,6 +176,7 @@ pub(super) fn spawn_isolated(
         c_empty: cstr("")?,
         unshare_flags,
         new_netns,
+        expect_ppid: unsafe { libc::getpid() },
         new_root,
         limits,
     };
@@ -330,6 +335,39 @@ unsafe fn bring_up_loopback() {
     libc::close(fd);
 }
 
+/// 让本进程在父进程死亡时被 `SIGKILL`（L3 生命周期绑定）。
+/// 返回 0 成功、-1 失败（errno 已设置）。
+///
+/// 这是 Windows 侧 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 在 Linux 上的对应物，
+/// 同样**必开**：wbox 被 SIGKILL 后不能留下还在跑的 guest 进程。
+///
+/// `expect_ppid` 给 `Some(pid)` 时会额外关掉一个真实竞态：若父进程在 `prctl`
+/// **之前**就已经死了，PDEATHSIG 永远不会送达，本进程会变成没人管的孤儿。
+/// 故设完立刻比对 `getppid()`，发现父进程已换（通常是被重新 parent 到
+/// init/subreaper）就直接自杀。
+///
+/// 给 `None` 是留给**新 PID namespace 里的 PID 1** 的：它的父进程在祖先
+/// namespace 里，对它不可见，`getppid()` 恒为 0，比对无从做起（照 `Some`
+/// 那样比会把 guest 当场杀掉——实测 rc=137，正是这么踩出来的）。此时只设
+/// PDEATHSIG，接受一个"fork 完到 prctl 之间父进程恰好死掉"的极小窗口：
+/// 那几条指令之间中间进程刚 fork 完就死的概率可以忽略，而要彻底关掉它得
+/// 额外引入一根 pipe 做存活检测，代价大于收益。
+///
+/// # Safety
+/// 仅在 fork 后的子进程中调用；只做裸 syscall。
+unsafe fn die_with_parent(expect_ppid: Option<libc::pid_t>) -> libc::c_int {
+    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+        return -1;
+    }
+    if let Some(want) = expect_ppid {
+        if libc::getppid() != want {
+            // 父进程已经不在了：PDEATHSIG 不会来，自己退场，别当孤儿。
+            libc::_exit(128 + libc::SIGKILL);
+        }
+    }
+    0
+}
+
 /// pre_exec 闭包主体：建立命名空间并切根。返回 `Err` 会让 spawn 失败。
 ///
 /// # Safety
@@ -337,7 +375,14 @@ unsafe fn bring_up_loopback() {
 unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     let err = || std::io::Error::last_os_error();
 
-    // 0. 限额必须在 unshare(CLONE_NEWUSER) **之前**落实：进了新 user
+    // 0. 生命周期绑定（L3）：把整棵进程树的存活挂在 wbox 身上，对齐 Windows
+    //    侧 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的语义承诺——wbox 退出或
+    //    崩溃后不留孤儿。与限额不同，这条**没有开关**，两侧都是必开。
+    if die_with_parent(Some(p.expect_ppid)) != 0 {
+        return Err(err());
+    }
+
+    // 1. 限额必须在 unshare(CLONE_NEWUSER) **之前**落实：进了新 user
     //    namespace 后，宿主 cgroup 文件的写入会因 uid 映射被拒。
     apply_limits(p)?;
 
@@ -382,6 +427,17 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     }
 
     // ---- 以下是孙进程（容器内 PID 1）----
+
+    // PDEATHSIG 不会被 fork 继承，孙进程得自己再设一次，这次盯的是中间进程。
+    // 链条因此是完整的：wbox 死 → 中间进程被 SIGKILL → 孙进程被 SIGKILL →
+    // 孙进程是新 PID namespace 的 PID 1，它一死内核就清掉该 ns 内所有进程。
+    // 少了这一环，杀 wbox 只能带走中间进程，guest 整棵树照样活着（实测如此）。
+    //
+    // 传 None：孙进程在新 PID ns 里，父进程不可见、getppid() 恒为 0，做不了
+    // 那个比对（见 die_with_parent）。
+    if die_with_parent(None) != 0 {
+        return Err(err());
+    }
 
     // 3b. 新 netns 里的 loopback 默认 DOWN，拉起来（见 bring_up_loopback）。
     if p.new_netns {

@@ -147,6 +147,7 @@ wbox image list
 | 进程 | 新 PID namespace，guest 为 PID 1 | 同左 |
 | 网络 | **默认新建空 netns**（仅 loopback 可用）；`--allow-network` 共享宿主网络栈 | 同左 |
 | 限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`），无则 rlimit 兜底 | 同左 |
+| 生命周期 | `PR_SET_PDEATHSIG` 双段链，wbox 退出/被杀后整棵进程树被清理，无孤儿 | 同左 |
 | 文件系统 | **不隔离**（不换根，宿主可见）；`--workdir` 是工作目录 | `pivot_root` 进镜像 rootfs，宿主不可见 |
 
 不提供什么：
