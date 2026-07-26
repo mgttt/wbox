@@ -87,8 +87,7 @@ int main(int argc, char **argv) {
   {
     pid_t pid = fork();
     if (pid == 0) {
-      void *hint = (void *)0x30000000000ULL;
-      void *m = mmap(hint, 4096, PROT_READ | PROT_WRITE,
+      void *m = mmap(NULL, 64 * 1024 * 1024, PROT_READ | PROT_WRITE,
                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (m == MAP_FAILED) _exit(2);
       *(char *)m = 1;

@@ -19,7 +19,34 @@ static long now_ms(void) {
   return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static int mkpair(int sv[2]) { return socketpair(AF_UNIX, SOCK_STREAM, 0, sv); }
+/* AF_UNIX socketpair with TCP-loopback fallback (wbox lacks AF_UNIX; the
+ * explicit probe in t_net_epoll.c records that gap). */
+static int have_afunix = 1;
+static int tcp_pair(int sv[2]) {
+  int ls = socket(AF_INET, SOCK_STREAM, 0);
+  if (ls < 0) return -1;
+  struct sockaddr_in a = {0};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 1)) goto err;
+  socklen_t l = sizeof a;
+  if (getsockname(ls, (struct sockaddr *)&a, &l)) goto err;
+  sv[1] = socket(AF_INET, SOCK_STREAM, 0);
+  if (sv[1] < 0) goto err;
+  if (connect(sv[1], (struct sockaddr *)&a, sizeof a)) { close(sv[1]); goto err; }
+  sv[0] = accept(ls, NULL, NULL);
+  close(ls);
+  if (sv[0] < 0) { close(sv[1]); return -1; }
+  return 0;
+err:
+  close(ls);
+  return -1;
+}
+static int mkpair(int sv[2]) {
+  if (have_afunix && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) return 0;
+  have_afunix = 0;
+  return tcp_pair(sv);
+}
 
 int main(void) {
   /* --- socket creation matrix --- */

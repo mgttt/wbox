@@ -49,50 +49,42 @@ int main(void) {
   T_BEGIN("sec/many-dotdot");
   deny_open("/a/../../b/../../../c/../../../../etc/passwd");
 
-  /* cwd-relative escape: chdir into a subdir, then open ../.. beyond root */
-  T_BEGIN("sec/relative-dotdot-escape");
-  {
-    T_ASSERT_OK(mkdir("t_sec_sub", 0700));
-    int cwdfd = open(".", O_RDONLY | O_DIRECTORY);
-    T_ASSERT(cwdfd >= 0);
-    T_ASSERT_OK(chdir("t_sec_sub"));
-    /* from /<root>/t_sec_sub, ../.. is the parent of the rootfs: must deny */
-    deny_open("../../etc/hostname");
-    deny_open("../../../..");
-    T_ASSERT_OK(fchdir(cwdfd));
-    close(cwdfd);
-    rmdir("t_sec_sub");
-  }
+  /* NOTE: cwd-relative ".." escape probes moved to t_sec_path_relesc.c —
+   * open("../../etc/hostname") from a chdir'd subdir CRASHES the current
+   * build (NULL deref in wbox-linux) and would mask everything below. */
 
   /* NOTE: absolute host-path probes live in t_sec_path_abshost.c — the
    * current build CRASHES (NULL deref in wbox-linux) on them, which would
    * mask the tests below. */
 
-  /* symlink chain escape: link inside rootfs pointing outside */
+  /* symlink chain escape: link inside rootfs pointing outside.
+   * NOTE: symlink() with an ABSOLUTE target (e.g. "/..") crashes the current
+   * build (see t_sec_linkabs.c, isolated); here we use relative targets.
+   * If symlink creation is unavailable (EPERM on this build) the probes
+   * degrade to SKIP. */
   T_BEGIN("sec/symlink-escape");
   {
     unlink("t_sec_link");
-    T_ASSERT_OK(symlink("/..", "t_sec_link"));
-    deny_open("t_sec_link");
-    unlink("t_sec_link");
-    T_ASSERT_OK(symlink("/../../etc/hostname", "t_sec_link"));
-    deny_open("t_sec_link");
-    /* chain: link2 -> link1 -> outside */
-    unlink("t_sec_l1"); unlink("t_sec_l2");
-    T_ASSERT_OK(symlink("t_sec_link", "t_sec_l1"));
-    T_ASSERT_OK(symlink("t_sec_l1", "t_sec_l2"));
-    deny_open("t_sec_l2");
-    unlink("t_sec_link"); unlink("t_sec_l1"); unlink("t_sec_l2");
+    if (symlink("../../..", "t_sec_link") != 0) {
+      T_ASSERT_OK(symlink("../../..", "t_sec_link")); /* FAIL line w/ errno */
+      T_SKIP("sec/symlink-escape-probes", "symlink creation unavailable");
+    } else {
+      deny_open("t_sec_link/etc/hostname");
+      unlink("t_sec_link");
+      /* chain: l2 -> l1 -> outside */
+      T_ASSERT_OK(symlink("../..", "t_sec_l1"));
+      T_ASSERT_OK(symlink("t_sec_l1", "t_sec_l2"));
+      deny_open("t_sec_l2");
+      deny_open("t_sec_l2/etc/hostname");
+      unlink("t_sec_l1"); unlink("t_sec_l2");
+    }
   }
 
   /* dirfd anchoring: openat relative to dirfd stays inside; .. past the
    * dirfd up to root is fine INSIDE the rootfs but past rootfs must deny */
   T_BEGIN("sec/openat-dirfd-anchor");
   {
-    T_ASSERT_OK(mkdir("t_sec_d", 0700));
-    int fd = open("t_sec_d", O_WRONLY | O_CREAT, 0600);
-    if (fd >= 0) close(fd); /* placeholder file t_sec_d can't be both */
-    unlink("t_sec_d");
+    rmdir("t_sec_d"); /* stale cleanup */
     T_ASSERT_OK(mkdir("t_sec_d", 0700));
     int dfd = open("t_sec_d", O_RDONLY | O_DIRECTORY);
     T_ASSERT(dfd >= 0);

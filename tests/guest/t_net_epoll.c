@@ -1,13 +1,61 @@
-/* t_net_epoll.c — epoll LT / ONESHOT / MOD / DEL / RDHUP semantics. */
+/* t_net_epoll.c — epoll LT / ONESHOT / MOD / DEL / RDHUP semantics.
+ *
+ * Stream pairs use AF_UNIX socketpair when available; otherwise fall back
+ * to a TCP loopback connection (wbox currently lacks AF_UNIX — recorded
+ * by the explicit probe below). */
 #define _GNU_SOURCE
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <unistd.h>
 #include "wtest.h"
 
-static int mkpair(int sv[2]) { return socketpair(AF_UNIX, SOCK_STREAM, 0, sv); }
+static int tcp_pair(int sv[2]) {
+  int ls = socket(AF_INET, SOCK_STREAM, 0);
+  if (ls < 0) return -1;
+  struct sockaddr_in a = {0};
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 1)) goto err;
+  socklen_t l = sizeof a;
+  if (getsockname(ls, (struct sockaddr *)&a, &l)) goto err;
+  sv[1] = socket(AF_INET, SOCK_STREAM, 0);
+  if (sv[1] < 0) goto err;
+  if (connect(sv[1], (struct sockaddr *)&a, sizeof a)) { close(sv[1]); goto err; }
+  sv[0] = accept(ls, NULL, NULL);
+  close(ls);
+  if (sv[0] < 0) { close(sv[1]); return -1; }
+  return 0;
+err:
+  close(ls);
+  return -1;
+}
+
+static int have_afunix = -1;
+static int mkpair(int sv[2]) {
+  if (have_afunix != 0) {
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) { have_afunix = 1; return 0; }
+    have_afunix = 0;
+  }
+  return tcp_pair(sv);
+}
 
 int main(void) {
+  /* explicit AF_UNIX probe: socketpair must exist (Linux parity) */
+  T_BEGIN("epoll/afunix-socketpair");
+  {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+      have_afunix = 1;
+      wtest_pass++; printf("PASS %s\n", wtest_cur);
+      close(sv[0]); close(sv[1]);
+    } else {
+      have_afunix = 0;
+      T_ASSERT_OK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv)); /* FAIL w/ errno */
+      T_SKIP("epoll pair transport", "AF_UNIX missing; using TCP loopback");
+    }
+  }
   int ep = epoll_create1(0);
   T_BEGIN("epoll/create");
   T_ASSERT(ep >= 0);
