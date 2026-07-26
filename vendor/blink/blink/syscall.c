@@ -705,6 +705,9 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc) {
   uintptr_t lo = WboxMemWindowBase();
   uintptr_t hi = WboxMemLimit();
   W32ForkDbg("child exit", rc, 0);
+  // flush MAP_SHARED anon pages back to the parent window BEFORE the
+  // exit status becomes waitable, while our guest pages are still mapped
+  WboxShsegSyncToParent();
   W32ChildSignalExit(rec, rc);
   // wake a parent blocked in wait4(WNOHANG)+sigsuspend: enqueue SIGCHLD
   // into the parent's guest signal set (busybox ash's wait loop depends on

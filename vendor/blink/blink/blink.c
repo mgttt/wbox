@@ -249,6 +249,7 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
 #endif
     old->system->cr3 = 0;  // page tables lived in the wiped window
     old->system->memstat.tables = 0;
+    WboxShsegSyncToParent();  // flush shared-anon writes made pre-exec
     WboxMemWipeWindow();
     WboxPurgeHostPagesInRange(lo, hi);
   }

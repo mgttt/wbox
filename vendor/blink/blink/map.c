@@ -80,6 +80,14 @@ static void *PortableMmap(void *addr,     //
     unlink(path);
     if (!ftruncate(tfd, length)) {
       res = mmap(addr, length, prot, flags & ~MAP_ANONYMOUS_, tfd, 0);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // wbox: snapshot fork gives each child a private host window, so
+      // MAP_SHARED anon pages need explicit tracking: registered here and
+      // synced child->parent at child exit (see w32mem.c ShsegSync).
+      if (res != MAP_FAILED && (flags & MAP_SHARED)) {
+        WboxShsegRegister((uintptr_t)res, length);
+      }
+#endif
     } else {
       res = MAP_FAILED;
     }
