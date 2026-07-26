@@ -313,9 +313,16 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
 |---|---|---|
 | ✅ L0 骨架 | `backend/linux.rs` 实现 `Backend`；镜像目标按宿主分派（`image_backend_kind`）；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | **已完成**：6 项单测覆盖执行计划（无模拟器前缀 / resolv.conf 注入 / POSIX 环境风味 / 共享保留键策略 / 参数校验 / spawn 拒绝），与 Blink/Native 同构 |
 | ✅ L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` 与最小 `/dev`（bind 宿主节点，user ns 内不能 mknod） | **已完成并实测**：非 root（uid=1001）跑容器内 `id` 得 `uid=0 gid=0`；`ls /` 只见 rootfs（`bin dev etc proc`），`/home` 不存在；容器内 `$$`=1（PID ns）；退出码 7/0 原样转发 |
-| L2 资源限额 | cgroup v2：`memory.max` / `cpu.max` / `pids.max`，对齐现有 `--memory`/`--cpu-pct`/`--max-procs` 语义 | 三个开关各有一条超限用例（OOM 被杀、CPU 占比受限、fork 炸弹被挡） |
+| ✅ L2 资源限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`）；无 cgroup v2 时 `--memory`→`RLIMIT_AS`、`--max-procs`→`RLIMIT_NPROC` 兜底，而 **`--cpu-pct` 明确报错**（无 rlimit 对应物，不静默忽略） | **已完成并实测**（开发容器是 cgroup v1，故验的是兜底路径）：`--memory 16` 下 64MB 分配 `dd: out of memory`、不限时同样操作成功；`--max-procs 8` 下 fork 炸弹 `can't fork: Resource temporarily unavailable`；`--cpu-pct 50` 报错且退出码 1（参数错误）。cgroup v2 路径由 ubuntu CI runner 覆盖 |
 | L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
 | L4 跨架构 | 宿主 arch ≠ 镜像 arch 时自动切 `BlinkBackend`（arm64 上跑 x86-64 镜像） | arm64 CI 上 `wbox run --platform linux/amd64 alpine -- uname -m` 输出 `x86_64` |
+
+**L2 的语义差异（必须如实告知，不能假装等价）**：cgroup/Job Object 限的是
+实际占用（RSS / page charge），`RLIMIT_AS` 限的是**虚拟地址空间总量**，对
+大量 reserve-but-not-commit 的程序偏严；`RLIMIT_NPROC` 是**按 uid 计**的
+全局进程数而非本容器的，rootless 下约束的是被映射 uid 的总进程数——挡
+fork 炸弹够用，但不等于"容器内进程数上限"。故 `-V` 会打印当前用的是哪条
+路径，避免用户以为两者等价。
 
 **语义一致性红线**：Linux 后端必须复用同一套 `--memory`/`--cpu-pct`/
 `--max-procs`/`--allow-network` 语义与同一套退出码约定（1 参数 / 2 profile /
