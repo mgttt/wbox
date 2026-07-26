@@ -24,6 +24,9 @@ The product must be usable in two equal ways:
 - Each tab has a stable ID, numeric index, editable name, and one terminal pane.
 - Selecting a tab changes the visible terminal and composer.
 - Closing a live tab terminates its PTY process tree.
+- The first tab line combines the main program and current terminal TITLE.
+- The second line is a user note edited independently from program-controlled
+  TITLE changes.
 
 ### Remain on exit
 
@@ -52,6 +55,17 @@ The product must be usable in two equal ways:
 - The whole RustCmd window can be saved as PNG.
 - A selected tab's terminal viewport can be saved as PNG.
 - Screenshot commands return the output path on success.
+
+### Settings and typography
+
+- Settings persist under `%LOCALAPPDATA%\RustCmd\settings.json`.
+- Users can change terminal font family and point size from GUI or CLI.
+- The UI reports the face Windows actually resolved, so a missing font fallback
+  is visible.
+- Terminal rendering anchors glyphs to VT cells: ordinary characters advance
+  one cell and CJK wide characters occupy two cells.
+- Recommended optional CJK font: Sarasa Fixed SC under SIL OFL 1.1. RustCmd
+  does not silently download or bundle it.
 
 ## Acceptance criteria for the first usable release
 
@@ -82,6 +96,10 @@ The product must be usable in two equal ways:
 - [x] GUI close confirms live process termination; dead tabs close immediately.
 - [x] Composer supports lossless `--stdin` and `--file` input.
 - [x] UX public-interface feedback is covered by `tests/ux_smoke.ps1`.
+- [x] Windows icon is embedded in the executable and shown by the native window.
+- [x] Font family/size settings are persistent, inspectable, and immediately
+  applied to rendering/grid geometry.
+- [x] Two-line tabs expose program/TITLE separately from user notes.
 - [ ] Keyboard, mouse, resize, ANSI color, CJK, and long-output behavior have
   repeatable regression coverage.
 - [ ] High-throughput terminal rendering is visually verified with no flicker.

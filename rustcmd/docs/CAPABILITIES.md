@@ -31,6 +31,13 @@ RustCmd
    ├─ composition
    │  ├─ show/set/send-composer                         [supported]
    │  └─ set-composer text/--stdin/--file               [supported]
+   ├─ tab metadata
+   │  ├─ program + terminal OSC TITLE primary line       [supported]
+   │  └─ set/show-tab-note and right-click note editor   [supported]
+   ├─ settings and typography
+   │  ├─ GUI Settings, get-settings, set-setting         [supported]
+   │  ├─ persistent font family and point size           [supported]
+   │  └─ downloadable/bundled fonts                      [not applicable]
    ├─ observation
    │  ├─ inspect, pane-snapshot, active-window          [supported]
    │  ├─ screenshot, screenshot-pane                    [supported]

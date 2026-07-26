@@ -18,14 +18,16 @@ use serde::{Deserialize, Serialize};
 use windows_sys::Win32::{
     Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
     Graphics::Gdi::{
-        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateSolidBrush,
-        DeleteDC, DeleteObject, DrawTextW, EndPaint, ExtTextOutW, FillRect, FrameRect,
-        GetDC, GetDIBits, GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, GetWindowDC,
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+        CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, ExtTextOutW, FillRect,
+        FrameRect, GetDC, GetDeviceCaps, GetDIBits, GetStockObject, GetTextExtentPoint32W,
+        GetTextFaceW, GetTextMetricsW, GetWindowDC,
         InvalidateRect, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-        PAINTSTRUCT, SelectObject, SetBkColor, SetBkMode, SetTextColor, UpdateWindow,
-        DEFAULT_GUI_FONT, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER,
-        ETO_OPAQUE, HDC, HFONT, HGDIOBJ, SRCCOPY, SYSTEM_FIXED_FONT, TEXTMETRICW,
-        TRANSPARENT,
+        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_CHARSET, DEFAULT_GUI_FONT,
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_MODERN,
+        FIXED_PITCH, FW_NORMAL, HDC, HFONT, HGDIOBJ, LOGPIXELSY, OUT_DEFAULT_PRECIS,
+        PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, SRCCOPY,
+        SYSTEM_FIXED_FONT, TEXTMETRICW, TRANSPARENT, UpdateWindow,
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::Input::KeyboardAndMouse::{GetFocus, GetKeyState, SetFocus},
@@ -33,12 +35,13 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
         GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-        IsIconic, LoadCursorW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassW,
+        IsIconic, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage,
+        RegisterClassW,
         SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
         TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, IDC_ARROW,
         MB_ICONERROR, MB_OK, MSG, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, WM_APP, WM_CHAR, WM_CLOSE,
-        WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_COMMAND, WM_CREATE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_RBUTTONDOWN,
         WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SIZE, WM_TIMER, WNDCLASSW, WS_BORDER,
         WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE,
     },
@@ -50,10 +53,14 @@ const INITIAL_COLS: u16 = 100;
 const SCROLLBACK_LINES: usize = 10_000;
 const SIDEBAR_WIDTH: i32 = 210;
 const COMPOSER_HEIGHT: i32 = 78;
-const TAB_TOP: i32 = 58;
-const TAB_HEIGHT: i32 = 36;
+const TAB_TOP: i32 = 62;
+const TAB_HEIGHT: i32 = 52;
 const BUTTON_ID: usize = 1001;
 const EDIT_ID: usize = 1002;
+const SETTINGS_BUTTON_ID: usize = 1003;
+const SETTINGS_FONT_ID: usize = 1004;
+const SETTINGS_SIZE_ID: usize = 1005;
+const SETTINGS_APPLY_ID: usize = 1006;
 const TIMER_ID: usize = 1;
 const WM_APP_WAKE: u32 = WM_APP + 1;
 const IPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,6 +92,22 @@ struct IpcResponse {
     ok: bool,
     output: String,
     error: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+struct AppConfig {
+    terminal_font_family: String,
+    terminal_font_size: u16,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            terminal_font_family: "Consolas".to_owned(),
+            terminal_font_size: 12,
+        }
+    }
 }
 
 impl IpcResponse {
@@ -154,6 +177,7 @@ fn run_gui() -> Result<()> {
     window_class.lpfnWndProc = Some(window_proc);
     window_class.hInstance = instance as HINSTANCE;
     window_class.hCursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_ARROW) };
+    window_class.hIcon = unsafe { LoadIconW(instance as HINSTANCE, 1_usize as *const u16) };
     window_class.lpszClassName = class_name.as_ptr();
     if unsafe { RegisterClassW(&window_class) } == 0 {
         anyhow::bail!("RegisterClassW failed");
@@ -217,12 +241,60 @@ fn run_gui() -> Result<()> {
             ptr::null(),
         )
     };
-    if edit.is_null() || send_button.is_null() {
+    let settings_button = unsafe {
+        CreateWindowExW(
+            0,
+            wide("BUTTON").as_ptr(),
+            wide("Settings").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            0,
+            0,
+            86,
+            30,
+            window,
+            SETTINGS_BUTTON_ID as *mut c_void,
+            instance,
+            ptr::null(),
+        )
+    };
+    let settings_font = create_hidden_edit(window, instance, SETTINGS_FONT_ID);
+    let settings_size = create_hidden_edit(window, instance, SETTINGS_SIZE_ID);
+    let settings_apply = unsafe {
+        CreateWindowExW(
+            0,
+            wide("BUTTON").as_ptr(),
+            wide("Apply").as_ptr(),
+            WS_CHILD | WS_TABSTOP,
+            0,
+            0,
+            86,
+            32,
+            window,
+            SETTINGS_APPLY_ID as *mut c_void,
+            instance,
+            ptr::null(),
+        )
+    };
+    if edit.is_null()
+        || send_button.is_null()
+        || settings_button.is_null()
+        || settings_font.is_null()
+        || settings_size.is_null()
+        || settings_apply.is_null()
+    {
         unsafe { DestroyWindow(window) };
-        anyhow::bail!("failed to create composer controls");
+        anyhow::bail!("failed to create native controls");
     }
 
-    let state = Box::new(AppState::new(window, edit, send_button)?);
+    let state = Box::new(AppState::new(
+        window,
+        edit,
+        send_button,
+        settings_button,
+        settings_font,
+        settings_size,
+        settings_apply,
+    )?);
     unsafe {
         SetWindowLongPtrW(window, GWLP_USERDATA, Box::into_raw(state) as isize);
         SetTimer(window, TIMER_ID, 100, None);
@@ -251,6 +323,25 @@ fn run_gui() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn create_hidden_edit(window: HWND, instance: HINSTANCE, id: usize) -> HWND {
+    unsafe {
+        CreateWindowExW(
+            0,
+            wide("EDIT").as_ptr(),
+            wide("").as_ptr(),
+            WS_CHILD | WS_BORDER | WS_TABSTOP,
+            0,
+            0,
+            100,
+            28,
+            window,
+            id as *mut c_void,
+            instance,
+            ptr::null(),
+        )
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -303,10 +394,28 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        WM_RBUTTONDOWN => {
+            let x = (lparam as u32 & 0xffff) as i16 as i32;
+            let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+            if let Some(state) = state_mut(window) {
+                state.right_click(x, y);
+            }
+            0
+        }
         WM_COMMAND => {
             if (wparam & 0xffff) == BUTTON_ID {
                 if let Some(state) = state_mut(window) {
                     state.send_composer();
+                }
+                0
+            } else if (wparam & 0xffff) == SETTINGS_BUTTON_ID {
+                if let Some(state) = state_mut(window) {
+                    state.open_settings();
+                }
+                0
+            } else if (wparam & 0xffff) == SETTINGS_APPLY_ID {
+                if let Some(state) = state_mut(window) {
+                    state.apply_settings_from_controls();
                 }
                 0
             } else {
@@ -360,14 +469,26 @@ enum PtyEvent {
     Error(String),
 }
 
+#[derive(Default)]
+struct TerminalCallbacks {
+    title: String,
+}
+
+impl vt100::Callbacks for TerminalCallbacks {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = String::from_utf8_lossy(title).trim().to_owned();
+    }
+}
+
 struct TerminalTab {
     id: u64,
     index: u32,
     title: String,
+    note: String,
     command_name: String,
     process_id: Option<u32>,
     composer: String,
-    parser: vt100::Parser,
+    parser: vt100::Parser<TerminalCallbacks>,
     receiver: Receiver<PtyEvent>,
     master: PtyMaster,
     child: PtyChild,
@@ -472,7 +593,13 @@ impl TerminalTab {
             command_name,
             process_id,
             composer: String::new(),
-            parser: vt100::Parser::new(initial_size.rows, initial_size.cols, SCROLLBACK_LINES),
+            note: String::new(),
+            parser: vt100::Parser::new_with_callbacks(
+                initial_size.rows,
+                initial_size.cols,
+                SCROLLBACK_LINES,
+                TerminalCallbacks::default(),
+            ),
             receiver,
             master,
             child,
@@ -628,6 +755,10 @@ struct AppState {
     window: HWND,
     edit: HWND,
     send_button: HWND,
+    settings_button: HWND,
+    settings_font: HWND,
+    settings_size: HWND,
+    settings_apply: HWND,
     tabs: Vec<TerminalTab>,
     active: Option<u64>,
     next_id: u64,
@@ -638,15 +769,36 @@ struct AppState {
     close_requested: bool,
     pending_close: Option<u64>,
     feedback: Option<String>,
+    note_edit_target: Option<u64>,
+    settings_open: bool,
+    config: AppConfig,
+    terminal_font: HFONT,
+    terminal_font_owned: bool,
+    resolved_font_family: String,
 }
 
 impl AppState {
-    fn new(window: HWND, edit: HWND, send_button: HWND) -> Result<Self> {
+    fn new(
+        window: HWND,
+        edit: HWND,
+        send_button: HWND,
+        settings_button: HWND,
+        settings_font: HWND,
+        settings_size: HWND,
+        settings_apply: HWND,
+    ) -> Result<Self> {
         let ipc_receiver = start_ipc_server(window)?;
+        let config = load_config();
+        let (terminal_font, terminal_font_owned, resolved_font_family) =
+            create_terminal_font(window, &config);
         let mut state = Self {
             window,
             edit,
             send_button,
+            settings_button,
+            settings_font,
+            settings_size,
+            settings_apply,
             tabs: Vec::new(),
             active: None,
             next_id: 1,
@@ -657,6 +809,12 @@ impl AppState {
             close_requested: false,
             pending_close: None,
             feedback: None,
+            note_edit_target: None,
+            settings_open: false,
+            config,
+            terminal_font,
+            terminal_font_owned,
+            resolved_font_family,
         };
         state.create_tab(None, Vec::new(), true)?;
         Ok(state)
@@ -790,6 +948,14 @@ impl AppState {
         let edit_width = (content_width - 104).max(80);
         unsafe {
             MoveWindow(
+                self.settings_button,
+                12,
+                (client.bottom - 72).max(0),
+                92,
+                30,
+                1,
+            );
+            MoveWindow(
                 self.edit,
                 SIDEBAR_WIDTH + 10,
                 (client.bottom - COMPOSER_HEIGHT + 30).max(0),
@@ -805,11 +971,116 @@ impl AppState {
                 34,
                 1,
             );
+            let settings_left = SIDEBAR_WIDTH + (content_width - 520) / 2;
+            let settings_top = (client.bottom - 260) / 2;
+            MoveWindow(
+                self.settings_font,
+                settings_left + 34,
+                settings_top + 92,
+                330,
+                30,
+                1,
+            );
+            MoveWindow(
+                self.settings_size,
+                settings_left + 380,
+                settings_top + 92,
+                68,
+                30,
+                1,
+            );
+            MoveWindow(
+                self.settings_apply,
+                settings_left + 362,
+                settings_top + 174,
+                86,
+                34,
+                1,
+            );
         }
     }
 
+    fn open_settings(&mut self) {
+        self.save_active_composer();
+        self.settings_open = true;
+        self.note_edit_target = None;
+        unsafe {
+            SetWindowTextW(
+                self.settings_font,
+                wide(&self.config.terminal_font_family).as_ptr(),
+            );
+            SetWindowTextW(
+                self.settings_size,
+                wide(&self.config.terminal_font_size.to_string()).as_ptr(),
+            );
+            ShowWindow(self.edit, SW_HIDE);
+            ShowWindow(self.send_button, SW_HIDE);
+            ShowWindow(self.settings_font, SW_SHOW);
+            ShowWindow(self.settings_size, SW_SHOW);
+            ShowWindow(self.settings_apply, SW_SHOW);
+            SetFocus(self.settings_font);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
+    }
+
+    fn close_settings(&mut self) {
+        self.settings_open = false;
+        unsafe {
+            ShowWindow(self.settings_font, SW_HIDE);
+            ShowWindow(self.settings_size, SW_HIDE);
+            ShowWindow(self.settings_apply, SW_HIDE);
+            ShowWindow(self.edit, SW_SHOW);
+            ShowWindow(self.send_button, SW_SHOW);
+            SetFocus(self.window);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
+        self.load_active_composer();
+    }
+
+    fn apply_settings_from_controls(&mut self) {
+        let family = window_text(self.settings_font).trim().to_owned();
+        let size = window_text(self.settings_size).trim().parse::<u16>();
+        let Ok(size) = size else {
+            self.last_error = Some("Font size must be a number from 8 to 36".to_owned());
+            unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+            return;
+        };
+        if family.is_empty() || !(8..=36).contains(&size) {
+            self.last_error =
+                Some("Font family is required and size must be from 8 to 36".to_owned());
+            unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+            return;
+        }
+        self.config.terminal_font_family = family;
+        self.config.terminal_font_size = size;
+        self.rebuild_terminal_font();
+        if let Err(error) = save_config(&self.config) {
+            self.last_error = Some(format!("Could not save settings: {error:#}"));
+        } else {
+            self.last_error = None;
+            self.feedback = Some(format!(
+                "Terminal font: {} {}pt (resolved: {})",
+                self.config.terminal_font_family,
+                self.config.terminal_font_size,
+                self.resolved_font_family
+            ));
+        }
+        self.close_settings();
+    }
+
+    fn rebuild_terminal_font(&mut self) {
+        let (font, owned, resolved) = create_terminal_font(self.window, &self.config);
+        if self.terminal_font_owned {
+            unsafe { DeleteObject(self.terminal_font as HGDIOBJ) };
+        }
+        self.terminal_font = font;
+        self.terminal_font_owned = owned;
+        self.resolved_font_family = resolved;
+        unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+    }
+
     fn click(&mut self, x: i32, y: i32) {
-        if self.pending_close.is_some() {
+        if self.pending_close.is_some() || self.settings_open {
             let mut client: RECT = unsafe { mem::zeroed() };
             unsafe { GetClientRect(self.window, &mut client) };
             let modal_left = SIDEBAR_WIDTH + (client.right - SIDEBAR_WIDTH - 460) / 2;
@@ -862,6 +1133,41 @@ impl AppState {
         }
     }
 
+    fn right_click(&mut self, x: i32, y: i32) {
+        if x >= SIDEBAR_WIDTH || y < TAB_TOP || self.pending_close.is_some() {
+            return;
+        }
+        let position = ((y - TAB_TOP) / TAB_HEIGHT) as usize;
+        let Some(tab) = self.tabs.get(position) else {
+            return;
+        };
+        let id = tab.id;
+        let note = tab.note.clone();
+        self.save_active_composer();
+        self.note_edit_target = Some(id);
+        unsafe {
+            SetWindowTextW(self.edit, wide(&note).as_ptr());
+            SetWindowTextW(self.send_button, wide("Save note").as_ptr());
+            SetFocus(self.edit);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
+    }
+
+    fn finish_note_edit(&mut self, save: bool) {
+        if let Some(id) = self.note_edit_target.take()
+            && save
+            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+        {
+            tab.note = window_text(self.edit);
+        }
+        unsafe { SetWindowTextW(self.send_button, wide("发送").as_ptr()) };
+        self.load_active_composer();
+        unsafe {
+            SetFocus(self.window);
+            InvalidateRect(self.window, ptr::null(), 0);
+        }
+    }
+
     fn handle_shortcut(&mut self, virtual_key: u32) -> bool {
         let control = unsafe { GetKeyState(0x11) } < 0;
         let shift = unsafe { GetKeyState(0x10) } < 0;
@@ -878,18 +1184,30 @@ impl AppState {
             }
             return true;
         }
+        if self.settings_open && virtual_key == 0x1b {
+            self.close_settings();
+            return true;
+        }
 
         if focused == self.edit {
             if control && virtual_key == 0x0d {
-                self.send_composer();
+                if self.note_edit_target.is_some() {
+                    self.finish_note_edit(true);
+                } else {
+                    self.send_composer();
+                }
                 unsafe { SetFocus(self.window) };
                 self.feedback = self.active.map(|id| format!("Sent to @{id}"));
                 unsafe { InvalidateRect(self.window, ptr::null(), 0) };
                 return true;
             }
             if virtual_key == 0x1b {
-                self.save_active_composer();
-                unsafe { SetFocus(self.window) };
+                if self.note_edit_target.is_some() {
+                    self.finish_note_edit(false);
+                } else {
+                    self.save_active_composer();
+                    unsafe { SetFocus(self.window) };
+                }
                 return true;
             }
         }
@@ -930,7 +1248,7 @@ impl AppState {
         if device.is_null() {
             return None;
         }
-        let font = unsafe { GetStockObject(SYSTEM_FIXED_FONT) as HFONT };
+        let font = self.terminal_font;
         let previous_font = unsafe { SelectObject(device, font as HGDIOBJ) };
         let mut metrics: TEXTMETRICW = unsafe { mem::zeroed() };
         let mut extent: SIZE = unsafe { mem::zeroed() };
@@ -1000,6 +1318,9 @@ impl AppState {
     }
 
     fn save_active_composer(&mut self) {
+        if self.note_edit_target.is_some() || self.settings_open {
+            return;
+        }
         let Some(position) = self.active_position() else {
             return;
         };
@@ -1017,6 +1338,10 @@ impl AppState {
     }
 
     fn send_composer(&mut self) {
+        if self.note_edit_target.is_some() {
+            self.finish_note_edit(true);
+            return;
+        }
         let Some(position) = self.active_position() else {
             return;
         };
@@ -1079,7 +1404,7 @@ impl AppState {
         );
 
         let ui_font = unsafe { GetStockObject(DEFAULT_GUI_FONT) as HFONT };
-        let terminal_font = unsafe { GetStockObject(SYSTEM_FIXED_FONT) as HFONT };
+        let terminal_font = self.terminal_font;
         unsafe {
             SelectObject(device, ui_font as HGDIOBJ);
             SetBkMode(device, TRANSPARENT as i32);
@@ -1146,24 +1471,53 @@ impl AppState {
                     COLOR_GREEN
                 },
             );
-            let label = match tab.exited {
-                Some(0) => format!("{}:{} [done]", tab.index, tab.title),
-                Some(code) => format!("{}:{} [exit {code}]", tab.index, tab.title),
-                None if !tab.composer.is_empty() => {
-                    format!("{}:{}  • draft", tab.index, tab.title)
-                }
-                None => format!("{}:{}", tab.index, tab.title),
+            let terminal_title = tab.parser.callbacks().title.trim();
+            let display_title = if terminal_title.is_empty() {
+                tab.title.as_str()
+            } else {
+                terminal_title
+            };
+            let primary = if display_title.eq_ignore_ascii_case(&tab.command_name) {
+                format!("{}  {}", tab.index, tab.command_name)
+            } else {
+                format!("{}  {} · {}", tab.index, tab.command_name, display_title)
             };
             draw_text(
                 device,
-                &label,
+                &primary,
                 RECT {
                     left: 27,
-                    top,
+                    top: top + 2,
+                    right: SIDEBAR_WIDTH - 39,
+                    bottom: top + 25,
+                },
+                COLOR_TEXT,
+                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+            );
+            let secondary = if !tab.note.is_empty() {
+                tab.note.clone()
+            } else {
+                match tab.exited {
+                    Some(0) => "done · right-click to add note".to_owned(),
+                    Some(code) => format!("exit {code} · right-click to add note"),
+                    None if !tab.composer.is_empty() => "draft · right-click to add note".to_owned(),
+                    None => "right-click to add note".to_owned(),
+                }
+            };
+            draw_text(
+                device,
+                &secondary,
+                RECT {
+                    left: 27,
+                    top: top + 24,
                     right: SIDEBAR_WIDTH - 39,
                     bottom: top + TAB_HEIGHT - 3,
                 },
-                COLOR_TEXT,
+                if tab.note.is_empty() {
+                    COLOR_MUTED
+                } else {
+                    COLOR_BLUE
+                },
                 DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
             );
             draw_text(
@@ -1216,7 +1570,15 @@ impl AppState {
             let tab = &self.tabs[position];
             draw_text(
                 device,
-                &format!("Compose input for {}:{}", tab.index, tab.title),
+                &if let Some(id) = self.note_edit_target {
+                    let target = self.tabs.iter().find(|tab| tab.id == id);
+                    format!(
+                        "Edit note for {}",
+                        target.map(|tab| tab.title.as_str()).unwrap_or("tab")
+                    )
+                } else {
+                    format!("Compose input for {}:{}", tab.index, tab.title)
+                },
                 RECT {
                     left: SIDEBAR_WIDTH + 10,
                     top: client.bottom - COMPOSER_HEIGHT + 4,
@@ -1308,6 +1670,9 @@ impl AppState {
         }
         if let Some(id) = self.pending_close {
             self.paint_close_confirmation(device, &client, id);
+        }
+        if self.settings_open {
+            self.paint_settings(device, &client);
         }
         unsafe {
             if buffered {
@@ -1418,6 +1783,86 @@ impl AppState {
         );
     }
 
+    fn paint_settings(&self, device: HDC, client: &RECT) {
+        let left = SIDEBAR_WIDTH + (client.right - SIDEBAR_WIDTH - 520) / 2;
+        let top = (client.bottom - 260) / 2;
+        let rect = RECT {
+            left,
+            top,
+            right: left + 520,
+            bottom: top + 260,
+        };
+        fill(device, &rect, COLOR_MODAL);
+        let border = unsafe { CreateSolidBrush(COLOR_BLUE) };
+        unsafe {
+            FrameRect(device, &rect, border);
+            DeleteObject(border as HGDIOBJ);
+        }
+        draw_text(
+            device,
+            "Terminal settings",
+            RECT {
+                left: left + 28,
+                top: top + 18,
+                right: left + 490,
+                bottom: top + 52,
+            },
+            COLOR_TEXT,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        draw_text(
+            device,
+            "Font family",
+            RECT {
+                left: left + 34,
+                top: top + 62,
+                right: left + 350,
+                bottom: top + 88,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        draw_text(
+            device,
+            "Size (pt)",
+            RECT {
+                left: left + 380,
+                top: top + 62,
+                right: left + 472,
+                bottom: top + 88,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_VCENTER,
+        );
+        draw_text(
+            device,
+            &format!(
+                "Resolved by Windows: {} · Recommended CJK: Sarasa Fixed SC (SIL OFL 1.1)",
+                self.resolved_font_family
+            ),
+            RECT {
+                left: left + 34,
+                top: top + 132,
+                right: left + 480,
+                bottom: top + 160,
+            },
+            COLOR_MUTED,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+        draw_text(
+            device,
+            "Esc cancels · Changing font size resizes the ConPTY grid",
+            RECT {
+                left: left + 34,
+                top: top + 174,
+                right: left + 330,
+                bottom: top + 210,
+            },
+            COLOR_ORANGE,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
+    }
+
     fn paint_terminal(&mut self, device: HDC, position: usize, client: &RECT) {
         if unsafe { IsIconic(self.window) } != 0 {
             return;
@@ -1437,54 +1882,76 @@ impl AppState {
 
         let screen = self.tabs[position].parser.screen();
         for row in 0..rows {
-            let mut runs: Vec<(u16, String, COLORREF, COLORREF)> = Vec::new();
+            let mut backgrounds: Vec<(u16, u16, COLORREF)> = Vec::new();
             for col in 0..cols {
                 let cell = screen.cell(row, col);
-                let (text, mut foreground, mut background) = match cell {
-                    Some(cell) => {
-                        let text = if cell.is_wide_continuation() || cell.contents().is_empty() {
-                            " "
-                        } else {
-                            cell.contents()
-                        };
-                        (
-                            text,
-                            terminal_color(cell.fgcolor(), false),
-                            terminal_color(cell.bgcolor(), true),
-                        )
-                    }
-                    None => (" ", COLOR_TEXT, COLOR_TERMINAL),
-                };
+                let mut foreground = cell
+                    .map(|cell| terminal_color(cell.fgcolor(), false))
+                    .unwrap_or(COLOR_TEXT);
+                let mut background = cell
+                    .map(|cell| terminal_color(cell.bgcolor(), true))
+                    .unwrap_or(COLOR_TERMINAL);
                 if cell.is_some_and(|value| value.inverse()) {
                     mem::swap(&mut foreground, &mut background);
                 }
-                if let Some((_, run_text, run_foreground, run_background)) = runs.last_mut()
-                    && *run_foreground == foreground
+                if let Some((_, end, run_background)) = backgrounds.last_mut()
                     && *run_background == background
                 {
-                    run_text.push_str(text);
+                    *end = col + 1;
                 } else {
-                    runs.push((col, text.to_owned(), foreground, background));
+                    backgrounds.push((col, col + 1, background));
                 }
             }
-            for (start_col, text, foreground, background) in runs {
-                let encoded: Vec<u16> = text.encode_utf16().collect();
-                let left = SIDEBAR_WIDTH + start_col as i32 * cell_width;
+            for (start_col, end_col, background) in backgrounds {
+                fill(
+                    device,
+                    &RECT {
+                        left: SIDEBAR_WIDTH + start_col as i32 * cell_width,
+                        top: row as i32 * cell_height,
+                        right: SIDEBAR_WIDTH + end_col as i32 * cell_width,
+                        bottom: (row as i32 + 1) * cell_height,
+                    },
+                    background,
+                );
+            }
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                if cell.is_wide_continuation() || cell.contents().is_empty() {
+                    continue;
+                }
+                let foreground = if cell.inverse() {
+                    terminal_color(cell.bgcolor(), true)
+                } else {
+                    terminal_color(cell.fgcolor(), false)
+                };
+                let encoded: Vec<u16> = cell.contents().encode_utf16().collect();
+                let left = SIDEBAR_WIDTH + col as i32 * cell_width;
                 let top = row as i32 * cell_height;
+                let cell_span = if col + 1 < cols
+                    && screen
+                        .cell(row, col + 1)
+                        .is_some_and(|next| next.is_wide_continuation())
+                {
+                    2
+                } else {
+                    1
+                };
                 let rect = RECT {
                     left,
                     top,
-                    right: left + text.chars().count() as i32 * cell_width,
+                    right: left + cell_span * cell_width,
                     bottom: top + cell_height,
                 };
                 unsafe {
                     SetTextColor(device, foreground);
-                    SetBkColor(device, background);
+                    SetBkMode(device, TRANSPARENT as i32);
                     ExtTextOutW(
                         device,
                         left,
                         top,
-                        ETO_OPAQUE,
+                        0,
                         &rect,
                         encoded.as_ptr(),
                         encoded.len() as u32,
@@ -1527,7 +1994,14 @@ impl AppState {
 
     fn focus_surface(&self) -> &'static str {
         let focused = unsafe { GetFocus() };
-        if focused == self.edit {
+        if focused == self.settings_font
+            || focused == self.settings_size
+            || focused == self.settings_apply
+        {
+            "settings"
+        } else if focused == self.edit && self.note_edit_target.is_some() {
+            "note-editor"
+        } else if focused == self.edit {
             "composer"
         } else {
             "terminal"
@@ -1552,6 +2026,8 @@ impl AppState {
                     "id": format!("@{}", tab.id),
                     "index": tab.index,
                     "name": tab.title,
+                    "terminal_title": tab.parser.callbacks().title,
+                    "note": tab.note,
                     "active": self.active == Some(tab.id),
                     "state": if tab.error.is_some() {
                         "error"
@@ -1592,7 +2068,7 @@ impl AppState {
                     "rows": rows, "cols": cols,
                 },
                 "composer": {
-                    "visible": self.pending_close.is_none(),
+                    "visible": self.pending_close.is_none() && !self.settings_open,
                     "height": COMPOSER_HEIGHT,
                 }
             },
@@ -1601,10 +2077,19 @@ impl AppState {
                 "window_id": self.active.map(|id| format!("@{id}")),
             },
             "tabs": tabs,
-            "modal": self.pending_close.map(|id| serde_json::json!({
-                "kind": "confirm-close-live",
-                "window_id": format!("@{id}"),
-            })),
+            "modal": if self.settings_open {
+                Some(serde_json::json!({"kind": "settings"}))
+            } else {
+                self.pending_close.map(|id| serde_json::json!({
+                    "kind": "confirm-close-live",
+                    "window_id": format!("@{id}"),
+                }))
+            },
+            "settings": {
+                "terminal_font_family": self.config.terminal_font_family,
+                "terminal_font_size": self.config.terminal_font_size,
+                "resolved_font_family": self.resolved_font_family,
+            },
             "feedback": {
                 "message": self.feedback.as_deref(),
                 "error": self.last_error.as_deref(),
@@ -1744,6 +2229,62 @@ impl AppState {
                 };
                 self.tabs[position].title = name.to_owned();
                 IpcResponse::success("")
+            }
+            "set-tab-note" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find tab");
+                };
+                let note = positional_values(args, &["-t"], &[]).join(" ");
+                self.tabs[position].note = note;
+                unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+                IpcResponse::success("")
+            }
+            "show-tab-note" => {
+                let Some(position) = self.target_position(option_value(args, "-t")) else {
+                    return IpcResponse::failure("can't find tab");
+                };
+                IpcResponse::success(self.tabs[position].note.clone())
+            }
+            "get-settings" => IpcResponse::success(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "terminal_font_family": self.config.terminal_font_family,
+                    "terminal_font_size": self.config.terminal_font_size,
+                    "resolved_font_family": self.resolved_font_family,
+                    "config_path": config_path(),
+                    "recommended_cjk_font": "Sarasa Fixed SC",
+                    "recommended_font_license": "SIL Open Font License 1.1",
+                }))
+                .unwrap_or_default(),
+            ),
+            "set-setting" => {
+                let Some(key) = args.get(1).map(String::as_str) else {
+                    return IpcResponse::failure("set-setting requires a key and value");
+                };
+                let value = args.get(2..).unwrap_or_default().join(" ");
+                match key {
+                    "terminal.font-family" if !value.trim().is_empty() => {
+                        self.config.terminal_font_family = value;
+                    }
+                    "terminal.font-size" => {
+                        let Ok(size) = value.parse::<u16>() else {
+                            return IpcResponse::failure("font size must be a number from 8 to 36");
+                        };
+                        if !(8..=36).contains(&size) {
+                            return IpcResponse::failure("font size must be from 8 to 36");
+                        }
+                        self.config.terminal_font_size = size;
+                    }
+                    "terminal.font-family" => {
+                        return IpcResponse::failure("font family cannot be empty");
+                    }
+                    other => return IpcResponse::failure(format!("unknown setting: {other}")),
+                }
+                self.rebuild_terminal_font();
+                if let Err(error) = save_config(&self.config) {
+                    return IpcResponse::failure(format!("{error:#}"));
+                }
+                unsafe { InvalidateRect(self.window, ptr::null(), 0) };
+                IpcResponse::success(self.ui_snapshot())
             }
             "rename" | "rename-session" => {
                 let Some(name) = last_positional(args, &["-t"]) else {
@@ -1920,7 +2461,8 @@ impl AppState {
                         "ui-snapshot", "ui-action", "focus", "protocol-info",
                         "inspect", "screenshot", "screenshot-pane", "dump-cells",
                         "wait-pane", "send-mouse", "show-composer",
-                        "set-composer", "send-composer"
+                        "set-composer", "send-composer", "get-settings",
+                        "set-setting", "set-tab-note", "show-tab-note"
                     ],
                     "features": {
                         "remain_on_exit": true,
@@ -1983,14 +2525,22 @@ impl AppState {
                         None
                     }
                     "cancel" => {
-                        if self.pending_close.is_none() {
-                            return IpcResponse::failure("no confirmation is pending");
+                        if self.settings_open {
+                            self.close_settings();
+                        } else {
+                            if self.pending_close.is_none() {
+                                return IpcResponse::failure("no modal is pending");
+                            }
+                            self.finish_close_confirmation(false);
                         }
-                        self.finish_close_confirmation(false);
                         None
                     }
                     "composer-send" => {
                         self.send_composer();
+                        None
+                    }
+                    "open-settings" => {
+                        self.open_settings();
                         None
                     }
                     other => {
@@ -2056,6 +2606,8 @@ impl AppState {
                             "id": format!("@{}", tab.id),
                             "index": tab.index,
                             "name": tab.title,
+                            "terminal_title": tab.parser.callbacks().title,
+                            "note": tab.note,
                             "active": self.active == Some(tab.id),
                             "dead": tab.exited.is_some(),
                             "exit_code": tab.exited,
@@ -2132,6 +2684,8 @@ impl AppState {
             "show" | "show-options" => IpcResponse::success(
                 [
                     format!("default-shell {}", env::var("COMSPEC").unwrap_or_default()),
+                    format!("terminal-font-family {}", self.config.terminal_font_family),
+                    format!("terminal-font-size {}", self.config.terminal_font_size),
                     "remain-on-exit on".to_owned(),
                     "status on".to_owned(),
                 ]
@@ -2229,6 +2783,14 @@ fn parse_status_windows(line: &str) -> Vec<StatusWindow> {
     windows
 }
 
+impl Drop for AppState {
+    fn drop(&mut self) {
+        if self.terminal_font_owned {
+            unsafe { DeleteObject(self.terminal_font as HGDIOBJ) };
+        }
+    }
+}
+
 fn fill(device: HDC, rect: &RECT, color: COLORREF) {
     let brush = unsafe { CreateSolidBrush(color) };
     unsafe {
@@ -2305,6 +2867,87 @@ fn window_text(window: HWND) -> String {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
+}
+
+fn config_path() -> std::path::PathBuf {
+    env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("RustCmd")
+        .join("settings.json")
+}
+
+fn load_config() -> AppConfig {
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_config(config: &AppConfig) -> Result<()> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(config)?;
+    std::fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn create_terminal_font(window: HWND, config: &AppConfig) -> (HFONT, bool, String) {
+    let device = unsafe { GetDC(window) };
+    let dpi = if device.is_null() {
+        96
+    } else {
+        unsafe { GetDeviceCaps(device, LOGPIXELSY as i32) }.max(72)
+    };
+    let height = -((i32::from(config.terminal_font_size) * dpi + 36) / 72);
+    let family = wide(&config.terminal_font_family);
+    let font = unsafe {
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            FW_NORMAL as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.into(),
+            OUT_DEFAULT_PRECIS.into(),
+            CLIP_DEFAULT_PRECIS.into(),
+            CLEARTYPE_QUALITY.into(),
+            (FIXED_PITCH | FF_MODERN).into(),
+            family.as_ptr(),
+        )
+    };
+    let (font, owned) = if font.is_null() {
+        (
+            unsafe { GetStockObject(SYSTEM_FIXED_FONT) as HFONT },
+            false,
+        )
+    } else {
+        (font, true)
+    };
+    let resolved = if device.is_null() {
+        config.terminal_font_family.clone()
+    } else {
+        let previous = unsafe { SelectObject(device, font as HGDIOBJ) };
+        let mut buffer = [0_u16; 128];
+        let copied = unsafe { GetTextFaceW(device, buffer.len() as i32, buffer.as_mut_ptr()) };
+        unsafe {
+            SelectObject(device, previous);
+            ReleaseDC(window, device);
+        }
+        if copied > 0 {
+            String::from_utf16_lossy(&buffer[..copied as usize])
+                .trim_end_matches('\0')
+                .to_owned()
+        } else {
+            config.terminal_font_family.clone()
+        }
+    };
+    (font, owned, resolved)
 }
 
 fn ipc_address() -> String {
@@ -2625,6 +3268,7 @@ active-window (active-tab)
 capture-pane (capturep)
 display-message (display)
 dump-cells
+get-settings
 has-session (has)
 inspect
 focus
@@ -2649,8 +3293,11 @@ select-window (selectw)
 send-keys (send)
 send-composer
 send-mouse
+set-setting
 set-composer
+set-tab-note
 show-composer
+show-tab-note
 show-options (show)
 start-server
 ui-action
@@ -2682,6 +3329,11 @@ Usage:
   rustcmd set-composer [-t target] text
   rustcmd set-composer [-t target] --stdin|--file path
   rustcmd send-composer [-t target]
+  rustcmd set-tab-note [-t target] text
+  rustcmd show-tab-note [-t target]
+  rustcmd get-settings
+  rustcmd set-setting terminal.font-family FAMILY
+  rustcmd set-setting terminal.font-size 8..36
   rustcmd send-mouse [-t target] -x col -y row [--button left] [--action press]
   rustcmd ui-snapshot
   rustcmd ui-action new-tab|select-tab|close-tab|confirm|cancel|composer-send
@@ -2773,6 +3425,8 @@ fn render_format(
         .replace("#{window_index}", &tab.index.to_string())
         .replace("#{window_id}", &format!("@{}", tab.id))
         .replace("#{window_name}", &tab.title)
+        .replace("#{window_note}", &tab.note)
+        .replace("#{terminal_title}", &tab.parser.callbacks().title)
         .replace("#{window_active}", if active { "1" } else { "0" })
         .replace("#{pane_index}", "0")
         .replace("#{pane_id}", &format!("%{}", tab.id))

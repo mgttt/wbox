@@ -36,6 +36,7 @@ Useful format variables include:
 ```text
 #{session_name} #{window_id} #{window_index} #{window_name}
 #{window_active} #{pane_id} #{pane_pid} #{pane_dead}
+#{window_note} #{terminal_title}
 #{pane_current_command} #{pane_width} #{pane_height}
 #{pane_input_bytes} #{pane_output_bytes} #{pane_error}
 ```
@@ -66,6 +67,33 @@ Get-Content .\command.txt -Raw | & $r set-composer -t build --stdin
 
 `--stdin` and `--file` preserve multiline content without shell argument
 joining. `send-composer` submits Enter and clears the stored draft.
+
+### Two-line tab metadata
+
+```powershell
+& $r rename-window -t build "build"
+& $r set-tab-note -t build "核心服务 · 发布前检查"
+& $r show-tab-note -t build
+```
+
+The first line combines the main process with the latest terminal OSC TITLE.
+`rename-window` / `new-window -n` controls the RustCmd name used for targeting
+and as the primary fallback title. The second line is a user note; terminal
+TITLE updates never overwrite it. Right-clicking a sidebar tab opens the same
+note editor in the composer area.
+
+### Settings
+
+```powershell
+& $r get-settings
+& $r set-setting terminal.font-family "Sarasa Fixed SC"
+& $r set-setting terminal.font-size 12
+& $r ui-action open-settings
+```
+
+Settings persist in `%LOCALAPPDATA%\RustCmd\settings.json`. `get-settings`
+reports both the requested and Windows-resolved face. See
+[FONTS.md](FONTS.md) for CJK width and licensing details.
 
 ### Semantic UI automation
 

@@ -23,6 +23,16 @@ The compact dynamic composer remains planned until RMUX's Windows attach resize
 path can keep its status rows flush after a live ConPTY resize. The current
 fixed-height composer is intentionally geometry-stable.
 
+Implemented in the typography/tab-metadata slice:
+
+- branded executable/window icon;
+- persistent GUI/CLI terminal font family and point size settings with resolved
+  Windows face reporting;
+- cell-anchored narrow/wide glyph rendering;
+- two-line tabs with program + OSC TITLE on line one and independent user note
+  on line two;
+- right-click note editing plus `set-tab-note` / `show-tab-note`.
+
 ## Product experience model
 
 RustCmd has two nested navigation levels and they must remain visually and

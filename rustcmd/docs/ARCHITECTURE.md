@@ -41,6 +41,8 @@ Each tab owns:
 - an exit watcher;
 - terminal metadata, byte counters, and a composer draft.
 - a bounded 1 MiB raw-output tail for protocol/rendering diagnostics.
+- VT callbacks that retain OSC window TITLE independently from the RustCmd name.
+- a user note that is never overwritten by terminal output.
 
 Exit updates tab state but does not remove the tab.
 
@@ -68,6 +70,21 @@ The GUI model also exposes a semantic automation layer:
 GUI close and tmux-compatible kill are deliberately distinct. A user-facing
 close request confirms before terminating a live process tree; `kill-window`
 is already an explicit scripting action and remains immediate.
+
+## Settings, fonts, and resources
+
+`AppConfig` is serialized to `%LOCALAPPDATA%\RustCmd\settings.json`. GUI
+settings and `get-settings` / `set-setting` use the same state and rebuild one
+owned GDI terminal font. `GetTextFaceW` records the face Windows actually
+resolved, making missing-font fallback observable.
+
+The terminal renderer fills background color runs in batches, then draws each
+non-continuation glyph at its VT cell origin. A wide CJK cell is drawn once
+across its two-cell rectangle; its continuation cell is not emitted as an
+extra space.
+
+`build.rs` embeds `assets/rustcmd.ico` into the executable through
+`winresource`; the window class loads the same resource for its title-bar icon.
 
 ## Feedback testing loop
 

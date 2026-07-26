@@ -33,6 +33,19 @@ try {
     }
     $id = $tab.id
 
+    Write-Host 'STEP two-line tab metadata'
+    $note = "build verification $PID"
+    Invoke-RustCmd @('set-tab-note', '-t', $id, $note) | Out-Null
+    $roundTripNote = Invoke-RustCmd @('show-tab-note', '-t', $id)
+    if ($roundTripNote -ne $note) {
+        throw "Tab note round trip mismatch: [$roundTripNote]"
+    }
+    $snapshot = Invoke-RustCmd @('ui-snapshot') | ConvertFrom-Json
+    $tab = $snapshot.tabs | Where-Object id -eq $id
+    if ($tab.note -ne $note -or [string]::IsNullOrWhiteSpace($tab.terminal_title)) {
+        throw 'ui-snapshot did not expose tab note and terminal title'
+    }
+
     Write-Host 'STEP lossless file composer and draft state'
     [IO.File]::WriteAllText($draftFile, "echo $token")
     Invoke-RustCmd @('set-composer', '-t', $id, '--file', $draftFile) | Out-Null
@@ -60,6 +73,19 @@ try {
         throw 'cancel did not clear the confirmation modal'
     }
 
+    Write-Host 'STEP settings discovery and modal'
+    $settings = Invoke-RustCmd @('get-settings') | ConvertFrom-Json
+    if ($settings.terminal_font_size -lt 8 -or
+        $settings.recommended_cjk_font -ne 'Sarasa Fixed SC') {
+        throw 'get-settings did not expose font settings and CJK recommendation'
+    }
+    $snapshot = Invoke-RustCmd @('ui-action', 'open-settings') | ConvertFrom-Json
+    if ($snapshot.modal.kind -ne 'settings' -or
+        $snapshot.focus.surface -ne 'settings') {
+        throw 'settings modal/focus was not exposed'
+    }
+    Invoke-RustCmd @('ui-action', 'cancel') | Out-Null
+
     Write-Host 'STEP dead tab remains and closes without confirmation'
     Invoke-RustCmd @('send-keys', '-t', $id, 'exit', 'Enter') | Out-Null
     Invoke-RustCmd @('wait-ui', '-t', $id, '--tab-state', 'dead', '--timeout-ms', '10000') | Out-Null
@@ -73,7 +99,7 @@ try {
     if ($protocol.protocol_version -ne 1 -or -not $protocol.features.semantic_ui_automation) {
         throw 'protocol-info did not advertise semantic UI automation'
     }
-    Write-Host 'PASS: UX state, stable IDs, composer, focus, safe close, dead close, protocol discovery'
+    Write-Host 'PASS: UX state, two-line tabs, settings, composer, focus, safe close, dead close, protocol discovery'
 }
 finally {
     Remove-Item -LiteralPath $draftFile -ErrorAction SilentlyContinue

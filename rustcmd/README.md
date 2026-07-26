@@ -7,7 +7,9 @@ per-tab external composer, and a tmux/RMUX-style command line.
 ## Current highlights
 
 - Native Win32/GDI UI with tabs on the left.
+- Branded Windows icon and a persistent terminal font/size settings panel.
 - `cmd.exe` is the default shell.
+- Two-line tabs separate program/terminal TITLE from a user-maintained note.
 - Exited processes leave a `[dead]` tab until the user explicitly closes it.
 - Every tab owns a composer text box and Send button.
 - Local CLI can create, select, rename, inspect, capture, and drive tabs.
@@ -50,4 +52,5 @@ $r = ".\target\release\rustcmd.exe"
 - [Architecture](docs/ARCHITECTURE.md)
 - [UX design](docs/UX_DESIGN.md)
 - [Capability tree](docs/CAPABILITIES.md)
+- [Terminal fonts and licensing](docs/FONTS.md)
 - [RMUX compatibility notes](docs/RMUX_COMPAT.md)

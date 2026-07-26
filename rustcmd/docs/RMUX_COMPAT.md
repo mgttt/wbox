@@ -100,3 +100,8 @@ RustCmd 因此让新 tab 继承当前 tab 已渲染的行列数，避免 RMUX
 完整的命令归属与实现状态见 [CAPABILITIES.md](CAPABILITIES.md)。左侧
 RustCmd tabs 属于外层 ConPTY 导航；RMUX status windows 始终属于终端内层，
 两者不会合并或重复显示。
+
+Changing terminal font family/size changes the outer ConPTY grid. RMUX 0.9.1
+Windows clients may retain their attach-time geometry; recreate the RMUX
+RustCmd tab after a font change if its status no longer reaches the terminal
+bottom.
