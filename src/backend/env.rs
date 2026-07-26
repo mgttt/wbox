@@ -24,6 +24,25 @@ pub fn is_reserved_key(key: &str) -> bool {
 }
 
 /// 默认透传给子进程的宿主环境白名单（Windows 进程正常运转的最小集）。
+/// 子进程所处的**宿主/容器风味**：决定白名单与兜底项。
+///
+/// 用显式参数而非 `cfg!`：两种风味的策略在任一平台上都要能单测到
+/// （Linux CI 是本仓测试主体，若按 cfg 分支，Windows 风味的策略在
+/// Linux 上就永远测不到，反之亦然）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuestFlavor {
+    /// Windows 子进程（NativeBackend / BlinkBackend 的 wbox-linux.exe）
+    Windows,
+    /// Linux 子进程（LinuxNativeBackend，容器内直接执行 Linux 程序）
+    Linux,
+}
+
+/// POSIX 侧最小白名单。**刻意不含 `SystemRoot`/`COMSPEC` 这类 Windows 键**，
+/// 也不做 `C:\Windows` 兜底——把它们注进 Linux 容器毫无意义且会误导 guest。
+/// `HOME` 不在此列：容器内的 HOME 应由镜像 config 或 wbox 决定，
+/// 直接继承宿主 HOME 会把宿主用户目录路径泄进容器。
+const POSIX_WHITELIST: &[&str] = &["PATH", "TERM", "LANG", "LC_ALL", "TZ"];
+
 const HOST_WHITELIST: &[&str] = &[
     "SystemRoot",
     "SYSTEMROOT", // 部分工具读大写形式
@@ -71,6 +90,7 @@ pub fn build_child_env(
     image_env: &[(String, String)],
     forced: &[(String, String)],
     pass_all: bool,
+    flavor: GuestFlavor,
 ) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
 
@@ -81,7 +101,11 @@ pub fn build_child_env(
             }
         }
     } else {
-        for w in HOST_WHITELIST {
+        let whitelist = match flavor {
+            GuestFlavor::Windows => HOST_WHITELIST,
+            GuestFlavor::Linux => POSIX_WHITELIST,
+        };
+        for w in whitelist {
             if let Ok(v) = std::env::var(w) {
                 // 白名单内不同大小写别名只保留第一个取到值的
                 if !out.iter().any(|(k, _)| k.eq_ignore_ascii_case(w)) {
@@ -89,8 +113,11 @@ pub fn build_child_env(
                 }
             }
         }
-        // SystemRoot 兜底：很多 Win32 进程缺了它无法初始化
-        if !out.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")) {
+        // SystemRoot 兜底：很多 Win32 进程缺了它无法初始化。
+        // 仅 Windows 风味——Linux 容器注入 C:\Windows 是噪音兼误导。
+        if flavor == GuestFlavor::Windows
+            && !out.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot"))
+        {
             out.push(("SystemRoot".to_string(), r"C:\Windows".to_string()));
         }
     }
@@ -176,7 +203,7 @@ mod tests {
         let mut g = crate::testenv::EnvGuard::new();
         g.set("WBOX_REGISTRY_PASS", "hunter2");
         g.set("MY_SECRET_HOST_VAR", "x");
-        let env = build_child_env(&[], &[], false);
+        let env = build_child_env(&[], &[], false, GuestFlavor::Windows);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
         assert!(!env.iter().any(|(k, _)| k == "MY_SECRET_HOST_VAR"));
         assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
@@ -186,7 +213,7 @@ mod tests {
     fn child_env_image_overrides_whitelist_forced_wins() {
         let img = vec![("PATH".to_string(), "/img/bin".to_string())];
         let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
-        let env = build_child_env(&img, &forced, false);
+        let env = build_child_env(&img, &forced, false, GuestFlavor::Windows);
         assert_eq!(
             env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str()),
             Some("/img/bin")
@@ -206,7 +233,7 @@ mod tests {
         g.set("BLINK_PREFIX", "/evil");
         g.set("HOST_OK", "1");
         let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
-        let env = build_child_env(&[], &forced, true);
+        let env = build_child_env(&[], &forced, true, GuestFlavor::Windows);
         assert!(env.iter().any(|(k, _)| k == "HOST_OK"));
         // 保留键不透传（H6：机密；H2：隔离旋钮）
         assert!(!env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
@@ -222,6 +249,35 @@ mod tests {
                 .find(|(k, _)| k == "BLINK_PREFIX")
                 .map(|(_, v)| v.as_str()),
             Some("/rootfs")
+        );
+    }
+
+    /// 两种风味的白名单必须互不污染：Linux 侧不得出现 Windows 键，
+    /// 且不得触发 SystemRoot 兜底（否则容器里会凭空多出 C:\Windows）。
+    #[test]
+    fn posix_flavor_excludes_windows_keys() {
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("SystemRoot", r"C:\Windows");
+        g.set("COMSPEC", r"C:\Windows\system32\cmd.exe");
+        g.set("PATH", "/usr/bin");
+        let env = build_child_env(&[], &[], false, GuestFlavor::Linux);
+        assert!(!env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+        assert!(!env.iter().any(|(k, _)| k.eq_ignore_ascii_case("COMSPEC")));
+        assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"));
+    }
+
+    /// 反向：Windows 风味仍保留既有行为（含 SystemRoot 兜底）。
+    #[test]
+    fn windows_flavor_keeps_systemroot_fallback() {
+        let mut g = crate::testenv::EnvGuard::new();
+        g.remove("SystemRoot");
+        g.remove("SYSTEMROOT");
+        let env = build_child_env(&[], &[], false, GuestFlavor::Windows);
+        assert_eq!(
+            env.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
+                .map(|(_, v)| v.as_str()),
+            Some(r"C:\Windows")
         );
     }
 
@@ -267,7 +323,7 @@ mod tests {
         let mut g = crate::testenv::EnvGuard::new();
         g.set("SystemRoot", r"C:\Windows");
         g.set("SYSTEMROOT", r"C:\OtherWindows");
-        let env = build_child_env(&[], &[], false);
+        let env = build_child_env(&[], &[], false, GuestFlavor::Windows);
         let matches: Vec<&(String, String)> = env
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
@@ -281,7 +337,7 @@ mod tests {
         let mut g = crate::testenv::EnvGuard::new();
         g.remove("SystemRoot");
         g.remove("SYSTEMROOT");
-        let env = build_child_env(&[], &[], false);
+        let env = build_child_env(&[], &[], false, GuestFlavor::Windows);
         let v = env
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("systemroot"))
@@ -295,7 +351,7 @@ mod tests {
         let mut g = crate::testenv::EnvGuard::new();
         g.set("PATH", "/host/bin");
         let img = vec![("path".to_string(), "/img/bin".to_string())];
-        let env = build_child_env(&img, &[], false);
+        let env = build_child_env(&img, &[], false, GuestFlavor::Windows);
         let paths: Vec<&str> = env
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("path"))
@@ -308,7 +364,7 @@ mod tests {
     fn forced_overrides_image_env() {
         let img = vec![("FOO".to_string(), "img".to_string())];
         let forced = vec![("foo".to_string(), "forced".to_string())]; // 大小写不敏感
-        let env = build_child_env(&img, &forced, false);
+        let env = build_child_env(&img, &forced, false, GuestFlavor::Windows);
         let vals: Vec<&str> = env
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("foo"))
@@ -346,7 +402,7 @@ mod tests {
         g.set("WBOX_H2_KNOB", "1");
         g.set("PASS_ALL_MARKER", "yes");
         let forced = vec![("PASS_ALL_MARKER".to_string(), "overridden".to_string())];
-        let env = build_child_env(&[], &forced, true);
+        let env = build_child_env(&[], &forced, true, GuestFlavor::Windows);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_H2_KNOB"));
         assert_eq!(
             env.iter()

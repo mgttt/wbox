@@ -71,7 +71,7 @@ pub const DEFAULT_DNS: &str = "223.5.5.5";
 /// 确保 rootfs 内存在 `/etc/resolv.conf`；缺失（或为空文件）时写入公共 DNS。
 /// 已存在且有内容的 resolv.conf 不覆盖（用户/镜像自定义优先）。
 /// 返回是否发生了注入。纯文件操作，Windows/Linux 宿主通用。
-fn ensure_resolv_conf(rootfs: &Path) -> Result<bool> {
+pub(super) fn ensure_resolv_conf(rootfs: &Path) -> Result<bool> {
     let etc = rootfs.join("etc");
     let resolv = etc.join("resolv.conf");
     let need_inject = match std::fs::metadata(&resolv) {
@@ -137,7 +137,7 @@ impl Backend for BlinkBackend {
             BLINK_PREFIX_ENV.to_string(),
             rootfs.to_string_lossy().into_owned(),
         )];
-        let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose);
+        let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose, super::env::GuestFlavor::Windows);
         let cmd = build_blink_command(&exe, &spec.cmd);
         if spec.verbose {
             super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", spec.cmd));

@@ -557,7 +557,7 @@ mod real_windows_tests {
     }
 
     fn minimal_process_env() -> Vec<(String, String)> {
-        crate::backend::env::build_child_env(&[], &[], false)
+        crate::backend::env::build_child_env(&[], &[], false, crate::backend::env::GuestFlavor::Windows)
     }
 
     /// 完整链路：在 AppContainer + Job 内起 hostname.exe，期望 rc=0。

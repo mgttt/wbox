@@ -15,11 +15,16 @@
 
 mod blink;
 pub mod env;
+// Linux 原生后端（多宿主扩展 L0，见 docs-architecture.md §10）。
+// prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
+mod linux;
 // native 的 prepare 纯逻辑跨平台可编译（spawn 链路内部 cfg），
 // 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;
 
+use blink::ensure_resolv_conf;
 pub use blink::BlinkBackend;
+pub use linux::LinuxNativeBackend;
 pub use native::NativeBackend;
 
 use crate::error::Result;
@@ -166,6 +171,7 @@ pub(crate) fn build_sanitized_env(
     forced: &[(String, String)],
     pass_all: bool,
     verbose: bool,
+    flavor: env::GuestFlavor,
 ) -> Vec<(String, String)> {
     let (img_env, dropped) = env::sanitize_image_env(spec_env);
     if verbose && !dropped.is_empty() {
@@ -174,7 +180,31 @@ pub(crate) fn build_sanitized_env(
             dropped.join(", ")
         );
     }
-    env::build_child_env(&img_env, forced, pass_all)
+    env::build_child_env(&img_env, forced, pass_all, flavor)
+}
+
+/// 镜像目标在**当前宿主**上应走的后端。
+///
+/// Windows 宿主：guest 是 Linux ELF，宿主跑不了，必须经 wbox-linux 模拟
+/// （BlinkBackend），外层再套 AppContainer+Job。
+/// Linux 宿主：宿主本身就能执行 Linux ELF，走原生 namespace 隔离
+/// （LinuxNativeBackend），无需模拟器——见 docs-architecture.md §10.2。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageBackendKind {
+    /// 模拟执行（wbox-linux / blink）
+    Blink,
+    /// 宿主原生执行（Linux namespace）
+    LinuxNative,
+}
+
+/// 按宿主选择镜像后端。单独成函数是为了可测——分派规则本身能被断言，
+/// 而不是散落在 cli 的 cfg 分支里。
+pub const fn image_backend_kind() -> ImageBackendKind {
+    if cfg!(windows) {
+        ImageBackendKind::Blink
+    } else {
+        ImageBackendKind::LinuxNative
+    }
 }
 
 /// `run` 的执行目标判别结果。
@@ -211,6 +241,21 @@ pub fn classify_target(
 
 #[cfg(test)]
 mod tests {
+    // ---- 宿主分派（§10.2）----
+    #[test]
+    fn image_backend_follows_host() {
+        let k = super::image_backend_kind();
+        if cfg!(windows) {
+            assert_eq!(k, super::ImageBackendKind::Blink, "Windows 宿主必须走模拟器");
+        } else {
+            assert_eq!(
+                k,
+                super::ImageBackendKind::LinuxNative,
+                "Linux 宿主应走原生 namespace，而非白白多套一层模拟"
+            );
+        }
+    }
+
     use super::*;
 
     fn never_pulled(_: &crate::oci::ImageRef) -> bool {
@@ -366,7 +411,7 @@ mod tests {
             ("BLINK_PREFIX".to_string(), "/".to_string()),
         ];
         let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
-        let env = build_sanitized_env(&spec_env, &forced, false, false);
+        let env = build_sanitized_env(&spec_env, &forced, false, false, env::GuestFlavor::Windows);
         // 保留键丢弃后由 forced 提供唯一 BLINK_PREFIX
         let prefix: Vec<&str> = env
             .iter()
@@ -451,7 +496,7 @@ mod tests {
     fn build_sanitized_env_pass_all_still_filters_reserved() {
         let mut g = crate::testenv::EnvGuard::new();
         g.set("WBOX_TEST_SECRET", "hunter2");
-        let env = build_sanitized_env(&[], &[], true, false);
+        let env = build_sanitized_env(&[], &[], true, false, env::GuestFlavor::Windows);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_TEST_SECRET"));
     }
 }

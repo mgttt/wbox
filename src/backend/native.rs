@@ -27,7 +27,7 @@ impl Backend for NativeBackend {
         // H2/H6：默认不继承完整宿主环境——构造显式白名单环境；
         // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入（统一策略见
         // backend::build_sanitized_env）。
-        let env = super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose);
+        let env = super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose, super::env::GuestFlavor::Windows);
         Ok(Prepared {
             cmd: spec.cmd.clone(),
             workdir: spec.workdir.clone(),

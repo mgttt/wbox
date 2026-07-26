@@ -264,11 +264,12 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 ### 10.5 `LinuxNativeBackend` 实施方案（可执行分解）
 
 前置门槛（不满足则不开工，理由见 10.4）：Windows 链路 CI 全绿，即
-`build-wbox-linux` 的验收矩阵无 FAIL（当前阻塞项：KNOWN-FAILURES W1）。
+`build-wbox-linux` 的验收矩阵无 FAIL。**已达成**（W1/W3 修复后六个门禁
+全部真绿），故 L0 已开工。
 
 | 里程碑 | 范围 | 验收标准 |
 |---|---|---|
-| L0 骨架 | `backend/linux.rs` 实现 `Backend`；`classify_target` 按宿主分派；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | `cargo test` 覆盖 prepare 的执行计划（不 spawn），与 Blink/Native 同构 |
+| ✅ L0 骨架 | `backend/linux.rs` 实现 `Backend`；镜像目标按宿主分派（`image_backend_kind`）；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | **已完成**：6 项单测覆盖执行计划（无模拟器前缀 / resolv.conf 注入 / POSIX 环境风味 / 共享保留键策略 / 参数校验 / spawn 拒绝），与 Blink/Native 同构 |
 | L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` `/dev` 最小挂载 | 非 root 用户跑 `wbox run alpine:3.20 -- id` 得 `uid=0(root)` 且宿主侧仍是原 uid |
 | L2 资源限额 | cgroup v2：`memory.max` / `cpu.max` / `pids.max`，对齐现有 `--memory`/`--cpu-pct`/`--max-procs` 语义 | 三个开关各有一条超限用例（OOM 被杀、CPU 占比受限、fork 炸弹被挡） |
 | L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
