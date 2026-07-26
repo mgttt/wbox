@@ -14,9 +14,7 @@ pub struct NativeBackend;
 
 impl Backend for NativeBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
-        if spec.cmd.is_empty() {
-            return Err(WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
-        }
+        super::require_cmd(&spec.cmd)?;
         if !spec.workdir.is_dir() {
             return Err(WboxError::args(format!(
                 "工作目录 '{}' 不存在或不是目录",
@@ -24,15 +22,9 @@ impl Backend for NativeBackend {
             )));
         }
         // H2/H6：默认不继承完整宿主环境——构造显式白名单环境；
-        // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入。
-        let (img_env, dropped) = super::env::sanitize_image_env(&spec.env);
-        if spec.verbose && !dropped.is_empty() {
-            println!(
-                "wbox: 已丢弃环境变量中的保留键（隔离/凭证相关）：{}",
-                dropped.join(", ")
-            );
-        }
-        let env = super::env::build_child_env(&img_env, &[], spec.env_pass_all);
+        // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入（统一策略见
+        // backend::build_sanitized_env）。
+        let env = super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose);
         Ok(Prepared {
             cmd: spec.cmd.clone(),
             workdir: spec.workdir.clone(),

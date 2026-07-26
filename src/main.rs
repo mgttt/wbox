@@ -233,11 +233,7 @@ fn cmd_run(args: &[String]) -> error::Result<u32> {
     let opts = parse_run_args(args)?;
 
     // 判别目标：镜像引用（已 pull 或 --pull）vs 本地可执行路径。
-    let target = backend::classify_target(opts.positional.as_deref(), opts.pull, |iref| {
-        oci::image_dir(iref)
-            .map(|d| d.join("rootfs").is_dir())
-            .unwrap_or(false)
-    })?;
+    let target = backend::classify_target(opts.positional.as_deref(), opts.pull, oci::is_pulled)?;
 
     match target {
         RunTarget::Native => {
@@ -646,12 +642,7 @@ mod tests {
         cmd_image_show(&["fake:latest".to_string()]).unwrap();
 
         // 3. classify：按真实缓存判定（与 cmd_run 相同的闭包）
-        let target = backend::classify_target(Some("fake"), false, |iref| {
-            oci::image_dir(iref)
-                .map(|d| d.join("rootfs").is_dir())
-                .unwrap_or(false)
-        })
-        .unwrap();
+        let target = backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap();
         let iref = match target {
             backend::RunTarget::Image(r) => r,
             other => panic!("已缓存镜像必须判为 Image，得到 {:?}", other),
@@ -699,17 +690,12 @@ mod tests {
     fn integration_uncached_then_plant_then_classify() {
         // 未缓存 → Native；构造缓存后 → Image（classify 实时看磁盘）
         let home = TempHome::new("promote");
-        let is_pulled = |iref: &oci::ImageRef| {
-            oci::image_dir(iref)
-                .map(|d| d.join("rootfs").is_dir())
-                .unwrap_or(false)
-        };
         assert_eq!(
-            backend::classify_target(Some("fake"), false, is_pulled).unwrap(),
+            backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap(),
             backend::RunTarget::Native
         );
         home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
-        match backend::classify_target(Some("fake"), false, is_pulled).unwrap() {
+        match backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap() {
             backend::RunTarget::Image(_) => {}
             other => panic!("期望 Image，得到 {:?}", other),
         }
