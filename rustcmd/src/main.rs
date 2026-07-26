@@ -254,14 +254,17 @@ unsafe extern "system" fn window_proc(
         }
         WM_TIMER => {
             if let Some(state) = state_mut(window) {
-                state.tick();
-                unsafe { InvalidateRect(window, ptr::null(), 0) };
+                if state.tick() {
+                    unsafe { InvalidateRect(window, ptr::null(), 0) };
+                }
             }
             0
         }
         WM_APP_WAKE => {
             if let Some(state) = state_mut(window) {
-                state.tick();
+                if state.tick() {
+                    unsafe { InvalidateRect(window, ptr::null(), 0) };
+                }
             }
             0
         }
@@ -466,8 +469,10 @@ impl TerminalTab {
         })
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(event) = self.receiver.try_recv() {
+            changed = true;
             match event {
                 PtyEvent::Output(bytes) => {
                     self.output_bytes += bytes.len();
@@ -477,6 +482,7 @@ impl TerminalTab {
                 PtyEvent::Error(error) => self.error = Some(error),
             }
         }
+        changed
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -610,11 +616,13 @@ impl AppState {
         self.load_active_composer();
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> bool {
+        let mut changed = false;
         for tab in &mut self.tabs {
-            tab.poll();
+            changed |= tab.poll();
         }
         let envelopes: Vec<IpcEnvelope> = self.ipc_receiver.try_iter().collect();
+        changed |= !envelopes.is_empty();
         for envelope in envelopes {
             let response = self.execute_command(&envelope.request.args);
             let _ = envelope.respond_to.send(response);
@@ -622,6 +630,7 @@ impl AppState {
         if self.close_requested {
             unsafe { PostMessageW(self.window, WM_CLOSE, 0, 0) };
         }
+        changed
     }
 
     fn layout(&self) {
@@ -1236,7 +1245,7 @@ impl AppState {
                 }
                 IpcResponse::success("")
             }
-            "inspect" => {
+            "inspect" | "pane-snapshot" => {
                 self.save_active_composer();
                 let selected: Vec<&TerminalTab> = match option_value(args, "-t") {
                     Some(target) => {
@@ -1265,6 +1274,7 @@ impl AppState {
                             "output_bytes": tab.output_bytes,
                             "composer": tab.composer,
                             "error": tab.error,
+                            "text": tab.parser.screen().contents(),
                         })
                     })
                     .collect::<Vec<_>>();
@@ -1524,6 +1534,9 @@ fn start_ipc_server(window: HWND) -> Result<Receiver<IpcEnvelope>> {
 
 fn run_cli(arguments: Vec<String>) -> i32 {
     let command = arguments.first().map(String::as_str).unwrap_or_default();
+    if matches!(command, "wait-pane" | "expect-pane") {
+        return run_wait_pane(&arguments);
+    }
     let may_start_server = matches!(
         command,
         "new-session"
@@ -1572,6 +1585,60 @@ fn run_cli(arguments: Vec<String>) -> i32 {
     }
 }
 
+fn run_wait_pane(arguments: &[String]) -> i32 {
+    let target = option_value(arguments, "-t").map(str::to_owned);
+    let timeout_ms = option_value(arguments, "--timeout-ms")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5_000);
+    let contains = option_value(arguments, "--contains")
+        .map(str::to_owned)
+        .or_else(|| {
+            (arguments.first().is_some_and(|value| value == "expect-pane"))
+                .then(|| last_positional(arguments, &["-t", "--timeout-ms"]))
+                .flatten()
+                .map(str::to_owned)
+        });
+    let wait_dead = arguments.iter().any(|argument| argument == "--dead");
+    if contains.is_none() && !wait_dead {
+        eprintln!("usage: wait-pane [-t target] (--contains text | --dead) [--timeout-ms ms]");
+        return 2;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let matched = if wait_dead {
+            let mut request = vec![
+                "display-message".to_owned(),
+                "-p".to_owned(),
+                "#{pane_dead}".to_owned(),
+            ];
+            if let Some(target) = &target {
+                request.extend(["-t".to_owned(), target.clone()]);
+            }
+            send_ipc_request(request)
+                .is_ok_and(|response| response.ok && response.output.trim() == "1")
+        } else {
+            let mut request = vec!["capture-pane".to_owned(), "-p".to_owned()];
+            if let Some(target) = &target {
+                request.extend(["-t".to_owned(), target.clone()]);
+            }
+            send_ipc_request(request).is_ok_and(|response| {
+                response.ok
+                    && contains
+                        .as_ref()
+                        .is_some_and(|needle| response.output.contains(needle))
+            })
+        };
+        if matched {
+            return 0;
+        }
+        if std::time::Instant::now() >= deadline {
+            eprintln!("wait-pane timed out after {timeout_ms} ms");
+            return 1;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn hide_owned_console_window() {
     #[link(name = "Kernel32")]
     unsafe extern "system" {
@@ -1609,6 +1676,7 @@ list-windows (lsw)
 new-session (new)
 new-window (neww)
 next-window (next)
+pane-snapshot
 previous-window (prev)
 rename-session (rename)
 rename-window (renamew)
