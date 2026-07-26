@@ -244,12 +244,17 @@ int closedir(DIR *d) {
   return 0;
 }
 
+// w32fd.c: reverse the %XXXX host-name escaping (F7/F8) so guests see
+// their original UTF-8 / win32-illegal names.
+void W32UnescapeName(wchar_t *w);
+
 struct dirent *readdir(DIR *d) {
   if (!d) return NULL;
   if (!d->first) {
     if (!FindNextFileW(d->h, &d->data)) return NULL;
   }
   d->first = 0;
+  W32UnescapeName(d->data.cFileName);
   WideCharToMultiByte(CP_UTF8, 0, d->data.cFileName, -1, d->ent.d_name,
                       sizeof(d->ent.d_name), NULL, NULL);
   d->ent.d_type = (d->data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)

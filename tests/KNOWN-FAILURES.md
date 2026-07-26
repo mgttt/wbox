@@ -14,14 +14,14 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
   WINEDEBUG=-all wine /path/to/wbox-linux.exe ./<t_xxx>
 ```
 
-## P0 安全（审计 C2 防退化项 —— 当前已退化！）
+## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复（fix/fs-sec）
 
-| # | 现象 | 期望 | 实际 | 疑似归属层 |
+| # | 现象 | 期望 | 实际 | 归属层 |
 |---|------|------|------|-----------|
-| S1 | `open("/bin/../..../etc/hostname")` | EACCES | **成功读到宿主文件**（中间 `..` 组件逃逸） | VFS 路径归一化（win32 移植） |
-| S2 | `open("/mnt/agents/...")`、`open("/etc/hostname")` 绝对路径 | EACCES/ENOENT | **成功读到宿主文件**（绝对路径越 rootfs；runner 默认无 BLINK_PREFIX 环境） | VFS 根限定 |
-| S3 | `openat(dirfd, "../..")`（dirfd 位于 rootfs 内子目录） | EACCES | **成功**（dirfd 锚定可 `..` 逃逸） | VFS openat 实现 |
-| S4 | 子目录中 `open("../../etc/hostname")` | EACCES | **wbox-linux 进程崩溃**（NULL deref，wine page fault @ wbox-linux+0x5be2b） | VFS 相对路径解析（隔离用例 t_sec_path_relesc，rc=5） |
+| S1 | `open("/bin/../..../etc/hostname")` | EACCES | ✅ EACCES/ENOENT（jail-by-default：无 BLINK_PREFIX 时 guest 根限定为启动 cwd；`..` 越根拒绝） | VfsInit + HostfsTraverse |
+| S2 | 绝对路径（/mnt/agents/...、/etc/hostname） | EACCES/ENOENT | ✅ ENOENT（绝对路径 jail 到 WBOX_ROOT 内解析；W32Path/W32ResolveAt 统一出口校验） | VfsInit + w32fd W32Path |
+| S3 | `openat(dirfd, "../..")` | EACCES | ✅ EACCES（VfsHandleDirfdName 尾随 `..` 不得越过 g_rootinfo + W32ResolveAt WithinRoot 复查） | vfs.c + w32fd.c |
+| S4 | 子目录 `open("../../etc/hostname")` | EACCES | ✅ 干净 ENOENT/EACCES——原为 NULL deref 崩溃（VfsTraverseStackBuild cleananddie 回卷越过 parent==NULL 的根节点；已加回卷护栏） | vfs.c + hostfs.c |
 
 ## P1 内存语义
 
@@ -38,14 +38,14 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 
 | # | 现象 | 期望 | 实际 | 疑似归属层 |
 |---|------|------|------|-----------|
-| F1 | `open(O_CREAT, 0604)` 后 `fstat` 权限位 | 0604 | **0666**（mode 参数被忽略） | VFS open |
+| F1 | `open(O_CREAT, 0604)` 后 `fstat` 权限位 | 0604 | ✅ **已修**（fix/fs-sec：w32fd 进程内 mode 仿真表，创建套 umask，stat/fstat 优先采用；win32 宿主仅有只读位） | VFS open |
 | F2 | `open(O_APPEND)` + `lseek(0)` + `write` | 强制追加到 EOF | **写到偏移 0**（O_APPEND 未生效；pwrite 同病） | VFS 写路径 |
 | F3 | `pwrite` 到 >4GiB 偏移后 `fstat` | st_size = off+len | **尺寸不符**；空洞 `pread` 返回 -1；`pread` 后文件位置被移动 | VFS 大文件/off_t 64 位 |
 | F4 | `pread(pipe)` | -1/ESPIPE | **返回数据（当 read 用）**；**空管道 pread 直接挂死模拟器**（无任何返回，120s 超时） | fd 层 pread 分派 |
-| F5 | `unlink(仍打开的文件)` | 删除成功、名字消失（POSIX） | **返回 0 但文件仍在**（Windows 不能删打开文件，错误被吞） | VFS unlink |
-| F6 | `unlink(目录)` | EISDIR | EACCES（次要，errno 精度） | VFS unlink |
-| F7 | UTF-8 文件名创建（é你好） | 成功 | **ENOENT**（创建即失败，编码转换问题） | VFS 文件名 UTF-8↔UTF-16 |
-| F8 | 特殊字符文件名（空格/'/"/()/[]） | 成功 | **EINVAL**（合法字符被拒绝） | VFS 文件名校验 |
+| F5 | `unlink(仍打开的文件)` | 删除成功、名字消失（POSIX） | ✅ **已修**（fix/fs-sec：wine DeleteFile 对已打开文件仅标 delete-pending——重命名到隐藏临时名再删，fd 保持有效，残留随最后 close 消失） | VFS unlink |
+| F6 | `unlink(目录)` | EISDIR | ✅ **已修**（fix/fs-sec：unlink 前查目录属性，EACCES→EISDIR） | VFS unlink |
+| F7 | UTF-8 文件名创建（é你好） | 成功 | ✅ **已修**（fix/fs-sec：根因是 wine 在非 UTF-8 locale 下无法创建非 ASCII 名；宿主文件名统一 %XXXX 纯 ASCII 转义，readdir 反转义） | VFS 文件名 UTF-8↔UTF-16 |
+| F8 | 特殊字符文件名（空格/'/"/()/[]） | 成功 | ✅ **已修**（同上转义方案覆盖 win32 非法字符 <xx>"\|?* 与控制字符） | VFS 文件名校验 |
 
 ## P1 进程
 
@@ -71,8 +71,9 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 
 ## 备注
 
-- `symlink()` 创建全部 **EPERM**（含相对/绝对目标）——win32 宿主无特权创建符号链接属已知限制，
-  连带 readlink/ELOOP/逃逸链用例退化；若最终判定为"不支持即合理"，可将 t_path/t_sec_* 中
-  symlink 创建断言降级为 SKIP。
+- `symlink()` 创建全部 **EPERM**（含相对/绝对目标）——✅ **已判定为宿主限制并降级 SKIP**
+  （fix/fs-sec）：probe 实测 wine 11 的 CreateSymbolicLinkW 只生成无法跟随的 reparse 占位文件
+  （真实文件名带 `?` 后缀），非 wbox 缺陷；t_path 三个 symlink 块与 t_sec_path/t_sec_linkabs 的
+  创建断言已在 EPERM 时降级为 SKIP（其他 errno 仍 FAIL）。
 - t_exec 在 `/proc/self/exe` 缺失时回退 argv[0] 自 exec，exec 语义本体（argv/env/内存清洁）全过。
 - t_stress（100 fork / 20 并发 / 1000 mmap 循环 / 1000 并发映射 / 64MiB 校验）**全部通过**。

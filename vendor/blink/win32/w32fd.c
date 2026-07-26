@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/ioctl.h>
+#include <wctype.h>
 #include <poll.h>
 #include <sys/select.h>
 #include <signal.h>
@@ -108,6 +109,71 @@ static int W32RootComps(const wchar_t *root) {
   return n;
 }
 
+static int W32EscapeName(wchar_t *w);
+
+// C2 (security-audit): THE jail root. Every host path that reaches a
+// Win32 API must textually resolve inside this directory — this is the
+// single egress check shared by all path entries (W32Path for cwd-based
+// and absolute paths, W32ResolveAt for the dirfd-anchored *at family).
+// It is the 雏形 of the planned unified path-normalization entry point:
+// VfsInit publishes the VFS root via WBOX_ROOT (BLINK_PREFIX, or the
+// launch cwd under jail-by-default), so the VFS layer and this fd layer
+// never disagree about what "outside the sandbox" means.
+static const wchar_t *W32JailRoot(int *comps) {
+  static wchar_t root[MAX_PATH];
+  static int root_init, root_comps;
+  if (!root_init) {
+    char *r = getenv("WBOX_ROOT");
+    if (!r || !*r) {
+      // jail-by-default fallback (VfsInit not run yet): the launch cwd
+      DWORD m = GetCurrentDirectoryW(MAX_PATH, root);
+      if (!m || m >= MAX_PATH) {
+        wcscpy(root, L"Z:\\");  // last resort: wine unix fs root
+      }
+    } else {
+      root[0] = 0;
+      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, MAX_PATH - 1);
+      root[MAX_PATH - 1] = 0;
+    }
+    for (int n = 0; root[n]; ++n)
+      if (root[n] == L'/') root[n] = L'\\';
+    // strip trailing backslashes ("Z:\" keeps its root slash)
+    size_t l = wcslen(root);
+    while (l > 3 && root[l - 1] == L'\\') root[--l] = 0;
+    // F7/F8: resolved host paths are compared in ESCAPED form (see
+    // W32EscapeName), so the jail root must be escaped too — otherwise
+    // a non-ASCII jail root would falsely deny everything.
+    W32EscapeName(root);
+    root_comps = W32RootComps(root);
+    root_init = 1;
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32jailroot] root='%S' comps=%d env='%s'\n", root,
+              root_comps, r ? r : "(null)");
+  }
+  if (comps) *comps = root_comps;
+  return root;
+}
+
+// C2: case-insensitive check that the NORMALIZED ABSOLUTE path `abs`
+// ("X:\..." drive-prefixed) resolves inside the jail root.
+static int W32WithinRoot(const wchar_t *abs) {
+  const wchar_t *root = W32JailRoot(NULL);
+  size_t rl = wcslen(root);
+  if (rl >= 2 && root[1] == L':' && rl == 2) {
+    // bare drive root "Z:" — everything on the drive is inside
+    return !_wcsnicmp(abs, root, 2) ? 0 : -1;
+  }
+  if (_wcsnicmp(abs, root, rl)) return -1;
+  wchar_t c = abs[rl];
+  return (c == 0 || c == L'\\') ? 0 : -1;
+}
+
+// DOS device names that must not be jail-checked (they are not paths).
+static int W32IsDeviceName(const wchar_t *w) {
+  return !wcscmp(w, L"NUL") || !wcscmp(w, L"CON") || !wcscmp(w, L"CONIN$") ||
+         !wcscmp(w, L"CONOUT$") || !wcscmp(w, L"CONSOLE$");
+}
+
 static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
   int n;
   wchar_t tmp[MAX_PATH];
@@ -115,27 +181,22 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
   if (!path) return NULL;
   if (!strcmp(path, "/dev/null")) path = "NUL";
   if (path[0] == '/') {
-    // root via WBOX_ROOT (default Z:)
-    static wchar_t root[64];
-    static int root_init, root_comps;
-    if (!root_init) {
-      char *r = getenv("WBOX_ROOT");
-      if (!r || !*r) r = "Z:";
-      root[0] = 0;
-      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, 63);
-      root[63] = 0;
-      for (n = 0; root[n]; ++n)
-        if (root[n] == L'/') root[n] = L'\\';
-      root_comps = W32RootComps(root);
-      root_init = 1;
-    }
+    // absolute guest path: root at the jail root
+    int root_comps;
+    const wchar_t *root = W32JailRoot(&root_comps);
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32path] abs '%s'\n", path);
     n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
     if (n <= 0) return NULL;
+    // F7/F8: escape the guest part BEFORE joining — the jail root is
+    // cached in escaped form, and escaping twice would corrupt '%'.
+    // "." / ".." are ASCII, so normalization below is unaffected.
+    if (W32EscapeName(tmp)) return NULL;
     if (wcslen(root) + wcslen(tmp) + 2 >= MAX_PATH) return NULL;
     wcscpy(joined, root);
     wcscat(joined, tmp);
     // C2: component-level normalization; reject any result that escapes
-    // above WBOX_ROOT (e.g. "/../outside" reaching the host).
+    // above the jail root (e.g. "/../outside" reaching the host).
     if (W32NormalizeW(joined, buf, root_comps)) {
       SetLastError(ERROR_ACCESS_DENIED);
       return NULL;
@@ -152,6 +213,31 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
       SetLastError(ERROR_ACCESS_DENIED);
       return NULL;
     }
+    // F7/F8: pure-ASCII host names (locale-proof, win32-legal). Done
+    // before the egress check so it compares in the same (escaped)
+    // form the host filesystem sees.
+    if (!W32IsDeviceName(buf)) {
+      if (W32EscapeName(buf)) return NULL;
+      if (buf[0] && buf[1] == L':') {
+        wcscpy(joined, buf);  // already drive-prefixed absolute
+      } else {
+        DWORD m = GetCurrentDirectoryW(MAX_PATH, joined);
+        if (!m || m >= MAX_PATH) return NULL;
+        if (wcslen(joined) + wcslen(buf) + 2 >= MAX_PATH) return NULL;
+        wcscat(joined, L"\\");
+        wcscat(joined, buf);
+      }
+      {
+        wchar_t full[MAX_PATH];
+        if (W32NormalizeW(joined, full, 0) || W32WithinRoot(full)) {
+          if (getenv("WBOX_DEBUG_PATH"))
+            fprintf(stderr, "[w32path] DENY rel '%s' full '%S' root '%S'\n",
+                    path, full, W32JailRoot(NULL));
+          SetLastError(ERROR_ACCESS_DENIED);
+          return NULL;
+        }
+      }
+    }
   }
   // normalize slashes to backslashes (some win32 apis insist)
   for (n = 0; buf[n]; ++n)
@@ -160,6 +246,70 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
 }
 
 static HANDLE W32Handle(int fd);
+
+// ------------------------------------------------ F7/F8: host filename escaping
+// Wine maps Win32 filenames onto the Unix filesystem through the LOCALE
+// charset — with an unset/non-UTF-8 locale any non-ASCII guest filename
+// fails to create (ENOENT), and Win32 natively rejects <>:"|?* and
+// control chars (EINVAL). Linux guests legitimately use both. Escape
+// every such wchar as %XXXX (UTF-16 code units, '%' itself as %25) so
+// host names are pure ASCII; readdir unescapes on the way back. The
+// mapping is injective per code unit, so surrogate pairs round-trip
+// losslessly. (Known limit: guest names ending in '.' or ' ' collide
+// with win32 trailing-dot/space stripping and are not yet escaped.)
+static int W32EscapeName(wchar_t *w) {
+  wchar_t tmp[MAX_PATH];
+  wchar_t *o = tmp;
+  int has_drive = iswalpha(w[0]) && w[1] == L':';
+  for (size_t i = 0; w[i]; ++i) {
+    wchar_t c = w[i];
+    int esc = c == L'%' || c < 0x20 || c > 0x7e || c == L'<' || c == L'>' ||
+              c == L'|' || c == L'?' || c == L'*' || c == L'"' ||
+              (c == L':' && !(has_drive && i == 1));
+    if (!esc) {
+      if (o - tmp >= MAX_PATH - 1) goto toolong;
+      *o++ = c;
+    } else {
+      if (o - tmp >= MAX_PATH - 5) goto toolong;
+      *o++ = L'%';
+      static const wchar_t hexd[] = L"0123456789abcdef";
+      *o++ = hexd[(c >> 12) & 15];
+      *o++ = hexd[(c >> 8) & 15];
+      *o++ = hexd[(c >> 4) & 15];
+      *o++ = hexd[c & 15];
+    }
+  }
+  *o = 0;
+  wcscpy(w, tmp);
+  return 0;
+toolong:
+  SetLastError(ERROR_FILENAME_EXCED_RANGE);
+  return -1;
+}
+
+static int W32HexDig(wchar_t c) {
+  return c >= L'0' && c <= L'9' ? c - L'0'
+       : c >= L'a' && c <= L'f' ? c - L'a' + 10
+       : c >= L'A' && c <= L'F' ? c - L'A' + 10
+                                : -1;
+}
+
+// reverse of W32EscapeName (in place, only shrinks); strict %XXXX
+// (4 hex digits) sequences decode, anything else passes through.
+void W32UnescapeName(wchar_t *w) {
+  wchar_t *r = w, *o = w;
+  while (*r) {
+    if (r[0] == L'%' && W32HexDig(r[1]) >= 0 && W32HexDig(r[2]) >= 0 &&
+        W32HexDig(r[3]) >= 0 && W32HexDig(r[4]) >= 0) {
+      *o++ = (wchar_t)((W32HexDig(r[1]) << 12) | (W32HexDig(r[2]) << 8) |
+                       (W32HexDig(r[3]) << 4) | W32HexDig(r[4]));
+      r += 5;
+    } else {
+      *o++ = *r++;
+    }
+  }
+  *o = 0;
+}
 
 // C2 (security-audit): real dirfd semantics for the *at family. A
 // relative path with dirfd != AT_FDCWD is anchored at the directory the
@@ -186,6 +336,10 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
       MultiByteToWideChar(CP_ACP, 0, path, -1, rel, MAX_PATH) <= 0) {
     return NULL;
   }
+  // F7/F8: the anchor `d` comes from the host (already escaped); escape
+  // the relative part before joining. "." / ".." components are ASCII
+  // and unaffected, so normalization below still sees them.
+  if (W32EscapeName(rel)) return NULL;
   if (wcslen(d) + wcslen(rel) + 2 >= MAX_PATH) return NULL;
   wcscpy(joined, d);
   wcscat(joined, L"\\");
@@ -197,7 +351,121 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
     SetLastError(ERROR_ACCESS_DENIED);
     return NULL;
   }
+  // C2 unified egress check: the resolved path must stay inside the
+  // jail root, no matter which directory the dirfd points at (S3).
+  if (W32WithinRoot(buf)) {
+    if (getenv("WBOX_DEBUG_PATH"))
+      fprintf(stderr, "[w32resolveat] DENY '%s' buf '%S' root '%S'\n", path,
+              buf, W32JailRoot(NULL));
+    SetLastError(ERROR_ACCESS_DENIED);
+    return NULL;
+  }
   return buf;
+}
+
+// ------------------------------------------------- F1: POSIX mode emulation
+// Win32 only has a read-only attribute, so the mode passed to
+// open(O_CREAT)/mkdir/chmod is kept in a process-local table keyed by
+// the normalized absolute wide path; W32FillStat prefers it over the
+// attribute heuristic. Single-process scope (like the rest of the L2
+// emulation); snapshot-fork children share it since they share the
+// process.
+#define W32MODE_CAP 4096
+static struct {
+  wchar_t *path;
+  mode_t mode;
+} g_modetab[W32MODE_CAP];
+static SRWLOCK g_modelock = SRWLOCK_INIT;
+static mode_t g_umask = 022;
+
+static uint32_t W32ModeHash(const wchar_t *w) {
+  uint32_t h = 2166136261u;
+  for (; *w; ++w) {
+    h ^= (uint32_t)towlower(*w);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+// absolutize an already-normalized path for use as a mode-table key
+static void W32AbsKey(const wchar_t *w, wchar_t out[MAX_PATH]) {
+  if (w[0] && w[1] == L':') {
+    wcscpy(out, w);
+    return;
+  }
+  DWORD m = GetCurrentDirectoryW(MAX_PATH, out);
+  if (!m || wcslen(out) + wcslen(w) + 2 >= MAX_PATH) {
+    wcscpy(out, w);
+    return;
+  }
+  wcscat(out, L"\\");
+  wcscat(out, w);
+}
+
+static void W32ModeSet(const wchar_t *w, mode_t mode) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n, firstfree = UINT32_MAX;
+  W32AbsKey(w, key);
+  AcquireSRWLockExclusive(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (!g_modetab[i].path) {
+      if (firstfree == UINT32_MAX) firstfree = i;
+      continue;
+    }
+    if (!_wcsicmp(g_modetab[i].path, key)) {
+      g_modetab[i].mode = mode;
+      ReleaseSRWLockExclusive(&g_modelock);
+      return;
+    }
+  }
+  if (firstfree != UINT32_MAX &&
+      (g_modetab[firstfree].path = _wcsdup(key))) {
+    g_modetab[firstfree].mode = mode;
+  }
+  ReleaseSRWLockExclusive(&g_modelock);
+}
+
+static int W32ModeGet(const wchar_t *w, mode_t *mode) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n;
+  W32AbsKey(w, key);
+  AcquireSRWLockShared(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (!g_modetab[i].path) continue;
+    if (!_wcsicmp(g_modetab[i].path, key)) {
+      *mode = g_modetab[i].mode;
+      ReleaseSRWLockShared(&g_modelock);
+      return 1;
+    }
+  }
+  ReleaseSRWLockShared(&g_modelock);
+  return 0;
+}
+
+static void W32ModeClear(const wchar_t *w) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n;
+  W32AbsKey(w, key);
+  AcquireSRWLockExclusive(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (g_modetab[i].path && !_wcsicmp(g_modetab[i].path, key)) {
+      free(g_modetab[i].path);
+      g_modetab[i].path = NULL;
+      break;
+    }
+  }
+  ReleaseSRWLockExclusive(&g_modelock);
+}
+
+static void W32ModeMove(const wchar_t *old, const wchar_t *new_) {
+  mode_t m;
+  if (W32ModeGet(old, &m)) {
+    W32ModeSet(new_, m);
+    W32ModeClear(old);
+  }
 }
 
 static DWORD W32Access(int flags, mode_t mode) {
@@ -383,8 +651,18 @@ int openat(int dirfd, const char *path, int flags, ...) {
   h = CreateFileW(wbuf, W32Access(flags, mode), share, NULL,
                   W32Disposition(flags), createflags, NULL);
   if (h == INVALID_HANDLE_VALUE) {
+    if (getenv("WBOX_DEBUG_PATH")) {
+      DWORD gle = GetLastError();
+      fprintf(stderr, "[openat] FAIL gle=%lu '%s' -> [", gle, path);
+      for (wchar_t *q = wbuf; *q; ++q) fprintf(stderr, "%04x.", *q);
+      fprintf(stderr, "]\n");
+    }
     errno = W32Err();
     return -1;
+  }
+  // F1: mode applies only at creation (attr was INVALID before CreateFile)
+  if ((flags & O_CREAT) && attr == INVALID_FILE_ATTRIBUTES) {
+    W32ModeSet(wbuf, mode & ~g_umask & 07777);
   }
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
   return W32ToCrt(h, flags);
@@ -808,6 +1086,13 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
     }
     if (!st->st_nlink) st->st_nlink = 1;
   }
+  // F1: the emulated POSIX mode table wins over the attribute heuristic
+  if (wpath && (ft == FILE_TYPE_DISK)) {
+    mode_t em;
+    if (W32ModeGet(wpath, &em)) {
+      st->st_mode = (st->st_mode & S_IFMT) | (em & 07777);
+    }
+  }
   // win32 filetime (100ns since 1601) -> unix timespec
   uint64_t t;
   t = ((uint64_t)ct.dwHighDateTime << 32) | ct.dwLowDateTime;
@@ -850,7 +1135,14 @@ int fstat(int fd, struct stat *st) {
     errno = EBADF;
     return -1;
   }
-  W32FillStat(st, h, NULL);
+  // F1: resolve the path for the emulated-mode lookup (fails for pipes)
+  wchar_t wbuf[MAX_PATH], *wp = NULL;
+  DWORD wn = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
+  if (wn && wn < MAX_PATH) {
+    wp = wbuf;
+    if (!wcsncmp(wp, L"\\\\?\\", 4)) wp += 4;
+  }
+  W32FillStat(st, h, wp);
   return 0;
 }
 
@@ -910,16 +1202,44 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
 }
 
 int unlink(const char *path) {
-  wchar_t wbuf[MAX_PATH];
-  if (!W32Path(path, wbuf) || !DeleteFileW(wbuf)) {
-    errno = W32Err();
+  return unlinkat(AT_FDCWD, path, 0);
+}
+
+// F5: POSIX unlink of an open file. DeleteFile on Win32/wine only marks
+// the file delete-pending — the name stays visible (stat succeeds) until
+// the last handle closes, violating POSIX unlink semantics. Emulation:
+// rename the victim to a hidden sibling (open handles stay valid and
+// keep the inode), then delete the temp name; its delete-pending residue
+// disappears at the last close and can only ever show up as a hidden
+// dotfile in readdir in between.
+static int W32UnlinkPosix(const wchar_t *wbuf) {
+  wchar_t tmp[MAX_PATH];
+  wchar_t *base;
+  static volatile long seq;
+  if (DeleteFileW(wbuf) &&
+      GetFileAttributesW(wbuf) == INVALID_FILE_ATTRIBUTES) {
+    return 0;  // not open anywhere: plain delete removed the name
+  }
+  if (wcslen(wbuf) + 40 >= MAX_PATH) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
     return -1;
   }
+  wcscpy(tmp, wbuf);
+  base = wcsrchr(tmp, L'\\');
+  base = base ? base + 1 : tmp;
+  swprintf(base, (size_t)(tmp + MAX_PATH - base), L".wbox-unlink-%lx-%lx",
+           (unsigned long)GetCurrentProcessId(),
+           (unsigned long)InterlockedIncrement(&seq));
+  if (!MoveFileExW(wbuf, tmp, MOVEFILE_REPLACE_EXISTING)) {
+    return -1;  // original DeleteFile error is the better errno; restore
+  }
+  DeleteFileW(tmp);  // may go delete-pending; freed at last close
   return 0;
 }
 
 int unlinkat(int dirfd, const char *path, int flags) {
   wchar_t wbuf[MAX_PATH];
+  DWORD attr;
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -929,12 +1249,20 @@ int unlinkat(int dirfd, const char *path, int flags) {
       errno = W32Err();
       return -1;
     }
+    W32ModeClear(wbuf);
     return 0;
   }
-  if (!DeleteFileW(wbuf)) {
+  // F6: Linux reports EISDIR for unlink(dir), not EACCES
+  attr = GetFileAttributesW(wbuf);
+  if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    errno = EISDIR;
+    return -1;
+  }
+  if (W32UnlinkPosix(wbuf)) {
     errno = W32Err();
     return -1;
   }
+  W32ModeClear(wbuf);
   return 0;
 }
 
@@ -957,6 +1285,7 @@ int rename(const char *old, const char *new_) {
     errno = W32Err();
     return -1;
   }
+  W32ModeMove(wo, wn);
   return 0;
 }
 
@@ -970,6 +1299,7 @@ int renameat(int oldfd, const char *old, int newfd, const char *new_) {
     errno = W32Err();
     return -1;
   }
+  W32ModeMove(wo, wn);
   return 0;
 }
 
@@ -988,6 +1318,7 @@ int mkdir(const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & ~g_umask & 07777);
   return 0;
 }
 
@@ -1001,6 +1332,7 @@ int mkdirat(int dirfd, const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & ~g_umask & 07777);
   return 0;
 }
 
@@ -1021,11 +1353,26 @@ int chmod(const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & 07777);
   return 0;
 }
 
 int fchmod(int fd, mode_t mode) {
-  return 0;  // L1
+  // F1: attribute emulation only covers the read-only bit; record the
+  // full mode in the emulation table so fstat reports it.
+  wchar_t wbuf[MAX_PATH];
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  DWORD n = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
+  if (n && n < MAX_PATH) {
+    wchar_t *d = wbuf;
+    if (!wcsncmp(d, L"\\\\?\\", 4)) d += 4;
+    W32ModeSet(d, mode & 07777);
+  }
+  return 0;
 }
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
@@ -1045,13 +1392,13 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & 07777);
   return 0;
 }
 
 mode_t umask(mode_t m) {
-  static mode_t cur = 022;
-  mode_t old = cur;
-  cur = m & 0777;
+  mode_t old = g_umask;
+  g_umask = m & 0777;
   return old;
 }
 

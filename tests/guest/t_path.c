@@ -69,31 +69,55 @@ int main(void) {
   T_ASSERT_ERRNO(link("t_p_nope", "t_p_h3"), ENOENT);
 
   /* --- symlink --- */
+  /* win32 host symlink creation is unavailable (wine 11 only produces
+   * inert reparse placeholder files that cannot be followed — verified
+   * by probe; wbox reports EPERM). Degrade to SKIP, not FAIL. */
   T_BEGIN("symlink/readlink-follow");
-  T_ASSERT_OK(symlink("t_p_h2", "t_p_s"));
-  ssize_t n = readlink("t_p_s", buf, sizeof buf - 1);
-  T_ASSERT(n > 0);
-  buf[n] = 0;
-  T_ASSERT_EQ(strcmp(buf, "t_p_h2"), 0);
-  T_ASSERT_EQ(read_file("t_p_s", buf, sizeof buf), 5); /* follow */
-  T_ASSERT_EQ(memcmp(buf, "hardy", 5), 0);
-  /* lstat sees the link itself */
-  T_ASSERT_OK(lstat("t_p_s", &st));
-  T_ASSERT(S_ISLNK(st.st_mode));
-  T_ASSERT_OK(stat("t_p_s", &st));
-  T_ASSERT(S_ISREG(st.st_mode));
+  if (symlink("t_p_h2", "t_p_s") != 0) {
+    if (errno == EPERM) {
+      T_SKIP("symlink/readlink-follow", "symlink unavailable (win32 host)");
+    } else {
+      T_ASSERT_OK(symlink("t_p_h2", "t_p_s")); /* FAIL line w/ errno */
+    }
+  } else {
+    ssize_t n = readlink("t_p_s", buf, sizeof buf - 1);
+    T_ASSERT(n > 0);
+    buf[n] = 0;
+    T_ASSERT_EQ(strcmp(buf, "t_p_h2"), 0);
+    T_ASSERT_EQ(read_file("t_p_s", buf, sizeof buf), 5); /* follow */
+    T_ASSERT_EQ(memcmp(buf, "hardy", 5), 0);
+    /* lstat sees the link itself */
+    T_ASSERT_OK(lstat("t_p_s", &st));
+    T_ASSERT(S_ISLNK(st.st_mode));
+    T_ASSERT_OK(stat("t_p_s", &st));
+    T_ASSERT(S_ISREG(st.st_mode));
+  }
 
   T_BEGIN("symlink/dangling");
-  T_ASSERT_OK(symlink("t_p_gone", "t_p_dang"));
-  T_ASSERT_ERRNO(open("t_p_dang", O_RDONLY), ENOENT);
-  T_ASSERT_OK(lstat("t_p_dang", &st));
-  T_ASSERT_OK(unlink("t_p_dang"));
+  if (symlink("t_p_gone", "t_p_dang") != 0) {
+    if (errno == EPERM) {
+      T_SKIP("symlink/dangling", "symlink unavailable (win32 host)");
+    } else {
+      T_ASSERT_OK(symlink("t_p_gone", "t_p_dang"));
+    }
+  } else {
+    T_ASSERT_ERRNO(open("t_p_dang", O_RDONLY), ENOENT);
+    T_ASSERT_OK(lstat("t_p_dang", &st));
+    T_ASSERT_OK(unlink("t_p_dang"));
+  }
 
   T_BEGIN("symlink/loop-ELOOP");
-  T_ASSERT_OK(symlink("t_p_l2", "t_p_l1"));
-  T_ASSERT_OK(symlink("t_p_l1", "t_p_l2"));
-  T_ASSERT_ERRNO(open("t_p_l1", O_RDONLY), ELOOP);
-  unlink("t_p_l1"); unlink("t_p_l2");
+  if (symlink("t_p_l2", "t_p_l1") != 0) {
+    if (errno == EPERM) {
+      T_SKIP("symlink/loop-ELOOP", "symlink unavailable (win32 host)");
+    } else {
+      T_ASSERT_OK(symlink("t_p_l2", "t_p_l1"));
+    }
+  } else {
+    T_ASSERT_OK(symlink("t_p_l1", "t_p_l2"));
+    T_ASSERT_ERRNO(open("t_p_l1", O_RDONLY), ELOOP);
+    unlink("t_p_l1"); unlink("t_p_l2");
+  }
 
   /* --- unlink semantics --- */
   T_BEGIN("unlink/open-survives");
