@@ -6,6 +6,14 @@
 #   WBOX_CC      compiler driver. Either a real compiler
 #                (e.g. x86_64-w64-mingw32-gcc, clang --target=...) or
 #                "zig" to use `python3 -m ziglang cc` (default fallback).
+#                注意 mingw 的 threading flavor：blink 用 pthread，必须用
+#                **posix-threads** 版（MSYS2 的 mingw-w64-*-gcc 默认即是）。
+#                Debian/Ubuntu 的 x86_64-w64-mingw32-gcc 默认软链到
+#                win32-threads 版，链接时会报成片的 pthread_* undefined
+#                reference——那是 flavor 选错，不是代码缺失，改用
+#                x86_64-w64-mingw32-gcc-posix 即可。
+#                （本脚本的自动探测会优先选中 PATH 上的
+#                x86_64-w64-mingw32-gcc，故此类机器上请显式设 WBOX_CC。）
 #   WBOX_TARGET  target triple        (default x86_64-windows-gnu)
 #   WBOX_BUILD   build/output dir     (default <repo>/build-win32)
 #   WBOX_JOBS    parallel jobs        (default nproc)
