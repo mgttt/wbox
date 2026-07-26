@@ -3,8 +3,10 @@
 #define _GNU_SOURCE
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -288,6 +290,70 @@ int main(void) {
     T_ASSERT_EQ(r2, 1);
     T_ASSERT(pfd.revents & (POLLHUP | POLLIN));
     close(sv[0]);
+  }
+
+  T_BEGIN("socket/dup-alias-survives-close");
+  {
+    int sv[2];
+    char ch = 0;
+    int type = 0;
+    struct stat st;
+    socklen_t type_len = sizeof(type);
+    T_ASSERT_OK(mkpair(sv));
+    int alias = dup(sv[0]);
+    T_ASSERT(alias >= 0);
+    T_ASSERT_OK(close(sv[0]));
+    T_ASSERT_OK(fstat(alias, &st));
+    T_ASSERT(S_ISSOCK(st.st_mode));
+    T_ASSERT_OK(getsockopt(alias, SOL_SOCKET, SO_TYPE, &type, &type_len));
+    T_ASSERT_EQ(type, SOCK_STREAM);
+    T_ASSERT_EQ(write(sv[1], "d", 1), 1);
+    T_ASSERT_EQ(read(alias, &ch, 1), 1);
+    T_ASSERT_EQ(ch, 'd');
+    close(alias);
+    close(sv[1]);
+  }
+
+  T_BEGIN("socket/dup2-replaces-file");
+  {
+    int sv[2];
+    char ch = 0;
+    int type = 0;
+    socklen_t type_len = sizeof(type);
+    T_ASSERT_OK(mkpair(sv));
+    int target = open("/dev/null", O_RDWR);
+    T_ASSERT(target >= 0);
+    T_ASSERT_EQ(dup2(sv[0], target), target);
+    T_ASSERT_OK(close(sv[0]));
+    T_ASSERT_OK(getsockopt(target, SOL_SOCKET, SO_TYPE, &type, &type_len));
+    T_ASSERT_EQ(type, SOCK_STREAM);
+    T_ASSERT_EQ(write(sv[1], "2", 1), 1);
+    T_ASSERT_EQ(read(target, &ch, 1), 1);
+    T_ASSERT_EQ(ch, '2');
+    close(target);
+    close(sv[1]);
+  }
+
+  T_BEGIN("socket/fork-inherits-alias");
+  {
+    int sv[2];
+    T_ASSERT_OK(mkpair(sv));
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      char ch = 0;
+      close(sv[1]);
+      _exit(read(sv[0], &ch, 1) == 1 && ch == 'f' ? 0 : 1);
+    }
+    if (pid > 0) {
+      int status = 0;
+      T_ASSERT_EQ(write(sv[1], "f", 1), 1);
+      T_ASSERT_EQ(waitpid(pid, &status, 0), pid);
+      T_ASSERT(WIFEXITED(status));
+      T_ASSERT_EQ(WEXITSTATUS(status), 0);
+    }
+    close(sv[0]);
+    close(sv[1]);
   }
 
   return WTEST_END();

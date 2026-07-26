@@ -1815,6 +1815,8 @@ ssize_t pwritev(int fd, const struct iovec *iov, int n, off_t off) {
 
 int dup(int fd) {
   if (IsSpecial(fd)) return fd + 10;  // fake: another special id band
+  int sockfd = WboxSockDup(fd);
+  if (sockfd != -2) return sockfd;
   int epollfd = WboxEpollDup(fd);
   if (epollfd != -2) return epollfd;
   int eventfd = EventfdDup(fd);
@@ -1836,6 +1838,8 @@ int dup(int fd) {
 
 int dup2(int fd, int fd2) {
   if (fd == fd2) return fd2;
+  int sockfd = WboxSockDup2(fd, fd2);
+  if (sockfd != -2) return sockfd;
   int eventfd = EventfdDup2(fd, fd2);
   if (eventfd != -2) return eventfd;
   EventfdUnmap(fd2);

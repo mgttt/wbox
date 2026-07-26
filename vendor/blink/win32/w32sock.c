@@ -52,6 +52,7 @@
 intptr_t _get_osfhandle(int);
 int _open_osfhandle(intptr_t, int);
 int _close(int);
+int _dup2(int, int);
 
 #ifndef ENOTSOCK
 #define ENOTSOCK 88
@@ -286,16 +287,25 @@ static int WsaRc(int rc) {
 // ---------------------------------------------------------------- fd table
 
 #define WBOX_MAXSOCK 256
+#define WBOX_MAXSOCKMAP 1024
+
+struct WboxSock {
+  int used;
+  int refs;
+  int nonblock;
+};
 
 static struct {
   int crtfd;
   WSOCK s;
-  int nonblock;
-} g_socks[WBOX_MAXSOCK];
+  struct WboxSock *sock;
+} g_socks[WBOX_MAXSOCKMAP];
+
+static struct WboxSock g_sockobjs[WBOX_MAXSOCK];
 
 static int SockSlot(int fd) {
   // note: zero-init table has s==0/crtfd==0 which must NOT match fd 0
-  for (int i = 0; i < WBOX_MAXSOCK; ++i)
+  for (int i = 0; i < WBOX_MAXSOCKMAP; ++i)
     if (g_socks[i].s != 0 && g_socks[i].s != WSOCK_INVALID &&
         g_socks[i].crtfd == fd)
       return i;
@@ -325,12 +335,18 @@ static int FamFromWs(int af) {
 // wrap a WSOCK into a CRT fd and register it; returns fd or -1 (errno set)
 static int SockWrap(WSOCK s) {
   int slot = -1;
-  for (int i = 0; i < WBOX_MAXSOCK; ++i)
+  int obj = -1;
+  for (int i = 0; i < WBOX_MAXSOCKMAP; ++i)
     if (g_socks[i].s == 0 || g_socks[i].s == WSOCK_INVALID) {
       slot = i;
       break;
     }
-  if (slot == -1) {
+  for (int i = 0; i < WBOX_MAXSOCK; ++i)
+    if (!g_sockobjs[i].used) {
+      obj = i;
+      break;
+    }
+  if (slot == -1 || obj == -1) {
     ws.closesocket(s);
     errno = EMFILE;
     return -1;
@@ -341,9 +357,12 @@ static int SockWrap(WSOCK s) {
     errno = EMFILE;
     return -1;
   }
+  memset(&g_sockobjs[obj], 0, sizeof(g_sockobjs[obj]));
+  g_sockobjs[obj].used = 1;
+  g_sockobjs[obj].refs = 1;
   g_socks[slot].crtfd = fd;
   g_socks[slot].s = s;
-  g_socks[slot].nonblock = 0;
+  g_socks[slot].sock = &g_sockobjs[obj];
   return fd;
 }
 
@@ -583,7 +602,7 @@ int accept4(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
   if (flags & SOCK_NONBLOCK) {
     unsigned long one = 1;
     ws.ioctlsocket(a, WS_FIONBIO, &one);
-    g_socks[SockSlot(nfd)].nonblock = 1;
+    g_socks[SockSlot(nfd)].sock->nonblock = 1;
   }
   return nfd;
 }
@@ -987,17 +1006,98 @@ ssize_t WboxSockWrite(int fd, const void *buf, size_t n) {
 
 // called from w32fd.c close(); returns 1 when fd was a socket (handled)
 void WboxEpollPurgeFd(int fd);  // defined in the epoll section below
+static void WboxEpollReplaceFd(int oldfd, int newfd);
+
+int WboxSockDup(int fd) {
+  int i = SockSlot(fd);
+  int slot = -1;
+  HANDLE newh;
+  int newfd;
+  if (i == -1) return -2;
+  for (int j = 0; j < WBOX_MAXSOCKMAP; ++j)
+    if (g_socks[j].s == 0 || g_socks[j].s == WSOCK_INVALID) {
+      slot = j;
+      break;
+    }
+  if (slot == -1) {
+    errno = EMFILE;
+    return -1;
+  }
+  if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)g_socks[i].s,
+                       GetCurrentProcess(), &newh, 0, FALSE,
+                       DUPLICATE_SAME_ACCESS)) {
+    errno = W32ErrFromHost(GetLastError());
+    return -1;
+  }
+  newfd = _open_osfhandle((intptr_t)newh, 0x8000 | 2);
+  if (newfd == -1) {
+    CloseHandle(newh);
+    errno = EMFILE;
+    return -1;
+  }
+  g_socks[slot].crtfd = newfd;
+  g_socks[slot].s = (WSOCK)newh;
+  g_socks[slot].sock = g_socks[i].sock;
+  ++g_socks[i].sock->refs;
+  return newfd;
+}
+
+int WboxSockDup2(int fd, int fd2) {
+  int tmp = WboxSockDup(fd);
+  int slot = -1;
+  struct WboxSock *sock;
+  if (tmp == -2) return -2;
+  if (tmp == -1) return -1;
+  sock = g_socks[SockSlot(tmp)].sock;
+  (void)close(fd2);
+  if (_dup2(tmp, fd2)) {
+    WboxSockClose(tmp);
+    errno = EBADF;
+    return -1;
+  }
+  for (int i = 0; i < WBOX_MAXSOCKMAP; ++i)
+    if (g_socks[i].s == 0 || g_socks[i].s == WSOCK_INVALID) {
+      slot = i;
+      break;
+    }
+  if (slot == -1) {
+    _close(fd2);
+    WboxSockClose(tmp);
+    errno = EMFILE;
+    return -1;
+  }
+  g_socks[slot].crtfd = fd2;
+  g_socks[slot].s = (WSOCK)_get_osfhandle(fd2);
+  g_socks[slot].sock = sock;
+  ++sock->refs;
+  WboxSockClose(tmp);
+  return fd2;
+}
 
 int WboxSockClose(int fd) {
   int i = SockSlot(fd);
+  int replacement = -1;
+  struct WboxSock *sock;
   if (i == -1) return 0;
   NET_LOGF("sock close(fd=%d)", fd);
-  WboxEpollPurgeFd(fd);  // Linux drops closed fds from all epoll sets
+  sock = g_socks[i].sock;
+  for (int j = 0; j < WBOX_MAXSOCKMAP; ++j)
+    if (j != i && g_socks[j].s != 0 && g_socks[j].s != WSOCK_INVALID &&
+        g_socks[j].sock == sock) {
+      replacement = g_socks[j].crtfd;
+      break;
+    }
+  if (replacement == -1)
+    WboxEpollPurgeFd(fd);
+  else
+    WboxEpollReplaceFd(fd, replacement);
   WSOCK s = g_socks[i].s;
   g_socks[i].s = WSOCK_INVALID;
   g_socks[i].crtfd = -1;
+  g_socks[i].sock = NULL;
   ws.closesocket(s);
   _close(fd);  // release CRT slot; CloseHandle on the dead handle may fail
+  if (!--sock->refs) memset(sock, 0, sizeof(*sock));
   return 1;
 }
 
@@ -1011,11 +1111,11 @@ int WboxSockFcntl(int fd, int cmd, long arg) {
       unsigned long nb = (arg & O_NDELAY) ? 1 : 0;
       if (ws.ioctlsocket(g_socks[i].s, WS_FIONBIO, &nb) != 0)
         return WsaRc(-1);
-      g_socks[i].nonblock = (int)nb;
+      g_socks[i].sock->nonblock = (int)nb;
       return 0;
     }
     case F_GETFL:
-      return O_RDWR | (g_socks[i].nonblock ? O_NONBLOCK : 0);
+      return O_RDWR | (g_socks[i].sock->nonblock ? O_NONBLOCK : 0);
     case F_GETFD:
     case F_SETFD:
       return 0;
@@ -1125,6 +1225,7 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
 
 struct WboxEpollEnt {
   int fd;
+  int pollfd;
   uint32_t events;
   epoll_data_t data;
   int oneshot_armed;  // EPOLLONESHOT: already delivered once
@@ -1179,10 +1280,19 @@ void WboxEpollPurgeFd(int fd) {
     struct WboxEpoll *ep = &g_epolls[i];
     if (!ep->used) continue;
     for (int j = 0; j < ep->n;)
-      if (ep->ents[j].fd == fd)
+      if (ep->ents[j].pollfd == fd)
         ep->ents[j] = ep->ents[--ep->n];
       else
         ++j;
+  }
+}
+
+static void WboxEpollReplaceFd(int oldfd, int newfd) {
+  for (int i = 0; i < WBOX_MAXEPOLL; ++i) {
+    struct WboxEpoll *ep = &g_epolls[i];
+    if (!ep->used) continue;
+    for (int j = 0; j < ep->n; ++j)
+      if (ep->ents[j].pollfd == oldfd) ep->ents[j].pollfd = newfd;
   }
 }
 
@@ -1330,6 +1440,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
         ep->cap = ncap;
       }
       ep->ents[ep->n].fd = fd;
+      ep->ents[ep->n].pollfd = fd;
       ep->ents[ep->n].events = ev->events | EPOLLERR | EPOLLHUP;
       ep->ents[ep->n].data = ev->data;
       ep->ents[ep->n].oneshot_armed = 0;
@@ -1380,7 +1491,7 @@ void WboxEpollRefreshFd(int fd) {
     struct WboxEpoll *ep = &g_epolls[i];
     if (!ep->used) continue;
     for (int j = 0; j < ep->n; ++j) {
-      if (ep->ents[j].fd == fd && (ep->ents[j].events & EPOLLET)) {
+      if (ep->ents[j].pollfd == fd && (ep->ents[j].events & EPOLLET)) {
         interests |= ep->ents[j].events & (EPOLLIN | EPOLLOUT | EPOLLPRI);
       }
     }
@@ -1398,7 +1509,7 @@ void WboxEpollRefreshFd(int fd) {
       if (!ep->used) continue;
       for (int j = 0; j < ep->n; ++j) {
         struct WboxEpollEnt *ent = &ep->ents[j];
-        if (ent->fd == fd && (ent->events & EPOLLET)) {
+        if (ent->pollfd == fd && (ent->events & EPOLLET)) {
           ent->edge_ready &= EpollReadyEvents(ent, pfd.revents);
         }
       }
@@ -1433,7 +1544,7 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
       pfds[i].fd = ((ep->ents[i].events & EPOLLONESHOT) &&
                     ep->ents[i].oneshot_armed)
                        ? -1
-                       : ep->ents[i].fd;
+                       : ep->ents[i].pollfd;
       // EPOLLIN/OUT/PRI low bits coincide with POLLIN/OUT/PRI.
       pfds[i].events =
           (int16_t)(ep->ents[i].events & (EPOLLIN | EPOLLOUT | EPOLLPRI));

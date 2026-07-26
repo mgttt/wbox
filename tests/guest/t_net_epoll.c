@@ -248,6 +248,26 @@ int main(void) {
     close(a[0]); close(a[1]); close(b[0]); close(b[1]);
   }
 
+  T_BEGIN("epoll/watched-fd-dup-alias");
+  {
+    int sv[2];
+    char ch = 0;
+    T_ASSERT_OK(mkpair(sv));
+    int alias = dup(sv[0]);
+    T_ASSERT(alias >= 0);
+    ev.events = EPOLLIN;
+    ev.data.u32 = 0xd0a;
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_ADD, sv[0], &ev));
+    T_ASSERT_OK(close(sv[0]));
+    T_ASSERT_EQ(write(sv[1], "d", 1), 1);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(out[0].data.u32, 0xd0a);
+    T_ASSERT_EQ(read(alias, &ch, 1), 1);
+    T_ASSERT_EQ(ch, 'd');
+    close(alias);
+    close(sv[1]);
+  }
+
   T_BEGIN("epoll/fork-inherits-instance");
   {
     int p[2];
