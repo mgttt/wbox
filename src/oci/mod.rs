@@ -58,7 +58,7 @@ impl ImageRef {
             (n.to_string(), d.to_string())
         } else {
             match s.rfind(':') {
-                Some(i) if s.rfind('/').map_or(true, |j| i > j) => {
+                Some(i) if s.rfind('/').is_none_or(|j| i > j) => {
                     (s[..i].to_string(), s[i + 1..].to_string())
                 }
                 _ => (s.to_string(), "latest".to_string()),

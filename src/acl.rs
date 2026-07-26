@@ -111,7 +111,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
         TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
         ptstrName: sid as *mut u16,
     };
-    let mut ea = EXPLICIT_ACCESS_W {
+    let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: ACCESS_READ_EXECUTE,
         grfAccessMode: SET_ACCESS,
         grfInheritance: if is_dir {
@@ -126,7 +126,7 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
     let mut new_dacl: *mut ACL = std::ptr::null_mut();
     // # Safety: ea 指向单个有效 EXPLICIT_ACCESS_W；old_dacl 来自上一步（可为 null）；
     // new_dacl 为有效输出指针，成功后由 LocalFree 释放。
-    let ret = unsafe { SetEntriesInAclW(1, &mut ea, old_dacl, &mut new_dacl) };
+    let ret = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
     if ret != 0 {
         return Err(WboxError::registry(format!("SetEntriesInAclW('{}') 失败，错误码={}", path.display(), ret)));
     }

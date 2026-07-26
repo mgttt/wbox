@@ -70,11 +70,14 @@ impl WboxError {
     }
 
     /// 便捷构造：AppContainer profile 错误。
+    // 仅 Windows 专属模块与测试使用。
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn profile(msg: impl Into<String>) -> Self {
         Self::msg(ErrKind::Profile, msg)
     }
 
     /// 便捷构造：Job Object 错误。
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
     pub fn job(msg: impl Into<String>) -> Self {
         Self::msg(ErrKind::Job, msg)
     }

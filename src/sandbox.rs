@@ -7,8 +7,8 @@
 //!   对当前用户**不需要 SeAssignPrimaryTokenPrivilege**，普通用户可用；
 //! - CreateProcessAsUser/CreateProcessWithToken 需要该特权（或服务上下文），
 //!   与"portable、默认非管理员"的定位冲突。
-//! 代价：SECURITY_CAPABILITIES 路径无法显式指定完整性级别——
-//! 但 AppContainer 派生令牌的 IL 恒为 Low（内核强制），满足 SPEC 的 Low IL 要求。
+//!   代价：SECURITY_CAPABILITIES 路径无法显式指定完整性级别——
+//!   但 AppContainer 派生令牌的 IL 恒为 Low（内核强制），满足 SPEC 的 Low IL 要求。
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
@@ -76,7 +76,7 @@ pub fn run_container(
         return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}", err)));
     }
     // 用 u64 对齐的缓冲区承载 attribute list。
-    let mut attr_buf = vec![0u64; (attr_list_size + 7) / 8];
+    let mut attr_buf = vec![0u64; attr_list_size.div_ceil(8)];
     let attr_list: LPPROC_THREAD_ATTRIBUTE_LIST =
         attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
     // # Safety: attr_buf 大小/对齐满足要求，attr_list_size 来自上一步查询。

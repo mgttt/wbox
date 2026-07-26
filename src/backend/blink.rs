@@ -140,7 +140,7 @@ impl Backend for BlinkBackend {
         let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose);
         let cmd = build_blink_command(&exe, &spec.cmd);
         if spec.verbose {
-            super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", &spec.cmd));
+            super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", spec.cmd));
             super::verbose_kv("最终命令行", format!("{:?}", cmd));
             for (k, v) in &env {
                 if k == BLINK_PREFIX_ENV {
