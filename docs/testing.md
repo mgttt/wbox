@@ -95,6 +95,21 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
     惯例。guest 侧 socket/epoll 语义不因此失去覆盖：`t_net_epoll` /
     `t_net_sockopt` 走本地 loopback，由 `guest-tests` 执行。
 
+### 4. Linux 原生后端验收（`scripts/test-linux-backend.sh`）
+
+- 覆盖 `docs-architecture.md` §10.5 的 L1/L2 验收标准，走**完整 CLI 链路**
+  （造假镜像缓存 → `wbox run`），而非只测内部函数：uid 映射 / 新根隔离 /
+  PID namespace / 退出码转发 / `--memory` / `--max-procs` / `--cpu-pct`。
+- **两个前置只有 CI 的 ubuntu runner 同时满足**，故这条必须进门禁而不能只靠
+  本地：① runner 以非 root 跑——`RLIMIT_NPROC` 兜底路径只有非 root 才真实
+  可测（**root 会绕过 RLIMIT_NPROC**，本地开发容器是 root，只能验"明确拒绝"
+  分支）；② ubuntu-latest 是 cgroup v2——`memory.max`/`pids.max`/`cpu.max`
+  这条首选路径只有那里有覆盖（本地容器是 cgroup **v1**）。
+- 断言按宿主能力二分，不写死单一环境：例如 `--max-procs` 有三种正确结局
+  （有 cgroup v2 → 挡住；无 v2 且非 root → 挡住；无 v2 且 root → 必须**明确
+  拒绝**），任一环境下都能给出确定判定。
+- 本地跑：`scripts/test-linux-backend.sh`（默认 `target/debug/wbox` + `./busybox`）。
+
 ## 二、本地跑法
 
 ```bash
@@ -111,6 +126,9 @@ scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox
 
 # guest 测试（入口落地后）
 bash tests/run.sh
+
+# Linux 原生后端 L1/L2 验收（需静态 busybox 与 unprivileged userns）
+scripts/test-linux-backend.sh
 ```
 
 提交前最低门槛：`cargo test` 全绿 + **双目标 clippy 0 warning**：
@@ -137,6 +155,9 @@ tag v* push
        ④ smoke-windows       真机冒烟（AppContainer 链路）
        ⑤ build-wbox-linux    wbox-linux 构建 + 完整真机矩阵
        ⑥ guest-tests         guest 测试（前置未就绪 = SKIP，补齐后自动生效）
+       ⑦ test-linux-backend  Linux 原生后端 L1/L2 验收（rootless namespace +
+                             cgroup v2；ubuntu runner 才同时具备"非 root"与
+                             "cgroup v2"两个前置，见 §一.4）
   └─ 产出：wbox.exe + wbox-linux.exe + wbox-portable-windows-x64.zip
            + SHA256SUMS.txt（两 exe + zip 的 sha256，必附）
 ```

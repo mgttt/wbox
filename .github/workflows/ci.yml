@@ -14,11 +14,12 @@ env:
   CARGO_TERM_COLOR: always
 
 # 发布门禁说明（详见 docs/testing.md §发布门禁）：
-#   tag v* 的 release job needs 全部六个门禁 job——
+#   tag v* 的 release job needs 全部七个门禁 job——
 #   test-linux（Rust 单测）+ test-windows（同一套单测在 windows 上跑，
 #   覆盖 cfg(windows) 模块）+ check-windows-msvc（Win32 编译门禁）+
 #   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
-#   guest-tests（guest 测试，前置未就绪时 SKIP 标黄不阻塞）——
+#   guest-tests（guest 测试，前置未就绪时 SKIP 标黄不阻塞）+
+#   test-linux-backend（Linux 原生后端 rootless/cgroup 验收，见 §10）——
 #   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
 
 jobs:
@@ -274,12 +275,43 @@ jobs:
           zig version
           WBOX_LINUX=$exe bash tests/run.sh
 
+  # ⑦ Linux 原生后端（多宿主 §10）：rootless namespace + cgroup v2 限额。
+  #    ubuntu runner 满足两个本地开发容器满足不了的前置——
+  #    ① runner 以非 root 用户跑，故 RLIMIT_NPROC 兜底路径真实可测
+  #       （root 会绕过 RLIMIT_NPROC，本地容器只能验"明确拒绝"分支）；
+  #    ② ubuntu-latest 是 cgroup v2，故 memory.max/pids.max/cpu.max 这条
+  #       首选路径在这里才有覆盖（本地容器是 cgroup v1）。
+  #    宿主能力缺失时脚本记 SKIP 而非 FAIL（同 test-matrix.sh 的既有惯例）。
+  test-linux-backend:
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      # L1 端到端与本脚本都要一个**静态** Linux ELF 当 guest（动态链接的
+      # 宿主二进制在 pivot_root 后找不到 .so）。
+      - name: 下载静态 busybox（guest 用）
+        run: |
+          curl -fsSL --retry 3 -o busybox \
+            https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+          chmod +x busybox
+      # 环境事实留档：出问题时先看这段，能立刻分辨"代码回归"与"runner 能力变化"
+      - name: 记录宿主能力（不判定成败）
+        run: |
+          echo "uid=$(id -u) cgroup=$(stat -fc %T /sys/fs/cgroup)"
+          cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo "(无 cgroup v2 控制器)"
+          unshare -Ur --mount true && echo "userns: ok" || echo "userns: 不可用"
+      - name: 端到端 —— LinuxNativeBackend L1/L2 验收
+        run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
+
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
     timeout-minutes: 30  # 构建 release + 打包 + 上传
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests]
+    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-linux-backend]
     runs-on: windows-latest
     permissions:
       contents: write

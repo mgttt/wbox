@@ -378,12 +378,25 @@ fn build_limit_plan(spec: &RunSpec) -> Result<LimitPlan> {
         }
     }
     // ---- cgroup v2 不可用：rlimit 兜底 ----
+    let nproc_wanted = l.max_procs > 0;
     if l.cpu_pct > 0 {
         return Err(WboxError::args(
             "本宿主无可用的 cgroup v2（或未开启委派），无法实施 --cpu-pct：\
              CPU 占比上限没有 setrlimit 对应物（RLIMIT_CPU 限的是累计 CPU 秒数，\
              语义不同）。请去掉 --cpu-pct，或在支持 cgroup v2 委派的宿主上运行。\
              wbox 不会静默忽略隔离参数",
+        ));
+    }
+    // RLIMIT_NPROC **对特权进程不生效**（内核放行 root 绕过该上限）。实测：
+    // 同一条 --max-procs 8 以 uid=1001 跑会 "can't fork"，以 root 跑则 40 个
+    // 子进程全部起来。既然限不住，就不能静默接受这个参数——否则用户以为
+    // 有进程数上限而实际没有，比直接报错危险得多（§10.5 红线）。
+    if nproc_wanted && unsafe { libc::geteuid() } == 0 {
+        return Err(WboxError::args(
+            "以 root 运行且本宿主无可用 cgroup v2：无法实施 --max-procs——\
+             RLIMIT_NPROC 对特权进程不生效（root 会绕过该上限），实测限不住。\
+             请改以非 root 用户运行（rootless 正是 wbox 的推荐用法），\
+             或在支持 cgroup v2 委派的宿主上运行。wbox 不会静默忽略隔离参数",
         ));
     }
     if spec.verbose {
