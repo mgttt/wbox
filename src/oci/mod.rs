@@ -406,17 +406,27 @@ mod tests {
 
     #[test]
     fn image_dir_layout_segments() {
-        // 布局 <root>/<registry>/<name_flat>/<reference>，全段无 ':'
+        // image_dir 自己拼的 3 段（<registry>/<name_flat>/<reference>）必须无 ':'',
+        // 这是 sanitize_segment 的契约。不遍历 cache_root() 整条绝对路径：
+        // Windows 上它带盘符前缀（如 "C:"），那是系统 home 的属性，与本函数无关。
         let r = ImageRef::parse("localhost:5000/ns/app@sha256:deadbeef", None).unwrap();
         let d = image_dir(&r).unwrap();
+        let root = cache_root().unwrap();
         let segs: Vec<String> = d
+            .strip_prefix(&root)
+            .expect("image_dir 必在 cache_root 之下")
             .components()
             .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
         for s in &segs {
             assert!(!s.contains(':'), "路径段含 Windows 非法字符 ':'：{}", s);
         }
-        let tail: Vec<&str> = segs.iter().rev().take(3).map(|s| s.as_str()).collect();
-        assert_eq!(tail, vec!["sha256_deadbeef", "ns_app", "localhost_5000"]);
+        assert_eq!(
+            segs,
+            vec!["localhost_5000", "ns_app", "sha256_deadbeef"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
     }
 }
