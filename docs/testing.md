@@ -75,7 +75,7 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   `t_net_sockopt @wine`。模式专有缺陷可用 `@native` / `@wine` 标注；
   真机首次执行发现的 W1（fork 挂死）与 W3
   （长路径），以及最后两项 N1（AF_UNIX）均已修复并从基线移除。
-  当前真机断言级结果为 **1013 pass / 0 fail / 9 skip**；文件映射覆盖
+  当前真机断言级结果为 **1025 pass / 0 fail / 9 skip**；文件映射覆盖
   fork 后父窗口可见性、磁盘写回、私有/共享 mremap、exec 地址复用、
   MAP_FIXED 清理及内部 fd 0；另以 160 个并存 MAP_SHARED 文件映射验证
   动态注册表的写回、fork 快照克隆和父窗口同步；160 个匿名共享映射另行
@@ -91,7 +91,9 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   不得把 Win32 句柄或 Winsock 占位 fd 的位置 0 泄漏为成功结果。
   `ftruncate`/`fsync`/`fdatasync` 对这些类型返回 `EINVAL`；快照 fork
   子进程关闭 stdin 后创建 pipe 则验证 per-System guest fd 表仍按最低空号
-  分配 0 和 3，而不泄漏全局 VFS 编号。
+  分配 0 和 3，而不泄漏全局 VFS 编号。epoll 同样验证 fork 子进程新建
+  实例复用 guest fd 0，以及继承的 fd alias 与父进程共享 interest table、
+  子退出后不提前销毁父实例。
 - `t_fork_mem` 文件级结果之外，runner 会用
   `WBOX_TEST_FORK_FAIL=system|machine|args|thread` 各重跑一次轻量探针，
   验证 fork 建立失败不会损坏父窗口、误删父 VFS/Fshare 条目或阻断后续 fork。

@@ -135,6 +135,14 @@
   `ftruncate`、`fsync`、`fdatasync` 类型错误验证；`t_fd_open` 增至 48 项、
   `t_fd_rw` 增至 75 项、`t_net_sockopt` 增至 82 项，完整套件现为
   **20/20 文件通过，1013 pass / 0 fail / 9 skip**。
+- **Win32 epoll fd 命名空间与 fork 继承修复**：`epoll_create1` 原先把
+  全局 VFS fd 直接登记为 guest fd，fork 子进程关闭 stdin 后无法复用 0；
+  fork/dup 还只复制 NUL backing，新的 CRT fd 未关联原 interest table，
+  导致继承 epoll 返回 `EBADF`。现创建路径独立分配最低 guest fd，并将
+  epoll 对象槽与 fd alias 映射分离；所有 alias 共享 interest table，
+  以引用计数在最后一次 close 时释放。新增 fork 后新建与继承实例回归，
+  `t_net_epoll` 增至 103 项，完整套件现为
+  **20/20 文件通过，1025 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

@@ -6733,6 +6733,10 @@ static int SysTimerfdGettime(struct Machine *m, i32 fildes, i64 valueaddr) {
 
 static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
   int lim, fildes, oflags, sysflags;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int hostfd;
+  struct Fd *fd;
+#endif
   oflags = 0;
   sysflags = 0;
   if (flags & EPOLL_CLOEXEC_LINUX) {
@@ -6746,6 +6750,20 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
   }
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if ((fildes = epoll_create1(sysflags)) != -1) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    hostfd = fildes;
+    LOCK(&m->system->fds.lock);
+    fildes = AllocGuestFd(&m->system->fds, 0);
+    if (fildes >= lim) {
+      UNLOCK(&m->system->fds.lock);
+      VfsClose(hostfd);
+      fildes = emfile();
+    } else {
+      unassert(fd = AddFd(&m->system->fds, fildes, oflags));
+      fd->hostfd = hostfd;
+      UNLOCK(&m->system->fds.lock);
+    }
+#else
     if (fildes >= lim) {
       close(fildes);
       fildes = emfile();
@@ -6754,6 +6772,7 @@ static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
       unassert(AddFd(&m->system->fds, fildes, oflags));
       UNLOCK(&m->system->fds.lock);
     }
+#endif
   }
   return fildes;
 }

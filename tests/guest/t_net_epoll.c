@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
@@ -245,6 +246,49 @@ int main(void) {
     for (int i = 0; i < n; i++) seen |= 1 << (out[i].data.u32 - 10);
     T_ASSERT_EQ(seen, 3);
     close(a[0]); close(a[1]); close(b[0]); close(b[1]);
+  }
+
+  T_BEGIN("epoll/fork-inherits-instance");
+  {
+    int p[2];
+    T_ASSERT_OK(pipe(p));
+    ev.events = EPOLLIN;
+    ev.data.u32 = 0xf04c;
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      struct epoll_event child_out;
+      int n = epoll_wait(ep, &child_out, 1, 1000);
+      _exit(n == 1 && child_out.data.u32 == 0xf04c ? 0 : 1);
+    }
+    if (pid > 0) {
+      int status = 0;
+      T_ASSERT_EQ(write(p[1], "x", 1), 1);
+      T_ASSERT_EQ(waitpid(pid, &status, 0), pid);
+      T_ASSERT(WIFEXITED(status));
+      T_ASSERT_EQ(WEXITSTATUS(status), 0);
+    }
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_DEL, p[0], NULL));
+    close(p[0]);
+    close(p[1]);
+  }
+
+  T_BEGIN("epoll/fork-child-lowest-fd");
+  {
+    pid_t pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      close(STDIN_FILENO);
+      int child_ep = epoll_create1(EPOLL_CLOEXEC);
+      _exit(child_ep == STDIN_FILENO ? 0 : child_ep < 0 ? 1 : 2);
+    }
+    if (pid > 0) {
+      int status = 0;
+      T_ASSERT_EQ(waitpid(pid, &status, 0), pid);
+      T_ASSERT(WIFEXITED(status));
+      T_ASSERT_EQ(WEXITSTATUS(status), 0);
+    }
   }
 
   close(ep);

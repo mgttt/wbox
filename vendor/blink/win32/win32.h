@@ -148,6 +148,7 @@ int WboxSockFstatMode(int fd, unsigned *mode); // 1 = socket, *mode set
 int WboxSockFionread(int fd, int *out);        // -2 = not a socket
 int WboxSockPoll(struct pollfd *pfds, unsigned long n, int timeout);
 int WboxEpollIsFd(int fd);
+int WboxEpollDup(int fd);                  // -2 = not an epoll fd
 int WboxEpollClose(int fd);                // 1 = handled (fd was epoll)
 void WboxEpollPurgeFd(int fd);
 void WboxEpollRefreshFd(int fd);

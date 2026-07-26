@@ -1815,6 +1815,8 @@ ssize_t pwritev(int fd, const struct iovec *iov, int n, off_t off) {
 
 int dup(int fd) {
   if (IsSpecial(fd)) return fd + 10;  // fake: another special id band
+  int epollfd = WboxEpollDup(fd);
+  if (epollfd != -2) return epollfd;
   int eventfd = EventfdDup(fd);
   if (eventfd != -2) return eventfd;
   HANDLE h = W32Handle(fd), duph;

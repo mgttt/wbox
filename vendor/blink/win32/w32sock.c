@@ -1121,6 +1121,7 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
 // edge-triggered and one-shot registrations share one interest table.
 
 #define WBOX_MAXEPOLL 32
+#define WBOX_MAXEPOLLMAP 1024
 
 struct WboxEpollEnt {
   int fd;
@@ -1132,18 +1133,39 @@ struct WboxEpollEnt {
 
 struct WboxEpoll {
   int used;
-  int crtfd;  // dummy event handle wrapped in a CRT fd (keeps fds in the
-              // CRT namespace, under blink's RLIMIT_NOFILE)
+  int refs;
   int n, cap;
   struct WboxEpollEnt *ents;
 };
 
+struct WboxEpollMap {
+  int used;
+  int fd;
+  struct WboxEpoll *ep;
+};
+
 static struct WboxEpoll g_epolls[WBOX_MAXEPOLL];
+static struct WboxEpollMap g_epollmaps[WBOX_MAXEPOLLMAP];
 
 static struct WboxEpoll *EpollFromFd(int fd) {
-  for (int i = 0; i < WBOX_MAXEPOLL; ++i)
-    if (g_epolls[i].used && g_epolls[i].crtfd == fd) return &g_epolls[i];
+  for (int i = 0; i < WBOX_MAXEPOLLMAP; ++i)
+    if (g_epollmaps[i].used && g_epollmaps[i].fd == fd)
+      return g_epollmaps[i].ep;
   return NULL;
+}
+
+static int EpollMapFd(int fd, struct WboxEpoll *ep) {
+  for (int i = 0; i < WBOX_MAXEPOLLMAP; ++i) {
+    if (!g_epollmaps[i].used) {
+      g_epollmaps[i].used = 1;
+      g_epollmaps[i].fd = fd;
+      g_epollmaps[i].ep = ep;
+      ++ep->refs;
+      return 0;
+    }
+  }
+  errno = EMFILE;
+  return -1;
 }
 
 int WboxEpollIsFd(int fd) {
@@ -1166,15 +1188,47 @@ void WboxEpollPurgeFd(int fd) {
 
 // called from w32fd.c close(); returns 1 when fd was an epoll fd
 int WboxEpollClose(int fd) {
+  for (int i = 0; i < WBOX_MAXEPOLLMAP; ++i) {
+    if (g_epollmaps[i].used && g_epollmaps[i].fd == fd) {
+      struct WboxEpoll *ep = g_epollmaps[i].ep;
+      memset(&g_epollmaps[i], 0, sizeof(g_epollmaps[i]));
+      _close(fd);  // releases CRT slot and the dummy NUL handle
+      if (!--ep->refs) {
+        free(ep->ents);
+        memset(ep, 0, sizeof(*ep));
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int WboxEpollDup(int fd) {
   struct WboxEpoll *ep = EpollFromFd(fd);
-  if (!ep) return 0;
-  free(ep->ents);
-  ep->ents = NULL;
-  ep->n = ep->cap = 0;
-  ep->used = 0;
-  ep->crtfd = -1;
-  _close(fd);  // releases CRT slot and the dummy event handle
-  return 1;
+  HANDLE oldh, newh;
+  int newfd;
+  if (!ep) return -2;
+  oldh = (HANDLE)_get_osfhandle(fd);
+  if (oldh == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  if (!DuplicateHandle(GetCurrentProcess(), oldh, GetCurrentProcess(), &newh,
+                       0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    errno = W32ErrFromHost(GetLastError());
+    return -1;
+  }
+  newfd = _open_osfhandle((intptr_t)newh, 0x8000 | 2);
+  if (newfd == -1) {
+    CloseHandle(newh);
+    errno = EMFILE;
+    return -1;
+  }
+  if (EpollMapFd(newfd, ep) == -1) {
+    _close(newfd);
+    return -1;
+  }
+  return newfd;
 }
 
 int epoll_create1(int flags) {
@@ -1198,7 +1252,11 @@ int epoll_create1(int flags) {
       }
       memset(&g_epolls[i], 0, sizeof(g_epolls[i]));
       g_epolls[i].used = 1;
-      g_epolls[i].crtfd = fd;
+      if (EpollMapFd(fd, &g_epolls[i]) == -1) {
+        memset(&g_epolls[i], 0, sizeof(g_epolls[i]));
+        _close(fd);
+        return -1;
+      }
 #ifndef DISABLE_VFS
       // win32 VFS 模式下存在两个宿主侧 fd 命名空间：VFS 号与裸 CRT fd。
       // syscall.c 的 W32EpollHostFd 把 guest fd 先翻成 Fd 表 hostfd，再按
@@ -1211,17 +1269,12 @@ int epoll_create1(int flags) {
         struct VfsInfo *info = NULL;
         int vfd;
         if (HostfsWrapFd(fd, false, &info) == -1) {
-          g_epolls[i].used = 0;
-          g_epolls[i].crtfd = -1;
-          _close(fd);
+          WboxEpollClose(fd);
           errno = EMFILE;
           return -1;
         }
         if ((vfd = VfsAddFd(info)) == -1) {
           VfsFreeInfo(info);
-          g_epolls[i].used = 0;
-          g_epolls[i].crtfd = -1;
-          _close(fd);
           errno = EMFILE;
           return -1;
         }
