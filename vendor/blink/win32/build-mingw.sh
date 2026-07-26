@@ -70,28 +70,58 @@ ZSRCS=$(ls third_party/libz/*.c | grep -v '/gz')
 
 mkdir -p "$BUILD/obj"
 OBJLIST=$BUILD/objlist.txt
+
+objfile() { echo "$BUILD/obj/$(echo "$1" | tr '/.' '__').o"; }
+
+# 目标文件清单在**前台按序**生成：原来由各后台子 shell 并发 >> 追加，
+# 顺序不稳定且存在交错风险。
+#
+# 路径形态很关键：MSYS2 只对 argv 做 POSIX→Windows 路径转换，**响应文件
+# （@list）的内容不转**。native ld.exe 读到 /d/a/... 会把每个 .o 都报
+# "cannot find"（编译其实已成功，因为 -c -o 走的是 argv）。故清单里的路径
+# 在有 cygpath 时一律转成宿主原生形式；Linux/无 cygpath 环境原样输出。
+CYGPATH=$(command -v cygpath 2>/dev/null || true)
 : >"$OBJLIST"
+for src in $SRCS $ZSRCS; do
+  obj=$(objfile "$src")
+  if [ -n "$CYGPATH" ]; then obj=$("$CYGPATH" -w "$obj"); fi
+  echo "$obj" >>"$OBJLIST"
+done
 
 compile_one() {
   src=$1
-  obj="$BUILD/obj/$(echo "$src" | tr '/.' '__').o"
-  echo "$obj" >>"$OBJLIST"
+  obj=$(objfile "$src")
   case $src in
     third_party/libz/*) $CC $ZCFLAGS -c "$src" -o "$obj" ;;
     blink/blink.c) $CC $CFLAGS -include "$VERH" -c "$src" -o "$obj" ;;
     *) $CC $CFLAGS -c "$src" -o "$obj" ;;
   esac
 }
-export CC CFLAGS ZCFLAGS BUILD OBJLIST VERH
+export CC CFLAGS ZCFLAGS BUILD VERH
 
-# poor man's parallel build
+# poor man's parallel build。注意 set -e 对后台任务无效、无参 wait 恒返回 0，
+# 所以必须逐个 pid 收状态——否则编译失败会被静默咽掉，直到链接期才以
+# "cannot find *.o" 的形式暴露，误导排查方向。
+fails=0
+pids=
+reap() {
+  for p in $pids; do
+    wait "$p" || fails=$((fails + 1))
+  done
+  pids=
+}
 i=0
 for src in $SRCS $ZSRCS; do
   compile_one "$src" &
+  pids="$pids $!"
   i=$((i + 1))
-  if [ $((i % JOBS)) -eq 0 ]; then wait; fi
+  if [ $((i % JOBS)) -eq 0 ]; then reap; fi
 done
-wait
+reap
+if [ "$fails" -ne 0 ]; then
+  echo "build-mingw.sh: $fails 个源文件编译失败（详见上方编译器输出）" >&2
+  exit 1
+fi
 
 echo "linking..."
 $CC -O2 -o "$BUILD/wbox-linux.exe" @"$OBJLIST" -lws2_32 -lwinmm -lbcrypt
