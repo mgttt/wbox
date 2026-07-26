@@ -15,11 +15,11 @@
 
 mod blink;
 pub mod env;
-#[cfg(windows)]
+// native 的 prepare 纯逻辑跨平台可编译（spawn 链路内部 cfg），
+// 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;
 
 pub use blink::BlinkBackend;
-#[cfg(windows)]
 pub use native::NativeBackend;
 
 use crate::error::Result;

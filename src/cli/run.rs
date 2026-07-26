@@ -142,8 +142,8 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     }
 }
 
-/// 原生模式：本地 Windows 程序（仅 Windows 可执行）。
-#[cfg(windows)]
+/// 原生模式：本地 Windows 程序。prepare/参数组装跨平台（可在 Linux 单测）；
+/// spawn 在非 Windows 平台给出明确错误（隔离原语为 Win32 API，见 native.rs）。
 fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
     let workdir = match &opts.workdir {
         Some(d) => std::path::PathBuf::from(d),
@@ -154,14 +154,6 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
     let backend = backend::NativeBackend;
     let prepared = backend.prepare(&spec)?;
     backend.spawn(&spec, &prepared)
-}
-
-/// 非 Windows 平台：原生模式不可用（隔离原语为 Win32 API）。
-#[cfg(not(windows))]
-fn run_native(_opts: &RunOptions, _cmd: Vec<String>) -> Result<u32> {
-    Err(WboxError::args(
-        "run 原生模式仅在 Windows 上可用（AppContainer/Job Object 为 Win32 原语）",
-    ))
 }
 
 /// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
