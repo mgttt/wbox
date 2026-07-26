@@ -603,7 +603,12 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
     errno = ENOMEM;
     return -1;
   }
+  if (getenv("WBOX_DEBUG_FORK"))
+    fprintf(stderr, "wbox mem: snapshot: acquiring src lock\n");
   AcquireSRWLockShared(&src->lock);
+  if (getenv("WBOX_DEBUG_FORK"))
+    fprintf(stderr, "wbox mem: snapshot: src lock held, %zu intervals\n",
+            (size_t)src->ivn);
   // inherit shared-anon segments (same guest offsets). The child gets a
   // private copy of the contents like every other page; its writes are
   // synced back into THIS window when the child exits (ShsegSync).
@@ -646,6 +651,11 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
       }
       if (bad) continue;  // skip the stale interval
     }
+    // 逐区间打点：真机 fork 挂死（KNOWN-FAILURES W1）已定位到本函数内部，
+    // 需要区分"卡在某个巨大区间的 commit/memcpy"与"卡在锁上"。
+    if (getenv("WBOX_DEBUG_FORK"))
+      fprintf(stderr, "wbox mem: snapshot: iv[%zu] [%p,%p) %zu bytes\n",
+              (size_t)i, (void *)a, (void *)b, (size_t)(b - a));
     if (!VirtualAlloc((LPVOID)da, b - a, MEM_COMMIT, PAGE_READWRITE)) {
       ReleaseSRWLockShared(&src->lock);
       goto fail;
