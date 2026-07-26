@@ -525,38 +525,28 @@ mod real_windows_tests {
     use crate::job::Job;
     use crate::token::{AppContainerProfile, CapabilitySid};
 
-    fn profile_or_skip(name: &str, caps: &[CapabilitySid]) -> Option<AppContainerProfile> {
-        match AppContainerProfile::create(name, caps) {
-            Ok(p) => Some(p),
-            Err(e) if format!("{}", e).contains("0x80070005") => {
-                eprintln!(
-                    "SKIP: 当前宿主拒绝 CreateAppContainerProfile（Access denied）：{}",
-                    e
-                );
-                None
-            }
-            Err(e) => panic!("创建 AppContainer profile 失败：{}", e),
-        }
+    fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
+        AppContainerProfile::create(name, caps)
+            .unwrap_or_else(|e| panic!("创建 AppContainer profile 失败：{}", e))
     }
     /// 找一个系统自带的无害可执行：hostname.exe 最稳（打印主机名 + rc=0）。
-    /// 若系统找不到则 SKIP，不红。
-    fn hostname_exe() -> Option<String> {
+    fn hostname_exe() -> String {
         for candidate in [
             r"C:\Windows\System32\hostname.exe",
             r"C:\Windows\system32\hostname.exe",
         ] {
             if std::path::Path::new(candidate).is_file() {
-                return Some(candidate.to_string());
+                return candidate.to_string();
             }
         }
         // 兜底：从 SystemRoot 环境变量拼
         if let Ok(root) = std::env::var("SystemRoot") {
             let p = format!(r"{}\System32\hostname.exe", root);
             if std::path::Path::new(&p).is_file() {
-                return Some(p);
+                return p;
             }
         }
-        None
+        panic!("Windows 系统目录中未找到 hostname.exe");
     }
 
     fn unique_name(label: &str) -> String {
@@ -573,20 +563,10 @@ mod real_windows_tests {
     /// 完整链路：在 AppContainer + Job 内起 hostname.exe，期望 rc=0。
     /// 这条链覆盖 token/sandbox/job 三个模块的真实协作路径。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 run_container 完整链路"]
     fn run_container_executes_hostname_in_sandbox() {
-        let exe = match hostname_exe() {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: 未找到 hostname.exe");
-                return;
-            }
-        };
+        let exe = hostname_exe();
 
-        let profile = match profile_or_skip(&unique_name("rc"), &[]) {
-            Some(p) => p,
-            None => return,
-        };
+        let profile = create_profile(&unique_name("rc"), &[]);
         let caps: Vec<CapabilitySid> = Vec::new();
         let job = Job::create(Limits::default()).unwrap();
         let workdir = std::path::Path::new(&exe)
@@ -606,19 +586,9 @@ mod real_windows_tests {
     /// 拒绝网络。这里只验证链路启动不因 caps=[] 失败（网络拒绝是后续 socket
     /// 调用的事，不影响 hostname 启动）。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 run_container caps=[] 不影响启动"]
     fn run_container_with_empty_caps_starts_process() {
-        let exe = match hostname_exe() {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: 未找到 hostname.exe");
-                return;
-            }
-        };
-        let profile = match profile_or_skip(&unique_name("nc"), &[]) {
-            Some(p) => p,
-            None => return,
-        };
+        let exe = hostname_exe();
+        let profile = create_profile(&unique_name("nc"), &[]);
         let job = Job::create(Limits {
             memory_mb: 0,
             cpu_pct: 0,
@@ -651,19 +621,9 @@ mod real_windows_tests {
     /// workdir 不存在 → CreateProcessW 在 lpCurrentDirectory 阶段失败，
     /// 报 spawn 错误。用 workdir = 显然不存在的路径。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 CreateProcess 缺失 workdir 报 spawn 错"]
     fn run_container_missing_workdir_is_spawn_error() {
-        let exe = match hostname_exe() {
-            Some(p) => p,
-            None => {
-                eprintln!("SKIP: 未找到 hostname.exe");
-                return;
-            }
-        };
-        let profile = match profile_or_skip(&unique_name("mw"), &[]) {
-            Some(p) => p,
-            None => return,
-        };
+        let exe = hostname_exe();
+        let profile = create_profile(&unique_name("mw"), &[]);
         let job = Job::create(Limits::default()).unwrap();
         let cmdline = build_cmdline(&[exe]).unwrap();
         // 一个绝对不存在的路径

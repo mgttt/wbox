@@ -14,6 +14,10 @@
 
 ### Fixed
 
+- **Windows 真机 Rust 测试不再被忽略**：11 项 AppContainer profile、
+  capability SID、Job Object 限额和完整进程启动测试纳入常规
+  `cargo test`；删除权限不足和缺失系统程序时的静默假绿分支。真 Windows
+  基线现为 **188 passed / 0 failed / 0 ignored**。
 - **Windows 命令行参数保真**：`build_cmdline` 改为完整实现
   `CommandLineToArgvW` 的反斜杠/引号规则，正确处理带空格且以 `\` 结尾、
   连续 `\` 后跟引号、空参数和 Unicode 参数，并拒绝不可表示的 NUL。

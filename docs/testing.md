@@ -22,7 +22,10 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   - `backend/env.rs`——保留键/白名单/脱敏全分支、优先级（forced > 镜像 > 宿主）；
   - `backend/mod.rs` + `main.rs`——classify_target 边界（`ubuntu` vs `./ubuntu`
     vs `ubuntu:latest` vs 绝对路径）、CLI 解析、临时 HOME 下的集成链
-    （假缓存 list→show→classify→run-prepare）。
+    （假缓存 list→show→classify→run-prepare）；
+  - Windows 专属测试——AppContainer profile 生命周期与 capability SID、
+    Job Object 限额下发，以及 AppContainer + Job + `CreateProcessW` 完整启动链。
+    这些测试属于 `cargo test` 常规门禁，不允许以权限不足等理由静默跳过。
 - 网络用例约定：真实 pull（hello-world）registry 不可达时 **SKIP 不 fail**
   （`eprintln!("SKIP：…")` 后返回 Ok）；严格失败场景一律用本地构造输入覆盖。
 - 临时目录约定：用 `std::process::id()` + tag 拼唯一目录，测试末清理；
@@ -80,8 +83,8 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   （wbox-linux.exe 构建 + 冒烟），完整矩阵留给 push main / tag / nightly /
   手动触发。
 - **单项超时**：`WBOX_MATRIX_TIMEOUT`（默认 60s，设 0 关闭，`timeout`
-  不可用时自动退化为不限制）。真机实测 B 组（fork 依赖）可能整项挂死，
-  而脚本原先没有任何上界——一次挂死就吃满整个 CI job。挂死记
+  不可用时自动退化为不限制）。该上界用于把 fork 等运行时回归限制在单项内，
+  避免一次挂死吃满整个 CI job。挂死记
   `rc=124` 并在详情里注明「超时 Ns 被终止」，其余项照常继续。
 - CI 里两个环境开关（本地跑不设，全量执行）：
   - `WBOX_GUEST_SKIP=1`——F 组交给专职的 `guest-tests` job，避免重复；
@@ -94,7 +97,7 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 ## 二、本地跑法
 
 ```bash
-# Rust 单测（Linux 即可跑全部；含网络 SKIP 语义）
+# Rust 单测（Linux 177 项；Windows 另含 11 项真机 API/启动链测试）
 cargo test --locked
 
 # Windows 代码编译门禁（Win32 专属模块只在 windows target 编译）

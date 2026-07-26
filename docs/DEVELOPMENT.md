@@ -89,7 +89,7 @@ WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
 ## 3. 验证三层（发布门禁的本地复现）
 
 ```bash
-cargo test --locked                                          # ① Rust 单测（Linux 可全跑；155 passed 基线）
+cargo test --locked                                          # ① Rust 单测（Linux 177；Windows 188，0 ignored）
 rustup target add x86_64-pc-windows-msvc
 cargo check --locked --target x86_64-pc-windows-msvc         # ② Win32 编译门禁（要求 0 warning）
 scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox   # ③ 真机矩阵
@@ -175,6 +175,8 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 - guest C 套件真 Windows：454 pass / 0 fail / 9 skip，16/16 用例文件通过，
   `known-failures.txt` 为空。
+- Rust 单测：Linux 177 passed；真 Windows 188 passed / 0 failed /
+  **0 ignored**，其中 11 项直接覆盖 AppContainer、Job Object 与完整启动链。
 - 真机矩阵：PASS=39 / FAIL=0 / SKIP=1（独立 epoll 预编译二进制缺失；
   同等且更完整的覆盖由 guest `t_net_epoll` 提供）。
 - 能力：busybox 静态全通；ubuntu-24.04 rootfs 动态 glibc

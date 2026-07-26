@@ -245,18 +245,9 @@ impl Drop for OwnedHandle {
 mod real_windows_tests {
     use super::*;
 
-    fn profile_or_skip(name: &str, caps: &[CapabilitySid]) -> Option<AppContainerProfile> {
-        match AppContainerProfile::create(name, caps) {
-            Ok(p) => Some(p),
-            Err(e) if format!("{}", e).contains("0x80070005") => {
-                eprintln!(
-                    "SKIP: 当前宿主拒绝 CreateAppContainerProfile（Access denied）：{}",
-                    e
-                );
-                None
-            }
-            Err(e) => panic!("创建 AppContainer profile 失败：{}", e),
-        }
+    fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
+        AppContainerProfile::create(name, caps)
+            .unwrap_or_else(|e| panic!("创建 AppContainer profile 失败：{}", e))
     }
     /// 唯一 tag：避免并发跑同一 suite 时 profile 名相撞（DeleteAppContainerProfile
     /// 在 Drop 里清，但中途可能重叠）。process id + 静态计数器双重保险。
@@ -273,16 +264,12 @@ mod real_windows_tests {
     }
 
     /// 真机 round-trip：create → sid 字符串非空 → keep → Drop 后 derive 找不到。
-    /// 不跑 spawn，只测 profile 生命周期 API。`#[ignore]` 因依赖真 Win32。
+    /// 不跑 spawn，只测 profile 生命周期 API。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 AppContainer profile 生命周期"]
     fn appcontainer_profile_create_keep_delete_roundtrip() {
         let name = unique_name("rt");
         let caps: Vec<CapabilitySid> = Vec::new();
-        let mut p = match profile_or_skip(&name, &caps) {
-            Some(p) => p,
-            None => return,
-        };
+        let mut p = create_profile(&name, &caps);
         // SID 字符串形如 S-1-15-2-...
         let sid = p.sid_string().unwrap();
         assert!(
@@ -311,16 +298,12 @@ mod real_windows_tests {
 
     /// profile 已存在时 create 走 ERROR_ALREADY_EXISTS 回退路径，derive 拿 SID。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 AppContainer profile ERROR_ALREADY_EXISTS 回���"]
     fn appcontainer_profile_already_exists_falls_back_to_derive() {
         let name = unique_name("ae");
         let caps: Vec<CapabilitySid> = Vec::new();
 
         // 第一次 create + keep（保留 profile）
-        let mut p1 = match profile_or_skip(&name, &caps) {
-            Some(p) => p,
-            None => return,
-        };
+        let mut p1 = create_profile(&name, &caps);
         p1.keep();
         let sid1 = p1.sid_string().unwrap();
         drop(p1);
@@ -336,7 +319,6 @@ mod real_windows_tests {
     /// INTERNET_CLIENT capability SID 构造 + 字符串校验。
     /// S-1-15-3-1 是 well-known INTERNET_CLIENT。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 CreateWellKnownSid(InternetClient)"]
     fn capability_sid_internet_client_has_correct_form() {
         let cap = CapabilitySid::internet_client().unwrap();
         // 取回 SID 字符串需 PSID -> 通过 sid_to_string 私有 fn
@@ -353,7 +335,6 @@ mod real_windows_tests {
     /// 或者 PE 内核返回 E_INVALIDARG。无论哪条路都不能 panic / unwrap 漏出来。
     /// 当前实现是直接调 API，记现状：超长名由 API 自己拒（0x80070057）。
     #[test]
-    #[ignore = "DIAGNOSE: 真机 Win32 profile 名长度边界"]
     fn appcontainer_profile_overlong_name_is_rejected() {
         let too_long: String = "a".repeat(65); // 文档上限 64
         let caps: Vec<CapabilitySid> = Vec::new();
