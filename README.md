@@ -120,7 +120,6 @@ wbox image list
 - **文件系统 overlay / 注册表虚拟化**：`--workdir` 只是工作目录，不是只读视图；Low IL 天然阻止容器写大部分系统位置，但用户目录中 Low-IL 可写的位置仍可被写。真正的 FS 虚拟化需要 minifilter 驱动（Sandboxie 路线），见路线图。
 - **网络命名空间**：Windows 无此原语；`--allow-network` 授予后没有流量级管控（防火墙规则需要管理员）。
 - **GUI 桌面隔离**：AppContainer 自有 window station 边界只提供部分隔离。
-- **Linux/OCI 镜像**：无虚拟化条件下不可行。
 
 ## 与同类方案的区别
 

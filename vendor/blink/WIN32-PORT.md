@@ -1,4 +1,4 @@
-# wbox win32 移植（L1 里程碑 / L2 进行中）
+# wbox win32 移植（wbox-linux 1.0.0-rc2 状态）
 
 本文档记录 blink → `wbox-linux.exe`（x86_64-windows，MinGW/zig cc 交叉编译）
 的移植层架构、运行时崩溃根因与修复、缺口裁决、已知限制与验证方法。
@@ -17,9 +17,9 @@
 
 **已知限制汇总**：
 
-- `apt-get update` 卡点（指令仿真级，专项在修）；glibc pthread 程序崩溃（musl/busybox 不受影响）
+- glibc pthread 程序崩溃（musl/busybox 不受影响）
 - epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT` 支持）；eventfd/signalfd ENOSYS
-- AF_UNIX/socketpair ENOSYS；`MAP_SHARED` 写回未实现；mremap 收缩外仅失败
+- AF_UNIX/socketpair ENOSYS；mremap 收缩外仅失败
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
 - 宿主 symlink/reparse point 不防护（rootfs 内勿放行特权创建的 symlink）
@@ -52,7 +52,9 @@ L2 进展（2026-07-24，wine 11.11 实测）：VFS/overlays 已启用，
 动态链接 glibc 程序（ls/cat/bash/uname/apt --version，见 §7.2）；
 网络矩阵（busybox wget 公网 md5 校验 + epoll loopback）通过（§7.3）。
 feat/cow 合入后 shell 管道/命令替换/后台任务已全通（快照式 fork，§7.4）；
-剩余已知限制为 `apt-get update`（指令仿真级）与 glibc pthread（汇总见 §0）。
+`apt-get update` 已于 2026-07-25 实测通过（rc=0，28.9MB 落盘，需
+`APT::Cache-Start "200000000"`，见 §7.4）；剩余已知限制为 glibc pthread
+（汇总见 §0）。
 
 ## 1. 移植层架构
 
@@ -251,7 +253,7 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
 | `/usr/bin/apt --version` | ✅ `apt 2.8.3 (amd64)` |
 | `/tmp/busybox wget http://mirrors.aliyun.com/debian/README`（rootfs 内） | ✅ md5 精确匹配（需先向 rootfs 写入有效 /etc/resolv.conf） |
 | `echo hello \| /bin/cat`（bash 管道） | ❌ 失败（§7.4） |
-| `apt-get update` | ❌ rc=137 SIGKILL（§7.4） |
+| `apt-get update` | ✅ rc=0（2026-07-25 实测，28.9MB 落盘，需 `APT::Cache-Start "200000000"`，见 §7.4） |
 
 ## 7.3 网络矩阵（wine 11.11 实测，2026-07-24）
 

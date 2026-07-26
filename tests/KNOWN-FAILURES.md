@@ -2,7 +2,7 @@
 
 基线来源：`tests/run-guest-tests.sh`（wine 模式，wbox-linux v1.0，wine 11.11）。
 基线统计（v1.0 全绿基线，2026-07-26 实测）：**16 个用例文件：13 PASS / 3 FAIL；
-断言 423 条：pass=419 fail=4 skip=10**（skip 均为 symlink EPERM 宿主限制降级与
+断言 433 条：pass=419 fail=4 skip=10**（skip 均为 symlink EPERM 宿主限制降级与
 t_exec/t_net_epoll 内个别环境降级项）。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
