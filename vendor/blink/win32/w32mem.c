@@ -442,6 +442,7 @@ ok:
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mem: window #%d [%p,%p) bits=%d\n", slot,
             (void *)w->base, (void *)w->limit, bits);
+    fflush(stderr);
   return w;
 }
 
@@ -605,10 +606,12 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
   }
   if (getenv("WBOX_DEBUG_FORK"))
     fprintf(stderr, "wbox mem: snapshot: acquiring src lock\n");
+    fflush(stderr);
   AcquireSRWLockShared(&src->lock);
   if (getenv("WBOX_DEBUG_FORK"))
     fprintf(stderr, "wbox mem: snapshot: src lock held, %zu intervals\n",
             (size_t)src->ivn);
+    fflush(stderr);
   // inherit shared-anon segments (same guest offsets). The child gets a
   // private copy of the contents like every other page; its writes are
   // synced back into THIS window when the child exits (ShsegSync).
@@ -643,6 +646,7 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
             fprintf(stderr,
                     "wbox mem: snapshot: stale interval [%p,%p) bad@%p\n",
                     (void *)a, (void *)b, (void *)q);
+    fflush(stderr);
           bad = 1;
           break;
         }
@@ -656,22 +660,35 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
     if (getenv("WBOX_DEBUG_FORK"))
       fprintf(stderr, "wbox mem: snapshot: iv[%zu] [%p,%p) %zu bytes\n",
               (size_t)i, (void *)a, (void *)b, (size_t)(b - a));
+    fflush(stderr);
     if (!VirtualAlloc((LPVOID)da, b - a, MEM_COMMIT, PAGE_READWRITE)) {
       ReleaseSRWLockShared(&src->lock);
       goto fail;
     }
-    memcpy((void *)da, (const void *)a, b - a);
+
     // NB: the child's interval table must hold CHILD addresses — copying
     // src->iv verbatim would make the child's munmap/wipe/release operate
     // on the PARENT's pages (decommitting them under a running parent).
     dst->iv[dst->ivn].a = da;
     dst->iv[dst->ivn].b = dst->base + (b - src->base);
     ++dst->ivn;
-    // replicate host protections region-by-region
+    // 逐区域「拷贝 + 复制保护属性」。
+    //
+    // 这里**必须**按区域走，不能对整个区间做一次 memcpy：区间只被验证过
+    // MEM_COMMIT（提交状态），而**已提交 ≠ 可读**——guest 的 PROT_NONE 映射
+    // 与 guard 页同样是 committed。整段 memcpy 一旦读到 PAGE_NOACCESS/
+    // PAGE_GUARD 页就触发访问违例，而 fork 期间 m->canhalt 为假、VEH 不按
+    // guest 缺页处理，故障指令被反复重试 → 表现为**永久挂死**（真 Windows
+    // 与 wine 9.0 均可复现，见 tests/KNOWN-FAILURES.md W1；旧顺序是"先整段
+    // 拷贝、后逐区域套保护"，恰好把这个雷埋在拷贝里）。
+    //
+    // 不可读区域无需拷贝：其内容对 guest 本就不可访问，子进程只要拿到同样的
+    // 保护属性即可，语义完全一致。
     p = a;
     while (p < b) {
       MEMORY_BASIC_INFORMATION mbi;
       uintptr_t s, e2;
+      int readable;
       if (!VirtualQuery((LPVOID)p, &mbi, sizeof(mbi)) ||
           mbi.State != MEM_COMMIT) {
         ReleaseSRWLockShared(&src->lock);
@@ -681,6 +698,17 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
       e2 = s + mbi.RegionSize;
       if (s < a) s = a;
       if (e2 > b) e2 = b;
+      readable = !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+      if (readable) {
+        memcpy((void *)(dst->base + (s - src->base)), (const void *)s, e2 - s);
+      } else if (getenv("WBOX_DEBUG_FORK")) {
+        fprintf(stderr,
+                "wbox mem: snapshot: skip unreadable [%p,%p) prot=%#lx\n",
+                (void *)s, (void *)e2, (unsigned long)mbi.Protect);
+        fflush(stderr);
+      }
+      // 保护属性在拷贝之后再套：dst 整段以 PAGE_READWRITE 提交，先拷后改，
+      // 否则给 dst 套上 PAGE_NOACCESS 会让后续区域的写入自己也炸。
       if (mbi.Protect != PAGE_READWRITE) {
         DWORD old;
         if (!VirtualProtect((LPVOID)(dst->base + (s - src->base)), e2 - s,
@@ -698,6 +726,7 @@ int WboxMemSnapshotWindow(void *srcwin, void **dstout) {
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mem: snapshot window #%d -> #%d (%zu intervals)\n",
             src->index, dst->index, n);
+    fflush(stderr);
   return 0;
 fail:
   AcquireSRWLockExclusive(&g_windows_lock);
@@ -731,6 +760,7 @@ void WboxMemWipeWindow(void) {
   ReleaseSRWLockExclusive(&w->lock);
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mem: wipe window #%d\n", w->index);
+    fflush(stderr);
 }
 
 // Validate a recycled host page (g_allocator freelist) before reuse.

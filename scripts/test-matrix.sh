@@ -173,7 +173,7 @@ fi
 
 echo
 echo "=== B. shell 矩阵（8 项，fork 依赖）==="
-check_rc_out "B1  管道 echo hello | cat" 0 hello  sh -c 'echo hello | cat'
+check_rc_out "B1  管道 echo hello | cat" 0 hello  sh -c 'echo hello | ./busybox cat'
 check_rc_out "B2  命令替换"              0 inner  sh -c 'echo $(echo inner)'
 check_rc_out "B3  后台任务 sleep & wait" 0 ""     sh -c 'sleep 0.1 & wait'
 # NB: 必须写 ./busybox cat，不能写裸 cat——工作目录里没有 cat，而矩阵不设
@@ -183,10 +183,10 @@ check_rc_out "B3  后台任务 sleep & wait" 0 ""     sh -c 'sleep 0.1 & wait'
 check_rc_out "B4  重定向链 && cat"       0 x      sh -c 'echo x > f && ./busybox cat f'
 check_rc_out "B5  写 /dev/null"          0 ""     sh -c 'echo n > /dev/null'
 check_rc_out "B6  读 /dev/null"          0 ok     sh -c 'cat /dev/null; echo ok'
-check_rc_out "B7  管道 + grep 退出码"    0 ""     sh -c 'echo a | grep a'
+check_rc_out "B7  管道 + grep 退出码"    0 ""     sh -c 'echo a | ./busybox grep a'
 # B8 fork 子 exec 外部 applet（回归保护项，md5("hello")）
 check_rc_out "B8  fork 子 exec md5sum"   0 5d41402abc4b2a76b9719d911017c592 \
-  sh -c 'echo -n hello | md5sum'
+  sh -c 'echo -n hello | ./busybox md5sum'
 
 echo
 echo "=== C. fork 矩阵 ==="
