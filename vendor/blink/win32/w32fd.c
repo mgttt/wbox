@@ -697,6 +697,17 @@ static int W32IsAppend(int fd) {
   return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
 }
 
+// F4: positioned IO on pipes is ESPIPE on Linux; on win32 ReadFile with
+// an OVERLAPPED offset on a pipe handle can BLOCK forever (t_fd_rw /
+// t_negative empty-pipe pread hang), so reject before touching the pipe.
+static int W32EspipeIfPipe(HANDLE h) {
+  if (GetFileType(h) == FILE_TYPE_PIPE) {
+    errno = ESPIPE;
+    return -1;
+  }
+  return 0;
+}
+
 
 
 ssize_t read(int fd, void *buf, size_t n) {
@@ -790,6 +801,7 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     errno = EBADF;
     return -1;
   }
+  if (W32EspipeIfPipe(h)) return -1;
   OVERLAPPED ov;
   memset(&ov, 0, sizeof(ov));
   /* off_t is 32-bit on windows-gnu; widen before shifting (>>32 on a
@@ -812,6 +824,7 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
     errno = EBADF;
     return -1;
   }
+  if (W32EspipeIfPipe(h)) return -1;
   // F2: pwrite on an O_APPEND fd ignores the offset and appends (Linux).
   if (W32IsAppend(fd)) {
     LARGE_INTEGER end;
