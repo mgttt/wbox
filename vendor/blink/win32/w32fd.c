@@ -253,6 +253,8 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
 
 static HANDLE W32Handle(int fd);
 static void W32SetAppend(int fd, int on);
+static void W32SetAccess(int fd, int flags);
+static int W32GetAccess(int fd);
 
 // ------------------------------------------------ F7/F8: host filename escaping
 // Wine maps Win32 filenames onto the Unix filesystem through the LOCALE
@@ -517,7 +519,11 @@ static int W32ToCrt(HANDLE h, int flags) {
   else cflags |= 0x0002;
   cflags |= 0x8000;  // _O_BINARY
   int fd = _open_osfhandle((intptr_t)h, cflags);
-  if (fd == -1) CloseHandle(h);
+  if (fd == -1) {
+    CloseHandle(h);
+  } else {
+    W32SetAccess(fd, flags);
+  }
   return fd;
 }
 
@@ -667,6 +673,11 @@ static int IsSpecial(int fd) {
 // Atomicity is best-effort: seek-to-END immediately before the write.
 #define W32_FDTRACK_MAX 65536
 static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
+// Access mode is needed by F_GETFL. MinGW's CRT doesn't expose a query for
+// the mode passed to _open_osfhandle(), and reporting O_RDWR unconditionally
+// makes blink treat stdin and read-only files as writable.
+// Store O_ACCMODE + 1 so zero remains the "not tracked" sentinel.
+static unsigned char g_fdaccess[W32_FDTRACK_MAX];
 static void W32SetAppend(int fd, int on) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
   if (on) {
@@ -677,6 +688,20 @@ static void W32SetAppend(int fd, int on) {
 }
 static int W32IsAppend(int fd) {
   return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+}
+static void W32SetAccess(int fd, int flags) {
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  g_fdaccess[fd] = flags < 0 ? 0 : (flags & O_ACCMODE) + 1;
+}
+static int W32GetAccess(int fd) {
+  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdaccess[fd]) {
+    return g_fdaccess[fd] - 1;
+  }
+  // Standard descriptors predate this table. Preserve their conventional
+  // directions so AddStdFd() records correct guest access flags.
+  if (fd == STDIN_FILENO) return O_RDONLY;
+  if (fd == STDOUT_FILENO || fd == STDERR_FILENO) return O_WRONLY;
+  return O_RDWR;
 }
 
 // Unified CRT-fd classification — THE single lookup that decides which
@@ -790,6 +815,12 @@ ssize_t read(int fd, void *buf, size_t n) {
       return -1;
   }
   HANDLE h = (HANDLE)fi.handle;
+  BY_HANDLE_FILE_INFORMATION hfi;
+  if (GetFileInformationByHandle(h, &hfi) &&
+      (hfi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    errno = EISDIR;
+    return -1;
+  }
   DWORD got = 0;
   if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, NULL)) {
     DWORD e = GetLastError();
@@ -840,6 +871,7 @@ int close(int fd) {
       return 0;
   }
   W32SetAppend(fd, 0);
+  W32SetAccess(fd, -1);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
 
@@ -1012,7 +1044,7 @@ int dup(int fd) {
     errno = W32Err();
     return -1;
   }
-  int nfd = W32ToCrt(duph, 0);
+  int nfd = W32ToCrt(duph, W32GetAccess(fd));
   W32SetAppend(nfd, W32IsAppend(fd));  // dup shares the file status flags
   return nfd;
 }
@@ -1038,14 +1070,15 @@ int dup2(int fd, int fd2) {
       return -1;
     }
     // replace fd2's handle: close and dup into it via _dup2 of a temp crt fd
-    int tmp = W32ToCrt(h, 0);
+    int tmp = W32ToCrt(h, O_RDWR);
     if (tmp == -1) return -1;
     if (_dup2(tmp, fd2)) {
-      _close(tmp);
+      close(tmp);
       errno = EBADF;
       return -1;
     }
-    _close(tmp);
+    close(tmp);
+    W32SetAccess(fd2, O_RDWR);
     return fd2;
   }
   if (_dup2(fd, fd2)) {
@@ -1053,6 +1086,7 @@ int dup2(int fd, int fd2) {
     return -1;
   }
   W32SetAppend(fd2, W32IsAppend(fd));
+  W32SetAccess(fd2, W32GetAccess(fd));
   return fd2;
 }
 
@@ -1081,8 +1115,8 @@ int pipe2(int fds[2], int flags) {
   fds[0] = W32ToCrt(r, O_RDONLY);
   fds[1] = W32ToCrt(w, O_WRONLY);
   if (fds[0] == -1 || fds[1] == -1) {
-    if (fds[0] != -1) _close(fds[0]);
-    if (fds[1] != -1) _close(fds[1]);
+    if (fds[0] != -1) close(fds[0]);
+    if (fds[1] != -1) close(fds[1]);
     errno = EMFILE;
     return -1;
   }
@@ -1104,9 +1138,11 @@ int fcntl(int fd, int cmd, ...) {
   }
   switch (cmd) {
     case F_GETFL:
-      // good enough for L1 (busybox checks & clears NONBLOCK); keep the
-      // append bit truthful since F2 made O_APPEND meaningful.
-      return O_RDWR | (W32IsAppend(fd) ? O_APPEND : 0);
+      if (W32FdClassify(fd, NULL) == W32FD_BAD) {
+        errno = EBADF;
+        return -1;
+      }
+      return W32GetAccess(fd) | (W32IsAppend(fd) ? O_APPEND : 0);
     case F_SETFL:
       W32SetAppend(fd, (arg & O_APPEND) != 0);
       return 0;  // ignore NONBLOCK toggling (console/pipes stay blocking)

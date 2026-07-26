@@ -14,6 +14,11 @@
 
 ### Fixed
 
+- **Win32 fd errno 精度（E1/E2）**：fd 适配层记录 open/pipe/dup 后的真实
+  访问模式，`F_GETFL` 不再把 stdin/只读文件一律报成 `O_RDWR`，因此
+  `write(只读 fd)` 正确返回 `EBADF`；`read(目录 fd)` 在 `ReadFile` 前识别
+  目录句柄并返回 `EISDIR`。真机 `t_negative` 由 2 条失败转为
+  **24 pass / 0 fail**，已从 known-failures 基线移除。
 - **fork 永久挂死（W1，真机与 wine 9.0 均复现）**：`WboxMemSnapshotWindow`
   对每个区间先做整段 `memcpy`，而区间只验证过 `MEM_COMMIT`——**已提交 ≠
   可读**，撞上 `PAGE_NOACCESS`（guest PROT_NONE）页即触发访问违例；fork 期间
@@ -47,7 +52,8 @@
   在它上线的第一轮就兑现了。相应地，`known-failures.txt` 的条目新增
   `@native` / `@wine` 模式标注：同一份基线要同时服务两种宿主环境，而
   两者的失败集合确实不同。
-  真机基线：16 个用例 12 PASS / 4 FAIL；wine：13 PASS / 3 FAIL。
+  E1/E2 修复后，真机基线收紧为 16 个用例 13 PASS / 3 FAIL；
+  wine 基线为 14 PASS / 2 FAIL。
 
 - **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
   在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils

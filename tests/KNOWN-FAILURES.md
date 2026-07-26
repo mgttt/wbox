@@ -8,20 +8,21 @@
 基线来源：`tests/run-guest-tests.sh`。**两种宿主环境的基线不同**，故
 `known-failures.txt` 的条目支持 `@native` / `@wine` 标注（无标注 = 两者都算）。
 
-| 环境 | 统计（2026-07-26 实测） | 失败项 |
+| 环境 | 当前基线 | 失败项 |
 |---|---|---|
-| 真 Windows（CI run 54，native） | 16 个用例：**12 PASS / 4 FAIL / 0 SKIP** | t_negative、t_net_epoll、t_net_sockopt、**t_path（W3，仅真机）** |
-| wine 9.0（Linux 沙箱，wine 模式） | 16 个用例：**13 PASS / 3 FAIL / 0 SKIP** | t_negative、t_net_epoll、t_net_sockopt |
+| 真 Windows（本机，native） | 16 个用例：**13 PASS / 3 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt、**t_path（W3，仅真机）** |
+| wine（wine 模式当前基线） | 16 个用例：**14 PASS / 2 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt |
 
-两者只差 `t_path`：W3 长路径超 `MAX_PATH`，wine 不施加该限制故通过。
-断言级统计（wine 11.11 历史基线）：433 条 pass=419 fail=4 skip=10，
-skip 均为 symlink EPERM 宿主限制降级与 t_exec/t_net_epoll 内个别环境降级项。
+两者只差 `t_path`：W3 长路径超 `MAX_PATH`，wine 不施加该限制故通过。真机
+断言级统计为 **433 条：pass=418 fail=5 skip=10**；5 条失败断言分别为
+N1 两条、W3 三条，skip 均为 symlink EPERM 宿主限制降级与
+t_exec/t_net_epoll 内个别环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
 build-wbox-linux 的 artifact + zig 交叉编译 + 基线判定），不再是 SKIP 空转。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
-残留仅下表 2 类共 4 条断言失败。
+机器基线因此只保留 N1 两项和 `t_path @native`。
 
 复现方法（任一条目）：
 
@@ -58,8 +59,8 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 fork 钉死。**教训**：Windows 上"已提交"只说明有物理承诺，不代表当前保护属性
 允许读；任何按区间批量读 guest 内存的地方都要先按区域看 `mbi.Protect`。
 
-修复后矩阵：**PASS=14 → PASS=35 FAIL=3 SKIP=2**，剩余 3 个 FAIL 即下方
-N1/E1/E2 既有基线。
+修复后矩阵：**PASS=14 → PASS=35 FAIL=3 SKIP=2**。当时剩余 3 个 FAIL 为
+N1/E1/E2；E1/E2 后续已修复，见下方 P2。
 
 ## W2 ~~真 Windows 专有：sh 内 applet 解析失败~~ → **判定为测试用例缺陷，已修**
 
@@ -160,14 +161,15 @@ Win32 调用点加前缀；注意该前缀会**关闭系统侧路径规范化**�
 | N2 | `epoll_ctl(ADD)` pipe/TCP | 成功 | ✅ 已修复（fix/net-sem），t_net_epoll LT/ONESHOT/MOD/DEL/RDHUP 矩阵全过 |
 | N3 | `socket(9999,…)` errno | EAFNOSUPPORT | ✅ 已修复（xlat.c 校准），t_negative 全过该项 |
 
-## P2 errno 精度 —— 1 项残留（真 bug，低优先级）
+## P2 errno 精度 —— ✅ 已全部修复（2026-07-26）
 
-| # | 现象 | 期望 | 实测现状（v1.0） |
+| # | 现象 | 期望 | 修复与实测 |
 |---|------|------|------|
-| E1 | `read(目录fd)` | EISDIR(21) | **仍失败**：EINVAL(22)（t_negative.c:94 实测复现） |
-| E2 | `write(只读fd=stdin)` | EBADF(9) | **仍失败**：EACCES(13)（t_negative.c:100 实测复现） |
+| E1 | `read(目录fd)` | EISDIR(21) | ✅ `ReadFile` 前识别目录句柄并返回 EISDIR |
+| E2 | `write(只读fd=stdin)` | EBADF(9) | ✅ Win32 fd 层跟踪真实访问模式，`F_GETFL` 不再一律谎报 O_RDWR |
 
-裁决：E1/E2 为真实缺陷（errno 校准不完整），不影响功能正确性，列入后续版本。
+真机回归：`t_negative` **pass=24 fail=0 skip=0**；完整 guest 套件未出现
+基线外新失败，`t_negative` 已从机器基线移除。
 
 ## 备注
 
