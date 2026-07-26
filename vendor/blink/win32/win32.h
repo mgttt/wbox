@@ -52,6 +52,7 @@ void W32ChildSignalKilled(struct W32Child *, int sig);
 void W32MachineTrack(void *);
 void W32MachineUntrack(void *);
 int W32MachineLiveLocked(const void *);
+void WboxItimerDestroy(void *system);
 void W32ChildReparent(void *old_machine, void *new_machine);
 void W32VforkWaitParent(struct W32Child *);
 // SIGCHLD delivery: the child record remembers the parent's Machine (as an

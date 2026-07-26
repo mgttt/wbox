@@ -407,6 +407,7 @@ void FreeSystem(struct System *s) {
   (void)pthread_mutex_destroy(&s->sig_lock);
   free(s->elf.interpreter);
 #if defined(_WIN32) && !defined(__CYGWIN__)
+  WboxItimerDestroy(s);
   if (s->selfexeinfo) VfsFreeInfo(s->selfexeinfo);  // wbox win32
 #endif
   DestroyFds(&s->fds);

@@ -71,8 +71,9 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   最后一条是刻意的，与 §四 "行为修复时测试会变红，强制同步更新" 同一原则——
   否则修好的东西会被基线继续掩盖。`WBOX_GUEST_NO_BASELINE=1` 可回到原始语义。
 
-  当前基线为空；真 Windows 已达到 17/17 文件级通过。模式专有缺陷可用
-  `@native` / `@wine` 标注；真机首次执行发现的 W1（fork 挂死）与 W3
+  真 Windows 基线为空，已达到 18/18 文件级通过；Wine 仅登记
+  `t_net_sockopt @wine`。模式专有缺陷可用 `@native` / `@wine` 标注；
+  真机首次执行发现的 W1（fork 挂死）与 W3
   （长路径），以及最后两项 N1（AF_UNIX）均已修复并从基线移除。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）

@@ -5,23 +5,24 @@
 > 行改成"已修复"。判定语义（失败 ⊆ 基线放行 / 基线外新失败为回归 /
 > 基线内用例变通过视为基线过期）见 `docs/testing.md` §一.2。
 
-基线来源：`tests/run-guest-tests.sh`。当前两种宿主环境的机器基线均为空；
-格式仍支持 `@native` / `@wine` 标注，以便精确登记后续环境专有缺陷
+基线来源：`tests/run-guest-tests.sh`。真 Windows 机器基线为空；Wine 因
+宿主 Winsock 不支持 AF_UNIX，登记 `t_net_sockopt @wine`。格式支持
+`@native` / `@wine` 标注，以便精确登记环境专有缺陷
 （无标注 = 两种模式都算）。
 
 | 环境 | 当前基线 | 失败项 |
 |---|---|---|
-| 真 Windows（本机，native） | 17 个用例：**17 PASS / 0 FAIL / 0 SKIP** | 无 |
-| wine（历史基线） | 16 个既有用例：**16 PASS / 0 FAIL / 0 SKIP** | 新增 `t_eventfd` 待复核 |
+| 真 Windows（本机，native） | 18 个用例：**18 PASS / 0 FAIL / 0 SKIP** | 无 |
+| wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer` 待复核 |
 
-真机断言级统计为 **531 条：pass=522 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **567 条：pass=558 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
 build-wbox-linux 的 artifact + zig 交叉编译 + 基线判定），不再是 SKIP 空转。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
-机器基线现已为空。
+真机机器基线现已为空；Wine 仅保留 W4（`t_net_sockopt @wine`）。
 
 复现方法（任一条目）：
 

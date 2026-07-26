@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/sysinfo.h>
+#include <sys/time.h>
 #include <sys/times.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -18,6 +19,11 @@
 
 #include <windows.h>
 #include <bcrypt.h>
+
+#include "blink/linux.h"
+#include "blink/machine.h"
+#include "blink/signal.h"
+#include "win32.h"
 
 // ---------------------------------------------------------------- ids
 
@@ -723,9 +729,41 @@ int wbox_clock_getres(int id, struct timespec *ts) {
   return 0;
 }
 
+static uint64_t W32MonotonicMicros(void) {
+  return GetTickCount64() * 1000;
+}
+
 int nanosleep(const struct timespec *req, struct timespec *rem) {
-  DWORD ms = req->tv_sec * 1000 + (req->tv_nsec + 999999) / 1000000;
-  Sleep(ms ? ms : 1);
+  uint64_t now;
+  uint64_t deadline;
+  uint64_t micros;
+  if (req->tv_sec < 0 || req->tv_nsec < 0 || req->tv_nsec >= 1000000000) {
+    errno = EINVAL;
+    return -1;
+  }
+  if ((uint64_t)req->tv_sec > (UINT64_MAX - 999999) / 1000000) {
+    micros = UINT64_MAX;
+  } else {
+    micros = (uint64_t)req->tv_sec * 1000000 +
+             ((uint64_t)req->tv_nsec + 999) / 1000;
+  }
+  now = W32MonotonicMicros();
+  deadline = micros > UINT64_MAX - now ? UINT64_MAX : now + micros;
+  while ((now = W32MonotonicMicros()) < deadline) {
+    uint64_t left = deadline - now;
+    uint64_t millis = left / 1000 + !!(left % 1000);
+    DWORD ms = millis > 10 ? 10 : (DWORD)millis;
+    if (g_machine &&
+        atomic_load_explicit(&g_machine->attention, memory_order_acquire)) {
+      if (rem) {
+        rem->tv_sec = left / 1000000;
+        rem->tv_nsec = left % 1000000 * 1000;
+      }
+      errno = EINTR;
+      return -1;
+    }
+    Sleep(ms);
+  }
   if (rem) {
     rem->tv_sec = 0;
     rem->tv_nsec = 0;
@@ -748,10 +786,143 @@ unsigned sleep(unsigned sec) {
   return 0;
 }
 
-unsigned alarm(unsigned sec) { return 0; }
+struct W32Itimer {
+  CRITICAL_SECTION lock;
+  HANDLE wake;
+  HANDLE thread;
+  struct System *system;
+  struct Machine *machine;
+  uint64_t due;
+  uint64_t interval;
+  int stop;
+};
+
+static void W32TimevalFromMicros(struct timeval *tv, uint64_t micros) {
+  tv->tv_sec = micros / 1000000;
+  tv->tv_usec = micros % 1000000;
+}
+
+static int W32TimevalToMicros(const struct timeval *tv, uint64_t *micros) {
+  if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000 ||
+      (uint64_t)tv->tv_sec > (UINT64_MAX - 999999) / 1000000) {
+    errno = EINVAL;
+    return -1;
+  }
+  *micros = (uint64_t)tv->tv_sec * 1000000 + tv->tv_usec;
+  return 0;
+}
+
+static void W32ReadItimerLocked(struct W32Itimer *timer,
+                                struct itimerval *value) {
+  uint64_t now = W32MonotonicMicros();
+  uint64_t remaining = timer->due > now ? timer->due - now : 0;
+  memset(value, 0, sizeof(*value));
+  W32TimevalFromMicros(&value->it_value, remaining);
+  W32TimevalFromMicros(&value->it_interval, timer->interval);
+}
+
+static DWORD WINAPI W32ItimerThread(void *arg) {
+  struct W32Itimer *timer = arg;
+  for (;;) {
+    DWORD wait;
+    uint64_t now;
+    uint64_t left;
+    struct Machine *machine;
+    EnterCriticalSection(&timer->lock);
+    if (timer->stop) {
+      LeaveCriticalSection(&timer->lock);
+      return 0;
+    }
+    now = W32MonotonicMicros();
+    if (timer->due && timer->due <= now) {
+      machine = timer->machine;
+      if (timer->interval) {
+        uint64_t periods = (now - timer->due) / timer->interval + 1;
+        if (periods > (UINT64_MAX - timer->due) / timer->interval) {
+          timer->due = UINT64_MAX;
+        } else {
+          timer->due += periods * timer->interval;
+        }
+      } else {
+        timer->due = 0;
+      }
+      LeaveCriticalSection(&timer->lock);
+      W32ChildLock();
+      if (machine && W32MachineLiveLocked(machine) &&
+          machine->system == timer->system) {
+        EnqueueSignal(machine, SIGALRM_LINUX);
+      }
+      W32ChildUnlock();
+      continue;
+    }
+    if (!timer->due) {
+      wait = INFINITE;
+    } else {
+      left = timer->due - now;
+      left = left / 1000 + !!(left % 1000);
+      wait = left >= INFINITE ? INFINITE - 1 : (DWORD)left;
+    }
+    LeaveCriticalSection(&timer->lock);
+    WaitForSingleObject(timer->wake, wait);
+  }
+}
+
+static struct W32Itimer *W32GetItimer(struct System *system, int create) {
+  struct W32Itimer *timer = system->w32itimer;
+  if (timer || !create) return timer;
+  if (!(timer = calloc(1, sizeof(*timer)))) {
+    errno = ENOMEM;
+    return NULL;
+  }
+  InitializeCriticalSection(&timer->lock);
+  timer->system = system;
+  if (!(timer->wake = CreateEventW(NULL, FALSE, FALSE, NULL)) ||
+      !(timer->thread =
+            CreateThread(NULL, 0, W32ItimerThread, timer, 0, NULL))) {
+    if (timer->wake) CloseHandle(timer->wake);
+    DeleteCriticalSection(&timer->lock);
+    free(timer);
+    errno = EAGAIN;
+    return NULL;
+  }
+  system->w32itimer = timer;
+  return timer;
+}
+
+void WboxItimerDestroy(void *system) {
+  struct System *s = system;
+  struct W32Itimer *timer = s->w32itimer;
+  if (!timer) return;
+  s->w32itimer = NULL;
+  EnterCriticalSection(&timer->lock);
+  timer->stop = 1;
+  LeaveCriticalSection(&timer->lock);
+  SetEvent(timer->wake);
+  WaitForSingleObject(timer->thread, INFINITE);
+  CloseHandle(timer->thread);
+  CloseHandle(timer->wake);
+  DeleteCriticalSection(&timer->lock);
+  free(timer);
+}
+
+unsigned alarm(unsigned sec) {
+  struct itimerval neu;
+  struct itimerval old;
+  memset(&neu, 0, sizeof(neu));
+  neu.it_value.tv_sec = sec;
+  if (setitimer(ITIMER_REAL, &neu, &old) == -1) return 0;
+  return old.it_value.tv_sec + !!old.it_value.tv_usec;
+}
+
 int pause(void) {
-  Sleep(INFINITE);
-  return -1;
+  for (;;) {
+    if (g_machine &&
+        atomic_load_explicit(&g_machine->attention, memory_order_acquire)) {
+      errno = EINTR;
+      return -1;
+    }
+    Sleep(10);
+  }
 }
 
 struct tm *gmtime_r(const time_t *t, struct tm *tm) {
@@ -786,13 +957,52 @@ int timer_delete(timer_t t) {
 }
 
 int getitimer(int which, struct itimerval *v) {
-  memset(v, 0, sizeof(*v));
+  struct W32Itimer *timer;
+  if (which != ITIMER_REAL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!g_machine || !(timer = W32GetItimer(g_machine->system, 0))) {
+    memset(v, 0, sizeof(*v));
+    return 0;
+  }
+  EnterCriticalSection(&timer->lock);
+  W32ReadItimerLocked(timer, v);
+  LeaveCriticalSection(&timer->lock);
   return 0;
 }
 
 int setitimer(int which, const struct itimerval *n, struct itimerval *o) {
-  if (o) memset(o, 0, sizeof(*o));
-  return 0;  // L1: no SIGALRM delivery
+  uint64_t value = 0;
+  uint64_t interval = 0;
+  uint64_t now;
+  struct W32Itimer *timer;
+  if (which != ITIMER_REAL || !g_machine) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (n && (W32TimevalToMicros(&n->it_value, &value) == -1 ||
+            W32TimevalToMicros(&n->it_interval, &interval) == -1)) {
+    return -1;
+  }
+  timer = W32GetItimer(g_machine->system, value || interval);
+  if (!timer) {
+    if (!value && !interval) {
+      if (o) memset(o, 0, sizeof(*o));
+      return 0;
+    }
+    return -1;
+  }
+  EnterCriticalSection(&timer->lock);
+  if (o) W32ReadItimerLocked(timer, o);
+  now = W32MonotonicMicros();
+  timer->machine = g_machine;
+  timer->due = value > UINT64_MAX - now ? UINT64_MAX
+                                        : value ? now + value : 0;
+  timer->interval = interval;
+  LeaveCriticalSection(&timer->lock);
+  SetEvent(timer->wake);
+  return 0;
 }
 
 // ---------------------------------------------------------------- misc

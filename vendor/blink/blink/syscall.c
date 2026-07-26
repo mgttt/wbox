@@ -5783,9 +5783,13 @@ static int SysTgkill(struct Machine *m, int pid, int tid, int sig) {
 }
 
 static int SysPause(struct Machine *m) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  return SigsuspendPolyfill(m, m->sigmask);
+#else
   int rc;
   NORESTART(rc, pause());
   return rc;
+#endif
 }
 
 static int SysSetsid(struct Machine *m) {

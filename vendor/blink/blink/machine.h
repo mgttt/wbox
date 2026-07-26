@@ -286,6 +286,7 @@ struct System {
   // busybox sh's standalone applet dispatch (execve("/proc/self/exe", applet,
   // ...)) then execs the wrong binary. Keep a per-System registry instead.
   struct VfsInfo *selfexeinfo;
+  void *w32itimer;  // per-process ITIMER_REAL state (win32/w32proc.c)
 #endif
   u32 efer;
   int pid;

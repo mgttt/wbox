@@ -80,7 +80,7 @@ stdlib.h、string.h、time.h。blink 全部源码不经修改（除下述 _WIN32
 | `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2 计数器、阻塞与 semaphore 语义；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe / eventfd 计数器语义内聚） |
 | `w32sock.c` | 网络/epoll/termios 真实现（feat/net）：WSA 动态装载、socket 族、epoll 兴趣表（`epoll_wait` 走 `W32WaitFds`）、tcgetattr/tcsetattr 控制台模式 |
 | `w32errno.c` | 宿主错误→Linux errno 映射表集中：`W32ErrFromHost`（GetLastError）、`W32ErrFromWsa`（WSAGetLastError）、`W32GaiErrFromWsa`（EAI_*） |
-| `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；快照 fork 的虚拟 pid 表（`W32Child*`）；fork/execve/wait 族见 §4/§7.4 |
+| `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；每 guest 进程独立的 alarm/setitimer ITIMER_REAL 定时器与 SIGALRM 投递；快照 fork 的虚拟 pid 表（`W32Child*`）；fork/execve/wait 族见 §4/§7.4 |
 | `w32sig.c` | 信号：sigaction/sigprocmask 记录型 stub（guest 信号语义在 blink 内部模拟）；VEH 把宿主同步异常转诊断 abort；Ctrl+C/Close 控制台事件终止进程 |
 | `w32stubs.c` | 杂项：dirent（opendir/fdopendir/readdir/rewinddir/seekdir/telldir）、termios 辅助（cfmakeraw/cfset*speed 等）、TUI 桩、其余长尾 stub |
 
