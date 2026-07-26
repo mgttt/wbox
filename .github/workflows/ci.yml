@@ -297,13 +297,35 @@ jobs:
           curl -fsSL --retry 3 -o busybox \
             https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
           chmod +x busybox
+      # Ubuntu 24.04 起 AppArmor 默认禁掉 unprivileged user namespace，而这条
+      # 门禁的全部用例都以它为前置。不打开的话脚本会老实 SKIP 全部用例并返回
+      # 0 —— 门禁"全绿"但一个用例都没跑（实际发生过，见 run 30207284306）。
+      - name: 打开 unprivileged user namespace（rootless 隔离的硬前置）
+        run: |
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       # 环境事实留档：出问题时先看这段，能立刻分辨"代码回归"与"runner 能力变化"
       - name: 记录宿主能力（不判定成败）
         run: |
           echo "uid=$(id -u) cgroup=$(stat -fc %T /sys/fs/cgroup)"
           cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo "(无 cgroup v2 控制器)"
+          # 注意：cgroup.controllers 存在 ≠ 能用。委派没开时自己的 cgroup 目录
+          # 里建不了子目录，wbox 会退化到 rlimit 兜底。这里实测一下写权限。
+          self=$(sed -n 's/^0:://p' /proc/self/cgroup)
+          echo "自身 cgroup: ${self:-（无 0:: 行，非 v2）}"
+          if mkdir "/sys/fs/cgroup${self}/wbox-ci-probe" 2>/dev/null; then
+            echo "cgroup v2 委派: 可写（能建子目录）"
+            rmdir "/sys/fs/cgroup${self}/wbox-ci-probe"
+          else
+            echo "cgroup v2 委派: **不可写** → 走 rlimit 兜底路径"
+          fi
           unshare -Ur --mount true && echo "userns: ok" || echo "userns: 不可用"
+      # WBOX_LBE_REQUIRE=1：能力缺失记 FAIL 而非 SKIP。这台 runner 是专门为
+      # 这条门禁选的，"跑不了"本身就是要修的问题，不能静默放过。
       - name: 端到端 —— LinuxNativeBackend L1/L2 + 宿主程序模式 + 网络默认 验收
+        env:
+          WBOX_LBE_REQUIRE: '1'
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
 
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；

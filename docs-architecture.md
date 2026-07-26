@@ -330,7 +330,7 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
 |---|---|---|
 | ✅ L0 骨架 | `backend/linux.rs` 实现 `Backend`；镜像目标按宿主分派（`image_backend_kind`）；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | **已完成**：6 项单测覆盖执行计划（无模拟器前缀 / resolv.conf 注入 / POSIX 环境风味 / 共享保留键策略 / 参数校验 / spawn 拒绝），与 Blink/Native 同构 |
 | ✅ L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` 与最小 `/dev`（bind 宿主节点，user ns 内不能 mknod） | **已完成并实测**：非 root（uid=1001）跑容器内 `id` 得 `uid=0 gid=0`；`ls /` 只见 rootfs（`bin dev etc proc`），`/home` 不存在；容器内 `$$`=1（PID ns）；退出码 7/0 原样转发 |
-| ✅ L2 资源限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`）；无 cgroup v2 时 `--memory`→`RLIMIT_AS`、`--max-procs`→`RLIMIT_NPROC` 兜底，而 **`--cpu-pct` 明确报错**（无 rlimit 对应物，不静默忽略） | **已完成并实测**（开发容器是 cgroup v1，故验的是兜底路径）：`--memory 16` 下 64MB 分配 `dd: out of memory`、不限时同样操作成功；`--max-procs 8` 下 fork 炸弹 `can't fork: Resource temporarily unavailable`；`--cpu-pct 50` 报错且退出码 1（参数错误）。cgroup v2 路径由 ubuntu CI runner 覆盖 |
+| ✅ L2 资源限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`）；无 cgroup v2 时 `--memory`→`RLIMIT_AS`、`--max-procs`→`RLIMIT_NPROC` 兜底，而 **`--cpu-pct` 明确报错**（无 rlimit 对应物，不静默忽略） | **已完成并实测**（开发容器是 cgroup v1，故验的是兜底路径）：`--memory 16` 下 64MB 分配 `dd: out of memory`、不限时同样操作成功；`--max-procs 8` 下 fork 炸弹 `can't fork: Resource temporarily unavailable`；`--cpu-pct 50` 报错且退出码 1（参数错误）。**cgroup v2 首选路径目前无任何环境覆盖**，见下方"覆盖缺口" |
 | ✅ LN 网络默认一致 | 默认新建空 network namespace（`CLONE_NEWNET`），`--allow-network` 才共享宿主网络栈；新 netns 内把 `lo` 拉起来 | **已完成并实测**：默认下 `connect(1.1.1.1:53)` 得 `ENETUNREACH`、`getent hosts github.com` 无结果；加 `--allow-network` 后解析成功；默认下 `bind/connect 127.0.0.1` 仍可用（对照：裸 `unshare -Urn` 同样操作报 `Network is unreachable`，证明 `lo` 是 wbox 拉起来的） |
 | ✅ H 宿主程序模式 | `LinuxMode::Host`：`wbox run -- <本机程序>` 复用全部隔离原语但不 `pivot_root`；按宿主分派（`host_program_backend_kind`） | **已完成并实测**：宿主程序 `$$`=1；`ls /` 见宿主 `usr/etc`（与镜像模式相反）；`--workdir /etc` 后 `pwd`=`/etc`；退出码 9 原样转发；工作目录无 `.wbox_oldroot`/`dev` 残留 |
 | L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
@@ -365,6 +365,24 @@ Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不�
 行为**，而不只是"带上参数后有效"。
 
 **CI 增量**：新增 `test-linux-backend`（ubuntu runner，rootless 场景）。
-注意 GitHub ubuntu runner 默认允许 unprivileged user namespace，但
-`pivot_root` 与 cgroup v2 委派需要确认；不可用时按既有惯例记
-`::notice::` SKIP 而非 FAIL。
+
+**覆盖缺口（如实登记，不假装覆盖）**：`test-linux-backend` 首次上线时"全绿"
+却一个用例都没跑——GitHub 的 ubuntu runner 从 Ubuntu 24.04 起由 AppArmor
+默认关掉 unprivileged user namespace（`kernel.apparmor_restrict_unprivileged_userns=1`），
+脚本老实 SKIP 全部用例并返回 0。现在 workflow 里先 `sysctl` 打开该开关，
+并以 `WBOX_LBE_REQUIRE=1` 把"能力缺失"从 SKIP 提为 FAIL——**这条门禁不允许
+静默零覆盖**。
+
+cgroup v2 **首选路径**仍无覆盖，且原因与上面不同：runner 是 cgroup v2、
+控制器齐全，但 runner 用户对自己的 cgroup 目录**没有写权限**（委派未开），
+`create_dir` 直接失败。本仓开发容器则是 cgroup **v1**。两处环境都只能覆盖
+兜底/拒绝路径。要真覆盖首选路径，需要一台开了 cgroup 委派的宿主（systemd
+用户会话 `Delegate=yes`，或自建带委派的容器）——在有这样的环境之前，文档
+里不写"已覆盖"。脚本每次运行会打印 `note:` 说明本次到底覆盖了哪条路径。
+
+这个缺口暴露出的另一个真实缺陷：`cgroup2_self_dir()` 原先只查
+`cgroup.controllers` 是否存在就断言"有 cgroup v2"，于是在 runner 这类
+"有 v2 但不给委派"的机器上，`--memory 16` 会硬报错而不是退化到
+`RLIMIT_AS`——明明有可用兜底却拒绝执行。现在"能不能用"由实地尝试
+（`try_cgroup_plan`）判定，任何一步不可用就退化；只有**兜底也满足不了**
+请求时才报错。**探测到能力存在 ≠ 能力可用**，这条对 Windows 侧同样适用。

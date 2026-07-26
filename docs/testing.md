@@ -108,14 +108,22 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 - **断言默认行为，不只断言"带上参数后有效"**。§10.5 记的两次红线违规
   （root 下 `--max-procs` 静默失效、Linux 侧默认联网）都是默认值不一致，
   两边都"能跑"，只有并排实测同一条命令才暴露。
-- **两个前置只有 CI 的 ubuntu runner 同时满足**，故这条必须进门禁而不能只靠
-  本地：① runner 以非 root 跑——`RLIMIT_NPROC` 兜底路径只有非 root 才真实
-  可测（**root 会绕过 RLIMIT_NPROC**，本地开发容器是 root，只能验"明确拒绝"
-  分支）；② ubuntu-latest 是 cgroup v2——`memory.max`/`pids.max`/`cpu.max`
-  这条首选路径只有那里有覆盖（本地容器是 cgroup **v1**）。
-- 断言按宿主能力二分，不写死单一环境：例如 `--max-procs` 有三种正确结局
-  （有 cgroup v2 → 挡住；无 v2 且非 root → 挡住；无 v2 且 root → 必须**明确
-  拒绝**），任一环境下都能给出确定判定。
+- **进门禁的理由**：runner 以非 root 跑，`RLIMIT_NPROC` 兜底路径只有非 root
+  才真实可测（**root 会绕过 RLIMIT_NPROC**，本地开发容器是 root，只能验
+  "明确拒绝"分支）。
+- **`WBOX_LBE_REQUIRE=1`（CI 必设）**：能力缺失记 FAIL 而非 SKIP。这条门禁
+  上线时曾"全绿"却零覆盖——ubuntu runner 从 24.04 起由 AppArmor 关掉了
+  unprivileged user namespace，脚本老实 SKIP 全部用例后返回 0。SKIP 语义没
+  错，错在没区分"本地机器恰好不支持"与"专为这条门禁选的 runner 竟然不支持"。
+  workflow 现在先 `sysctl` 打开该开关，再以 REQUIRE=1 跑。
+- **断言实际发生的事，不按宿主特征猜能力**。原先用
+  `[ -f /sys/fs/cgroup/cgroup.controllers ]` 当"有 cgroup v2"的判据，但那个
+  文件存在**不代表能用**（runner 上委派未开，实际走兜底）。现在每项只要求
+  落在"可接受结局集合"里：例如 `--cpu-pct` 要么真生效、要么明确拒绝，不接受
+  静默忽略；`--max-procs` 要么挡住 fork 炸弹、要么明确拒绝。
+- **cgroup v2 首选路径目前无任何环境覆盖**（runner 委派未开、本地容器是
+  cgroup v1）。脚本每次打印 `note:` 说明本次覆盖了哪条路径，不靠猜。
+  详见 `docs-architecture.md` §10.5「覆盖缺口」。
 - 本地跑：`scripts/test-linux-backend.sh`（默认 `target/debug/wbox` + `./busybox`）。
 
 ## 二、本地跑法

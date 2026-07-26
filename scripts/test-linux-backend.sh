@@ -14,7 +14,18 @@
 #
 # 约定（与 scripts/test-matrix.sh 一致）：PASS/FAIL/SKIP 计数，退出码即结果。
 # 环境能力缺失（无 user namespace 等）记 SKIP 而非 FAIL——那不是代码回归。
+#
+# **但 CI 里必须设 `WBOX_LBE_REQUIRE=1`**：那时能力缺失记 FAIL。
+# 教训——这个门禁曾经"全绿"却一个用例都没跑：GitHub 的 ubuntu runner 从
+# Ubuntu 24.04 起默认由 AppArmor 关掉了 unprivileged user namespace
+# (`kernel.apparmor_restrict_unprivileged_userns=1`)，脚本老实地 SKIP 了全部
+# 用例并返回 0，于是门禁变成装饰。SKIP 语义本身是对的，错在没人区分
+# "本地机器恰好不支持"与"专门为这条门禁准备的 runner 竟然不支持"。
 set -u
+
+REQUIRE=${WBOX_LBE_REQUIRE:-0}
+# 能力缺失时的记法：CI 里是 FAIL，本地是 SKIP
+absent() { if [ "$REQUIRE" = 1 ]; then report FAIL "$1" "$2（WBOX_LBE_REQUIRE=1：本环境本应具备该能力）"; else report SKIP "$1" "$2"; fi; }
 
 WBOX=${1:-target/debug/wbox}
 BUSYBOX=${2:-./busybox}
@@ -29,13 +40,24 @@ report() {
 die() { echo "FATAL: $*" >&2; exit 1; }
 
 [ -x "$WBOX" ] || die "找不到可执行的 wbox：$WBOX（先 cargo build）"
-[ -f "$BUSYBOX" ] || { report SKIP "全部用例" "缺静态 busybox（$BUSYBOX）"; echo "结果: PASS=0 FAIL=0 SKIP=1"; exit 0; }
-
-# 宿主能力探测：user namespace 是 L1 的硬前置。
-if ! unshare -Ur --mount true 2>/dev/null; then
-  report SKIP "全部用例" "宿主不允许 unprivileged user namespace"
+if [ ! -f "$BUSYBOX" ]; then
+  absent "全部用例" "缺静态 busybox（$BUSYBOX）"
   echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
-  exit 0
+  [ "$fail" -eq 0 ]
+  exit $?
+fi
+
+# 宿主能力探测：user namespace 是全部用例的硬前置。
+if ! unshare -Ur --mount true 2>/dev/null; then
+  hint="宿主不允许 unprivileged user namespace"
+  # Ubuntu 24.04+ 的 AppArmor 开关是最常见的原因，直接把解法说出来
+  if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+    hint="$hint（kernel.apparmor_restrict_unprivileged_userns=1，可 sysctl 置 0 打开）"
+  fi
+  absent "全部用例" "$hint"
+  echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
+  [ "$fail" -eq 0 ]
+  exit $?
 fi
 
 WBOX_ABS=$(cd "$(dirname "$WBOX")" && pwd)/$(basename "$WBOX")
@@ -114,33 +136,36 @@ fi
 #   无 cgroup v2 且非 root  → RLIMIT_NPROC 生效，同样被挡；
 #   无 cgroup v2 且是 root  → RLIMIT_NPROC 对特权进程无效，故必须**明确拒绝**
 #                             （实测 root 下 40 个子进程全能起来，限不住）。
+# --max-procs 有两种可接受结局，**按实际发生的事判定，不按宿主特征猜**：
+# 早先这里用 `[ -f /sys/fs/cgroup/cgroup.controllers ]` 当"有 cgroup v2"的
+# 判据，但那个文件存在**不代表能用**——GitHub runner 上委派没开，实际走的是
+# 兜底路径。凡是"探测说有、实际不能用"的机器都会被这种写法误判。
 run --max-procs 8 lbetest -- /bin/sh -c 'i=0; while [ $i -lt 40 ]; do /bin/sleep 5 & i=$((i+1)); done; echo all-spawned'
-if [ ! -f /sys/fs/cgroup/cgroup.controllers ] && [ "$(id -u)" = 0 ]; then
-  if [ "$rc" -eq 1 ] && printf '%s' "$OUT" | grep -q 'max-procs'; then
-    report PASS "L2.2 --max-procs 以 root 且无 cgroup v2 时明确拒绝（RLIMIT_NPROC 限不住 root）"
-  else
-    report FAIL "L2.2 --max-procs 拒绝语义" "rc=$rc（期望 1）输出: $(printf '%s' "$OUT" | head -c 200)"
-  fi
-elif printf '%s' "$OUT" | grep -qi "can't fork\|Resource temporarily unavailable"; then
+if printf '%s' "$OUT" | grep -qi "can't fork\|Resource temporarily unavailable"; then
   report PASS "L2.2 --max-procs 8 挡住 fork 炸弹"
+elif [ "$rc" -eq 1 ] && printf '%s' "$OUT" | grep -q 'max-procs'; then
+  report PASS "L2.2 --max-procs 无法实施时明确拒绝（rc=1，不静默放行）"
 else
-  report FAIL "L2.2 --max-procs" "未见 fork 失败：$(printf '%s' "$OUT" | head -c 200)"
+  report FAIL "L2.2 --max-procs" "既没挡住也没拒绝（rc=$rc）：$(printf '%s' "$OUT" | head -c 200)"
 fi
 
-# --cpu-pct：有 cgroup v2 应正常执行；没有则必须**明确报错**而非静默忽略
+# --cpu-pct：要么 cgroup v2 真生效，要么**明确报错**。不接受静默忽略。
 run --cpu-pct 50 lbetest -- /bin/id
-if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
-  if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q 'uid=0'; then
-    report PASS "L2.3 --cpu-pct（cgroup v2 路径生效）"
-  else
-    report FAIL "L2.3 --cpu-pct（cgroup v2）" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 200)"
-  fi
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q 'uid=0'; then
+  report PASS "L2.3 --cpu-pct（cgroup v2 路径生效）"
+elif [ "$rc" -eq 1 ] && printf '%s' "$OUT" | grep -q 'cpu-pct'; then
+  report PASS "L2.3 --cpu-pct 无可用 cgroup v2 时明确拒绝（rc=1，不静默忽略）"
 else
-  if [ "$rc" -eq 1 ] && printf '%s' "$OUT" | grep -q 'cpu-pct'; then
-    report PASS "L2.3 --cpu-pct 无 cgroup v2 时明确拒绝（rc=1，不静默忽略）"
-  else
-    report FAIL "L2.3 --cpu-pct 拒绝语义" "rc=$rc（期望 1）输出: $(printf '%s' "$OUT" | head -c 200)"
-  fi
+  report FAIL "L2.3 --cpu-pct" "既未生效也未明确拒绝（rc=$rc）：$(printf '%s' "$OUT" | head -c 200)"
+fi
+
+# 覆盖面留档（不判定成败）：上面 L2.3 走的是哪条路径，决定了这台机器到底
+# 有没有覆盖 cgroup v2 首选路径。文档里不能凭"runner 是 cgroup v2"就断言
+# 覆盖到了——那正是之前写错的地方。
+if [ "$rc" -eq 0 ]; then
+  echo "note: 本次运行**覆盖了** cgroup v2 首选路径"
+else
+  echo "note: 本次运行只覆盖 rlimit 兜底/拒绝路径，cgroup v2 首选路径**未覆盖**"
 fi
 
 echo

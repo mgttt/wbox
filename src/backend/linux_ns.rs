@@ -108,11 +108,15 @@ enum LimitPlan {
     None,
 }
 
-/// 探测可写的 cgroup v2 目录。返回 `Some(自己的 cgroup 目录)`。
+/// 定位自己所在的 cgroup v2 目录。返回 `Some(目录)` 仅表示**存在** v2 统一
+/// 层级，**不代表能用**——委派没开时那个目录里建不了子目录，控制器没在父级
+/// `cgroup.subtree_control` 里启用时对应的 `*.max` 文件根本不存在。
+/// "能不能用"由 [`try_cgroup_plan`] 实地一试来判定，不在这里猜。
 ///
-/// 判据：`/proc/self/cgroup` 有 `0::` 行（v2 统一层级）、且
-/// `/sys/fs/cgroup/<该路径>` 下能创建子目录（委派已开）。两者缺一即 None——
-/// 例如本仓开发容器就是 cgroup **v1**，探测会返回 None 并走 rlimit 兜底。
+/// 这个区分是被 CI 打脸打出来的：GitHub 的 ubuntu runner 是 cgroup v2、
+/// 控制器齐全，但 runner 用户对自己的 cgroup 目录**没有写权限**（委派未开）。
+/// 早先这里只查 `cgroup.controllers` 存在就返回 Some，于是 `build_limit_plan`
+/// 认定"有 v2"却写不进去，把一个本可以退化到 rlimit 的情形变成了硬报错。
 fn cgroup2_self_dir() -> Option<std::path::PathBuf> {
     let content = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let rel = content
@@ -465,6 +469,9 @@ fn build_limit_plan(spec: &RunSpec) -> Result<LimitPlan> {
     build_limit_plan_with_cgroup(spec, cgroup2_self_dir())
 }
 
+/// `build_limit_plan` 的可注入版本：`cgroup_base` 显式传入而非现场探测，
+/// 这样兜底逻辑能被**确定性**单测（传 `None` 即"本宿主没有 cgroup v2"），
+/// 不受跑测机器的 cgroup 版本影响。真机行为另有一组不变量测试兜着。
 fn build_limit_plan_with_cgroup(
     spec: &RunSpec,
     cgroup_base: Option<std::path::PathBuf>,
@@ -473,38 +480,8 @@ fn build_limit_plan_with_cgroup(
     if l.memory_mb == 0 && l.cpu_pct == 0 && l.max_procs == 0 {
         return Ok(LimitPlan::None);
     }
-    if let Some(base) = cgroup_base {
-        let dir = base.join(format!("wbox-{}", std::process::id()));
-        // 创建失败（无委派/只读）不致命：落到 rlimit 分支再判断
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let mut wrote = Vec::new();
-            if l.memory_mb > 0 {
-                let v = (l.memory_mb * 1024 * 1024).to_string();
-                std::fs::write(dir.join("memory.max"), &v)
-                    .map_err(|e| cgroup_err("memory.max", &e))?;
-                wrote.push(format!("memory.max={}", v));
-            }
-            if l.max_procs > 0 {
-                std::fs::write(dir.join("pids.max"), l.max_procs.to_string())
-                    .map_err(|e| cgroup_err("pids.max", &e))?;
-                wrote.push(format!("pids.max={}", l.max_procs));
-            }
-            if l.cpu_pct > 0 {
-                // cpu.max 格式："<quota_us> <period_us>"；period 取默认 100ms
-                let period = 100_000u64;
-                let quota = period * u64::from(l.cpu_pct) / 100;
-                std::fs::write(dir.join("cpu.max"), format!("{} {}", quota, period))
-                    .map_err(|e| cgroup_err("cpu.max", &e))?;
-                wrote.push(format!("cpu.max={}/{}", quota, period));
-            }
-            if spec.verbose {
-                verbose_kv("限额（cgroup v2）", wrote.join(" "));
-                verbose_kv("cgroup", dir.display());
-            }
-            return Ok(LimitPlan::Cgroup {
-                procs: cstr(&dir.join("cgroup.procs").to_string_lossy())?,
-            });
-        }
+    if let Some(p) = try_cgroup_plan(spec, cgroup_base)? {
+        return Ok(p);
     }
     // ---- cgroup v2 不可用：rlimit 兜底 ----
     let nproc_wanted = l.max_procs > 0;
@@ -541,11 +518,66 @@ fn build_limit_plan_with_cgroup(
     })
 }
 
-fn cgroup_err(file: &str, e: &std::io::Error) -> WboxError {
-    WboxError::spawn(format!(
-        "写 cgroup v2 的 {} 失败：{}（委派是否开启？rootless 下通常需要 systemd 用户会话）",
-        file, e
-    ))
+/// 尝试落成 cgroup v2 方案；本宿主用不了就返回 `Ok(None)` 交给 rlimit 兜底。
+///
+/// **任何一步不可用都是 None 而不是 Err**，这一点是刻意的：
+/// - 目录建不了 → 委派没开（GitHub ubuntu runner 就是这样）；
+/// - `*.max` 写不进去 → 该控制器没在父级 `cgroup.subtree_control` 里启用。
+///
+/// 这两种都属于"本宿主没有可用的 cgroup v2"，而不是"用户请求有问题"。在这里
+/// 硬报错会让 `--memory 16` 在那类机器上直接不能用，而 `RLIMIT_AS` 明明能兜住。
+/// 真正该拒绝的情形（`--cpu-pct` 无对应物、root 下 `RLIMIT_NPROC` 限不住）由
+/// 调用方在兜底分支判定——那里才知道兜底能不能满足请求。
+///
+/// 部分写成功后又失败时会把刚建的 cgroup 目录删掉：此时还没有任何进程加入，
+/// 留着只是垃圾，且会让下次同 pid 的探测误判。
+fn try_cgroup_plan(
+    spec: &RunSpec,
+    base: Option<std::path::PathBuf>,
+) -> Result<Option<LimitPlan>> {
+    let l = &spec.limits;
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let dir = base.join(format!("wbox-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return Ok(None); // 委派未开
+    }
+    let abandon = || {
+        let _ = std::fs::remove_dir(&dir);
+        Ok(None)
+    };
+
+    let mut wrote = Vec::new();
+    if l.memory_mb > 0 {
+        let v = (l.memory_mb * 1024 * 1024).to_string();
+        if std::fs::write(dir.join("memory.max"), &v).is_err() {
+            return abandon();
+        }
+        wrote.push(format!("memory.max={}", v));
+    }
+    if l.max_procs > 0 {
+        if std::fs::write(dir.join("pids.max"), l.max_procs.to_string()).is_err() {
+            return abandon();
+        }
+        wrote.push(format!("pids.max={}", l.max_procs));
+    }
+    if l.cpu_pct > 0 {
+        // cpu.max 格式："<quota_us> <period_us>"；period 取默认 100ms
+        let period = 100_000u64;
+        let quota = period * u64::from(l.cpu_pct) / 100;
+        if std::fs::write(dir.join("cpu.max"), format!("{} {}", quota, period)).is_err() {
+            return abandon();
+        }
+        wrote.push(format!("cpu.max={}/{}", quota, period));
+    }
+    if spec.verbose {
+        verbose_kv("限额（cgroup v2）", wrote.join(" "));
+        verbose_kv("cgroup", dir.display());
+    }
+    Ok(Some(LimitPlan::Cgroup {
+        procs: cstr(&dir.join("cgroup.procs").to_string_lossy())?,
+    }))
 }
 
 /// 把无符号整数写进栈上缓冲区，返回有效切片。pre_exec 内不能分配内存，
@@ -639,15 +671,18 @@ mod tests {
         assert!(matches!(plan, LimitPlan::None));
     }
 
-    /// `--cpu-pct` 在无可用 cgroup 时必须明确报错（§10.5 红线：
+    // ---- 限额方案：两组测试各管一件事 ----
+    // A) 注入 `None` 的确定性测试：钉死"没有 cgroup v2 时"的兜底逻辑，
+    //    结果与跑测机器的 cgroup 版本无关。
+    // B) 真机不变量测试：跑当前宿主的真实路径，只断言"结局必须落在可接受
+    //    集合里"。缺了 B，像"这台机器上 --memory 会硬报错"这种缺陷没人发现；
+    //    缺了 A，兜底数值就没有确定性覆盖。两组都要。
+
+    /// A) `--cpu-pct` 在无可用 cgroup 时必须明确报错（§10.5 红线：
     /// 不静默忽略隔离参数）。
     #[test]
-    fn cpu_pct_requires_cgroup2_or_errors() {
-        let s = spec_with(Limits {
-            memory_mb: 0,
-            cpu_pct: 50,
-            max_procs: 0,
-        });
+    fn cpu_pct_without_cgroup_errors() {
+        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 50, max_procs: 0 });
         let e = match build_limit_plan_with_cgroup(&s, None) {
             Err(e) => e,
             Ok(_) => panic!("无 cgroup 时 --cpu-pct 必须报错"),
@@ -656,14 +691,10 @@ mod tests {
         assert!(m.contains("cpu-pct"), "错误应点明是 --cpu-pct：{}", m);
     }
 
-    /// 内存限额在无可用 cgroup 时应退化为 RLIMIT_AS。
+    /// A) 内存限额在无可用 cgroup 时应退化为 RLIMIT_AS。
     #[test]
     fn memory_falls_back_to_rlimit() {
-        let s = spec_with(Limits {
-            memory_mb: 16,
-            cpu_pct: 0,
-            max_procs: 0,
-        });
+        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 0 });
         match build_limit_plan_with_cgroup(&s, None).unwrap() {
             LimitPlan::Rlimit { as_bytes, nproc } => {
                 assert_eq!(as_bytes, Some(16 * 1024 * 1024));
@@ -673,15 +704,11 @@ mod tests {
         }
     }
 
-    /// RLIMIT_NPROC 对 root 无效，因此无 cgroup 时 root 必须报错，非 root
+    /// A) RLIMIT_NPROC 对 root 无效，因此无 cgroup 时 root 必须报错，非 root
     /// 才能退化为 RLIMIT_NPROC。
     #[test]
     fn max_procs_fallback_matches_privilege() {
-        let s = spec_with(Limits {
-            memory_mb: 0,
-            cpu_pct: 0,
-            max_procs: 8,
-        });
+        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 0, max_procs: 8 });
         match build_limit_plan_with_cgroup(&s, None) {
             Err(e) if unsafe { libc::geteuid() } == 0 => {
                 let m = format!("{}", e);
@@ -693,6 +720,66 @@ mod tests {
             }
             Err(e) => panic!("非 root 的进程限额应可退化为 rlimit：{}", e),
             Ok(_) => panic!("无 cgroup 时进程限额应落成 Rlimit"),
+        }
+    }
+
+    /// B) `--cpu-pct` 在**当前宿主**上只有两种可接受结局：落成 cgroup v2
+    /// 方案，或明确报错。绝不能是 rlimit/None —— `RLIMIT_CPU` 限的是累计
+    /// CPU 秒数，不是占比，冒充等价就是骗人。
+    ///
+    /// 不按宿主特征分支：早先这里按 `cgroup2_self_dir()` 是否为 Some 来断言，
+    /// 结果在 GitHub runner 上炸了 —— 那台机器有 cgroup v2、控制器齐全，但
+    /// 委派没开，实际走的是兜底路径。"探测说有"与"实际能用"是两件事。
+    #[test]
+    fn cpu_pct_on_this_host_is_cgroup_or_error() {
+        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 50, max_procs: 0 });
+        match build_limit_plan(&s) {
+            Ok(LimitPlan::Cgroup { .. }) => {}
+            Err(e) => {
+                let m = format!("{}", e);
+                assert!(m.contains("cpu-pct"), "错误应点明是 --cpu-pct：{}", m);
+            }
+            Ok(LimitPlan::Rlimit { .. }) => {
+                panic!("--cpu-pct 不得退化成 rlimit：RLIMIT_CPU 限累计秒数，语义不同")
+            }
+            Ok(LimitPlan::None) => panic!("--cpu-pct 被静默忽略了，这是 §10.5 红线"),
+        }
+    }
+
+    /// B) `--memory` + `--max-procs` 在**当前宿主**上的三种可接受结局。
+    /// 唯一与宿主有关的判据是 euid —— RLIMIT_NPROC 对特权进程不生效是
+    /// **内核行为**，不是环境探测。
+    #[test]
+    fn memory_and_procs_on_this_host_never_silently_ignored() {
+        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 8 });
+        let is_root = unsafe { libc::geteuid() } == 0;
+        match build_limit_plan(&s) {
+            Ok(LimitPlan::Cgroup { .. }) => {}
+            Ok(LimitPlan::Rlimit { as_bytes, nproc }) => {
+                assert!(!is_root, "以 root 退化到 RLIMIT_NPROC 等于限不住，必须报错");
+                assert_eq!(as_bytes, Some(16 * 1024 * 1024));
+                assert_eq!(nproc, Some(8));
+            }
+            Ok(LimitPlan::None) => panic!("--memory/--max-procs 被静默忽略了，这是 §10.5 红线"),
+            Err(e) => {
+                let m = format!("{}", e);
+                assert!(is_root, "非 root 下有 rlimit 兜底，不该报错：{}", m);
+                assert!(m.contains("max-procs"), "错误应点明是 --max-procs：{}", m);
+            }
+        }
+    }
+
+    /// `cgroup2_self_dir()` 说有 v2，就必须真的有 `cgroup.controllers`；
+    /// 但它**不保证可写**（委派可能没开），故不能拿它当"cgroup 可用"的判据
+    /// —— 见 `try_cgroup_plan` 的注释。
+    #[test]
+    fn cgroup2_probe_reports_presence_not_usability() {
+        if let Some(dir) = cgroup2_self_dir() {
+            assert!(
+                dir.join("cgroup.controllers").is_file(),
+                "探测返回了 {} 但那里没有 cgroup.controllers",
+                dir.display()
+            );
         }
     }
 
