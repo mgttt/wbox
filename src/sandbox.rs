@@ -222,30 +222,60 @@ impl Drop for AttrListGuard {
     }
 }
 
-/// 组装传给 CreateProcessW 的命令行：程序名加引号，其余参数原样拼接。
-///
-/// 注意（已知限制）：参数转义为简化规则（仅处理空格/制表符/内嵌引号，
-/// 未完整实现 CommandLineToArgvW 的反斜杠规则——例如以 `\` 结尾的参数
-/// 或 `\\\"` 序列）。对含复杂反斜杠+引号组合的参数可能与标准解析结果不同；
-/// 常见路径/参数场景可用，v1 接受该简化。
+fn push_cmdline_arg(out: &mut String, arg: &str, force_quote: bool) {
+    let quote = force_quote
+        || arg.is_empty()
+        || arg
+            .chars()
+            .any(|c| c == ' ' || c == '\t' || c == '"');
+    if !quote {
+        out.push_str(arg);
+        return;
+    }
+
+    out.push('"');
+    let mut backslashes = 0;
+    for c in arg.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        for _ in 0..backslashes {
+            out.push('\\');
+        }
+        if c == '"' {
+            // A quote needs 2n+1 backslashes: n preserve the original
+            // backslashes and n+1 escape the quote.
+            for _ in 0..backslashes {
+                out.push('\\');
+            }
+            out.push('\\');
+        }
+        out.push(c);
+        backslashes = 0;
+    }
+    // Before the closing quote, 2n backslashes decode to n literal ones.
+    for _ in 0..backslashes {
+        out.push('\\');
+        out.push('\\');
+    }
+    out.push('"');
+}
+
+/// 组装传给 CreateProcessW 的命令行，按 Windows CRT /
+/// CommandLineToArgvW 规则无损编码每个参数。
 pub fn build_cmdline(cmd: &[String]) -> Result<String> {
     if cmd.is_empty() {
         return Err(crate::error::WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
     }
+    if cmd.iter().any(|arg| arg.contains('\0')) {
+        return Err(crate::error::WboxError::args("命令或参数不能包含 NUL 字符"));
+    }
     let mut s = String::new();
-    s.push('"');
-    s.push_str(&cmd[0]);
-    s.push('"');
+    push_cmdline_arg(&mut s, &cmd[0], true);
     for arg in &cmd[1..] {
         s.push(' ');
-        // 含空格或引号的参数加引号并转义内嵌引号（简化版 CommandLineToArgvW 规则）。
-        if arg.contains(' ') || arg.contains('"') || arg.contains('\t') || arg.is_empty() {
-            s.push('"');
-            s.push_str(&arg.replace('"', "\\\""));
-            s.push('"');
-        } else {
-            s.push_str(arg);
-        }
+        push_cmdline_arg(&mut s, arg, false);
     }
     Ok(s)
 }
@@ -332,32 +362,73 @@ mod tests {
     }
 
     #[test]
-    fn build_cmdline_records_known_limitation_backslash_trailing() {
-        // 记录现状：以 \ 结尾的参数，本简化规则不追加额外反斜杠来"保护"闭合引号，
-        // 与标准 CommandLineToArgvW 行为不同。钉死现状，未来若按标准修复会变红。
+    fn build_cmdline_doubles_trailing_backslashes_in_quoted_arg() {
         let s = build_cmdline(&[
             "cmd.exe".to_string(),
-            r"C:\path\".to_string(),
+            r"C:\path with space\".to_string(),
         ])
         .unwrap();
-        // 该参数无空格/引号/制表符 → 原样输出（不加引号、不加反斜杠）
-        assert_eq!(s, r#""cmd.exe" C:\path\"#);
+        assert_eq!(s, r#""cmd.exe" "C:\path with space\\""#);
     }
 
     #[test]
-    fn build_cmdline_records_known_limitation_backslash_quote_sequence() {
-        // 记录现状：输入 x\"y（x + \ + " + y），当前规则：
-        // - 不识别 \ 对 " 的转义前缀，\ 原样保留
-        // - " → \" 转义
-        // - 整体加引号
-        // 故结果字面量内为 x + \ + \" + y = x\\"y（标准 CommandLineToArgvW 会解析回 x\"y，
-        // 但简化实现不改 \，解析后变为 x\ + y 两段）。钉死现状。
+    fn build_cmdline_escapes_backslash_quote_sequence() {
         let s = build_cmdline(&[
             "cmd.exe".to_string(),
             r#"x\"y"#.to_string(),
         ])
         .unwrap();
-        assert_eq!(s, r#""cmd.exe" "x\\"y""#);
+        assert_eq!(s, r#""cmd.exe" "x\\\"y""#);
+    }
+
+    #[test]
+    fn build_cmdline_rejects_nul() {
+        let err = build_cmdline(&["cmd.exe".to_string(), "a\0b".to_string()])
+            .unwrap_err();
+        assert!(format!("{err}").contains("NUL"));
+    }
+
+    #[test]
+    fn build_cmdline_roundtrips_through_command_line_to_argv_w() {
+        use windows_sys::Win32::Foundation::LocalFree;
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn CommandLineToArgvW(cmdline: *const u16, argc: *mut i32) -> *mut *mut u16;
+        }
+
+        let cmd = vec![
+            "cmd.exe".to_string(),
+            "plain".to_string(),
+            "".to_string(),
+            "two words".to_string(),
+            r"C:\path with space\".to_string(),
+            r#"x\"y"#.to_string(),
+            r#"say "hello""#.to_string(),
+            "制表\t符".to_string(),
+        ];
+        let line = build_cmdline(&cmd).unwrap();
+        let wide = to_wide(&line);
+        let mut argc = 0;
+        // Safety: wide is NUL-terminated; argv is released with LocalFree.
+        let argv = unsafe { CommandLineToArgvW(wide.as_ptr(), &mut argc) };
+        assert!(!argv.is_null());
+        assert_eq!(argc as usize, cmd.len());
+        let mut parsed = Vec::new();
+        for i in 0..argc as usize {
+            // Safety: CommandLineToArgvW returns argc valid NUL-terminated strings.
+            let p = unsafe { *argv.add(i) };
+            let mut len = 0;
+            while unsafe { *p.add(len) } != 0 {
+                len += 1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(p, len) };
+            parsed.push(String::from_utf16(slice).unwrap());
+        }
+        unsafe {
+            LocalFree(argv.cast());
+        }
+        assert_eq!(parsed, cmd);
     }
 
     // ---- build_env_block：CreateProcessW lpEnvironment 的双 NUL 结尾 UTF-16 块 ----

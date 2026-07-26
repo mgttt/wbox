@@ -173,15 +173,16 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 ## 6. 当前状态（v1.0.0-rc2 基线）
 
-- guest C 套件 wine 11.11：419 pass / 4 fail / 10 skip（4 fail 为
-  KNOWN-FAILURES 固有：AF_UNIX ×2、errno 精度 ×2）。
-- 矩阵：PASS=36 / FAIL=3（同基线）/ SKIP=1（epoll 预编译缺失）。
+- guest C 套件真 Windows：454 pass / 0 fail / 9 skip，16/16 用例文件通过，
+  `known-failures.txt` 为空。
+- 真机矩阵：PASS=39 / FAIL=0 / SKIP=1（独立 epoll 预编译二进制缺失；
+  同等且更完整的覆盖由 guest `t_net_epoll` 提供）。
 - 能力：busybox 静态全通；ubuntu-24.04 rootfs 动态 glibc
   （ls/cat/bash/uname/apt）✅；shell 8 项 + fork 矩阵 ✅（快照式 fork）；
   wget 公网 md5 ✅；epoll/socket ✅；`apt-get update` rc=0（aliyun 源实测）。
-- 残留限制（WIN32-PORT.md §0）：异步信号投递不完整；wine 偶发 winsock
-  退化（真 Windows 待确认）；EPOLLET 按水平触发；AF_UNIX/socketpair
-  ENOSYS；JIT 默认开（`WBOX_JIT=0` 关）。
+- 残留限制（WIN32-PORT.md §0）：宿主异步信号投递不完整；EPOLLET 按
+  水平触发；glibc pthread/clone、mremap 扩容和 ptrace 尚不支持；
+  JIT 默认开启（`WBOX_JIT=0` 关闭）。
 
 ## 7. 已知坑 / 冷启动注意事项
 
@@ -194,10 +195,9 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
    判 FAIL——这是刻意设计，防止修好的东西被基线继续掩盖。
    CI 里矩阵步骤设 `WBOX_GUEST_SKIP=1`，guest 套件由专职 job 独家承担，
    不重复跑；本地 `test-matrix.sh` 不设该变量，F 组照常执行。
-4. **文档状态口径分散**：能力声明以 CHANGELOG rc2 + KNOWN-FAILURES 基线
-   为准；README/WIN32-PORT.md 个别段落滞后（如 apt-get update 状态、
-   MAP_SHARED 写回），见矛盾审查报告。
-5. 参数转义为简化规则（未完整实现 CommandLineToArgvW 反斜杠规则）；
+4. **能力口径**：以 CHANGELOG 未发布段、`tests/KNOWN-FAILURES.md` 和
+   最近一次绑定 main 提交的 CI 结果为准。
+5. 参数转义已按 CommandLineToArgvW 反斜杠规则实现并由系统解析器往返测试；
    `--workdir` 不 canonicalize（`\\?\` 前缀不能作 lpCurrentDirectory）。
 6. symlink 降级：普通用户无 SeCreateSymbolicLinkPrivilege，解包时
    降级为目标复制（开发者模式/管理员可真实创建）。

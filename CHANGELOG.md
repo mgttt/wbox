@@ -14,6 +14,9 @@
 
 ### Fixed
 
+- **Windows 命令行参数保真**：`build_cmdline` 改为完整实现
+  `CommandLineToArgvW` 的反斜杠/引号规则，正确处理带空格且以 `\` 结尾、
+  连续 `\` 后跟引号、空参数和 Unicode 参数，并拒绝不可表示的 NUL。
 - **AF_UNIX / socketpair（N1）**：现代 Windows 的 pathname AF_UNIX stream
   socket 走原生 Winsock；匿名 stream/datagram pair 由 loopback 连接对承载，
   同时在 Hostfs 层保留未命名 AF_UNIX 身份。修复 Win32 `SysSocketpair`

@@ -79,7 +79,7 @@ wbox run -V --keep-profile -- cmd.exe /c whoami /all
 | 资源限额（内存/CPU/进程数）+ 进程树收割 | ✅ |
 | 默认断网、`--allow-network` 放行 | ✅ |
 | 拉取 OCI 镜像 rootfs（`wbox image pull ubuntu:24.04`） | ✅ |
-| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 全链路已串联：镜像解析 → rootfs 定位 → config 合并（Entrypoint/Cmd/Env）→ 注入 resolv.conf 与 `BLINK_PREFIX` → AppContainer 内拉起 wbox-linux.exe。Wine 11.11 实测矩阵：busybox 级静态程序 ✅（L1）；ubuntu:24.04 rootfs 内动态 glibc 程序 ls/cat/bash/uname/`apt --version` ✅、rootfs 内 wget 下载 md5 校验通过 ✅、epoll/socket ✅（L2）。快照式 fork 落地后（8 项 shell 矩阵 + 8 项 fork 矩阵 Wine 实测全过）：shell 管道/命令替换/多段管道/后台任务+wait/kill 子进程/重定向 ✅、fork 子内 DNS 解析 ✅、**`apt-get update` 实测通过**（rc=0，aliyun 源真实下载 28.9MB、18 个索引文件落盘）。剩余限制：异步信号投递不完整；wine 环境偶发 winsock 退化（真 Windows 待 CI 首跑确认）；详见 vendor/blink/WIN32-PORT.md §0 生产状态声明 |
+| **运行 Linux 镜像**（`wbox run ubuntu:24.04 -- bash`） | 🔨 全链路已串联：镜像解析 → rootfs 定位 → config 合并（Entrypoint/Cmd/Env）→ 注入 resolv.conf 与 `BLINK_PREFIX` → AppContainer 内拉起 wbox-linux.exe。Wine 11.11 与真 Windows CI 已验证 busybox 静态程序、动态 glibc ls/cat/bash/uname/apt、wget、epoll/socket/AF_UNIX 和快照式 fork；shell 管道/命令替换/后台任务、fork 子 DNS 与 `apt-get update` 均实测通过。剩余限制为宿主异步信号、EPOLLET、glibc pthread/clone、mremap 扩容和 ptrace；详见 vendor/blink/WIN32-PORT.md §0。 |
 | GUI 桌面程序（notepad 等） | ⚠️ AppContainer 对 GUI 有天然限制，多数会失败或异常，非目标场景 |
 | Windows 服务 / COM / 驱动类程序 | ❌ 超出进程级容器边界 |
 | 容器生命周期管理（ps/stop/rm/logs/exec） | 📐 未实现（v1 为前台一次性运行） |
@@ -164,7 +164,8 @@ SPEC 允许两条路径启动子进程：
 
 - **profile 复用**：`CreateAppContainerProfile` 返回 `ERROR_ALREADY_EXISTS`（profile 已存在）时视为成功，回退用 `DeriveAppContainerSidFromAppContainerName` 取 SID——同名容器可重复运行。
 - **工作目录**：`--workdir` 只做存在性校验，不做 `canonicalize`（其产出的 `\\?\` 前缀路径不能作为 `CreateProcessW` 的 `lpCurrentDirectory`）。
-- **参数转义（已知限制）**：命令行参数采用简化转义规则（仅处理空格/制表符/内嵌引号），未完整实现 `CommandLineToArgvW` 的反斜杠规则；含复杂 `\`+`"` 组合的参数可能与标准解析结果不同。
+- **参数转义**：命令行参数按 Windows CRT / `CommandLineToArgvW` 规则编码，
+  包括引号前连续反斜杠、带空格且以反斜杠结尾的参数和空参数。
 
 ## 路线图
 

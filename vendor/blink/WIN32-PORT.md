@@ -3,9 +3,9 @@
 本文档记录 blink → `wbox-linux.exe`（x86_64-windows，MinGW/zig cc 交叉编译）
 的移植层架构、运行时崩溃根因与修复、缺口裁决、已知限制与验证方法。
 
-## 0. 生产状态声明（wbox-linux 1.0.0-rc1）
+## 0. 生产状态声明（wbox-linux 1.0.0-rc2）
 
-**支持矩阵**（wine 11.11 实测；真 Windows 验收矩阵待跑，见 §8）：
+**支持矩阵**（wine 11.11 + 真 Windows CI 实测，见 §7/§8）：
 
 | 场景 | 状态 |
 |---|---|
@@ -19,7 +19,7 @@
 
 - glibc pthread 程序崩溃（musl/busybox 不受影响）
 - epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT` 支持）；eventfd/signalfd ENOSYS
-- AF_UNIX/socketpair ENOSYS；mremap 收缩外仅失败
+- mremap 收缩外仅失败
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
 - 宿主 symlink/reparse point 不防护（rootfs 内勿放行特权创建的 symlink）
@@ -120,13 +120,13 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 | # | 缺口 | 裁决 |
 |---|---|---|
-| 1 | fork/vfork | ⚠️ vfork 式特判：fork/vfork 以阻塞语义进程内实现（子 Machine 共享 System 线程，父阻塞至子 exec/exit；exec 时子切独立 VA 窗口，fd 表 host-dup 隔离）；`sh -c ':'; sh fork+exec 外部命令`多数可用；真 COW fork 不支持；命令替换/管道为已知 COW 级限制（见 §7.4） |
-| 2 | 管道组合命令（`a \| b`） | ❌ 仍失败：fork 子进程在 exec 前退出（`child exit noexec rc=1`，bash/busybox 同现），属 fork+exec 共享堆问题（COW 级，见 §7.4）；匿名管道本身（pipe2→CreatePipe）已实现 |
-| 3 | socket 族 | ✅ feat/net：Winsock2 映射（win32/w32sock.c，ws2_32 GetProcAddress 惰性解析；AF_INET/INET6 STREAM/DGRAM、errno 映射、fcntl O_NONBLOCK）；socketpair 仍 ENOSYS。feat/listener 已修复“wine 进程 connect wbox listener 必 ECONNREFUSED”：根因非 socket 层——wine 11.11 对 N 字节 MEM_RESERVE 额外提交并清零 N/4096 字节匿名区（每保留页 1 字节状态图），8TB guest 窗口 → 每 wbox 进程 ~2GB RSS，两个 wbox 进程超 3GiB CI memcg 触发 OOM 杀掉 listener（dmesg oom-kill 实锤），客户端遂得 ECONNREFUSED；修法 w32mem.c 窗口 43→40 位（~256MB phantom，真 Windows 无此开销，记为 wine 怪癖）。另修 w32fd.c poll()：wine 无法 PeekNamedPipe 包装 unix fifo 的 stdio 句柄（ERROR_NOT_SUPPORTED），原 POLLERR 使 busybox nc 在空 fifo 上 read 阻塞、socket 数据无人服务，改为按错误码区分（断管→POLLHUP，其余→WaitForSingleObject 回退） |
+| 1 | fork/vfork | ✅ 快照式 fork：子 Machine 独立 VA 窗口，按区域复制可读页并保留 MAP_SHARED 共享映射；guest fd 表独立、host fd dup，父子并发与 fork 后 exec 可用（见 §7.4） |
+| 2 | 管道组合命令（`a \| b`） | ✅ pipe2 + 快照 fork 已打通；busybox shell 管道、命令替换、后台任务和多段重定向矩阵通过 |
+| 3 | socket 族 | ✅ Winsock2 映射：AF_INET/INET6 STREAM/DGRAM、pathname AF_UNIX stream、匿名 AF_UNIX stream/datagram socketpair、epoll/poll、errno 与 O_NONBLOCK。socketpair 内部 loopback 承载层在 Hostfs 对外保持未命名 AF_UNIX 身份 |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |
-| 7 | MAP_SHARED 文件写回 | ⚠️ 未实现（L1 gap，代码内注释标注）；文件映射按 MAP_PRIVATE pread 拷贝 |
+| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回和 fork 后共享页可见性均由 `t_mmap` / `t_fork_mem` 覆盖 |
 | 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
 | 10 | clone/线程 | ❌ 未接入（静态 glibc pthread 在上游 blink 亦 100% 崩溃，列入不支持） |
@@ -135,12 +135,11 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 ## 5. 已知不工作项
 
-- 管道/命令替换/部分 fork+exec 场景：vfork 子在 exec 前异常退出或整体
-  SIGKILL（§7.4，COW 级限制）；`sh -c 'cmd'` 单命令 fork+exec 多数可用
-- 真并发 COW fork（设计上不支持）
-- socketpair（ENOSYS）；socket 族其余可用（feat/net）
 - mremap 扩容（ENOMEM）
-- MAP_SHARED 写回
+- glibc pthread/clone
+- `EPOLLET` 当前按水平触发；eventfd/signalfd 未实现
+- 宿主异步信号投递不完整；不可中断等待中的 SIGKILL 使用线程终止兜底
+- ptrace/调试接口
 - 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty
 - wineserver 报 "prefix is not owned by you" 为 wine 沙箱提示，无功能影响
 
