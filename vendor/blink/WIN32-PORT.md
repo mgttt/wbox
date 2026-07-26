@@ -18,7 +18,7 @@
 **已知限制汇总**：
 
 - glibc pthread 程序崩溃（musl/busybox 不受影响）
-- epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT`、eventfd、timerfd 支持）；signalfd ENOSYS
+- epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT`、eventfd、timerfd、signalfd 支持）
 - mremap 收缩外仅失败
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
@@ -77,7 +77,7 @@ stdlib.h、string.h、time.h。blink 全部源码不经修改（除下述 _WIN32
 | 模块 | 职责 |
 |---|---|
 | `w32mem.c` | guest 地址空间：启动时 ReserveVirtual 保留整块 VA 窗口并回写 `kSkew`；mmap/munmap/mprotect/mremap → VirtualAlloc/Free/Protect 自管分配器，模拟 blink 依赖的 MAP_FIXED / 部分 munmap 语义；文件映射用 pread 填充（MAP_PRIVATE 拷贝语义） |
-| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2 计数器与 timerfd 定时计数器、阻塞/nonblock、poll/epoll 语义；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/timerfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe / eventfd/timerfd 计数器语义内聚） |
+| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2、timerfd 与 signalfd 共享 pseudo-fd 对象、阻塞/nonblock、poll/epoll 语义；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/timerfd/signalfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe / pseudo-fd 就绪语义内聚） |
 | `w32sock.c` | 网络/epoll/termios 真实现（feat/net）：WSA 动态装载、socket 族、epoll 兴趣表（`epoll_wait` 走 `W32WaitFds`）、tcgetattr/tcsetattr 控制台模式 |
 | `w32errno.c` | 宿主错误→Linux errno 映射表集中：`W32ErrFromHost`（GetLastError）、`W32ErrFromWsa`（WSAGetLastError）、`W32GaiErrFromWsa`（EAI_*） |
 | `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；每 guest 进程独立的 alarm/setitimer ITIMER_REAL 定时器与 SIGALRM 投递；快照 fork 的虚拟 pid 表（`W32Child*`）；fork/execve/wait 族见 §4/§7.4 |
@@ -137,7 +137,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 - mremap 扩容（ENOMEM）
 - glibc pthread/clone
-- `EPOLLET` 当前按水平触发；signalfd 未实现
+- `EPOLLET` 当前按水平触发
 - 宿主异步信号投递不完整；不可中断等待中的 SIGKILL 使用线程终止兜底
 - ptrace/调试接口
 - 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty

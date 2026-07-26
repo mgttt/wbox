@@ -39,6 +39,11 @@
   realtime、monotonic、boottime 时钟，一次性/周期/绝对定时、nonblock、
   dup/fork 共享及 poll/epoll 就绪。新增 `t_timerfd` 后真机套件达到
   **19/19 文件通过，625 pass / 0 fail / 9 skip**。
+- **signalfd**：Win32 接入 `signalfd/signalfd4`，支持 mask 更新、
+  nonblock/CLOEXEC、批量读取、dup/fork、poll/epoll，以及与普通 signal
+  handler 竞争消费时的 pending/就绪同步；同时修复 self-kill 未进入 guest
+  pending 集合及 SIGKILL/SIGSTOP 可被错误屏蔽。新增 `t_signalfd` 后真机
+  套件达到 **20/20 文件通过，710 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

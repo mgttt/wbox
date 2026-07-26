@@ -77,6 +77,10 @@ int SysStatfs(struct Machine *, i64, i64);
 int SysFstatfs(struct Machine *, i32, i64);
 int mkfifoat_(int, const char *, mode_t);
 int mkfifo_(const char *, mode_t);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+void W32NotifySignalFds(struct Machine *, int, int, int);
+void W32ClearSignalFds(struct Machine *, int);
+#endif
 
 void Strace(struct Machine *, const char *, bool, const char *, ...);
 

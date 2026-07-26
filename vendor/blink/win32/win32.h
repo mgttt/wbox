@@ -98,6 +98,7 @@ enum {
   W32FD_EPOLL,    // epoll instance wrapped in a CRT fd (w32sock.c table)
   W32FD_EVENTFD,  // eventfd counter wrapped in a CRT fd (w32fd.c table)
   W32FD_TIMERFD,  // timerfd counter wrapped in a CRT fd (w32fd.c table)
+  W32FD_SIGNALFD, // signalfd pending set wrapped in a CRT fd (w32fd.c table)
   W32FD_SPECIAL,  // fake device fd sentinel 1000000..1000002 (no CRT fd)
 };
 struct W32FdInfo {
@@ -112,6 +113,12 @@ int WboxTimerfdCreate(int clockid, int flags);
 int WboxTimerfdSettime(int fd, int flags, const struct itimerspec *,
                        struct itimerspec *);
 int WboxTimerfdGettime(int fd, struct itimerspec *);
+int WboxSignalfdCreate(uint64_t mask, int flags);
+int WboxSignalfdSetMask(int fd, uint64_t mask);
+void WboxSignalfdNotify(int fd, int sig, int pid, int code, int blocked);
+void WboxSignalfdClear(int fd, int sig);
+int WboxSignalfdRead(int fd, uint32_t *signals, uint32_t *pids,
+                     int32_t *codes, size_t count);
 
 // w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
 // the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets

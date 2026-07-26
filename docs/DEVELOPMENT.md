@@ -173,11 +173,11 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 ## 6. 当前状态（v1.0.0-rc2 基线）
 
-- guest C 套件真 Windows：625 pass / 0 fail / 9 skip，19/19 用例文件通过，
+- guest C 套件真 Windows：710 pass / 0 fail / 9 skip，20/20 用例文件通过，
   native 基线为空（Wine 单列 `t_net_sockopt @wine`）。
 - Rust 单测：Linux 177 passed；真 Windows 188 passed / 0 failed /
   **0 ignored**，其中 11 项直接覆盖 AppContainer、Job Object 与完整启动链。
-- 真机矩阵：PASS=42 / FAIL=0 / SKIP=1（独立 epoll 预编译二进制缺失；
+- 真机矩阵：PASS=43 / FAIL=0 / SKIP=1（独立 epoll 预编译二进制缺失；
   同等且更完整的覆盖由 guest `t_net_epoll` 提供）。
 - 能力：busybox 静态全通；ubuntu-24.04 rootfs 动态 glibc
   （ls/cat/bash/uname/apt）✅；shell 8 项 + fork 矩阵 ✅（快照式 fork）；

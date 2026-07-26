@@ -1575,6 +1575,118 @@ static int W32ResolveFd(struct System *s, int guestfd, int want_crtfd) {
 #endif
   return hostfd;
 }
+
+static int W32NextSignalFd(struct Machine *m, int after, int *hostfd) {
+  int next;
+  struct Dll *e;
+  next = -1;
+  LOCK(&m->system->fds.lock);
+  for (e = dll_first(m->system->fds.list); e;
+       e = dll_next(m->system->fds.list, e)) {
+    struct Fd *fd = FD_CONTAINER(e);
+    if (fd->signalfd && fd->fildes > after &&
+        (next == -1 || fd->fildes < next)) {
+      next = fd->fildes;
+      *hostfd = fd->hostfd;
+    }
+  }
+  UNLOCK(&m->system->fds.lock);
+  return next;
+}
+
+void W32NotifySignalFds(struct Machine *m, int sig, int pid, int code) {
+  int guestfd;
+  int hostfd;
+  int saved_errno;
+  int blocked;
+  saved_errno = errno;
+  blocked = !!(m->sigmask & ((u64)1 << (sig - 1)));
+  guestfd = -1;
+  while ((guestfd = W32NextSignalFd(m, guestfd, &hostfd)) != -1) {
+    int crtfd = VfsHostFileFd(hostfd);
+    if (crtfd != -1)
+      WboxSignalfdNotify(crtfd, sig, pid, code, blocked);
+  }
+  errno = saved_errno;
+}
+
+void W32ClearSignalFds(struct Machine *m, int sig) {
+  int guestfd;
+  int hostfd;
+  int saved_errno;
+  saved_errno = errno;
+  guestfd = -1;
+  while ((guestfd = W32NextSignalFd(m, guestfd, &hostfd)) != -1) {
+    int crtfd = VfsHostFileFd(hostfd);
+    if (crtfd != -1) WboxSignalfdClear(crtfd, sig);
+  }
+  errno = saved_errno;
+}
+
+static size_t W32IovsSize(const struct iovec *iov, int n) {
+  int i;
+  size_t total;
+  total = 0;
+  for (i = 0; i < n; ++i) {
+    if (iov[i].iov_len > SIZE_MAX - total) return SIZE_MAX;
+    total += iov[i].iov_len;
+  }
+  return total;
+}
+
+static void W32CopyToIovs(const struct iovec *iov, int n, size_t offset,
+                          const void *data, size_t size) {
+  int i;
+  size_t chunk;
+  const char *p;
+  p = data;
+  for (i = 0; i < n && size; ++i) {
+    if (offset >= iov[i].iov_len) {
+      offset -= iov[i].iov_len;
+      continue;
+    }
+    chunk = MIN(size, iov[i].iov_len - offset);
+    memcpy((char *)iov[i].iov_base + offset, p, chunk);
+    p += chunk;
+    size -= chunk;
+    offset = 0;
+  }
+}
+
+static i64 W32ReadSignalfd(struct Machine *m, struct Fd *fd,
+                           const struct iovec *iov, int iovlen) {
+  _Static_assert(sizeof(struct signalfd_siginfo_linux) == 128,
+                 "Linux signalfd record size");
+  int i;
+  int rc;
+  int crtfd;
+  size_t count;
+  size_t total;
+  uint32_t signals[64];
+  uint32_t pids[64];
+  int32_t codes[64];
+  struct signalfd_siginfo_linux info;
+  total = W32IovsSize(iov, iovlen);
+  if (total < sizeof(info)) return einval();
+  count = MIN(total / sizeof(info), ARRAYLEN(signals));
+  if ((crtfd = VfsHostFileFd(fd->hostfd)) == -1) return -1;
+  RESTARTABLE(rc = WboxSignalfdRead(crtfd, signals, pids, codes, count));
+  if (rc <= 0) return rc;
+  LOCK(&m->system->sig_lock);
+  for (i = 0; i < rc; ++i) {
+    m->signals &= ~((u64)1 << (signals[i] - 1));
+  }
+  UNLOCK(&m->system->sig_lock);
+  for (i = 0; i < rc; ++i) {
+    memset(&info, 0, sizeof(info));
+    Write32(info.signo, signals[i]);
+    Write32(info.code, codes[i]);
+    Write32(info.pid, pids[i]);
+    W32CopyToIovs(iov, iovlen, i * sizeof(info), &info, sizeof(info));
+    W32ClearSignalFds(m, signals[i]);
+  }
+  return rc * sizeof(info);
+}
 #endif
 
 static i64 SysMmapImpl(struct Machine *m, i64 virt, i64 size, int prot,
@@ -2975,7 +3087,14 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
-      RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      if (fd->signalfd) {
+        rc = W32ReadSignalfd(m, fd, iv.p, iv.i);
+      } else
+#endif
+      {
+        RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
+      }
       if (rc != -1) SetWriteAddr(m, addr, rc);
     }
     FreeIovs(&iv);
@@ -3151,7 +3270,14 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
     if ((rc = AppendIovsGuest(m, &iv, iovaddr, iovlen, PROT_WRITE)) != -1) {
       if (iv.i) {
         if (offset == -1) {
-          RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+          if (fd->signalfd) {
+            rc = W32ReadSignalfd(m, fd, iv.p, iv.i);
+          } else
+#endif
+          {
+            RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
+          }
         } else if (offset < 0) {
           return einval();
 #if defined(_WIN32) && !defined(__CYGWIN__)
@@ -5606,6 +5732,8 @@ static int SysSigprocmask(struct Machine *m, int how, i64 setaddr,
   }
   if (setaddr) {
     set = Read64(neu);
+    set &= ~(((u64)1 << (SIGKILL_LINUX - 1)) |
+             ((u64)1 << (SIGSTOP_LINUX - 1)));
     if (how == SIG_BLOCK_LINUX) {
       m->sigmask |= set;
     } else if (how == SIG_UNBLOCK_LINUX) {
@@ -5645,6 +5773,15 @@ static int SysKill(struct Machine *m, int pid, int sig) {
   // a non-polling host wait, give it a short grace and then terminate
   // the host thread so a blocking wait4 in the parent can never hang.
   if (pid > 0 && !(0 <= sig && sig <= 64)) return einval();
+  if (pid == m->system->pid) {
+    if (!sig) return 0;
+    if (sig == SIGKILL_LINUX) {
+      TerminateSignal(m, sig, 0);
+      return 0;
+    }
+    EnqueueSignalInfo(m, sig, m->system->pid, SI_USER_LINUX);
+    return 0;
+  }
   if (pid > 0) {
     // H1 (security-audit): the table lock is held across find+enqueue so
     // the child can not free its Machine in between (its exit path first
@@ -5668,7 +5805,7 @@ static int SysKill(struct Machine *m, int pid, int sig) {
         W32ChildTerminate(pid, 9);  // uncatchable: no grace period
         return 0;
       }
-      EnqueueSignal(cm, sig);
+      EnqueueSignalInfo(cm, sig, m->system->pid, SI_USER_LINUX);
       W32ChildUnlock();
       if (W32ChildWaitExited(pid, 200)) {
         // child is wedged in a host wait that never polls signals
@@ -5725,7 +5862,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
       UNLOCK(&m->system->sig_lock);
       return rc;
     } else {
-      m->signals |= (u64)1 << (sig - 1);
+      EnqueueSignalInfo(m, sig, m->system->pid, SI_TKILL_LINUX);
       return 0;
     }
   }
@@ -5745,7 +5882,7 @@ static int SysTkill(struct Machine *m, int tid, int sig) {
       m2 = MACHINE_CONTAINER(e);
       if (m2->tid == tid) {
         if (sig) {
-          EnqueueSignal(m2, sig);
+          EnqueueSignalInfo(m2, sig, m->system->pid, SI_TKILL_LINUX);
           err = pthread_kill(m2->thread, SIGSYS);
         } else {
           err = pthread_kill(m2->thread, 0);
@@ -6155,6 +6292,59 @@ static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
 
 static int SysEventfd(struct Machine *m, u32 initval) {
   return SysEventfd2(m, initval, 0);
+}
+
+static int SysSignalfd4(struct Machine *m, i32 fildes, i64 maskaddr,
+                        u64 sigsetsize, i32 flags) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int guestfd;
+  int rawfd;
+  int sig;
+  u64 mask;
+  u64 pending;
+  struct Fd *fd;
+  const struct sigset_linux *guestmask;
+  if (sigsetsize != sizeof(*guestmask)) return einval();
+  if (!(guestmask = (const struct sigset_linux *)SchlepR(
+            m, maskaddr, sizeof(*guestmask)))) {
+    return -1;
+  }
+  if (flags & ~(SFD_CLOEXEC_LINUX | SFD_NONBLOCK_LINUX)) return einval();
+  mask = Read64(guestmask->sigmask);
+  mask &= ~(((u64)1 << (SIGKILL_LINUX - 1)) |
+            ((u64)1 << (SIGSTOP_LINUX - 1)));
+  if (fildes == -1) {
+    if ((rawfd = WboxSignalfdCreate(mask, flags)) == -1) return -1;
+    if ((guestfd = AddW32CounterFd(m, rawfd, flags)) == -1) return -1;
+    LOCK(&m->system->fds.lock);
+    unassert(fd = GetFd(&m->system->fds, guestfd));
+    fd->signalfd = true;
+    UNLOCK(&m->system->fds.lock);
+  } else {
+    if ((rawfd = W32ResolveFd(m->system, fildes, 1)) == -1) return -1;
+    if (WboxSignalfdSetMask(rawfd, mask) == -1) return -1;
+    guestfd = fildes;
+  }
+  pending = m->signals & m->sigmask & mask;
+  for (sig = 1; sig <= 64; ++sig) {
+    if (pending & ((u64)1 << (sig - 1))) {
+      WboxSignalfdNotify(rawfd, sig, 0, SI_KERNEL_LINUX, 1);
+    }
+  }
+  return guestfd;
+#else
+  (void)m;
+  (void)fildes;
+  (void)maskaddr;
+  (void)sigsetsize;
+  (void)flags;
+  return enosys();
+#endif
+}
+
+static int SysSignalfd(struct Machine *m, i32 fildes, i64 maskaddr,
+                       u64 sigsetsize) {
+  return SysSignalfd4(m, fildes, maskaddr, sigsetsize, 0);
 }
 
 static int LoadItimerspec(struct Machine *m, i64 addr,
@@ -6707,10 +6897,12 @@ void OpSyscall(P) {
     SYSCALL(3, 0x13E, "getrandom", SysGetrandom, STRACE_GETRANDOM);
     SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
     SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
+    SYSCALL(3, 0x11A, "signalfd", SysSignalfd, STRACE_3);
     SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
     SYSCALL(2, 0x11B, "timerfd_create", SysTimerfdCreate, STRACE_2);
     SYSCALL(4, 0x11E, "timerfd_settime", SysTimerfdSettime, STRACE_4);
     SYSCALL(2, 0x11F, "timerfd_gettime", SysTimerfdGettime, STRACE_2);
+    SYSCALL(4, 0x121, "signalfd4", SysSignalfd4, STRACE_4);
     SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #ifdef HAVE_EPOLL_PWAIT1

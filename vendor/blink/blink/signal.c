@@ -228,6 +228,9 @@ static int ConsumeSignalImpl(struct Machine *m, int *delivered, bool *restart) {
   while ((signals = m->signals & ~m->sigmask)) {
     sig = bsr(signals) + 1;
     m->signals &= ~((u64)1 << (sig - 1));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    W32ClearSignalFds(m, sig);
+#endif
     handler = Read64(m->system->hands[sig - 1].handler);
     if (handler == SIG_DFL_LINUX) {
       if (IsSignalIgnoredByDefault(sig)) {
@@ -263,13 +266,20 @@ int ConsumeSignal(struct Machine *m, int *delivered, bool *restart) {
   return rc;
 }
 
-void EnqueueSignal(struct Machine *m, int sig) {
+void EnqueueSignalInfo(struct Machine *m, int sig, int pid, int code) {
   if (m && (1 <= sig && sig <= 64)) {
     m->signals |= 1ul << (sig - 1);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    W32NotifySignalFds(m, sig, pid, code);
+#endif
     if ((m->signals & ~m->sigmask)) {
       atomic_store_explicit(&m->attention, true, memory_order_release);
     }
   }
+}
+
+void EnqueueSignal(struct Machine *m, int sig) {
+  EnqueueSignalInfo(m, sig, 0, SI_KERNEL_LINUX);
 }
 
 void CheckForSignals(struct Machine *m) {

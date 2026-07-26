@@ -840,6 +840,8 @@
 #define EFD_SEMAPHORE_LINUX 1
 #define EFD_CLOEXEC_LINUX   O_CLOEXEC_LINUX
 #define EFD_NONBLOCK_LINUX  O_NDELAY_LINUX
+#define SFD_CLOEXEC_LINUX             O_CLOEXEC_LINUX
+#define SFD_NONBLOCK_LINUX            O_NDELAY_LINUX
 #define TFD_TIMER_ABSTIME_LINUX       1
 #define TFD_TIMER_CANCEL_ON_SET_LINUX 2
 #define TFD_CLOEXEC_LINUX             O_CLOEXEC_LINUX
@@ -1002,6 +1004,31 @@ struct itimerval_linux {
 struct itimerspec_linux {
   struct timespec_linux interval;
   struct timespec_linux value;
+};
+
+struct signalfd_siginfo_linux {
+  u8 signo[4];
+  u8 error[4];
+  u8 code[4];
+  u8 pid[4];
+  u8 uid[4];
+  u8 fd[4];
+  u8 tid[4];
+  u8 band[4];
+  u8 overrun[4];
+  u8 trapno[4];
+  u8 status[4];
+  u8 sigint[4];
+  u8 ptr[8];
+  u8 utime[8];
+  u8 stime[8];
+  u8 addr[8];
+  u8 addr_lsb[2];
+  u8 pad2[2];
+  u8 syscall[4];
+  u8 call_addr[8];
+  u8 arch[4];
+  u8 pad[28];
 };
 
 struct rusage_linux {
