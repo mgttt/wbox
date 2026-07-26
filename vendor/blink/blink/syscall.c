@@ -5968,24 +5968,28 @@ static i32 SysEpollCreate(struct Machine *m, i32 size) {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 // win32: VFS 开启后 guest fd 编号独立于宿主 CRT fd（epoll 实现按宿主 fd
-// 工作，见 win32/w32sock.c）。VFS fd 的真实宿主 fd 在 HostfsInfo.filefd；
-// epoll 自身/管道等非 VFS fd 走 fds 表 hostfd。非 VFS 构建两者恒等。
+// 工作，见 win32/w32sock.c）。guest fd 号与 VFS 号是两个命名空间（均从 0
+// 递增，必撞车），因此必须先走 per-System Fd 表把 guestfd 翻成 hostfd
+//（VFS fd 的 hostfd 即 VFS 号），再按 VFS 号解析出 HostfsInfo.filefd；
+// epoll 自身/管道等非 VFS fd 的 hostfd 直接就是宿主 CRT fd。
+// 注意：fds.lock 持有期间不得调用 VfsGetFd（锁序），先取号再查 VFS。
 static int W32EpollHostFd(struct Machine *m, int guestfd) {
   struct Fd *fd;
-  struct VfsInfo *info;
   int hostfd = -1;
-#ifndef DISABLE_VFS
-  if (VfsGetFd(guestfd, &info) != -1) {
-    hostfd = ((struct HostfsInfo *)info->data)->filefd;
-    unassert(!VfsFreeInfo(info));
-    return hostfd;
-  }
-#endif
   LOCK(&m->system->fds.lock);
   if ((fd = GetFd(&m->system->fds, guestfd))) {
     hostfd = fd->hostfd;
   }
   UNLOCK(&m->system->fds.lock);
+  if (hostfd == -1) return -1;
+#ifndef DISABLE_VFS
+  struct VfsInfo *info;
+  if (VfsGetFd(hostfd, &info) != -1) {
+    int crtfd = ((struct HostfsInfo *)info->data)->filefd;
+    unassert(!VfsFreeInfo(info));
+    return crtfd;
+  }
+#endif
   return hostfd;
 }
 #endif

@@ -58,9 +58,9 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 
 | # | 现象 | 期望 | 实际 | 疑似归属层 |
 |---|------|------|------|-----------|
-| N1 | `socket(AF_UNIX, …)` / `socketpair(AF_UNIX)` | 成功 | **ENOSYS**（AF_UNIX 整体缺失） | 网络层 |
-| N2 | `epoll_ctl(ADD)` 于 pipe / TCP 连接 socket | 成功 | **EBADF**（epoll 对管道与已连接 socket 不可用；LT/ONESHOT/MOD/DEL/RDHUP 全部连带失败） | epoll 层 fd 注册 |
-| N3 | `socket(9999,…)` 非法 family | EAFNOSUPPORT(97) | ENOPROTOOPT(92)（errno 精度） | 网络层 |
+| N1 | `socket(AF_UNIX, …)` / `socketpair(AF_UNIX)` | 成功 | EAFNOSUPPORT(97) / **ENOSYS(38)**（AF_UNIX 整体缺失）——**明确限制**（win32 宿主无 AF_UNIX；返回码干净、语义明确，本期不实现） | 网络层（won't fix，已确认） |
+| ~~N2~~ | ~~`epoll_ctl(ADD)` 于 pipe / TCP 连接 socket~~ | 成功 | **已修复**（fix/net-sem：guest/VFS fd 命名空间撞车，Fd 表优先解析 + epoll fd 注册进 VFS；LT/ONESHOT/MOD/DEL/RDHUP 矩阵全翻 PASS） | epoll 层 fd 注册 |
+| ~~N3~~ | ~~`socket(9999,…)` 非法 family~~ | EAFNOSUPPORT(97) | **已修复**（xlat.c 未知 family 校准为 EAFNOSUPPORT） | 网络层 |
 
 ## P2 errno 精度
 

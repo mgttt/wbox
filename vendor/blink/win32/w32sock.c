@@ -43,6 +43,11 @@
 
 #include "win32.h"
 
+#ifndef DISABLE_VFS
+#include "blink/hostfs.h"
+#include "blink/vfs.h"
+#endif
+
 intptr_t _get_osfhandle(int);
 int _open_osfhandle(intptr_t, int);
 int _close(int);
@@ -1133,7 +1138,37 @@ int epoll_create1(int flags) {
       memset(&g_epolls[i], 0, sizeof(g_epolls[i]));
       g_epolls[i].used = 1;
       g_epolls[i].crtfd = fd;
+#ifndef DISABLE_VFS
+      // win32 VFS 模式下存在两个宿主侧 fd 命名空间：VFS 号与裸 CRT fd。
+      // syscall.c 的 W32EpollHostFd 把 guest fd 先翻成 Fd 表 hostfd，再按
+      // VFS 号解析 HostfsInfo.filefd；裸 CRT fd 与 VFS 号都从 0 递增、
+      // 必然撞车，因此 epoll fd 也注册进 VFS 表，与文件/管道/socket 走同
+      // 一条翻译路径。返回值变为 VFS 号；CRT fd 留在 HostfsInfo.filefd，
+      // 关闭路径 VfsClose -> HostfsClose -> close(crtfd) -> WboxEpollClose
+      // 仍照常回收本表项。
+      {
+        struct VfsInfo *info = NULL;
+        int vfd;
+        if (HostfsWrapFd(fd, false, &info) == -1) {
+          g_epolls[i].used = 0;
+          g_epolls[i].crtfd = -1;
+          _close(fd);
+          errno = EMFILE;
+          return -1;
+        }
+        if ((vfd = VfsAddFd(info)) == -1) {
+          VfsFreeInfo(info);
+          g_epolls[i].used = 0;
+          g_epolls[i].crtfd = -1;
+          _close(fd);
+          errno = EMFILE;
+          return -1;
+        }
+        return vfd;
+      }
+#else
       return fd;
+#endif
     }
   }
   errno = EMFILE;
