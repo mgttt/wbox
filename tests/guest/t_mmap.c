@@ -369,6 +369,44 @@ int main(void) {
     unlink("t_mmap_tmp.bin");
   }
 
+  T_BEGIN("mmap/file-shared-many-writeback");
+  {
+    enum { MAP_COUNT = 160 };
+    char *maps[MAP_COUNT];
+    int stressfd;
+    int mapped = 0;
+    int persisted = 1;
+    memset(maps, 0, sizeof(maps));
+    stressfd = open("t_mmap_many.bin",
+                    O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(stressfd >= 0);
+    if (stressfd >= 0) {
+      T_ASSERT_OK(ftruncate(stressfd, (off_t)MAP_COUNT * PGSZ));
+      for (int i = 0; i < MAP_COUNT; ++i) {
+        maps[i] = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       stressfd, (off_t)i * PGSZ);
+        if (maps[i] == MAP_FAILED) break;
+        maps[i][0] = (char)(i + 1);
+        ++mapped;
+      }
+      T_ASSERT_EQ(mapped, MAP_COUNT);
+      for (int i = 0; i < mapped; ++i) {
+        if (munmap(maps[i], PGSZ) == -1) persisted = 0;
+      }
+      for (int i = 0; i < MAP_COUNT; ++i) {
+        unsigned char byte = 0;
+        if (pread(stressfd, &byte, 1, (off_t)i * PGSZ) != 1 ||
+            byte != (unsigned char)(i + 1)) {
+          persisted = 0;
+          break;
+        }
+      }
+      T_ASSERT(persisted);
+      T_ASSERT_OK(close(stressfd));
+    }
+    unlink("t_mmap_many.bin");
+  }
+
   /* --- invalid combos must fail --- */
   T_BEGIN("mmap/file-badfd-EBADF");
   T_ASSERT_ERRNO(mmap(NULL, PGSZ, PROT_READ, MAP_PRIVATE, 9999, 0), EBADF);

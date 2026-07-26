@@ -207,6 +207,53 @@ int main(int argc, char **argv) {
     }
   }
 
+  T_BEGIN("fork/file-shared-many-visible");
+  {
+    enum { MAP_COUNT = 160 };
+    unsigned char *maps[MAP_COUNT];
+    int fd = open("t_fork_mem_many.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    int mapped = 0;
+    int cleaned = 1;
+    memset(maps, 0, sizeof(maps));
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      T_ASSERT_OK(ftruncate(fd, (off_t)MAP_COUNT * 4096));
+      for (int i = 0; i < MAP_COUNT; ++i) {
+        maps[i] = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       fd, (off_t)i * 4096);
+        if (maps[i] == MAP_FAILED) break;
+        ++mapped;
+      }
+      T_ASSERT_EQ(mapped, MAP_COUNT);
+      if (mapped == MAP_COUNT) {
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          maps[0][0] = 0xd1;
+          maps[MAP_COUNT - 1][0] = 0xd7;
+          _exit(msync(maps[MAP_COUNT - 1], 4096, MS_SYNC) == 0 ? 0 : 1);
+        }
+        if (pid > 0) {
+          unsigned char ondisk[2] = {0};
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(maps[0][0] == 0xd1);
+          T_ASSERT(maps[MAP_COUNT - 1][0] == 0xd7);
+          T_ASSERT_EQ(pread(fd, ondisk, 1, 0), 1);
+          T_ASSERT_EQ(pread(fd, ondisk + 1, 1,
+                            (off_t)(MAP_COUNT - 1) * 4096), 1);
+          T_ASSERT(ondisk[0] == 0xd1 && ondisk[1] == 0xd7);
+        }
+      }
+      for (int i = 0; i < mapped; ++i) {
+        if (munmap(maps[i], 4096) == -1) cleaned = 0;
+      }
+      T_ASSERT(cleaned);
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_fork_mem_many.bin"));
+    }
+  }
+
   /* --- inherited file mapping keeps its backing for child mremap --- */
   T_BEGIN("fork/file-private-mremap");
   {

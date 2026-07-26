@@ -76,7 +76,7 @@ stdlib.h、string.h、time.h。blink 全部源码不经修改（除下述 _WIN32
 
 | 模块 | 职责 |
 |---|---|
-| `w32mem.c` | guest 地址空间：启动时 ReserveVirtual 保留整块 VA 窗口并回写 `kSkew`；mmap/munmap/mprotect/mremap → VirtualAlloc/Free/Protect 自管分配器，模拟 blink 依赖的 MAP_FIXED / 部分 munmap 语义；文件映射用 pread 填充，MAP_SHARED 由 per-window 注册表在 msync/munmap/exec/销毁时写回，并随 fork 快照克隆 |
+| `w32mem.c` | guest 地址空间：启动时 ReserveVirtual 保留整块 VA 窗口并回写 `kSkew`；mmap/munmap/mprotect/mremap → VirtualAlloc/Free/Protect 自管分配器，模拟 blink 依赖的 MAP_FIXED / 部分 munmap 语义；文件映射用 pread 填充，MAP_SHARED 由按需增长的 per-window 注册表在 msync/munmap/exec/销毁时写回，并随 fork 快照克隆 |
 | `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2、timerfd 与 signalfd 共享 pseudo-fd 对象、阻塞/nonblock、poll/epoll 语义；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/timerfd/signalfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe / pseudo-fd 就绪语义内聚） |
 | `w32sock.c` | 网络/epoll/termios 真实现（feat/net）：WSA 动态装载、socket 族、epoll 兴趣表（`epoll_wait` 走 `W32WaitFds`）、tcgetattr/tcsetattr 控制台模式 |
 | `w32errno.c` | 宿主错误→Linux errno 映射表集中：`W32ErrFromHost`（GetLastError）、`W32ErrFromWsa`（WSAGetLastError）、`W32GaiErrFromWsa`（EAI_*） |
@@ -126,7 +126,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ✅ 匿名及文件映射支持原地扩缩、`MREMAP_MAYMOVE` / `MREMAP_FIXED` 搬移、数据与逐页权限保留、新增页加载/清零；文件 backing 独立于原 fd 生命周期，MAP_PRIVATE 脏页隔离和 MAP_SHARED 写回均覆盖 |
-| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回按文件 ID/偏移同步，覆盖 fork 后父窗口可见性、子映射搬移、exec wipe、MAP_FIXED 清理及内部 fd 0；由 `t_mmap` / `t_fork_mem` / `t_exec` 验证 |
+| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回按文件 ID/偏移同步，注册表按需增长，覆盖 160 个并存映射、fork 后父窗口可见性、子映射搬移、exec wipe、MAP_FIXED 清理及内部 fd 0；由 `t_mmap` / `t_fork_mem` / `t_exec` 验证 |
 | 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
 | 10 | clone/线程 | ❌ 未接入（静态 glibc pthread 在上游 blink 亦 100% 崩溃，列入不支持） |
@@ -287,8 +287,9 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
    getent/glibc DNS 在 fork 子内解析成功。
 5. **文件 MAP_SHARED**：写回注册按 VA window 隔离并持有独立 backing fd；
    共享同步按 Windows 卷序列号、文件 ID 和重叠文件偏移匹配，因此子映射
-   搬到不同 VA 后仍更新父进程原映射。显式槽占用状态保证 dup 复用宿主
-   fd 0 时仍能正确写回。
+   搬到不同 VA 后仍更新父进程原映射。注册表按需增长，不再从第 129 个
+   并存映射起静默丢写；显式槽占用状态保证 dup 复用宿主 fd 0 时仍能正确
+   写回。注册或中间 munmap 拆分失败会保留原映射并返回错误。
 6. **VFS 映射元数据**：fork 快照将父窗口内的文件 backing 条目平移克隆到
    子窗口，使继承映射可继续 `mremap`；exec wipe 前按当前窗口清除旧条目，
    新映像可安全复用同一 guest 地址且不会删除父窗口记录。
