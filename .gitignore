@@ -2,3 +2,4 @@ target/
 *.o
 vendor/blink/build-win32/
 tests/guest/bin/
+build/
