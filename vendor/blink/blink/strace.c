@@ -242,6 +242,8 @@ const struct MagicNumber kFcntl[] = {
     {F_DUPFD_CLOEXEC_LINUX, "F_DUPFD_CLOEXEC"},  //
     {F_GETFL_LINUX, "F_GETFL"},                  //
     {F_SETFL_LINUX, "F_SETFL"},                  //
+    {F_SETPIPE_SZ_LINUX, "F_SETPIPE_SZ"},        //
+    {F_GETPIPE_SZ_LINUX, "F_GETPIPE_SZ"},        //
     {F_GETLK_LINUX, "F_GETLK"},                  //
     {F_SETLK_LINUX, "F_SETLK"},                  //
     {F_SETLKW_LINUX, "F_SETLKW"},                //

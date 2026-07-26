@@ -4431,6 +4431,22 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
     } else {
       rc = -1;
     }
+  } else if (cmd == F_GETPIPE_SZ_LINUX) {
+#ifdef F_GETPIPE_SZ
+    rc = VfsFcntl(fd->hostfd, F_GETPIPE_SZ);
+#else
+    rc = einval();
+#endif
+  } else if (cmd == F_SETPIPE_SZ_LINUX) {
+#ifdef F_SETPIPE_SZ
+    if (arg <= 0 || arg > INT_MAX) {
+      rc = einval();
+    } else {
+      rc = VfsFcntl(fd->hostfd, F_SETPIPE_SZ, (int)arg);
+    }
+#else
+    rc = einval();
+#endif
   } else if (cmd == F_SETLK_LINUX ||   //
              cmd == F_SETLKW_LINUX ||  //
              cmd == F_GETLK_LINUX) {

@@ -195,6 +195,28 @@ int main(void) {
     close(pp[1]);
   }
 
+  T_BEGIN("pipe/capacity-fcntl");
+  {
+    int pp[2];
+    int capacity;
+    int resized;
+    T_ASSERT_OK(pipe(pp));
+    capacity = fcntl(pp[0], F_GETPIPE_SZ);
+    T_ASSERT(capacity >= 4096);
+    T_ASSERT_EQ(fcntl(pp[1], F_GETPIPE_SZ), capacity);
+    resized = fcntl(pp[1], F_SETPIPE_SZ, 1);
+    T_ASSERT(resized >= 4096 && resized <= capacity);
+    T_ASSERT_EQ(fcntl(pp[0], F_GETPIPE_SZ), resized);
+    T_ASSERT_EQ(fcntl(pp[1], F_GETPIPE_SZ), resized);
+    T_ASSERT_ERRNO(fcntl(pp[0], F_SETPIPE_SZ, 0), EINVAL);
+    close(pp[0]);
+    close(pp[1]);
+    int nullfd = open("/dev/null", O_RDONLY);
+    T_ASSERT(nullfd >= 0);
+    T_ASSERT_ERRNO(fcntl(nullfd, F_GETPIPE_SZ), EBADF);
+    close(nullfd);
+  }
+
   /* --- readv/writev --- */
   T_BEGIN("readv/writev");
   fd = open("t_frw_v", O_RDWR | O_CREAT | O_TRUNC, 0600);

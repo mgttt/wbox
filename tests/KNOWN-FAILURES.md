@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1139 条：pass=1130 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1148 条：pass=1139 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -151,6 +151,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F13 | `dup` 别名不共享 socket `O_NONBLOCK` / 文件 `O_APPEND` 状态 | ✅ t_net_sockopt/t_fd_open 覆盖双向状态可见性及 append 实际写入位置 |
 | F14 | Win32 pipe `dup` 别名不共享 `O_NONBLOCK`；`FIONBIO`/`FIOCLEX` 错用 guest fd 且状态切换不完整 | ✅ t_fd_rw/t_net_sockopt/t_fd_open 覆盖 fcntl/ioctl 双向切换、空读 `EAGAIN` 与 close-on-exec 状态 |
 | F15 | 非阻塞 pipe 写满后 `poll(POLLOUT)` 仍误报并阻塞在 `WriteFile` | ✅ t_fd_rw 覆盖写满后的 write/writev `EAGAIN`、配额恢复及关闭端 `POLLHUP`/`POLLERR` |
+| F16 | guest `fcntl` 不识别 `F_GETPIPE_SZ/F_SETPIPE_SZ` | ✅ t_fd_rw 覆盖两端容量查询、向下请求、零值与非 pipe 错误 |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 

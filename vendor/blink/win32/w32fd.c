@@ -2069,7 +2069,7 @@ int fcntl(int fd, int cmd, ...) {
   va_list ap;
   va_start(ap, cmd);
   if (cmd == F_SETFL || cmd == F_SETFD || cmd == F_SETLK || cmd == F_SETLKW ||
-      cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC)
+      cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC || cmd == F_SETPIPE_SZ)
     arg = va_arg(ap, int);
   va_end(ap);
   // feat/net: socket fds get real O_NONBLOCK (FIONBIO) semantics
@@ -2095,6 +2095,25 @@ int fcntl(int fd, int cmd, ...) {
       return 0;  // FD_CLOEXEC meaningless without fork
     case F_SETFD:
       return 0;
+    case F_GETPIPE_SZ:
+    case F_SETPIPE_SZ: {
+      struct W32PipeLocalInfo pi;
+      HANDLE h = W32Handle(fd);
+      if (h == INVALID_HANDLE_VALUE ||
+          GetFileType(h) != FILE_TYPE_PIPE ||
+          !W32QueryPipe(h, &pi)) {
+        errno = EBADF;
+        return -1;
+      }
+      if (cmd == F_GETPIPE_SZ) return pi.outbound_quota;
+      if (arg <= 0) {
+        errno = EINVAL;
+        return -1;
+      }
+      if ((unsigned)arg <= pi.outbound_quota) return pi.outbound_quota;
+      errno = EPERM;
+      return -1;
+    }
     case F_DUPFD:
     case F_DUPFD_CLOEXEC: {
       int nfd = dup(fd);

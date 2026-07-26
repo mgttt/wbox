@@ -139,6 +139,8 @@
 
 #define F_GETFL_LINUX 3
 #define F_SETFL_LINUX 4
+#define F_SETPIPE_SZ_LINUX 1031
+#define F_GETPIPE_SZ_LINUX 1032
 
 #define F_GETLK_LINUX  5
 #define F_SETLK_LINUX  6

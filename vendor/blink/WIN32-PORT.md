@@ -19,6 +19,7 @@
 
 - glibc pthread 程序崩溃（musl/busybox 不受影响）
 - epoll：LT、`EPOLLET`、`EPOLLONESHOT` 均支持，覆盖 socket、pipe、eventfd、timerfd、signalfd
+- 匿名管道可查询实际容量；`F_SETPIPE_SZ` 可接受不超过当前容量的请求，但 Windows 不支持创建后扩容，扩容请求返回 `EPERM`
 - mremap：匿名及文件映射均支持原地扩缩、MAYMOVE/FIXED 搬移，保留 private/shared 语义
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
@@ -77,7 +78,7 @@ stdlib.h、string.h、time.h。blink 全部源码不经修改（除下述 _WIN32
 | 模块 | 职责 |
 |---|---|
 | `w32mem.c` | guest 地址空间：启动时 ReserveVirtual 保留整块 VA 窗口并回写 `kSkew`；mmap/munmap/mprotect/mremap → VirtualAlloc/Free/Protect 自管分配器，模拟 blink 依赖的 MAP_FIXED / 部分 munmap 语义；文件映射用 pread 填充，MAP_SHARED 由按需增长的 per-window 注册表在 msync/munmap/exec/销毁时写回，并随 fork 快照克隆 |
-| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2、timerfd 与 signalfd 共享 pseudo-fd 对象、阻塞/nonblock、poll/epoll 语义；`lseek` 在宿主 seek 前区分 pseudo-fd no-op 与 pipe/socket `ESPIPE`；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/timerfd/signalfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道 PeekNamedPipe / pseudo-fd 就绪语义内聚） |
+| `w32fd.c` | fd 层：open/openat/read/write/pread/pwrite/lseek/dup/fcntl/fstat/stat 族 → CreateFileW + CRT fd；isatty/select/pipe（Console/匿名管道）；eventfd/eventfd2、timerfd 与 signalfd 共享 pseudo-fd 对象、阻塞/nonblock、poll/epoll 语义；`lseek` 在宿主 seek 前区分 pseudo-fd no-op 与 pipe/socket `ESPIPE`；`W32FillStat` 统一组装 struct stat。**统一抽象**：`W32FdClassify` 是 CRT fd 分类单入口（file/socket/epoll/eventfd/timerfd/signalfd/special，HANDLE 随附）；`W32JoinNorm` 是路径 escape+拼接+规范化共享步（`W32Path`/`W32ResolveAt` 两个路径入口共用，jail 出口检查集中）；`W32WaitFds` 是共享等待原语（socket WSAPoll 切片 / 文件恒就绪 / 管道内核 quota / pseudo-fd 就绪语义内聚） |
 | `w32sock.c` | 网络/epoll/termios 真实现（feat/net）：WSA 动态装载、socket 族、epoll 兴趣表（`epoll_wait` 走 `W32WaitFds`）、tcgetattr/tcsetattr 控制台模式 |
 | `w32errno.c` | 宿主错误→Linux errno 映射表集中：`W32ErrFromHost`（GetLastError）、`W32ErrFromWsa`（WSAGetLastError）、`W32GaiErrFromWsa`（EAI_*） |
 | `w32proc.c` | 进程/时间：getrlimit/getrusage/sysinfo/statvfs/times/sysconf、clock_gettime/nanosleep/sleep 族；每 guest 进程独立的 alarm/setitimer ITIMER_REAL 定时器与 SIGALRM 投递；快照 fork 的虚拟 pid 表（`W32Child*`）；fork/execve/wait 族见 §4/§7.4 |
