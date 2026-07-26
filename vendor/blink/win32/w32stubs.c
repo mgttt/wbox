@@ -111,16 +111,15 @@ static int WboxDirApiPath(const wchar_t *wpath,
 static DIR *OpendirW(const wchar_t *wpath, const char *path) {
   DIR *d = calloc(1, sizeof(DIR));
   if (!d) return NULL;
-  wchar_t wbuf[W32_PATH_MAX];
-  if (WboxDirApiPath(wpath, wbuf) || wcslen(wbuf) + 3 >= W32_PATH_MAX) {
+  if (WboxDirApiPath(wpath, d->wpath) ||
+      wcslen(d->wpath) + 3 >= W32_PATH_MAX) {
     free(d);
     errno = ENAMETOOLONG;
     return NULL;
   }
-  wcscat(wbuf, L"\\*");
-  wcscpy(d->wpath, wbuf);
+  wcscat(d->wpath, L"\\*");
   (void)path;
-  d->h = FindFirstFileW(wbuf, &d->data);
+  d->h = FindFirstFileW(d->wpath, &d->data);
   if (d->h == INVALID_HANDLE_VALUE) {
     free(d);
     errno = ENOENT;
@@ -131,13 +130,20 @@ static DIR *OpendirW(const wchar_t *wpath, const char *path) {
 }
 
 DIR *opendir(const char *path) {
-  wchar_t wbuf[W32_PATH_MAX];
+  wchar_t *wbuf = malloc(W32_PATH_MAX * sizeof(*wbuf));
+  if (!wbuf) {
+    errno = ENOMEM;
+    return NULL;
+  }
   if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, W32_PATH_MAX) <= 0) {
+    free(wbuf);
     errno = ENOENT;
     return NULL;
   }
   // strip trailing "\\*" not present here; OpendirW appends it
-  return OpendirW(wbuf, path);
+  DIR *d = OpendirW(wbuf, path);
+  free(wbuf);
+  return d;
 }
 
 DIR *fdopendir(int fd) {
@@ -148,13 +154,20 @@ DIR *fdopendir(int fd) {
     errno = EBADF;
     return NULL;
   }
-  wchar_t wbuf[W32_PATH_MAX];
+  wchar_t *wbuf = malloc(W32_PATH_MAX * sizeof(*wbuf));
+  if (!wbuf) {
+    errno = ENOMEM;
+    return NULL;
+  }
   DWORD n = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, 0);
   if (!n || n >= W32_PATH_MAX) {
+    free(wbuf);
     errno = ENOENT;
     return NULL;
   }
-  return OpendirW(wbuf, NULL);
+  DIR *d = OpendirW(wbuf, NULL);
+  free(wbuf);
+  return d;
 }
 
 int closedir(DIR *d) {
