@@ -69,6 +69,12 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   最后一条是刻意的，与 §四 "行为修复时测试会变红，强制同步更新" 同一原则——
   否则修好的东西会被基线继续掩盖。`WBOX_GUEST_NO_BASELINE=1` 可回到原始语义。
 
+  ⚠️ **当前基线来自 wine 实测**。真 Windows 首测已发现 wine 掩盖的问题
+  （`KNOWN-FAILURES.md` 的 W1：fork 依赖项挂死），故 guest 套件在真机上
+  很可能出现基线外的失败而判 FAIL。**那是门禁在正确工作**，不是基线配错：
+  真机专有缺陷应当被看见并修掉，而不是加进基线掩盖。确需暂缓时，在
+  `known-failures.txt` 中单列并注明"真机专有 + 关联 W1"，修复后一并移除。
+
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 
 - 内容：基础 11 项 + shell 8 项 + fork 矩阵 + wget md5 + epoll 单测（缺二进制
@@ -76,6 +82,10 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 - 触发收窄：矩阵脚本无子集开关，故在 workflow 层收窄——**PR 只跑核心组**
   （wbox-linux.exe 构建 + 冒烟），完整矩阵留给 push main / tag / nightly /
   手动触发。
+- **单项超时**：`WBOX_MATRIX_TIMEOUT`（默认 60s，设 0 关闭，`timeout`
+  不可用时自动退化为不限制）。真机实测 B 组（fork 依赖）可能整项挂死，
+  而脚本原先没有任何上界——一次挂死就吃满整个 CI job。挂死记
+  `rc=124` 并在详情里注明「超时 Ns 被终止」，其余项照常继续。
 - CI 里两个环境开关（本地跑不设，全量执行）：
   - `WBOX_GUEST_SKIP=1`——F 组交给专职的 `guest-tests` job，避免重复；
   - `WBOX_MATRIX_NET_SKIP=1`——D 组从 guest 内 wget 公网，runner 到该站点的
