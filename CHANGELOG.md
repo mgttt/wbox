@@ -109,6 +109,13 @@
   注册统一保存 `int64_t`。新增稀疏文件高位映射、扩容、`msync` 写回及低位
   别名隔离回归；`t_fd_rw` 增至 50 项，`t_mmap` 增至 140 项，完整套件现为
   **20/20 文件通过，980 pass / 0 fail / 9 skip**。
+- **Win32 sendfile 支持 4 GiB+ 显式偏移**：`sendfile(..., offset, ...)`
+  旧路径仍以 MinGW 32 位 `off_t` 拒绝高位范围并返回 `EOVERFLOW`。现仅在
+  显式范围越界时解析 hostfs backing，使用 64 位 positioned read，普通
+  VFS 与 `offset == NULL` 路径保持不变。回归同时验证 offset 指针推进、
+  输入 fd 当前位置不变，以及预先 seek 到高位的隐式 offset 模式；
+  `t_fd_rw` 增至 66 项，完整套件现为
+  **20/20 文件通过，996 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

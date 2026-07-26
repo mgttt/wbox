@@ -3642,6 +3642,7 @@ static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
   u8 *buf, *offsetp = 0;
   size_t chunk, maxchunk = 16384;
 #if defined(_WIN32) && !defined(__CYGWIN__)
+  int in_crtfd = -1;
   // wbox win32: in_fd/out_fd are GUEST descriptors; the Vfs* calls below
   // need the host-side descriptors (guest 0 is not necessarily VFS fd 0 —
   // reading it would slurp the emulator's own stdin and hang, which is
@@ -3668,15 +3669,29 @@ static i64 SysSendfile(struct Machine *m, i32 out_fd, i32 in_fd, i64 offsetaddr,
   if (offsetp) {
     offset = Read64(offsetp);
     if ((i64)offset < 0) return einval();
-    if (Read64(offsetp) + count < count ||
-        Read64(offsetp) + count > NUMERIC_MAX(off_t)) {
+    if (offset + count < count) {
       return eoverflow();
     }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (offset + count > INT64_MAX) return eoverflow();
+    if (offset + count > NUMERIC_MAX(off_t) &&
+        (in_crtfd = VfsHostFileFd(in_fd)) == -1) {
+      return -1;
+    }
+#else
+    if (offset + count > NUMERIC_MAX(off_t)) return eoverflow();
+#endif
   }
   for (toto = 0; toto < count;) {
     chunk = MIN(count - toto, maxchunk);
     if (offsetp) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      got = in_crtfd == -1
+                ? VfsPread(in_fd, buf, chunk, offset + toto)
+                : W32Pread64(in_crtfd, buf, chunk, offset + toto);
+#else
       got = VfsPread(in_fd, buf, chunk, offset + toto);
+#endif
     } else {
       got = VfsRead(in_fd, buf, chunk);
     }

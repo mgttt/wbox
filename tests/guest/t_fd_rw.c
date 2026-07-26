@@ -2,6 +2,7 @@
  * readv/writev, truncate/ftruncate. */
 #define _GNU_SOURCE
 #include <sys/stat.h>
+#include <sys/sendfile.h>
 #include <sys/uio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -42,7 +43,35 @@ int main(void) {
   T_ASSERT_OK(truncate("t_frw_big", far + 4096));
   T_ASSERT_OK(fstat(fd, &st));
   T_ASSERT(st.st_size == far + 4096);
-  close(fd);
+
+  /* --- sendfile beyond 4GB, with and without an explicit offset --- */
+  T_BEGIN("sendfile/offset-gt4GB");
+  {
+    char got[sizeof(magic)] = {0};
+    int out = open("t_frw_send_dst", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(out >= 0);
+    if (out >= 0) {
+      T_ASSERT_EQ(lseek(fd, 7, SEEK_SET), 7);
+      off_t pos = far;
+      T_ASSERT_EQ(sendfile(out, fd, &pos, sizeof(magic)), sizeof(magic));
+      T_ASSERT(pos == far + sizeof(magic));
+      T_ASSERT_EQ(lseek(fd, 0, SEEK_CUR), 7);
+      T_ASSERT_EQ(pread(out, got, sizeof(got), 0), sizeof(got));
+      T_ASSERT_EQ(memcmp(got, magic, sizeof(magic)), 0);
+
+      T_ASSERT_EQ(ftruncate(out, 0), 0);
+      T_ASSERT_EQ(lseek(out, 0, SEEK_SET), 0);
+      T_ASSERT_EQ(lseek(fd, far, SEEK_SET), far);
+      T_ASSERT_EQ(sendfile(out, fd, NULL, sizeof(magic)), sizeof(magic));
+      T_ASSERT_EQ(lseek(fd, 0, SEEK_CUR), far + sizeof(magic));
+      memset(got, 0, sizeof(got));
+      T_ASSERT_EQ(pread(out, got, sizeof(got), 0), sizeof(got));
+      T_ASSERT_EQ(memcmp(got, magic, sizeof(magic)), 0);
+      T_ASSERT_OK(close(out));
+    }
+    unlink("t_frw_send_dst");
+  }
+  T_ASSERT_OK(close(fd));
   unlink("t_frw_big");
 
   /* --- negative offset / on pipe ---
