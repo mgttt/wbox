@@ -80,11 +80,15 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
 
 /// 测试共享脚手架：临时 HOME（构造期间把 HOME 指向独立临时目录，
 /// Drop 时恢复并清理；cache_root 优先 USERPROFILE，故同时摘掉它）。
+///
+/// HOME 是**进程级**状态：并行用例各自指向自己的临时目录必然互踩（且一方的
+/// 清理会删掉另一方正在读的文件）。因此内部持有 [`crate::testenv::EnvGuard`]，
+/// 存活期间独占进程环境——用例之间由此天然串行。需要额外临时环境变量时，
+/// 经 [`TempHome::env`] 借出**同一把**守卫，切勿另起 `EnvGuard`（会自死锁）。
 #[cfg(test)]
 pub(crate) struct TempHome {
     pub dir: std::path::PathBuf,
-    saved_home: Option<std::ffi::OsString>,
-    saved_userprofile: Option<std::ffi::OsString>,
+    env: crate::testenv::EnvGuard,
 }
 
 #[cfg(test)]
@@ -97,11 +101,15 @@ impl TempHome {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
-        let saved_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", &dir);
-        std::env::remove_var("USERPROFILE");
-        Self { dir, saved_home, saved_userprofile }
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("HOME", &dir);
+        env.remove("USERPROFILE");
+        Self { dir, env }
+    }
+
+    /// 借出内部环境守卫：用例需要额外临时环境变量时经它设置（Drop 时一并还原）。
+    pub fn env(&mut self) -> &mut crate::testenv::EnvGuard {
+        &mut self.env
     }
 
     /// 在缓存布局中安放一个假镜像（rootfs + 元数据），返回缓存目录。
@@ -128,14 +136,8 @@ impl TempHome {
 #[cfg(test)]
 impl Drop for TempHome {
     fn drop(&mut self) {
-        match &self.saved_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match &self.saved_userprofile {
-            Some(v) => std::env::set_var("USERPROFILE", v),
-            None => std::env::remove_var("USERPROFILE"),
-        }
+        // 只清目录；环境变量由字段 `env` 的 Drop 还原（本 Drop 先于字段执行，
+        // 故清理期间 HOME 仍指向本目录，不会误删他人）。
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -160,7 +162,7 @@ mod tests {
 
     #[test]
     fn integration_list_show_run_prepare_chain() {
-        let home = TempHome::new("chain");
+        let mut home = TempHome::new("chain");
         home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
 
         // 1. list：扫描到已缓存镜像（返回 Ok 即不报错；输出人工可查）
@@ -186,7 +188,7 @@ mod tests {
 
         let fake_exe = std::env::current_exe().unwrap();
         // WBOX_LINUX 环境变量（blink::LINUX_EXE_ENV，模块私有故此处用字面量）
-        std::env::set_var("WBOX_LINUX", &fake_exe);
+        home.env().set("WBOX_LINUX", &fake_exe);
         let spec = backend::RunSpec {
             name: "t".to_string(),
             limits: Default::default(),
@@ -199,7 +201,6 @@ mod tests {
             env_pass_all: false,
         };
         let prepared = backend::BlinkBackend.prepare(&spec).unwrap();
-        std::env::remove_var("WBOX_LINUX");
         // 执行计划：wbox-linux + 合并命令；BLINK_PREFIX 指向 rootfs
         assert_eq!(prepared.cmd[0], fake_exe.to_string_lossy());
         assert_eq!(&prepared.cmd[1..], &["/bin/sh", "-l"]);

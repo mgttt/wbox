@@ -324,9 +324,9 @@ mod tests {
 
     #[test]
     fn build_sanitized_env_pass_all_still_filters_reserved() {
-        std::env::set_var("WBOX_TEST_SECRET", "hunter2");
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set("WBOX_TEST_SECRET", "hunter2");
         let env = build_sanitized_env(&[], &[], true, false);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_TEST_SECRET"));
-        std::env::remove_var("WBOX_TEST_SECRET");
     }
 }

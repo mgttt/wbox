@@ -17,6 +17,9 @@ mod cli;
 mod error;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod oci;
+// 测试脚手架：环境变量互斥 + 自动还原（进程级全局状态在并行用例下必须串行化）。
+#[cfg(test)]
+mod testenv;
 // 以下模块直接调用 Win32 API，仅 Windows 可编译。
 #[cfg(windows)]
 mod acl;
