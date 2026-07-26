@@ -270,47 +270,10 @@ static int WsaInit(void) {
 }
 
 // ---------------------------------------------------------------- errno map
+// mapping tables centralized in w32errno.c
 
 static int WsaErrno(void) {
-  switch (ws.WSAGetLastError()) {
-    case 10004: return EINTR;
-    case 10013: return EACCES;
-    case 10014: return EFAULT;
-    case 10022: return EINVAL;
-    case 10024: return EMFILE;
-    case 10035: return EAGAIN;      // WSAEWOULDBLOCK
-    case 10036: return EINPROGRESS;
-    case 10037: return EALREADY;
-    case 10038: return ENOTSOCK;
-    case 10039: return EDESTADDRREQ;
-    case 10040: return EMSGSIZE;
-    case 10041: return EPROTOTYPE;
-    case 10042: return ENOPROTOOPT;
-    case 10043: return EPROTONOSUPPORT;
-    case 10044: return ESOCKTNOSUPPORT;
-    case 10045: return EOPNOTSUPP;
-    case 10046: return EPFNOSUPPORT;
-    case 10047: return EAFNOSUPPORT;
-    case 10048: return EADDRINUSE;
-    case 10049: return EADDRNOTAVAIL;
-    case 10050: return ENETDOWN;
-    case 10051: return ENETUNREACH;
-    case 10052: return ENETRESET;
-    case 10053: return ECONNABORTED;
-    case 10054: return ECONNRESET;
-    case 10055: return ENOBUFS;
-    case 10056: return EISCONN;
-    case 10057: return ENOTCONN;
-    case 10058: return EPIPE;       // WSAESHUTDOWN
-    case 10060: return ETIMEDOUT;
-    case 10061: return ECONNREFUSED;
-    case 10065: return EHOSTUNREACH;
-    case 11001: return ENOENT;      // WSAHOST_NOT_FOUND
-    case 11002: return EAGAIN;      // WSATRY_AGAIN
-    case 11003: return EIO;         // WSANO_RECOVERY
-    case 11004: return ENOENT;      // WSANO_DATA
-    default: return EINVAL;
-  }
+  return W32ErrFromWsa(ws.WSAGetLastError());
 }
 
 static int WsaRc(int rc) {
@@ -984,8 +947,9 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
   if (WsaInit() < 0) return 0;
   NET_LOGF("WboxSockPoll(nfds=%lu timeout=%d)", (unsigned long)n, timeout);
   struct wsa_pollfd stackw[32];
+  int stackidx[32];
   struct wsa_pollfd *w = stackw;
-  int *idx = NULL;
+  int *idx = stackidx;
   int nsock = 0;
   for (nfds_t i = 0; i < n; ++i)
     if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) ++nsock;
@@ -997,36 +961,6 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       return -1;
     }
     idx = (int *)(w + nsock);
-  } else {
-    int stackidx[32];
-    idx = stackidx;
-    // careful: stackidx must outlive the loop below; it does (same frame)
-    int k = 0;
-    for (nfds_t i = 0; i < n; ++i) {
-      if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) {
-        w[k].fd = SockFromFd(pfds[i].fd);
-        w[k].events = PollEventsToWs(pfds[i].events);
-        w[k].revents = 0;
-        idx[k] = (int)i;
-        ++k;
-      }
-    }
-    /* analyzer: idx[0..k) is fully initialized here and k == nsock
-       (same filter as the count pass above); the "uninitialized
-       subscript" warning below is a false positive. */
-    int rc = ws.WSAPoll(w, nsock, timeout);
-    if (rc < 0) {
-      errno = WsaErrno();
-      return -1;
-    }
-    int ready = 0;
-    for (int j = 0; j < nsock; ++j) {
-      if (w[j].revents) {
-        pfds[idx[j]].revents |= PollEventsFromWs(w[j].revents);
-        if (pfds[idx[j]].revents) ++ready;
-      }
-    }
-    return ready;
   }
   int k = 0;
   for (nfds_t i = 0; i < n; ++i) {
@@ -1038,9 +972,12 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       ++k;
     }
   }
+  /* analyzer: idx[0..k) is fully initialized here and k == nsock
+     (same filter as the count pass above); the "uninitialized
+     subscript" warning below is a false positive. */
   int rc = ws.WSAPoll(w, nsock, timeout);
   if (rc < 0) {
-    free(w);
+    if (w != stackw) free(w);
     errno = WsaErrno();
     return -1;
   }
@@ -1051,7 +988,7 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
       if (pfds[idx[j]].revents) ++ready;
     }
   }
-  free(w);
+  if (w != stackw) free(w);
   return ready;
 }
 
@@ -1273,7 +1210,7 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
     pfds[i].events = (int16_t)(ep->ents[i].events & (EPOLLIN | EPOLLOUT | EPOLLPRI));
     pfds[i].revents = 0;
   }
-  int rc = poll(pfds, ep->n, timeout);
+  int rc = W32WaitFds(pfds, ep->n, timeout);  // shared wait primitive
   if (rc <= 0) {
     free(pfds);
     return rc < 0 ? -1 : 0;
@@ -1305,14 +1242,10 @@ int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
 
 int h_errno;
 
+// winsock returns WSATRY_AGAIN/WSAHOST_NOT_FOUND/... positive codes;
+// table centralized in w32errno.c
 static int GaiErr(int wsrc) {
-  // winsock returns WSATRY_AGAIN/WSAHOST_NOT_FOUND/... positive codes
-  switch (wsrc) {
-    case 11002: return EAI_AGAIN;
-    case 11001:
-    case 11004: return EAI_NONAME;
-    default: return EAI_FAIL;
-  }
+  return W32GaiErrFromWsa(wsrc);
 }
 
 int getaddrinfo(const char *node, const char *service,

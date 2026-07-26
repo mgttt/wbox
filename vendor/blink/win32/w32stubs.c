@@ -1,5 +1,6 @@
-// wbox win32: termios console stubs, sockets/epoll stubs (L1 no network),
-// dirent implementation, TUI stubs, small string/stdlib helpers.
+// wbox win32: termios helper stubs, dirent implementation, TUI stubs,
+// small string/stdlib helpers. (sockets/epoll/tcgetattr/tcsetattr are
+// real implementations in w32sock.c.)
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -24,50 +25,9 @@ intptr_t _get_osfhandle(int);
 #include "blink/machine.h"
 
 // ---------------------------------------------------------------- termios
-// L1: dumb console. tcgetattr returns a sane cooked-mode profile;
-// tcsetattr(ICANON off) flips console to raw-ish input so shells work.
-
-static struct termios g_tios = {
-    .c_iflag = ICRNL | IXON,
-    .c_oflag = OPOST | ONLCR,
-    .c_cflag = CS8 | CREAD | HUPCL,
-    .c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN,
-    .c_line = 0,
-    .c_cc = {3, 28, 127, 21, 4, 0, 1, 0, 17, 19, 26, 0, 18, 15, 23, 22, 0},
-    .c_ispeed = B38400,
-    .c_ospeed = B38400,
-};
-
-static void W32ApplyConsole(int fd, const struct termios *t) {
-  HANDLE h = (HANDLE)_get_osfhandle(fd);
-  if (h == INVALID_HANDLE_VALUE) return;
-  DWORD m;
-  if (!GetConsoleMode(h, &m)) return;
-  if (t->c_lflag & ICANON) {
-    m |= ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT;
-  } else {
-    m &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-    m |= ENABLE_VIRTUAL_TERMINAL_INPUT;
-  }
-  SetConsoleMode(h, m);
-  // try to enable VT output for colors/readline
-  HANDLE ho = GetStdHandle(STD_OUTPUT_HANDLE);
-  DWORD om;
-  if (GetConsoleMode(ho, &om)) {
-    SetConsoleMode(ho, om | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-  }
-}
-
-int tcgetattr(int fd, struct termios *t) {
-  *t = g_tios;
-  return 0;
-}
-
-int tcsetattr(int fd, int act, const struct termios *t) {
-  g_tios = *t;
-  W32ApplyConsole(fd, t);
-  return 0;
-}
+// tcgetattr/tcsetattr (and console-mode application) live in w32sock.c
+// (feat/net); the L1 stubs that used to sit here were deleted with the
+// STUB_RENAMES build hack. The remaining helpers are the real symbols.
 
 int tcdrain(int fd) { return 0; }
 int tcflow(int fd, int act) { return 0; }
@@ -95,71 +55,15 @@ void cfmakeraw(struct termios *t) {
 }
 pid_t tcgetsid(int fd) { return getpid(); }
 
-// ---------------------------------------------------------------- sockets (L1: off)
-
-static int Nosock(void) {
-  errno = EPROTONOSUPPORT;
-  return -1;
-}
-
-int socket(int d, int t, int p) { return Nosock(); }
-int socketpair(int d, int t, int p, int f[2]) { return Nosock(); }
-int bind(int s, const struct sockaddr *a, socklen_t l) { return Nosock(); }
-int connect(int s, const struct sockaddr *a, socklen_t l) { return Nosock(); }
-int listen(int s, int b) { return Nosock(); }
-int accept(int s, struct sockaddr *a, socklen_t *l) { return Nosock(); }
-int accept4(int s, struct sockaddr *a, socklen_t *l, int f) { return Nosock(); }
-int shutdown(int s, int h) { return Nosock(); }
-ssize_t send(int s, const void *b, size_t n, int f) { return Nosock(); }
-ssize_t recv(int s, void *b, size_t n, int f) { return Nosock(); }
-ssize_t sendto(int s, const void *b, size_t n, int f, const struct sockaddr *a,
-               socklen_t l) { return Nosock(); }
-ssize_t recvfrom(int s, void *b, size_t n, int f, struct sockaddr *a,
-                 socklen_t *l) { return Nosock(); }
-ssize_t sendmsg(int s, const struct msghdr *m, int f) { return Nosock(); }
-ssize_t recvmsg(int s, struct msghdr *m, int f) { return Nosock(); }
-int getsockopt(int s, int l, int o, void *v, socklen_t *n) { return Nosock(); }
-int setsockopt(int s, int l, int o, const void *v, socklen_t n) { return Nosock(); }
-int getsockname(int s, struct sockaddr *a, socklen_t *l) { return Nosock(); }
-int getpeername(int s, struct sockaddr *a, socklen_t *l) { return Nosock(); }
-int sockatmark(int s) { return Nosock(); }
+// ---------------------------------------------------------------- sockets
+// The real socket/epoll/inet_pton/inet_ntop implementations live in
+// w32sock.c (feat/net); the L1 ENOSYS stubs that used to be here were
+// deleted together with the STUB_RENAMES build hack that hid them.
 
 const struct in6_addr in6addr_any = {{0}};
 const struct in6_addr in6addr_loopback = {{1}};
 
 uint32_t inet_addr_(void);  // placate
-int inet_pton(int af, const char *src, void *dst) {
-  errno = EAFNOSUPPORT;
-  return -1;
-}
-const char *inet_ntop(int af, const void *src, char *dst, socklen_t size) {
-  errno = EAFNOSUPPORT;
-  return NULL;
-}
-
-// ---------------------------------------------------------------- epoll (L1: stubs)
-
-int epoll_create(int size) {
-  errno = ENOSYS;
-  return -1;
-}
-int epoll_create1(int flags) {
-  errno = ENOSYS;
-  return -1;
-}
-int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
-  errno = ENOSYS;
-  return -1;
-}
-int epoll_wait(int epfd, struct epoll_event *ev, int max, int timeout) {
-  errno = ENOSYS;
-  return -1;
-}
-int epoll_pwait(int epfd, struct epoll_event *ev, int max, int timeout,
-                const sigset_t *mask) {
-  errno = ENOSYS;
-  return -1;
-}
 
 // ---------------------------------------------------------------- dirent
 

@@ -60,23 +60,10 @@ if [ "$JIT" = 1 ]; then
 else
   CFLAGS="$CFLAGS -DDISABLE_JIT"
 fi
-SRCS="$SRCS win32/w32mem.c win32/w32fd.c win32/w32proc.c win32/w32sig.c win32/w32stubs.c win32/w32sock.c"
-# feat/net: w32sock.c provides the real socket/epoll/termios symbols; the
-# L1 stubs still living in w32stubs.c are renamed away (dead code) until the
-# merge deletes them there. Keep this list in sync with w32sock.c's header.
-STUB_RENAMES="-Dsocket=wbox_stub_socket -Dsocketpair=wbox_stub_socketpair \
-  -Dbind=wbox_stub_bind -Dconnect=wbox_stub_connect -Dlisten=wbox_stub_listen \
-  -Daccept=wbox_stub_accept -Daccept4=wbox_stub_accept4 \
-  -Dshutdown=wbox_stub_shutdown -Dsend=wbox_stub_send -Drecv=wbox_stub_recv \
-  -Dsendto=wbox_stub_sendto -Drecvfrom=wbox_stub_recvfrom \
-  -Dsendmsg=wbox_stub_sendmsg -Drecvmsg=wbox_stub_recvmsg \
-  -Dgetsockopt=wbox_stub_getsockopt -Dsetsockopt=wbox_stub_setsockopt \
-  -Dgetsockname=wbox_stub_getsockname -Dgetpeername=wbox_stub_getpeername \
-  -Dsockatmark=wbox_stub_sockatmark -Depoll_create=wbox_stub_epoll_create \
-  -Depoll_create1=wbox_stub_epoll_create1 -Depoll_ctl=wbox_stub_epoll_ctl \
-  -Depoll_wait=wbox_stub_epoll_wait -Depoll_pwait=wbox_stub_epoll_pwait \
-  -Dinet_pton=wbox_stub_inet_pton -Dinet_ntop=wbox_stub_inet_ntop \
-  -Dtcgetattr=wbox_stub_tcgetattr -Dtcsetattr=wbox_stub_tcsetattr"
+SRCS="$SRCS win32/w32mem.c win32/w32fd.c win32/w32proc.c win32/w32sig.c win32/w32stubs.c win32/w32sock.c win32/w32errno.c"
+# feat/net: w32sock.c provides the real socket/epoll/termios symbols. The
+# L1 stubs that used to live in w32stubs.c (renamed away via the former
+# STUB_RENAMES hack) were deleted; w32stubs.c now compiles clean.
 # zlib core only: gz*.c pull in <io.h> and blink only needs
 # compress2/uncompress/compressBound.
 ZSRCS=$(ls third_party/libz/*.c | grep -v '/gz')
@@ -91,7 +78,6 @@ compile_one() {
   echo "$obj" >>"$OBJLIST"
   case $src in
     third_party/libz/*) $CC $ZCFLAGS -c "$src" -o "$obj" ;;
-    win32/w32stubs.c) $CC $CFLAGS $STUB_RENAMES -c "$src" -o "$obj" ;;
     blink/blink.c) $CC $CFLAGS -include "$VERH" -c "$src" -o "$obj" ;;
     *) $CC $CFLAGS -c "$src" -o "$obj" ;;
   esac

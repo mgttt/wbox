@@ -111,14 +111,25 @@ static int W32RootComps(const wchar_t *root) {
 
 static int W32EscapeName(wchar_t *w);
 
+// Shared escape+join+normalize step of THE path-resolution entry points
+// (W32Path for cwd/absolute, W32ResolveAt for the dirfd-anchored *at
+// family): escapes `rel` in place (%XXXX form), joins it under `anchor`
+// with one separator, and component-normalizes the result, rejecting any
+// ".." that pops above `floor` anchor components. Sets LastError on
+// failure. Previously this sequence was open-coded twice.
+static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
+                       wchar_t out[MAX_PATH]);
+
 // C2 (security-audit): THE jail root. Every host path that reaches a
 // Win32 API must textually resolve inside this directory — this is the
 // single egress check shared by all path entries (W32Path for cwd-based
-// and absolute paths, W32ResolveAt for the dirfd-anchored *at family).
-// It is the 雏形 of the planned unified path-normalization entry point:
+// and absolute paths, W32ResolveAt for the dirfd-anchored *at family;
+// both share the W32JoinNorm escape/join/normalize step).
 // VfsInit publishes the VFS root via WBOX_ROOT (BLINK_PREFIX, or the
 // launch cwd under jail-by-default), so the VFS layer and this fd layer
 // never disagree about what "outside the sandbox" means.
+// (Audit: w32stubs.c's opendir/realpath intentionally bypass this — they
+// serve the VFS hostfs with already host-rooted paths, a different layer.)
 static const wchar_t *W32JailRoot(int *comps) {
   static wchar_t root[MAX_PATH];
   static int root_init, root_comps;
@@ -191,15 +202,10 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
     // F7/F8: escape the guest part BEFORE joining — the jail root is
     // cached in escaped form, and escaping twice would corrupt '%'.
     // "." / ".." are ASCII, so normalization below is unaffected.
-    if (W32EscapeName(tmp)) return NULL;
-    if (wcslen(root) + wcslen(tmp) + 2 >= MAX_PATH) return NULL;
-    wcscpy(joined, root);
-    wcscat(joined, tmp);
     // C2: component-level normalization; reject any result that escapes
     // above the jail root (e.g. "/../outside" reaching the host).
-    if (W32NormalizeW(joined, buf, root_comps)) {
-      SetLastError(ERROR_ACCESS_DENIED);
-      return NULL;
+    if (W32JoinNorm(root, tmp + 1 /* skip leading '/' */, root_comps, buf)) {
+      return NULL;  // error already set
     }
   } else {
     n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
@@ -288,6 +294,24 @@ toolong:
   return -1;
 }
 
+static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
+                       wchar_t out[MAX_PATH]) {
+  wchar_t joined[MAX_PATH];
+  if (W32EscapeName(rel)) return -1;  // error already set
+  if (wcslen(anchor) + wcslen(rel) + 3 > MAX_PATH) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+    return -1;
+  }
+  wcscpy(joined, anchor);
+  wcscat(joined, L"\\");
+  wcscat(joined, rel);
+  if (W32NormalizeW(joined, out, floor)) {
+    SetLastError(ERROR_ACCESS_DENIED);
+    return -1;
+  }
+  return 0;
+}
+
 static int W32HexDig(wchar_t c) {
   return c >= L'0' && c <= L'9' ? c - L'0'
        : c >= L'a' && c <= L'f' ? c - L'a' + 10
@@ -318,7 +342,7 @@ void W32UnescapeName(wchar_t *w) {
 // path resolved against the process-global cwd).
 static wchar_t *W32ResolveAt(int dirfd, const char *path,
                              wchar_t buf[MAX_PATH]) {
-  wchar_t dir[MAX_PATH], rel[MAX_PATH], joined[MAX_PATH];
+  wchar_t dir[MAX_PATH], rel[MAX_PATH];
   wchar_t *d;
   DWORD n;
   HANDLE h;
@@ -340,18 +364,10 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
   // F7/F8: the anchor `d` comes from the host (already escaped); escape
   // the relative part before joining. "." / ".." components are ASCII
   // and unaffected, so normalization below still sees them.
-  if (W32EscapeName(rel)) return NULL;
-  if (wcslen(d) + wcslen(rel) + 2 >= MAX_PATH) return NULL;
-  wcscpy(joined, d);
-  wcscat(joined, L"\\");
-  wcscat(joined, rel);
   // the anchor is absolute; ".." may not climb above the drive root.
   // (the VFS/hostfs layer already clamps ".." at the guest root — this
   // is defense in depth.)
-  if (W32NormalizeW(joined, buf, 0)) {
-    SetLastError(ERROR_ACCESS_DENIED);
-    return NULL;
-  }
+  if (W32JoinNorm(d, rel, 0, buf)) return NULL;  // error already set
   // C2 unified egress check: the resolved path must stay inside the
   // jail root, no matter which directory the dirfd points at (S3).
   if (W32WithinRoot(buf)) {
@@ -488,43 +504,9 @@ static DWORD W32Disposition(int flags) {
   return OPEN_EXISTING;
 }
 
+// mapping table centralized in w32errno.c (W32ErrFromHost)
 static int W32Err(void) {
-  DWORD e = GetLastError();
-  switch (e) {
-    case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND:
-      return ENOENT;
-    case ERROR_ACCESS_DENIED:
-      return EACCES;
-    case ERROR_ALREADY_EXISTS:
-    case ERROR_FILE_EXISTS:
-      return EEXIST;
-    case ERROR_INVALID_HANDLE:
-      return EBADF;
-    case ERROR_INVALID_PARAMETER:
-      return EINVAL;
-    case ERROR_NOT_ENOUGH_MEMORY:
-      return ENOMEM;
-    case ERROR_WRITE_PROTECT:
-      return EROFS;
-    case ERROR_SHARING_VIOLATION:
-    case ERROR_LOCK_VIOLATION:
-      return EACCES;
-    case ERROR_HANDLE_EOF:
-      return 0;
-    case ERROR_BROKEN_PIPE:
-      return EPIPE;
-    case ERROR_DISK_FULL:
-      return ENOSPC;
-    case ERROR_DIR_NOT_EMPTY:
-      return ENOTEMPTY;
-        case ERROR_DIRECTORY:
-      return ENOTDIR;
-    case ERROR_IS_SUBSTED:
-      return EEXIST;
-    default:
-      return EINVAL;
-  }
+  return W32ErrFromHost(GetLastError());
 }
 
 static int W32ToCrt(HANDLE h, int flags) {
@@ -697,6 +679,38 @@ static int W32IsAppend(int fd) {
   return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
 }
 
+// Unified CRT-fd classification — THE single lookup that decides which
+// backing object a host-side fd refers to (see win32.h). The namespaces are
+// disjoint: specials are sentinels >= 1000000, epoll/socket are real CRT
+// fds registered in the w32sock.c tables, everything else HANDLE-backed.
+int W32FdClassify(int fd, struct W32FdInfo *out) {
+  struct W32FdInfo tmp;
+  if (!out) out = &tmp;
+  out->handle = (void *)(intptr_t)-1;
+  out->dev = 0;
+  if (IsSpecial(fd)) {
+    out->kind = W32FD_SPECIAL;
+    out->dev = fd;
+    return out->kind;
+  }
+  if (WboxEpollIsFd(fd)) {
+    out->kind = W32FD_EPOLL;
+    return out->kind;
+  }
+  if (WboxSockIsFd(fd)) {
+    out->kind = W32FD_SOCKET;
+    return out->kind;
+  }
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    out->kind = W32FD_BAD;
+    return out->kind;
+  }
+  out->kind = W32FD_FILE;
+  out->handle = (void *)h;
+  return out->kind;
+}
+
 // positioned IO on pipes is ESPIPE on Linux; on win32 ReadFile with an
 // OVERLAPPED offset on a pipe handle can BLOCK forever (t_fd_rw /
 // t_negative empty-pipe hang), so reject before touching the handle.
@@ -753,27 +767,29 @@ static ssize_t W32PwriteAt(HANDLE h, const void *buf, size_t n, uint64_t off) {
 }
 
 ssize_t read(int fd, void *buf, size_t n) {
-  if (WboxSockIsFd(fd)) return WboxSockRead(fd, buf, n);  // feat/net
-  if (IsSpecial(fd)) {
-    if (fd == 1000001) {  // zero
-      memset(buf, 0, n);
-      return n;
-    }
-    if (fd == 1000000) {  // urandom
-      NTSTATUS st = BCryptGenRandom(NULL, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-      if (st != 0) {
-        errno = EIO;
-        return -1;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET:
+      return WboxSockRead(fd, buf, n);  // feat/net
+    case W32FD_SPECIAL:
+      if (fi.dev == 1000001) {  // zero
+        memset(buf, 0, n);
+        return n;
       }
-      return n;
-    }
-    return 0;  // full: reads give eof
+      if (fi.dev == 1000000) {  // urandom
+        NTSTATUS st = BCryptGenRandom(NULL, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (st != 0) {
+          errno = EIO;
+          return -1;
+        }
+        return n;
+      }
+      return 0;  // full: reads give eof
+    case W32FD_BAD:
+      errno = EBADF;
+      return -1;
   }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   DWORD got = 0;
   if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, NULL)) {
     DWORD e = GetLastError();
@@ -786,19 +802,21 @@ ssize_t read(int fd, void *buf, size_t n) {
 }
 
 ssize_t write(int fd, const void *buf, size_t n) {
-  if (WboxSockIsFd(fd)) return WboxSockWrite(fd, buf, n);  // feat/net
-  if (IsSpecial(fd)) {
-    if (fd == 1000002) {  // full
-      errno = ENOSPC;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET:
+      return WboxSockWrite(fd, buf, n);  // feat/net
+    case W32FD_SPECIAL:
+      if (fi.dev == 1000002) {  // full
+        errno = ENOSPC;
+        return -1;
+      }
+      return n;
+    case W32FD_BAD:
+      errno = EBADF;
       return -1;
-    }
-    return n;
   }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   // F2: O_APPEND — every write goes to EOF regardless of the fd position.
   if (W32IsAppend(fd)) SetFilePointerEx(h, (LARGE_INTEGER){0}, NULL, FILE_END);
   DWORD put = 0;
@@ -811,9 +829,16 @@ ssize_t write(int fd, const void *buf, size_t n) {
 }
 
 int close(int fd) {
-  if (WboxSockClose(fd)) return 0;    // feat/net: socket fds
-  if (WboxEpollClose(fd)) return 0;   // feat/net: epoll fds
-  if (IsSpecial(fd)) return 0;
+  switch (W32FdClassify(fd, NULL)) {
+    case W32FD_SOCKET:
+      (void)WboxSockClose(fd);  // feat/net: socket fds (classified above)
+      return 0;
+    case W32FD_EPOLL:
+      (void)WboxEpollClose(fd);  // feat/net: epoll fds (classified above)
+      return 0;
+    case W32FD_SPECIAL:
+      return 0;
+  }
   W32SetAppend(fd, 0);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
@@ -1256,32 +1281,33 @@ int W32FileSize64(int fd, int64_t *out) {
 }
 
 int fstat(int fd, struct stat *st) {
-  unsigned sockmode;
-  if (WboxSockFstatMode(fd, &sockmode)) {  // feat/net
-    memset(st, 0, sizeof(*st));
-    st->st_mode = sockmode;
-    st->st_blksize = 4096;
-    st->st_nlink = 1;
-    return 0;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET: {  // feat/net
+      unsigned sockmode = 0;
+      (void)WboxSockFstatMode(fd, &sockmode);  // classified above
+      memset(st, 0, sizeof(*st));
+      st->st_mode = sockmode;
+      st->st_blksize = 4096;
+      st->st_nlink = 1;
+      return 0;
+    }
+    case W32FD_EPOLL:  // feat/net
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFCHR | 0600;
+      st->st_blksize = 4096;
+      st->st_nlink = 1;
+      return 0;
+    case W32FD_SPECIAL:
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFCHR | 0666;
+      st->st_blksize = 4096;
+      return 0;
+    case W32FD_BAD:
+      errno = EBADF;
+      return -1;
   }
-  if (WboxEpollIsFd(fd)) {  // feat/net
-    memset(st, 0, sizeof(*st));
-    st->st_mode = S_IFCHR | 0600;
-    st->st_blksize = 4096;
-    st->st_nlink = 1;
-    return 0;
-  }
-  if (IsSpecial(fd)) {
-    memset(st, 0, sizeof(*st));
-    st->st_mode = S_IFCHR | 0666;
-    st->st_blksize = 4096;
-    return 0;
-  }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   // F1: resolve the path for the emulated-mode lookup (fails for pipes)
   wchar_t wbuf[MAX_PATH], *wp = NULL;
   DWORD wn = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
@@ -1709,25 +1735,36 @@ int utimensat(int dirfd, const char *path, const struct timespec ts[2],
 
 // ---------------------------------------------------------------- poll/select
 
-int poll(struct pollfd *pfds, nfds_t n, int timeout) {
-  // files & console always ready; pipes peeked; sockets via WSAPoll (feat/net)
+// THE shared wait primitive of the win32 port: poll/epoll_wait and (via
+// fd->cb->poll through the VFS) syscall.c's W32NonblockPoll gate all funnel
+// here. The per-class readiness semantics live in exactly one place:
+// sockets are level-triggered WSAPoll (w32sock.c, sliced so the non-socket
+// fds are re-checked regularly), files/consoles are always ready, pipes are
+// PeekNamedPipe'd with a handle-wait fallback for wine fifos.
+int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
   DWORD deadline = timeout >= 0 ? GetTickCount() + timeout : 0;
   int nsock = 0;
   for (nfds_t i = 0; i < n; ++i)
-    if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) ++nsock;
+    if (pfds[i].fd >= 0 && W32FdClassify(pfds[i].fd, NULL) == W32FD_SOCKET)
+      ++nsock;
   for (;;) {
     int nready = 0;
     for (nfds_t i = 0; i < n; ++i) {
       struct pollfd *p = pfds + i;
+      struct W32FdInfo fi;
       p->revents = 0;
-      if (p->fd < 0 || WboxSockIsFd(p->fd)) continue;
-      if (IsSpecial(p->fd)) {
-        p->revents = p->events & (POLLIN | POLLOUT);
-      } else {
-        HANDLE h = W32Handle(p->fd);
-        if (h == INVALID_HANDLE_VALUE) {
+      if (p->fd < 0) continue;
+      switch (W32FdClassify(p->fd, &fi)) {
+        case W32FD_SOCKET:
+          continue;  // serviced by WboxSockPoll below
+        case W32FD_SPECIAL:
+          p->revents = p->events & (POLLIN | POLLOUT);
+          break;
+        case W32FD_BAD:
           p->revents = POLLNVAL;
-        } else {
+          break;
+        default: {
+          HANDLE h = (HANDLE)fi.handle;
           DWORD ft = GetFileType(h);
           if (ft == FILE_TYPE_PIPE) {
             DWORD avail = 0;
@@ -1761,6 +1798,7 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
           } else {
             p->revents = p->events & (POLLIN | POLLOUT);
           }
+          break;
         }
       }
       if (p->revents) ++nready;
@@ -1786,6 +1824,10 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
     if (timeout > 0 && GetTickCount() >= deadline) return 0;
     if (!nsock) Sleep(timeout > 10 ? 10 : 1);
   }
+}
+
+int poll(struct pollfd *pfds, nfds_t n, int timeout) {
+  return W32WaitFds(pfds, n, timeout);
 }
 
 int ppoll(struct pollfd *pfds, nfds_t n, const struct timespec *ts,
