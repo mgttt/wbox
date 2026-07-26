@@ -208,11 +208,41 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 
 **两个利好**：`jit.h` 已内建 Win64 ABI（JIT 移植成本大幅降低）；guest `execve` 是进程内重建 Machine，不依赖宿主 exec（fork+exec 特判的工程量比预判小）。
 
-## 10. 多宿主后端（设计，未实现）
+## 10. 多宿主后端（Linux 宿主 L0/L1 已落地，其余为设计）
 
-> 起因：wbox 当前只做「Windows 宿主」。把宿主维度打开后，`Backend` trait
+> 起因：wbox 最初只做「Windows 宿主」。把宿主维度打开后，`Backend` trait
 > 天然可以承载更多组合。本节记录**评估结论与优先级**，避免把"能做"当成
 > "该做"。
+
+### 10.0 Linux 宿主的目标图景（按确定性排序）
+
+Linux 侧不是"顺手也支持一下"，而是与 Windows 侧对等的一条主线。四个台阶
+按**确定性**而非按吸引力排序——越往下越是愿景，工程量与不确定性同步放大：
+
+| 台阶 | 内容 | 状态 | 对标 |
+|---|---|---|---|
+| ① 沙箱 Linux 程序 | 宿主已有的 ELF 关进 namespace + cgroup | ✅ L0/L1 已落地（L2 进行中） | `bwrap` / `systemd-run` |
+| ② 沙箱 Linux 容器 | OCI 镜像 rootfs 直接跑 | ✅ 同上（复用整个 `oci/`） | podman / docker（**只对标 runner，不对标生态**） |
+| ③ 沙箱 Windows 程序 | Linux 上跑 PE，**聚焦 CLI/TUI** | 📐 见 §10.3 | wine（集成而非取代） |
+| ④ Windows 容器 | Linux 上跑 Windows 容器镜像 | 🔭 远期愿景，仅记录 | Windows Container |
+
+关于 ②：**明确不以功能数对标 podman/docker**。它们的护城河是网络/卷/
+compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是它在 Windows
+上已经站住的那个——单文件、无 daemon、rootless、给 Agent 与 CI 当沙箱用。
+同一定位平移到 Linux 是自洽的；比功能数量必输。
+
+关于 ③ 的**范围收窄**：只做 CLI/TUI，不碰 GUI/DirectX/COM。理由是这三块
+正是 wine 三十年工程量的主体，而 CLI/TUI 的 Win32 表面小得多（控制台 API、
+文件/注册表、进程/线程），且与 wbox 已有的 `win32/` 移植层**方向相反但知识
+互通**——那 8k 行做的是「把 POSIX 实现在 Win32 上」，反向要做的是「把 Win32
+实现在 POSIX 上」，两者对同一批语义（路径规范化、fd/HANDLE 映射、控制台
+模式、errno↔GetLastError）的理解可以复用，但**代码不能复用**，这一点必须
+说清楚，否则会严重低估工作量。
+
+关于 ④：记录在此是为了不让它变成口头传说。**目前不投入**——Windows 容器
+镜像的 base layer 依赖 Windows 内核 API 面，在 Linux 上等价于把 ③ 做到
+"能跑完整 Windows 服务栈"的程度，是 ③ 的超集而非并列项。真要做，前置是
+③ 已覆盖到足够的 API 面，而不是另起一条路线。
 
 ### 10.1 维度拆解
 
@@ -249,6 +279,18 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
   把 POSIX 实现在 Win32 上。两者没有可复用部分，自研等于从零再造一个 wine。
 - **划算的做法**：把 wine 当执行器，包进 10.2 的 namespace 沙箱里，
   用户得到统一 CLI 与统一隔离语义，而我们不碰 Win32 语义这个无底洞。
+- **范围收窄到 CLI/TUI**（§10.0 ③）：不碰 GUI/DirectX/COM。这不是偷懒，
+  而是把工程量压到可控：CLI/TUI 需要的 Win32 表面主要是控制台 API、
+  文件/注册表、进程/线程，而 GUI 那一大摊正是 wine 工程量的主体。
+- **落地形态**（待做，非本期）：`WineBackend` 与 `LinuxNativeBackend` 共用
+  同一套隔离（namespace + cgroup），差别只在执行器——前者 `wine app.exe`，
+  后者直接 exec。故实现上应是 `LinuxNativeBackend` 的一个执行器变体，
+  而不是平行的第三份隔离代码。
+- **前置检测**：宿主无 wine 时必须明确报"该宿主不支持运行 PE"，
+  不得静默降级（§10.5 语义一致性红线）。
+- **不做的事**：不 bundle wine（体积与许可）、不替 wine 做兼容层补丁、
+  不承诺 GUI 程序可用。用户的 wine 版本差异导致的行为差异不属 wbox 缺陷，
+  但 `wbox run -V` 应打印 wine 版本便于甩锅定位。
 
 ### 10.4 排序与前置条件
 
