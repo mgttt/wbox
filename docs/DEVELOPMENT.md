@@ -89,7 +89,7 @@ WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
 ## 3. 验证三层（发布门禁的本地复现）
 
 ```bash
-cargo test --locked                                          # ① Rust 单测（Linux 可全跑；144 passed 基线）
+cargo test --locked                                          # ① Rust 单测（Linux 可全跑；155 passed 基线）
 rustup target add x86_64-pc-windows-msvc
 cargo check --locked --target x86_64-pc-windows-msvc         # ② Win32 编译门禁（要求 0 warning）
 scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox   # ③ 真机矩阵
@@ -131,7 +131,7 @@ wbox image list / image rm
 | `check-windows-msvc` | ubuntu(+target) | Win32 专属代码编译期门禁 |
 | `smoke-windows` | windows | build + `--help`/`image list`/AppContainer 内 cmd 冒烟 + 真机 `image pull`（registry 不可达标黄不红） |
 | `build-wbox-linux` | windows+MSYS2 | MinGW 构建 wbox-linux.exe + 完整验收矩阵（**PR 只跑冒烟**，矩阵留给 main/tag/nightly） |
-| `guest-tests` | windows | 前置齐备才执行，否则 `::notice::` SKIP 不阻塞。前置有两项：`tests/run.sh`（已落地）与 `wbox-linux.exe`（本 job 不构建，故当前恒 SKIP，见 §7.3） |
+| `guest-tests` | windows | **真门禁**：`needs: build-wbox-linux`，取其 artifact 拿 exe + 经 msys2 装 zig，跑 `tests/run.sh`。判定走 `tests/known-failures.txt` 基线（失败 ⊆ 基线放行；基线外新失败 = 回归；基线内变通过 = 基线过期，均判 FAIL）。artifact 缺失仍 SKIP 不阻塞 |
 
 tag `v*` 时 `release` job needs 全部 6 个门禁 job 全绿，打包
 wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
@@ -153,12 +153,12 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 1. **开发沙箱是 Linux**：无法跑 Windows 功能测试；Win32 代码靠
    `cargo check --target x86_64-pc-windows-msvc` 门禁，真机信号靠 CI。
 2. **别用 MSVC 编 vendor/blink**：GNU 扩展必须 MinGW/zig cc。
-3. **guest-tests job 当前恒 SKIP（原因已变）**：入口 `tests/run.sh` 已落地
-   （包装 `run-guest-tests.sh`），入口名问题不复存在。现在 SKIP 的原因是
-   运行前置缺失——该 job 既不构建 `wbox-linux.exe`，也没有 zig（guest 用例
-   要交叉编译成 x86_64-linux-musl 静态 ELF）。补齐路径：取
-   build-wbox-linux 的 artifact + 装 zig。矩阵 F 组已在 build-wbox-linux
-   内跑同一套 guest 套件。
+3. **guest 套件的已知失败走基线**：`tests/known-failures.txt` 是机器可读
+   基线（CI 门禁读它），`tests/KNOWN-FAILURES.md` 是人读的裁决理由，
+   **两者必须同步**。修好某项后要从基线移除，否则 runner 会以"基线过期"
+   判 FAIL——这是刻意设计，防止修好的东西被基线继续掩盖。
+   CI 里矩阵步骤设 `WBOX_GUEST_SKIP=1`，guest 套件由专职 job 独家承担，
+   不重复跑；本地 `test-matrix.sh` 不设该变量，F 组照常执行。
 4. **文档状态口径分散**：能力声明以 CHANGELOG rc2 + KNOWN-FAILURES 基线
    为准；README/WIN32-PORT.md 个别段落滞后（如 apt-get update 状态、
    MAP_SHARED 写回），见矛盾审查报告。
@@ -178,5 +178,6 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 | `docs/testing.md` | 三层测试体系与发布门禁 |
 | `docs-architecture.md` | 架构总览 |
 | `CHANGELOG.md` | 版本线（rc2 终审基线在此） |
-| `tests/KNOWN-FAILURES.md` | guest 套件残留失败台账 + 复现方法 |
+| `tests/known-failures.txt` | guest 套件已知失败**基线**（机器可读，CI 门禁读它） |
+| `tests/KNOWN-FAILURES.md` | 上表条目的叙述与裁决理由 + 复现方法（须与基线同步） |
 | `vendor/blink/WIN32-PORT.md` | wbox-linux 移植圣经（§0 生产状态/支持矩阵/诊断开关） |
