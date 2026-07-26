@@ -53,7 +53,10 @@ int main(void) {
   T_BEGIN("sock/create-types");
   int s = socket(AF_INET, SOCK_STREAM, 0);
   T_ASSERT(s >= 0);
-  if (s >= 0) close(s);
+  if (s >= 0) {
+    T_ASSERT_ERRNO(lseek(s, 0, SEEK_CUR), ESPIPE);
+    close(s);
+  }
   s = socket(AF_INET, SOCK_DGRAM, 0);
   T_ASSERT(s >= 0);
   if (s >= 0) close(s);

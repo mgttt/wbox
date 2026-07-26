@@ -121,6 +121,12 @@
   阻塞。现移除预写入，并同时覆盖 `pread`、`pwrite`、`preadv` 和
   `pwritev` 均立即返回 `ESPIPE`；`t_fd_rw` 增至 70 项，完整套件现为
   **20/20 文件通过，1000 pass / 0 fail / 9 skip**。
+- **Win32 lseek 拒绝 pipe 与 socket**：旧 `W32Lseek64` 会把 pipe 句柄
+  和 Winsock 占位 fd 交给 `SetFilePointerEx`，两者在本机均错误返回位置
+  0。现于宿主 seek 前按 fd 类型返回 `ESPIPE`，同时保留 eventfd/timerfd/
+  signalfd 的既有 no-op seek 语义。新增 pipe 两端及 AF_INET socket 回归；
+  `t_fd_rw` 增至 72 项、`t_net_sockopt` 增至 79 项，完整套件现为
+  **20/20 文件通过，1003 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

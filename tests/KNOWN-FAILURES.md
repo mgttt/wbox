@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1009 条：pass=1000 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1012 条：pass=1003 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -144,6 +144,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F6 | `unlink(目录)` 非 EISDIR | ✅ t_fd_open 全过 |
 | F7 | UTF-8 文件名 | ✅ t_path 全过（宿主名 %XXXX 纯 ASCII 转义） |
 | F8 | 特殊字符文件名 | ✅ t_path 全过（同转义方案） |
+| F9 | `lseek(pipe/socket)` 错误返回位置 0 | ✅ t_fd_rw/t_net_sockopt 覆盖 pipe 两端与 AF_INET socket（均返 ESPIPE） |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 

@@ -84,6 +84,8 @@ int main(void) {
     T_ASSERT_ERRNO(pwrite(pp[1], "x", 1, 0), ESPIPE);
     T_ASSERT_ERRNO(preadv(pp[0], &one, 1, 0), ESPIPE);
     T_ASSERT_ERRNO(pwritev(pp[1], &one, 1, 0), ESPIPE);
+    T_ASSERT_ERRNO(lseek(pp[0], 0, SEEK_CUR), ESPIPE);
+    T_ASSERT_ERRNO(lseek(pp[1], 0, SEEK_SET), ESPIPE);
     T_ASSERT_OK(close(pp[0]));
     T_ASSERT_OK(close(pp[1]));
     fd = open("t_frw_x", O_RDWR | O_CREAT | O_TRUNC, 0600);

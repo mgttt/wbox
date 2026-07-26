@@ -1608,11 +1608,16 @@ int64_t W32Lseek64(int fd, int64_t off, int whence) {
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
     return 0;
+  if (kind == W32FD_SOCKET) {
+    errno = ESPIPE;
+    return -1;
+  }
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
     return -1;
   }
+  if (W32EspipeIfPipe(h)) return -1;
   DWORD m;
   LARGE_INTEGER d, r;
   d.QuadPart = off;
