@@ -24,7 +24,7 @@ mod native;
 
 use blink::ensure_resolv_conf;
 pub use blink::BlinkBackend;
-pub use linux::LinuxNativeBackend;
+pub use linux::{LinuxMode, LinuxNativeBackend};
 pub use native::NativeBackend;
 
 use crate::error::Result;
@@ -207,6 +207,33 @@ pub const fn image_backend_kind() -> ImageBackendKind {
     }
 }
 
+/// **宿主程序**目标（`wbox run -- <本机程序>`）在当前宿主上应走的后端。
+///
+/// 与 [`ImageBackendKind`] 是两条独立的分派：那条决定"Linux ELF 怎么跑"，
+/// 这条决定"本机程序用哪套隔离原语包起来"。
+/// Windows：AppContainer + Job Object；Linux：user/pid/net namespace + cgroup。
+/// 其它宿主暂无实现——明确报错，不假装成功（§10.5 语义一致性红线）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostProgramBackendKind {
+    /// Win32：AppContainer profile + Job Object
+    AppContainer,
+    /// Linux：namespace + cgroup（rootless）
+    LinuxNamespace,
+    /// 本宿主没有可用的隔离原语
+    Unsupported,
+}
+
+/// 按宿主选择宿主程序后端。与 [`image_backend_kind`] 同理单独成函数以便断言。
+pub const fn host_program_backend_kind() -> HostProgramBackendKind {
+    if cfg!(windows) {
+        HostProgramBackendKind::AppContainer
+    } else if cfg!(target_os = "linux") {
+        HostProgramBackendKind::LinuxNamespace
+    } else {
+        HostProgramBackendKind::Unsupported
+    }
+}
+
 /// `run` 的执行目标判别结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunTarget {
@@ -253,6 +280,24 @@ mod tests {
                 super::ImageBackendKind::LinuxNative,
                 "Linux 宿主应走原生 namespace，而非白白多套一层模拟"
             );
+        }
+    }
+
+    /// 宿主程序目标（台阶①）也必须按宿主分派——Linux 上曾经直接报
+    /// "原生后端仅在 Windows 上可用"，等于台阶① 完全缺失。
+    #[test]
+    fn host_program_backend_follows_host() {
+        let k = super::host_program_backend_kind();
+        if cfg!(windows) {
+            assert_eq!(k, super::HostProgramBackendKind::AppContainer);
+        } else if cfg!(target_os = "linux") {
+            assert_eq!(
+                k,
+                super::HostProgramBackendKind::LinuxNamespace,
+                "Linux 宿主必须能沙箱宿主程序（harness 环境控制的基础）"
+            );
+        } else {
+            assert_eq!(k, super::HostProgramBackendKind::Unsupported);
         }
     }
 

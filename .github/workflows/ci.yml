@@ -303,7 +303,7 @@ jobs:
           echo "uid=$(id -u) cgroup=$(stat -fc %T /sys/fs/cgroup)"
           cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo "(无 cgroup v2 控制器)"
           unshare -Ur --mount true && echo "userns: ok" || echo "userns: 不可用"
-      - name: 端到端 —— LinuxNativeBackend L1/L2 验收
+      - name: 端到端 —— LinuxNativeBackend L1/L2 + 宿主程序模式 + 网络默认 验收
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
 
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；

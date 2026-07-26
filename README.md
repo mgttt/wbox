@@ -35,15 +35,15 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$PWD/win32-link-zig.sh \
 > 以 `wbox --help` 的输出为准（唯一文本源在 `src/cli/mod.rs` 的 `USAGE`）。
 
 ```
-wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本地 Windows 程序
-wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Linux 后端）
+wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本机程序（Win: AppContainer+Job；Linux: namespace+cgroup）
+wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Win: 经模拟器；Linux: 原生 namespace）
 
   --name <NAME>     容器名（AppContainer profile 名），默认 "wbox-<pid>"（1..=64 字符）
   --memory <MB>     每进程内存上限（MB），0 = 不限，默认 0
   --cpu-pct <N>     CPU 硬性百分比上限 1-100（Job Object CPU rate control），默认 0 = 不限
   --max-procs <N>   最大进程数，默认 0 = 不限
-  --allow-network   授予 INTERNET_CLIENT capability（默认不授予网络能力）
-  --no-network      显式声明不授予网络（默认行为，预留）
+  --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
+  --no-network      显式声明断网（默认行为，预留）
   --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              显式声明退出即清理（默认行为，docker 习惯写法）
@@ -117,9 +117,11 @@ wbox image pull quay.io/prometheus/busybox:latest -V
 wbox image list
 ```
 
-> 说明：Windows 进程容器无法直接运行 Linux 二进制，拉取的 rootfs 用于资源/工具链提取、调试与后续跨架构场景；`run --workdir` 可指向缓存中的 `rootfs` 作为工作目录。
+> 说明：**Windows 宿主**无法直接运行 Linux 二进制，镜像经 `wbox-linux`（blink 模拟器）执行；`run --workdir` 也可指向缓存中的 `rootfs` 作为工作目录。**Linux 宿主**上宿主自己就能执行 ELF，直接走原生 namespace 隔离，不过模拟器一层。
 
 ## 隔离边界与限制
+
+### Windows 宿主
 
 提供什么：
 
@@ -133,6 +135,30 @@ wbox image list
 - **文件系统 overlay / 注册表虚拟化**：`--workdir` 只是工作目录，不是只读视图；Low IL 天然阻止容器写大部分系统位置，但用户目录中 Low-IL 可写的位置仍可被写。真正的 FS 虚拟化需要 minifilter 驱动（Sandboxie 路线），见路线图。
 - **网络命名空间**：Windows 无此原语；`--allow-network` 授予后没有流量级管控（防火墙规则需要管理员）。
 - **GUI 桌面隔离**：AppContainer 自有 window station 边界只提供部分隔离。
+
+### Linux 宿主
+
+同一套 CLI 与同一套语义（`--memory`/`--cpu-pct`/`--max-procs`/`--allow-network`
+在两个宿主上**默认强度相同**），底层换成 Linux 原语。两种形态由目标决定：
+
+| | `wbox run -- <本机程序>` | `wbox run <镜像> -- <cmd>` |
+|---|---|---|
+| 身份 | rootless user namespace，宿主 uid → 容器内 uid 0 | 同左 |
+| 进程 | 新 PID namespace，guest 为 PID 1 | 同左 |
+| 网络 | **默认新建空 netns**（仅 loopback 可用）；`--allow-network` 共享宿主网络栈 | 同左 |
+| 限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`），无则 rlimit 兜底 | 同左 |
+| 文件系统 | **不隔离**（不换根，宿主可见）；`--workdir` 是工作目录 | `pivot_root` 进镜像 rootfs，宿主不可见 |
+
+不提供什么：
+
+- **无需 root，但也不越权**：全程 unprivileged user namespace。宿主禁用
+  `unprivileged_userns_clone` 时直接报错，不会降级成"没有隔离地跑"。
+- **`--cpu-pct` 需要 cgroup v2 委派**：没有时**明确报错**而非静默忽略
+  （`RLIMIT_CPU` 限的是累计 CPU 秒数，语义不同）。同理，以 root 运行且无
+  cgroup v2 时 `--max-procs` 也会被拒绝——`RLIMIT_NPROC` 对特权进程不生效。
+- **网络仅"通/断"两档**：没有按容器的流量级管控（无 veth/NAT/端口映射）。
+- **`--name`/`--keep-profile`** 是 Windows AppContainer profile 的概念，
+  在 Linux 上仅作容器名/无操作。
 
 ## 与同类方案的区别
 

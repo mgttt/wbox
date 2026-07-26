@@ -17,8 +17,8 @@ use crate::error::{Result, WboxError};
 pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer + Job Object）
 
 用法:
-  wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本地 Windows 程序
-  wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Linux 后端骨架）
+  wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本机程序（Win: AppContainer+Job；Linux: namespace+cgroup）
+  wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Win: 经模拟器；Linux: 原生 namespace）
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
@@ -31,8 +31,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --memory <MB>     每进程内存上限（MB），0 = 不限，默认 0
   --cpu-pct <N>     CPU 硬性百分比上限 1-100（Job CPU rate control），默认 0 = 不限
   --max-procs <N>   最大进程数，默认 0 = 不限
-  --allow-network   授予 INTERNET_CLIENT capability（默认不授予任何网络能力）
-  --no-network      显式声明不授予网络（默认行为，预留）
+  --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
+  --no-network      显式声明断网（默认行为，预留）
   --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              显式声明退出即清理（默认行为，docker 习惯写法；仅 run）

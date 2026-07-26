@@ -22,6 +22,7 @@
 //! 并继续 exec。
 
 use super::super::{verbose_kv, Prepared, RunSpec};
+use super::LinuxMode;
 use crate::error::{Result, WboxError};
 use std::ffi::CString;
 use std::os::unix::process::CommandExt;
@@ -53,28 +54,40 @@ unsafe fn write_proc_self(path: *const libc::c_char, data: &[u8]) -> libc::c_int
 
 /// fork 前备好的全部参数（闭包按值捕获，内部零分配）。
 struct NsPlan {
-    /// rootfs 的宿主绝对路径
-    rootfs: CString,
-    /// rootfs 内用于暂存旧根的目录（pivot_root 的 put_old）
-    put_old: CString,
     /// `/proc/self/setgroups` / `uid_map` / `gid_map`
     p_setgroups: CString,
     p_uid_map: CString,
     p_gid_map: CString,
     uid_map: Vec<u8>,
     gid_map: Vec<u8>,
+    c_root: CString,
+    c_empty: CString,
+    /// `unshare(2)` 的标志位，fork 前算好（是否含 `CLONE_NEWNET` 取决于
+    /// `--allow-network`）。
+    unshare_flags: libc::c_int,
+    /// 是否新建 network namespace（决定要不要把 `lo` 拉起来）。
+    new_netns: bool,
+    /// 换根计划。`None` = 宿主程序模式（[`LinuxMode::Host`]）：不 `pivot_root`，
+    /// 宿主文件系统照常可见，只做身份/进程/网络/限额隔离。
+    new_root: Option<NewRoot>,
+    /// 资源限额落地方式（cgroup v2 或 rlimit 兜底）
+    limits: LimitPlan,
+}
+
+/// 镜像模式的换根参数（[`LinuxMode::Image`] 才有）。
+struct NewRoot {
+    /// rootfs 的宿主绝对路径
+    rootfs: CString,
+    /// rootfs 内用于暂存旧根的目录（pivot_root 的 put_old）
+    put_old: CString,
     /// 容器内的 /proc 挂载点与 put_old 卸载路径（pivot_root 之后的视角）
     c_proc: CString,
     c_put_old_in_new: CString,
     c_proc_fstype: CString,
-    c_root: CString,
-    c_empty: CString,
     /// 最小设备集的 (宿主源, rootfs 内目标) 绑定对。**必须在 pivot_root 之前
     /// 完成**：切根后旧根已被 detach，宿主的 /dev/* 再也取不到。
     /// user namespace 里 mknod 不被允许，故只能 bind 宿主已有的设备节点。
     dev_binds: Vec<(CString, CString)>,
-    /// 资源限额落地方式（cgroup v2 或 rlimit 兜底）
-    limits: LimitPlan,
 }
 
 /// 资源限额的落地方式。cgroup v2 是首选（语义与 Windows 侧 Job Object
@@ -121,67 +134,72 @@ fn cgroup2_self_dir() -> Option<std::path::PathBuf> {
 const MIN_DEVICES: &[&str] = &["null", "zero", "full", "random", "urandom", "tty"];
 
 /// 在隔离环境中启动 guest 并等待退出。
-pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared) -> Result<u32> {
-    let rootfs = prepared.workdir.to_string_lossy().into_owned();
-    // put_old 必须位于新根之内（pivot_root 的硬性要求）。用固定名字，
-    // 每次启动前确保存在；pivot_root 后立刻 umount 并删除。
-    let put_old_host = prepared.workdir.join(".wbox_oldroot");
-    std::fs::create_dir_all(&put_old_host).map_err(|e| {
-        WboxError::spawn(format!(
-            "创建 pivot_root 暂存目录 '{}' 失败：{}（rootfs 是否可写？）",
-            put_old_host.display(),
-            e
-        ))
-    })?;
+///
+/// `mode` 决定是否换根：[`LinuxMode::Image`] 进镜像 rootfs，
+/// [`LinuxMode::Host`] 直接跑宿主程序（只做身份/进程/网络/限额隔离）。
+pub(super) fn spawn_isolated(
+    spec: &RunSpec,
+    prepared: &Prepared,
+    mode: LinuxMode,
+) -> Result<u32> {
+    let new_root = match mode {
+        LinuxMode::Host => None,
+        LinuxMode::Image => Some(build_new_root(prepared)?),
+    };
+
+    // 网络：默认**不给**（新建空 network namespace），与 Windows 侧不授
+    // INTERNET_CLIENT 能力的默认一致。§10.5 语义一致性红线要求同一条命令
+    // 在两个宿主上默认隔离强度相同，故这里不能"Linux 上顺便继承宿主网络"。
+    let new_netns = !spec.allow_network;
+    let unshare_flags = unshare_flags(spec.allow_network);
 
     // rootless 映射：把宿主当前 uid/gid 映射成容器内的 root。
     // 写 gid_map 之前必须先写 setgroups=deny，否则内核拒绝（CVE-2014-8989 之后的加固）。
-    // 最小设备集：bind 挂载需要目标文件已存在，故在 fork 前先备好空文件。
-    // rootfs 不可写时跳过该设备而不是整体失败——只读 rootfs 是合法用法。
-    let dev_dir = prepared.workdir.join("dev");
-    let _ = std::fs::create_dir_all(&dev_dir);
-    let mut dev_binds = Vec::new();
-    for d in MIN_DEVICES {
-        let src = format!("/dev/{}", d);
-        if !std::path::Path::new(&src).exists() {
-            continue;
-        }
-        let dst = dev_dir.join(d);
-        if !dst.exists() && std::fs::write(&dst, b"").is_err() {
-            continue; // rootfs 只读或无权限：跳过这个设备
-        }
-        if let (Ok(a), Ok(b)) = (cstr(&src), cstr(&dst.to_string_lossy())) {
-            dev_binds.push((a, b));
-        }
-    }
-
     let limits = build_limit_plan(spec)?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     let plan = NsPlan {
-        rootfs: cstr(&rootfs)?,
-        put_old: cstr(&put_old_host.to_string_lossy())?,
         p_setgroups: cstr("/proc/self/setgroups")?,
         p_uid_map: cstr("/proc/self/uid_map")?,
         p_gid_map: cstr("/proc/self/gid_map")?,
         uid_map: format!("0 {} 1\n", uid).into_bytes(),
         gid_map: format!("0 {} 1\n", gid).into_bytes(),
-        c_proc: cstr("/proc")?,
-        c_put_old_in_new: cstr("/.wbox_oldroot")?,
-        c_proc_fstype: cstr("proc")?,
         c_root: cstr("/")?,
         c_empty: cstr("")?,
-        dev_binds,
+        unshare_flags,
+        new_netns,
+        new_root,
         limits,
     };
 
     if spec.verbose {
-        verbose_kv("隔离", "user+mount+pid namespace（rootless）");
+        let ns_list = if new_netns {
+            "user+mount+pid+net namespace（rootless）"
+        } else {
+            "user+mount+pid namespace（rootless，共享宿主网络）"
+        };
+        verbose_kv("隔离", ns_list);
         verbose_kv("uid 映射", format!("容器 0 ← 宿主 {}", uid));
-        verbose_kv("新根", &rootfs);
+        verbose_kv(
+            "网络",
+            if new_netns {
+                "断开（新建空 network namespace，仅 loopback）"
+            } else {
+                "允许（--allow-network：继承宿主网络栈）"
+            },
+        );
+        match mode {
+            LinuxMode::Image => verbose_kv("新根", prepared.workdir.display()),
+            LinuxMode::Host => verbose_kv("新根", "无（宿主程序模式，不换根）"),
+        }
     }
 
     let mut cmd = Command::new(&prepared.cmd[0]);
+    // 宿主程序模式下 workdir 是真正的工作目录（镜像模式里它是 rootfs，
+    // 换根后 pre_exec 已经 chdir("/")，不能在这里设）。
+    if mode == LinuxMode::Host {
+        cmd.current_dir(&prepared.workdir);
+    }
     cmd.args(&prepared.cmd[1..]);
     // 环境完全由 prepared.env 决定（策略见 backend::env），不继承宿主。
     cmd.env_clear();
@@ -217,6 +235,97 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared) -> Result<u32>
     })
 }
 
+/// 组装 `unshare(2)` 的标志位。
+///
+/// user + mount + pid 恒有；network namespace **默认也建**，只有
+/// `--allow-network` 才共享宿主网络栈——与 Windows 侧默认不授
+/// `INTERNET_CLIENT` 能力对齐。单独成函数是为了可测：`spawn_isolated`
+/// 会真的 fork，不便在单测里断言。
+fn unshare_flags(allow_network: bool) -> libc::c_int {
+    let mut f = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+    if !allow_network {
+        f |= libc::CLONE_NEWNET;
+    }
+    f
+}
+
+/// 备好镜像模式的换根参数（在 fork **之前**做完所有分配与目录准备）。
+fn build_new_root(prepared: &Prepared) -> Result<NewRoot> {
+    let rootfs = prepared.workdir.to_string_lossy().into_owned();
+    // put_old 必须位于新根之内（pivot_root 的硬性要求）。用固定名字，
+    // 每次启动前确保存在；pivot_root 后立刻 umount 并删除。
+    let put_old_host = prepared.workdir.join(".wbox_oldroot");
+    std::fs::create_dir_all(&put_old_host).map_err(|e| {
+        WboxError::spawn(format!(
+            "创建 pivot_root 暂存目录 '{}' 失败：{}（rootfs 是否可写？）",
+            put_old_host.display(),
+            e
+        ))
+    })?;
+
+    // 最小设备集：bind 挂载需要目标文件已存在，故在 fork 前先备好空文件。
+    // rootfs 不可写时跳过该设备而不是整体失败——只读 rootfs 是合法用法。
+    let dev_dir = prepared.workdir.join("dev");
+    let _ = std::fs::create_dir_all(&dev_dir);
+    let mut dev_binds = Vec::new();
+    for d in MIN_DEVICES {
+        let src = format!("/dev/{}", d);
+        if !std::path::Path::new(&src).exists() {
+            continue;
+        }
+        let dst = dev_dir.join(d);
+        if !dst.exists() && std::fs::write(&dst, b"").is_err() {
+            continue; // rootfs 只读或无权限：跳过这个设备
+        }
+        if let (Ok(a), Ok(b)) = (cstr(&src), cstr(&dst.to_string_lossy())) {
+            dev_binds.push((a, b));
+        }
+    }
+
+    Ok(NewRoot {
+        rootfs: cstr(&rootfs)?,
+        put_old: cstr(&put_old_host.to_string_lossy())?,
+        c_proc: cstr("/proc")?,
+        c_put_old_in_new: cstr("/.wbox_oldroot")?,
+        c_proc_fstype: cstr("proc")?,
+        dev_binds,
+    })
+}
+
+/// `SIOCSIFFLAGS` 用的 `ifreq` 前缀。自己声明而不用 `libc::ifreq`：后者的
+/// `ifr_ifru` 是 union，跨 libc 版本字段名不稳定，而这里只需要 flags 这一支。
+/// 大小必须与内核的 `struct ifreq` 一致（64 位下 40 字节）。
+#[repr(C)]
+struct IfReqFlags {
+    name: [libc::c_char; libc::IF_NAMESIZE],
+    flags: libc::c_short,
+    _pad: [u8; 22],
+}
+
+/// 把新 network namespace 里的 `lo` 拉起来。
+///
+/// 新建的 netns 只有一个 **DOWN** 的 loopback，此时连 `127.0.0.1` 都不通。
+/// 大量程序（本地 socket 通信、语言运行时自检）会因此莫名失败，而这与
+/// "不给外网"的意图无关，故与 podman/docker 的默认一致：断外网但留 loopback。
+///
+/// 失败不致命——最坏情况是 guest 自己在用 loopback 时报错，比整个容器起不来好。
+///
+/// # Safety
+/// 仅在 fork 后、已进入新 netns 的子进程中调用；内部只做裸 syscall。
+unsafe fn bring_up_loopback() {
+    const SIOCSIFFLAGS: libc::c_ulong = 0x8914;
+    let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+    if fd < 0 {
+        return;
+    }
+    let mut ifr: IfReqFlags = std::mem::zeroed();
+    ifr.name[0] = b'l' as libc::c_char;
+    ifr.name[1] = b'o' as libc::c_char;
+    ifr.flags = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
+    libc::ioctl(fd, SIOCSIFFLAGS, &mut ifr as *mut IfReqFlags);
+    libc::close(fd);
+}
+
 /// pre_exec 闭包主体：建立命名空间并切根。返回 `Err` 会让 spawn 失败。
 ///
 /// # Safety
@@ -228,9 +337,9 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //    namespace 后，宿主 cgroup 文件的写入会因 uid 映射被拒。
     apply_limits(p)?;
 
-    // 1. 建 user + mount + pid namespace。user namespace 让非 root 也能
-    //    获得新 mount namespace 内的 CAP_SYS_ADMIN（rootless 的关键）。
-    if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID) != 0 {
+    // 1. 建 user + mount + pid (+ net) namespace。user namespace 让非 root 也能
+    //    获得新 mount/net namespace 内的 CAP_SYS_ADMIN（rootless 的关键）。
+    if libc::unshare(p.unshare_flags) != 0 {
         return Err(err());
     }
     // 2. 身份映射。顺序不能反：gid_map 之前必须 setgroups=deny。
@@ -270,7 +379,14 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
 
     // ---- 以下是孙进程（容器内 PID 1）----
 
+    // 3b. 新 netns 里的 loopback 默认 DOWN，拉起来（见 bring_up_loopback）。
+    if p.new_netns {
+        bring_up_loopback();
+    }
+
     // 4. 把根挂载点改成 private，否则后续挂载会传播回宿主。
+    //    宿主程序模式下没有后续挂载，但仍然要做：mount namespace 只有在根被
+    //    置为 private 后才真正与宿主解耦（否则 guest 自己的挂载会漏回宿主）。
     if libc::mount(
         p.c_empty.as_ptr(),
         p.c_root.as_ptr(),
@@ -281,10 +397,16 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     {
         return Err(err());
     }
+
+    // 宿主程序模式（LinuxMode::Host）：不换根，到此为止。
+    let Some(r) = p.new_root.as_ref() else {
+        return Ok(());
+    };
+
     // 5. pivot_root 要求新根是一个挂载点，故把 rootfs bind 到自身。
     if libc::mount(
-        p.rootfs.as_ptr(),
-        p.rootfs.as_ptr(),
+        r.rootfs.as_ptr(),
+        r.rootfs.as_ptr(),
         std::ptr::null(),
         libc::MS_BIND | libc::MS_REC,
         std::ptr::null(),
@@ -296,7 +418,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //     必须在 pivot_root **之前**——切根后旧根 detach，宿主 /dev 就没了。
     //     单个设备失败不致命（例如 rootfs 只读时目标文件不存在），
     //     缺哪个由 guest 自己报错，比整个容器起不来好。
-    for (src, dst) in &p.dev_binds {
+    for (src, dst) in &r.dev_binds {
         libc::mount(
             src.as_ptr(),
             dst.as_ptr(),
@@ -306,10 +428,10 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
         );
     }
     // 6. 切根。put_old 必须在新根之内。
-    if libc::chdir(p.rootfs.as_ptr()) != 0 {
+    if libc::chdir(r.rootfs.as_ptr()) != 0 {
         return Err(err());
     }
-    if libc::syscall(libc::SYS_pivot_root, p.rootfs.as_ptr(), p.put_old.as_ptr()) != 0 {
+    if libc::syscall(libc::SYS_pivot_root, r.rootfs.as_ptr(), r.put_old.as_ptr()) != 0 {
         return Err(err());
     }
     if libc::chdir(p.c_root.as_ptr()) != 0 {
@@ -319,17 +441,17 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //    rootfs 里没有 /proc 目录时静默跳过——镜像不含它属正常情况，
     //    不该因此让整个容器起不来。
     libc::mount(
-        p.c_proc_fstype.as_ptr(),
-        p.c_proc.as_ptr(),
-        p.c_proc_fstype.as_ptr(),
+        r.c_proc_fstype.as_ptr(),
+        r.c_proc.as_ptr(),
+        r.c_proc_fstype.as_ptr(),
         0,
         std::ptr::null(),
     );
     // 8. 卸掉旧根：不 detach 的话宿主整个文件系统仍在容器内可见，隔离就是假的。
-    if libc::umount2(p.c_put_old_in_new.as_ptr(), libc::MNT_DETACH) != 0 {
+    if libc::umount2(r.c_put_old_in_new.as_ptr(), libc::MNT_DETACH) != 0 {
         return Err(err());
     }
-    libc::rmdir(p.c_put_old_in_new.as_ptr());
+    libc::rmdir(r.c_put_old_in_new.as_ptr());
     Ok(())
 }
 
@@ -529,20 +651,84 @@ mod tests {
 
     /// 仅内存/进程数时，无 cgroup v2 应退化为 rlimit（而非报错）——
     /// 这两项有可用的 setrlimit 对应物，拒绝执行就过度了。
+    ///
+    /// 三种宿主能力都要断言，否则只在一类机器上有效（本测试就曾因为只覆盖
+    /// 前两种，在"root + cgroup v1"的开发容器上直接 panic，而 CI 的 ubuntu
+    /// runner 有 cgroup v2 所以照样绿）：
+    ///   有 cgroup v2          → Cgroup 方案；
+    ///   无 cgroup v2 且非 root → Rlimit 兜底；
+    ///   无 cgroup v2 且是 root → 必须报错（RLIMIT_NPROC 限不住 root）。
     #[test]
     fn memory_and_procs_fall_back_to_rlimit() {
         let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 8 });
-        match (cgroup2_self_dir(), build_limit_plan(&s).unwrap()) {
-            (Some(_), LimitPlan::Cgroup { .. }) => {}
-            (None, LimitPlan::Rlimit { as_bytes, nproc }) => {
+        let is_root = unsafe { libc::geteuid() } == 0;
+        let name = |p: &LimitPlan| match p {
+            LimitPlan::None => "None",
+            LimitPlan::Cgroup { .. } => "Cgroup",
+            LimitPlan::Rlimit { .. } => "Rlimit",
+        };
+        match (cgroup2_self_dir(), build_limit_plan(&s)) {
+            (Some(_), Ok(LimitPlan::Cgroup { .. })) => {}
+            (None, Ok(LimitPlan::Rlimit { as_bytes, nproc })) if !is_root => {
                 assert_eq!(as_bytes, Some(16 * 1024 * 1024));
                 assert_eq!(nproc, Some(8));
             }
-            (_, other) => panic!("落成的方案与宿主能力不匹配：{}", match other {
-                LimitPlan::None => "None",
-                LimitPlan::Cgroup { .. } => "Cgroup",
-                LimitPlan::Rlimit { .. } => "Rlimit",
-            }),
+            (None, Err(e)) if is_root => {
+                let m = format!("{}", e);
+                assert!(m.contains("max-procs"), "错误应点明是 --max-procs：{}", m);
+            }
+            (cg, Ok(other)) => panic!(
+                "落成的方案与宿主能力不匹配：cgroup2={} root={} 方案={}",
+                cg.is_some(),
+                is_root,
+                name(&other)
+            ),
+            (cg, Err(e)) => panic!(
+                "不该报错：cgroup2={} root={} err={}",
+                cg.is_some(),
+                is_root,
+                e
+            ),
         }
+    }
+
+    /// 网络默认必须**断开**（与 Windows 侧不授 INTERNET_CLIENT 一致），
+    /// `--allow-network` 才共享宿主网络栈。这条是 §10.5 语义一致性红线：
+    /// 同一条命令在两个宿主上默认隔离强度必须相同。
+    #[test]
+    fn netns_is_created_unless_allow_network() {
+        let deny = unshare_flags(false);
+        let allow = unshare_flags(true);
+        assert_ne!(
+            deny & libc::CLONE_NEWNET,
+            0,
+            "默认必须新建 network namespace（Windows 侧默认无 INTERNET_CLIENT）"
+        );
+        assert_eq!(
+            allow & libc::CLONE_NEWNET,
+            0,
+            "--allow-network 时不应再建 netns（否则连不上外网）"
+        );
+        // 其余三种 namespace 与网络选项无关，两种情况都必须有
+        for f in [deny, allow] {
+            for (bit, n) in [
+                (libc::CLONE_NEWUSER, "user"),
+                (libc::CLONE_NEWNS, "mount"),
+                (libc::CLONE_NEWPID, "pid"),
+            ] {
+                assert_ne!(f & bit, 0, "{} namespace 不该受 --allow-network 影响", n);
+            }
+        }
+    }
+
+    /// `IfReqFlags` 必须与内核 `struct ifreq` 同大小，否则 SIOCSIFFLAGS
+    /// 会读到越界数据（ioctl 按固定布局解析，不看我们声明了多少字段）。
+    #[test]
+    fn ifreq_layout_matches_kernel() {
+        assert_eq!(
+            std::mem::size_of::<IfReqFlags>(),
+            std::mem::size_of::<libc::ifreq>(),
+            "IfReqFlags 与 libc::ifreq 大小不一致，SIOCSIFFLAGS 布局会错"
+        );
     }
 }

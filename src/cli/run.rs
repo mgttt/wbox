@@ -150,8 +150,10 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     }
 }
 
-/// 原生模式：本地 Windows 程序。prepare/参数组装跨平台（可在 Linux 单测）；
-/// spawn 在非 Windows 平台给出明确错误（隔离原语为 Win32 API，见 native.rs）。
+/// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
+/// Linux 上是 namespace+cgroup 但**不换根**（linux.rs 的 `LinuxMode::Host`）
+/// ——即 docs-architecture.md §10.0 的台阶①，供 harness 做环境控制。
+/// 规则本体在 `backend::host_program_backend_kind`（可单测），此处只做分发。
 fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
     let workdir = match &opts.workdir {
         Some(d) => std::path::PathBuf::from(d),
@@ -159,9 +161,20 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
             .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
     let spec = make_spec(opts, workdir, cmd, Vec::new());
-    let backend = backend::NativeBackend;
-    let prepared = backend.prepare(&spec)?;
-    backend.spawn(&spec, &prepared)
+    match backend::host_program_backend_kind() {
+        backend::HostProgramBackendKind::LinuxNamespace => {
+            let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
+            let prepared = backend.prepare(&spec)?;
+            backend.spawn(&spec, &prepared)
+        }
+        // Unsupported 也走 NativeBackend：它的 spawn 已经会给出明确的
+        // "只能在 Windows 宿主上执行"错误，不必再重复一份文案。
+        _ => {
+            let backend = backend::NativeBackend;
+            let prepared = backend.prepare(&spec)?;
+            backend.spawn(&spec, &prepared)
+        }
+    }
 }
 
 /// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
@@ -211,7 +224,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             backend.spawn(&spec, &prepared)
         }
         backend::ImageBackendKind::LinuxNative => {
-            let backend = backend::LinuxNativeBackend;
+            let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);
             let prepared = backend.prepare(&spec)?;
             backend.spawn(&spec, &prepared)
         }

@@ -5,6 +5,8 @@
 # （假镜像缓存 → wbox run），而不是只测内部函数：
 #   L1  uid 映射 / 新根隔离 / PID namespace / 退出码转发
 #   L2  --memory 超限失败 / --max-procs 挡 fork 炸弹 / --cpu-pct 语义
+#   H   台阶①宿主程序模式（`wbox run -- <本机程序>`，harness 环境控制用）
+#   N   网络默认断开（与 Windows 侧默认无 INTERNET_CLIENT 对齐）
 #
 # 用法：
 #   scripts/test-linux-backend.sh [wbox 二进制] [静态 busybox]
@@ -139,6 +141,88 @@ else
   else
     report FAIL "L2.3 --cpu-pct 拒绝语义" "rc=$rc（期望 1）输出: $(printf '%s' "$OUT" | head -c 200)"
   fi
+fi
+
+echo
+echo "=== H 台阶①宿主程序模式 / N 网络默认 ==="
+
+# 宿主模式不需要镜像缓存：直接跑宿主已有的程序。
+hrun() { OUT=$(HOME=$WORK/home "$WBOX_ABS" run "$@" 2>&1); rc=$?; return $rc; }
+
+hrun -- /bin/sh -c 'echo pid=$$'
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q 'pid=1'; then
+  report PASS "H.1 宿主程序在新 PID namespace 内运行（PID 1）"
+else
+  report FAIL "H.1 宿主程序模式" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 200)"
+fi
+
+# 与镜像模式的关键差异：宿主文件系统**照常可见**（这是"环境控制"而非
+# "文件系统隔离"，README 已写明 --workdir 不是只读视图）。
+hrun -- /bin/ls /
+if printf '%s' "$OUT" | grep -qE '^(usr|etc)$'; then
+  report PASS "H.2 宿主模式不换根（宿主文件系统可见，与镜像模式相反）"
+else
+  report FAIL "H.2 宿主模式不换根" "输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 200)"
+fi
+
+hrun --workdir /etc -- /bin/pwd
+if [ "$rc" -eq 0 ] && [ "$OUT" = /etc ]; then
+  report PASS "H.3 --workdir 作为工作目录生效"
+else
+  report FAIL "H.3 --workdir" "rc=$rc 输出: $OUT（期望 /etc）"
+fi
+
+hrun -- /bin/sh -c 'exit 9'
+if [ "$rc" -eq 9 ]; then
+  report PASS "H.4 宿主模式退出码转发（exit 9）"
+else
+  report FAIL "H.4 宿主模式退出码转发" "rc=$rc（期望 9）"
+fi
+
+# 宿主模式绝不能在宿主 cwd 里留下镜像模式的换根残留物
+before=$(ls -a . | wc -l)
+hrun -- /bin/true
+if [ ! -e .wbox_oldroot ] && [ "$(ls -a . | wc -l)" = "$before" ]; then
+  report PASS "H.5 宿主模式不在工作目录留下 .wbox_oldroot/dev 残留"
+else
+  report FAIL "H.5 宿主模式无残留" "出现了 .wbox_oldroot 或新增文件"
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  probe="import socket
+s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+try:
+    s.connect(('1.1.1.1',53)); print('NET-OK')
+except OSError as e:
+    print('NET-BLOCKED', e.errno)"
+  hrun -- python3 -c "$probe"
+  if printf '%s' "$OUT" | grep -q 'NET-BLOCKED'; then
+    report PASS "N.1 默认断网（新建空 network namespace）"
+  else
+    report FAIL "N.1 默认断网" "输出: $(printf '%s' "$OUT" | head -c 200)"
+  fi
+
+  hrun --allow-network -- python3 -c "$probe"
+  if printf '%s' "$OUT" | grep -q 'NET-OK'; then
+    report PASS "N.2 --allow-network 恢复宿主网络栈"
+  else
+    # 宿主本身没有外网（离线 runner）时无法判定，不算回归
+    report SKIP "N.2 --allow-network" "宿主自身似乎也无外网：$(printf '%s' "$OUT" | head -c 120)"
+  fi
+
+  # 新 netns 里 loopback 默认 DOWN，wbox 必须把它拉起来，否则连
+  # 127.0.0.1 都不通——那与"不给外网"的意图无关，是附带损伤。
+  lo="import socket
+s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1)
+c=socket.socket(); c.connect(s.getsockname()); print('LO-OK')"
+  hrun -- python3 -c "$lo"
+  if printf '%s' "$OUT" | grep -q 'LO-OK'; then
+    report PASS "N.3 断网时 loopback 仍可用（127.0.0.1 可连）"
+  else
+    report FAIL "N.3 loopback 可用" "输出: $(printf '%s' "$OUT" | head -c 200)"
+  fi
+else
+  report SKIP "N.1/N.2/N.3 网络默认" "宿主无 python3，无法做 socket 探测"
 fi
 
 echo
