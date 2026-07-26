@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1195 条：pass=1186 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1212 条：pass=1203 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -163,6 +163,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 |---|------|-----------|
 | P1 | `kill`+`waitpid` 信号语义 | ✅ t_proc 全过（WIFSIGNALED/WTERMSIG 成立） |
 | P2 | `readlink("/proc/self/exe")` | ✅ t_proc/t_exec 全过 |
+| P3 | `prlimit` 对存活虚拟子进程一律返回 `EPERM`，回收后也不返回 `ESRCH` | ✅ t_proc 覆盖父进程查询/设置、子进程观察值与回收后错误边界 |
 
 ## P1 网络 —— ✅ 已全部修复（2026-07-26）
 

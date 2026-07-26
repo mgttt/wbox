@@ -4857,19 +4857,19 @@ static bool IsSupportedResourceLimit(int resource) {
          resource == RLIMIT_NOFILE_LINUX;
 }
 
-static void GetResourceLimit_(struct Machine *m, int resource,
+static void GetResourceLimit_(struct System *s, int resource,
                               struct rlimit_linux *lux) {
-  LOCK(&m->system->mmap_lock);
-  memcpy(lux, m->system->rlim + resource, sizeof(*lux));
-  UNLOCK(&m->system->mmap_lock);
+  LOCK(&s->mmap_lock);
+  memcpy(lux, s->rlim + resource, sizeof(*lux));
+  UNLOCK(&s->mmap_lock);
 }
 
-static int GetResourceLimit(struct Machine *m, int resource,
+static int GetResourceLimit(struct System *s, int resource,
                             struct rlimit_linux *lux) {
   int rc, sysresource;
   struct rlimit rlim;
   if (IsSupportedResourceLimit(resource)) {
-    GetResourceLimit_(m, resource, lux);
+    GetResourceLimit_(s, resource, lux);
     return 0;
   }
   if ((sysresource = XlatResource(resource)) == -1) return -1;
@@ -4879,7 +4879,7 @@ static int GetResourceLimit(struct Machine *m, int resource,
   return rc;
 }
 
-static int SetResourceLimit(struct Machine *m, int resource,
+static int SetResourceLimit(struct System *s, int resource,
                             const struct rlimit_linux *lux) {
   int rc, sysresource;
   struct rlimit rlim;
@@ -4889,25 +4889,25 @@ static int SetResourceLimit(struct Machine *m, int resource,
     XlatLinuxToRlimit(sysresource, &rlim, lux);
     return setrlimit(sysresource, &rlim);
   }
-  LOCK(&m->system->mmap_lock);
+  LOCK(&s->mmap_lock);
   cur = Read64(lux->cur);
   max = Read64(lux->max);
-  oldmax = Read64(m->system->rlim[resource].max);
+  oldmax = Read64(s->rlim[resource].max);
   if (cur > max) {
     rc = einval();
   } else if (max <= oldmax) {
-    memcpy(m->system->rlim + resource, lux, sizeof(*lux));
+    memcpy(s->rlim + resource, lux, sizeof(*lux));
     rc = 0;
   } else {
     rc = eperm();
   }
-  UNLOCK(&m->system->mmap_lock);
+  UNLOCK(&s->mmap_lock);
   return rc;
 }
 
 static int SysGetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
   struct rlimit_linux lux;
-  if (GetResourceLimit(m, resource, &lux) == -1) return -1;
+  if (GetResourceLimit(m->system, resource, &lux) == -1) return -1;
   return CopyToUserWrite(m, rlimitaddr, &lux, sizeof(lux));
 }
 
@@ -4917,16 +4917,19 @@ static int SysSetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
                                                    sizeof(*lux)))) {
     return -1;
   }
-  return SetResourceLimit(m, resource, lux);
+  return SetResourceLimit(m->system, resource, lux);
 }
 
 static int SysPrlimit(struct Machine *m, i32 pid, i32 resource,
                       i64 new_rlimit_addr, i64 old_rlimit_addr) {
+  int rc;
+  struct System *s;
   const struct rlimit_linux *newp;
   struct rlimit_linux old, new;
-  if (pid && pid != m->system->pid) {
-    return eperm();
-  }
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  bool child_locked;
+  struct Machine *child;
+#endif
   newp = NULL;
   if (new_rlimit_addr) {
     if (!(newp = (const struct rlimit_linux *)SchlepR(
@@ -4936,11 +4939,36 @@ static int SysPrlimit(struct Machine *m, i32 pid, i32 resource,
     memcpy(&new, newp, sizeof(new));
     newp = &new;
   }
-  if ((old_rlimit_addr || !newp) &&
-      GetResourceLimit(m, resource, &old) == -1) {
-    return -1;
+  s = m->system;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  child_locked = false;
+#endif
+  if (pid && pid != m->system->pid) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    child = (struct Machine *)W32ChildFindMachineHold(pid);
+    if (!child || !W32MachineLiveLocked(child)) {
+      W32ChildUnlock();
+      return esrch();
+    }
+    child_locked = true;
+    if (!IsSupportedResourceLimit(resource)) {
+      W32ChildUnlock();
+      return XlatResource(resource) == -1 ? -1 : eperm();
+    }
+    s = child->system;
+#else
+    return eperm();
+#endif
   }
-  if (newp && SetResourceLimit(m, resource, newp) == -1) return -1;
+  rc = 0;
+  if ((old_rlimit_addr || !newp) &&
+      GetResourceLimit(s, resource, &old) == -1)
+    rc = -1;
+  if (!rc && newp && SetResourceLimit(s, resource, newp) == -1) rc = -1;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (child_locked) W32ChildUnlock();
+#endif
+  if (rc == -1) return -1;
   if (old_rlimit_addr &&
       CopyToUserWrite(m, old_rlimit_addr, &old, sizeof(old)) == -1)
     return -1;

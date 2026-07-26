@@ -1,5 +1,6 @@
 /* t_proc.c — fork matrix, waitpid semantics, exit codes, signals. */
 #define _GNU_SOURCE
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
@@ -192,6 +193,48 @@ int main(void) {
     T_ASSERT_EQ(read(pp[0], &b, 1), 0); /* EOF */
     waitpid(pid, &st, 0);
     close(pp[0]);
+  }
+
+  T_BEGIN("proc/prlimit-live-child");
+  {
+    int ctl[2], obs[2];
+    struct rlimit own, old, replaced, lim, seen;
+    T_ASSERT_OK(pipe(ctl));
+    T_ASSERT_OK(pipe(obs));
+    pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      char byte = 'R';
+      close(ctl[1]);
+      close(obs[0]);
+      if (write(obs[1], &byte, 1) != 1) _exit(1);
+      if (read(ctl[0], &byte, 1) != 1) _exit(2);
+      if (getrlimit(RLIMIT_NOFILE, &seen) == -1) _exit(3);
+      if (write(obs[1], &seen, sizeof(seen)) != sizeof(seen)) _exit(4);
+      _exit(0);
+    }
+    close(ctl[0]);
+    close(obs[1]);
+    char byte;
+    T_ASSERT_EQ(read(obs[0], &byte, 1), 1);
+    T_ASSERT_EQ(byte, 'R');
+    T_ASSERT_OK(getrlimit(RLIMIT_NOFILE, &own));
+    T_ASSERT_OK(prlimit(pid, RLIMIT_NOFILE, NULL, &old));
+    T_ASSERT(old.rlim_cur == own.rlim_cur && old.rlim_max == own.rlim_max);
+    T_ASSERT(old.rlim_cur > 0);
+    lim = old;
+    --lim.rlim_cur;
+    T_ASSERT_OK(prlimit(pid, RLIMIT_NOFILE, &lim, &replaced));
+    T_ASSERT(replaced.rlim_cur == old.rlim_cur &&
+             replaced.rlim_max == old.rlim_max);
+    T_ASSERT_EQ(write(ctl[1], "G", 1), 1);
+    T_ASSERT_EQ(read(obs[0], &seen, sizeof(seen)), sizeof(seen));
+    T_ASSERT(seen.rlim_cur == lim.rlim_cur && seen.rlim_max == lim.rlim_max);
+    T_ASSERT_EQ(waitpid(pid, &st, 0), pid);
+    T_ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+    T_ASSERT_ERRNO(prlimit(pid, RLIMIT_NOFILE, NULL, &old), ESRCH);
+    close(ctl[1]);
+    close(obs[0]);
   }
 
   return WTEST_END();
