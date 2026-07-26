@@ -173,7 +173,7 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 ## 6. 当前状态（v1.0.0-rc2 基线）
 
-- guest C 套件真 Windows：1203 pass / 0 fail / 9 skip，20/20 用例文件通过，
+- guest C 套件真 Windows：1207 pass / 0 fail / 9 skip，20/20 用例文件通过，
   native 基线为空（Wine 单列 `t_net_sockopt @wine`）。
 - Rust 单测：真 Windows 198 passed / 0 failed / **0 ignored**，其中 11 项
   直接覆盖 AppContainer、Job Object 与完整启动链。

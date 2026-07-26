@@ -2,6 +2,7 @@
  * args, illegal flag combos. Crash-prone probes run in forked children so a
  * guest SIGSEGV surfaces as FAIL instead of aborting the whole suite. */
 #define _GNU_SOURCE
+#include <netinet/in.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -18,7 +19,7 @@
 /* run fn in a child; expect it to _exit(0). Any signal/other exit = FAIL */
 static void in_child(int (*fn)(void)) {
   pid_t pid = fork();
-  if (pid == 0) _exit(fn() == 0 ? 0 : 1);
+  if (pid == 0) _exit(fn());
   int st;
   if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
     wtest_fail++;
@@ -121,6 +122,73 @@ static int chk_prlimit_bad_old_applies_new(void) {
                                                                          : 1;
 }
 
+static int lower_nofile(rlim_t cur) {
+  struct rlimit lim;
+  if (getrlimit(RLIMIT_NOFILE, &lim) == -1 || lim.rlim_max < cur) return -1;
+  lim.rlim_cur = cur;
+  return setrlimit(RLIMIT_NOFILE, &lim);
+}
+
+static int chk_low_nofile_open_socket(void) {
+  if (lower_nofile(8) == -1) return 1;
+  int fd = open("/dev/null", O_RDONLY);
+  if (fd < 3 || fd >= 8) return 1;
+  close(fd);
+  fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (fd < 3 || fd >= 8) return 1;
+  close(fd);
+  return 0;
+}
+
+static int chk_low_nofile_tmpfile(void) {
+  if (lower_nofile(8) == -1) return 1;
+  int fd = open(".", O_RDWR | O_TMPFILE, 0600);
+  if (fd < 3 || fd >= 8) return 1;
+  close(fd);
+  return 0;
+}
+
+static int chk_low_nofile_accept(void) {
+  struct sockaddr_in addr = {0};
+  socklen_t len = sizeof(addr);
+  int ls = socket(AF_INET, SOCK_STREAM, 0);
+  int cs = socket(AF_INET, SOCK_STREAM, 0);
+  if (ls < 0 || cs < 0) return 2;
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (bind(ls, (struct sockaddr *)&addr, sizeof(addr)) == -1 ||
+      listen(ls, 1) == -1 ||
+      getsockname(ls, (struct sockaddr *)&addr, &len) == -1 ||
+      connect(cs, (struct sockaddr *)&addr, sizeof(addr)) == -1 ||
+      lower_nofile(8) == -1) {
+    return 3;
+  }
+  int as = accept(ls, NULL, NULL);
+  if (as < 3 || as >= 8) return 4;
+  close(as);
+  close(cs);
+  close(ls);
+  return 0;
+}
+
+static int chk_low_nofile_pair_atomic(void) {
+  int pp[2] = {77, 88};
+  int sv[2] = {99, 111};
+  if (lower_nofile(4) == -1) return 1;
+  errno = 0;
+  if (pipe(pp) != -1 || errno != EMFILE || pp[0] != 77 || pp[1] != 88)
+    return 2;
+  errno = 0;
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != -1 || errno != EMFILE ||
+      sv[0] != 99 || sv[1] != 111) {
+    return 3;
+  }
+  int fd = open("/dev/null", O_RDONLY);
+  if (fd != 3) return 4;
+  close(fd);
+  return 0;
+}
+
 int main(void) {
   char b[16];
   struct stat st;
@@ -189,6 +257,14 @@ int main(void) {
   T_ASSERT_ERRNO(syscall(SYS_prlimit64, 0, INT_MAX, NULL, NULL), EINVAL);
   T_ASSERT_ERRNO(
       syscall(SYS_prlimit64, 0, INT_MAX, (void *)0x1000, NULL), EFAULT);
+  T_BEGIN("neg/rlimit-nofile-open-socket");
+  in_child(chk_low_nofile_open_socket);
+  T_BEGIN("neg/rlimit-nofile-tmpfile");
+  in_child(chk_low_nofile_tmpfile);
+  T_BEGIN("neg/rlimit-nofile-accept");
+  in_child(chk_low_nofile_accept);
+  T_BEGIN("neg/rlimit-nofile-pair-atomic");
+  in_child(chk_low_nofile_pair_atomic);
 
   /* --- syscall arg edges --- */
   T_BEGIN("neg/unknown-open-flag");

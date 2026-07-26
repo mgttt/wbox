@@ -2364,10 +2364,13 @@ static int SysSocket(struct Machine *m, i32 family, i32 type, i32 protocol) {
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if (flags) LOCK(&m->system->exec_lock);
   if ((fildes = VfsSocket(family, type, protocol)) != -1) {
+#if !defined(_WIN32) || defined(__CYGWIN__)
     if (fildes >= lim) {
       VfsClose(fildes);
       fildes = emfile();
-    } else {
+    } else
+#endif
+    {
       FixupSock(fildes, flags);
 #if defined(_WIN32) && !defined(__CYGWIN__)
       // wbox win32: guest number from the per-System table (see SysOpenat)
@@ -2601,10 +2604,13 @@ static int SysAccept4(struct Machine *m, i32 fildes, i64 sockaddr_addr,
   INTERRUPTIBLE(restartable,
                 newfd = VfsAccept(fd->hostfd, (struct sockaddr *)&addr, &addrlen));
   if (newfd != -1) {
+#if !defined(_WIN32) || defined(__CYGWIN__)
     if (newfd >= lim) {
       VfsClose(newfd);
       newfd = emfile();
-    } else {
+    } else
+#endif
+    {
       FixupSock(newfd, flags);
 #if defined(_WIN32) && !defined(__CYGWIN__)
       // wbox win32: guest number from the per-System table (see SysOpenat)

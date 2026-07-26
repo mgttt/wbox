@@ -73,10 +73,13 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
   unassert(!pthread_sigmask(SIG_BLOCK, &ss, &oldss));
   if ((tmpdir = VfsOpen(GetDirFildes(dirfildes), LoadStr(m, pathaddr),
                         O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)) != -1) {
+#if !defined(_WIN32) || defined(__CYGWIN__)
     if (tmpdir >= lim) {
       VfsClose(tmpdir);
       fildes = emfile();
-    } else {
+    } else
+#endif
+    {
       unassert(GetRandom(&rng, 8, 0) == 8);
       for (i = 0; i < 12; ++i) {
         name[i] = "0123456789abcdefghijklmnopqrstuvwxyz"[rng % 36];
@@ -97,13 +100,20 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
         // per-System number (fork children included).
         struct Fd *fd;
         int guestfd = AllocGuestFd(&m->system->fds, 0);
-        unassert(fd = AddFd(&m->system->fds, guestfd, oflags));
-        fd->hostfd = fildes;
-        fildes = guestfd;
+        if (guestfd >= lim) {
+          UNLOCK(&m->system->fds.lock);
+          VfsClose(fildes);
+          fildes = emfile();
+        } else {
+          unassert(fd = AddFd(&m->system->fds, guestfd, oflags));
+          fd->hostfd = fildes;
+          fildes = guestfd;
+          UNLOCK(&m->system->fds.lock);
+        }
 #else
         unassert(AddFd(&m->system->fds, fildes, oflags));
-#endif
         UNLOCK(&m->system->fds.lock);
+#endif
       } else {
         unassert(!VfsClose(tmpdir));
       }
@@ -139,10 +149,13 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
   if (!(path = LoadStr(m, pathaddr))) return -1;
   RESTARTABLE(fildes = VfsOpen(GetDirFildes(dirfildes), path, sysflags, mode));
   if (fildes != -1) {
+#if !defined(_WIN32) || defined(__CYGWIN__)
     if (fildes >= lim) {
       close(fildes);
       fildes = emfile();
-    } else {
+    } else
+#endif
+    {
 #if defined(_WIN32) && !defined(__CYGWIN__)
       // wbox win32: the VFS fd table is global (shared with every snapshot
       // fork child), so the number VfsOpen returned can not double as the
