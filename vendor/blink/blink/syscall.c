@@ -1527,17 +1527,39 @@ int GetOflags(struct Machine *m, int fildes) {
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-// wbox win32: translate a GUEST descriptor to the host-side (VFS-global)
-// descriptor for paths that feed a fd straight into Vfs*/host mmap
-// (pread/pwrite family, file mmap). In the main System both numberings
-// agree; in snapshot-fork children they diverge (see SysOpenat).
-static int W32HostFd(struct System *s, int guestfd) {
+// wbox win32: THE guest-fd -> host-fd resolver. The win32 port has three fd
+// namespaces — per-System guest fds, VFS-global fds, and host CRT fds — and
+// this single entry performs the translation so callers stop hand-rolling
+// GetFd/VfsGetFd sequences (the historical source of the epoll EBADF and
+// socket/fd-namespace collision bugs).
+//   want_crtfd=0: stop at the VFS-global hostfd, for callers that feed the
+//     fd straight into Vfs*/host mmap (pread/pwrite family, file mmap).
+//     In the main System both numberings agree; in snapshot-fork children
+//     they diverge (see SysOpenat).
+//   want_crtfd=1: additionally resolve a VFS fd down to the bare host CRT
+//     fd (HostfsInfo.filefd), for the CRT-level epoll/poll shims.
+// On failure sets errno = EBADF and returns -1.
+// NB: do not call VfsGetFd while holding fds.lock (lock order); take the
+// number first, then consult the VFS.
+static int W32ResolveFd(struct System *s, int guestfd, int want_crtfd) {
   int hostfd;
   struct Fd *fd;
   LOCK(&s->fds.lock);
   hostfd = (fd = GetFd(&s->fds, guestfd)) ? fd->hostfd : -1;
   UNLOCK(&s->fds.lock);
-  if (hostfd == -1) ebadf();
+  if (hostfd == -1) return ebadf();
+#ifndef DISABLE_VFS
+  if (want_crtfd) {
+    struct VfsInfo *info;
+    if (VfsGetFd(hostfd, &info) != -1) {
+      int crtfd = ((struct HostfsInfo *)info->data)->filefd;
+      unassert(!VfsFreeInfo(info));
+      return crtfd;
+    }
+  }
+#else
+  (void)want_crtfd;
+#endif
   return hostfd;
 }
 #endif
@@ -1623,7 +1645,7 @@ CreateTheMap:
   // number in fork children — metadata only, no functional impact.)
   if (fildes != -1) {
     int guestfd = fildes;
-    if ((fildes = W32HostFd(m->system, fildes)) == -1) {
+    if ((fildes = W32ResolveFd(m->system, fildes, 0)) == -1) {
       return -1;
     }
     if (getenv("WBOX_DEBUG_MEM"))
@@ -2974,7 +2996,7 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, false, EBADF) == -1) return -1;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+  if ((fildes = W32ResolveFd(m->system, fildes, 0)) == -1) return -1;
 #endif
   if (size) {
     InitIovs(&iv);
@@ -3007,7 +3029,7 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
   if (size > NUMERIC_MAX(size_t)) return eoverflow();
   if (CheckFdAccess(m, fildes, true, EBADF) == -1) return -1;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((fildes = W32HostFd(m->system, fildes)) == -1) return -1;
+  if ((fildes = W32ResolveFd(m->system, fildes, 0)) == -1) return -1;
 #endif
   if (size) {
     InitIovs(&iv);
@@ -3444,7 +3466,7 @@ static int SysFstat(struct Machine *m, i32 fd, i64 staddr) {
   struct stat st;
   struct stat_linux gst;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((fd = W32HostFd(m->system, fd)) == -1) return -1;
+  if ((fd = W32ResolveFd(m->system, fd, 0)) == -1) return -1;
 #endif
   if ((rc = VfsFstat(fd, &st)) != -1) {
     XlatStatToLinux(&gst, &st);
@@ -6040,26 +6062,10 @@ static i32 SysEpollCreate(struct Machine *m, i32 size) {
 // 工作，见 win32/w32sock.c）。guest fd 号与 VFS 号是两个命名空间（均从 0
 // 递增，必撞车），因此必须先走 per-System Fd 表把 guestfd 翻成 hostfd
 //（VFS fd 的 hostfd 即 VFS 号），再按 VFS 号解析出 HostfsInfo.filefd；
-// epoll 自身/管道等非 VFS fd 的 hostfd 直接就是宿主 CRT fd。
-// 注意：fds.lock 持有期间不得调用 VfsGetFd（锁序），先取号再查 VFS。
+// epoll 自身/管道等非 VFS fd 的 hostfd 直接就是宿主 CRT fd。翻译本身统
+// 一走 W32ResolveFd（锁序约定见该处注释）。
 static int W32EpollHostFd(struct Machine *m, int guestfd) {
-  struct Fd *fd;
-  int hostfd = -1;
-  LOCK(&m->system->fds.lock);
-  if ((fd = GetFd(&m->system->fds, guestfd))) {
-    hostfd = fd->hostfd;
-  }
-  UNLOCK(&m->system->fds.lock);
-  if (hostfd == -1) return -1;
-#ifndef DISABLE_VFS
-  struct VfsInfo *info;
-  if (VfsGetFd(hostfd, &info) != -1) {
-    int crtfd = ((struct HostfsInfo *)info->data)->filefd;
-    unassert(!VfsFreeInfo(info));
-    return crtfd;
-  }
-#endif
-  return hostfd;
+  return W32ResolveFd(m->system, guestfd, 1);
 }
 #endif
 

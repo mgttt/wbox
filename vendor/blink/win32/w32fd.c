@@ -697,6 +697,38 @@ static int W32IsAppend(int fd) {
   return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
 }
 
+// Unified CRT-fd classification — THE single lookup that decides which
+// backing object a host-side fd refers to (see win32.h). The namespaces are
+// disjoint: specials are sentinels >= 1000000, epoll/socket are real CRT
+// fds registered in the w32sock.c tables, everything else HANDLE-backed.
+int W32FdClassify(int fd, struct W32FdInfo *out) {
+  struct W32FdInfo tmp;
+  if (!out) out = &tmp;
+  out->handle = (void *)(intptr_t)-1;
+  out->dev = 0;
+  if (IsSpecial(fd)) {
+    out->kind = W32FD_SPECIAL;
+    out->dev = fd;
+    return out->kind;
+  }
+  if (WboxEpollIsFd(fd)) {
+    out->kind = W32FD_EPOLL;
+    return out->kind;
+  }
+  if (WboxSockIsFd(fd)) {
+    out->kind = W32FD_SOCKET;
+    return out->kind;
+  }
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    out->kind = W32FD_BAD;
+    return out->kind;
+  }
+  out->kind = W32FD_FILE;
+  out->handle = (void *)h;
+  return out->kind;
+}
+
 // positioned IO on pipes is ESPIPE on Linux; on win32 ReadFile with an
 // OVERLAPPED offset on a pipe handle can BLOCK forever (t_fd_rw /
 // t_negative empty-pipe hang), so reject before touching the handle.
@@ -753,27 +785,29 @@ static ssize_t W32PwriteAt(HANDLE h, const void *buf, size_t n, uint64_t off) {
 }
 
 ssize_t read(int fd, void *buf, size_t n) {
-  if (WboxSockIsFd(fd)) return WboxSockRead(fd, buf, n);  // feat/net
-  if (IsSpecial(fd)) {
-    if (fd == 1000001) {  // zero
-      memset(buf, 0, n);
-      return n;
-    }
-    if (fd == 1000000) {  // urandom
-      NTSTATUS st = BCryptGenRandom(NULL, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-      if (st != 0) {
-        errno = EIO;
-        return -1;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET:
+      return WboxSockRead(fd, buf, n);  // feat/net
+    case W32FD_SPECIAL:
+      if (fi.dev == 1000001) {  // zero
+        memset(buf, 0, n);
+        return n;
       }
-      return n;
-    }
-    return 0;  // full: reads give eof
+      if (fi.dev == 1000000) {  // urandom
+        NTSTATUS st = BCryptGenRandom(NULL, buf, n, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+        if (st != 0) {
+          errno = EIO;
+          return -1;
+        }
+        return n;
+      }
+      return 0;  // full: reads give eof
+    case W32FD_BAD:
+      errno = EBADF;
+      return -1;
   }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   DWORD got = 0;
   if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, NULL)) {
     DWORD e = GetLastError();
@@ -786,19 +820,21 @@ ssize_t read(int fd, void *buf, size_t n) {
 }
 
 ssize_t write(int fd, const void *buf, size_t n) {
-  if (WboxSockIsFd(fd)) return WboxSockWrite(fd, buf, n);  // feat/net
-  if (IsSpecial(fd)) {
-    if (fd == 1000002) {  // full
-      errno = ENOSPC;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET:
+      return WboxSockWrite(fd, buf, n);  // feat/net
+    case W32FD_SPECIAL:
+      if (fi.dev == 1000002) {  // full
+        errno = ENOSPC;
+        return -1;
+      }
+      return n;
+    case W32FD_BAD:
+      errno = EBADF;
       return -1;
-    }
-    return n;
   }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   // F2: O_APPEND — every write goes to EOF regardless of the fd position.
   if (W32IsAppend(fd)) SetFilePointerEx(h, (LARGE_INTEGER){0}, NULL, FILE_END);
   DWORD put = 0;
@@ -811,9 +847,16 @@ ssize_t write(int fd, const void *buf, size_t n) {
 }
 
 int close(int fd) {
-  if (WboxSockClose(fd)) return 0;    // feat/net: socket fds
-  if (WboxEpollClose(fd)) return 0;   // feat/net: epoll fds
-  if (IsSpecial(fd)) return 0;
+  switch (W32FdClassify(fd, NULL)) {
+    case W32FD_SOCKET:
+      (void)WboxSockClose(fd);  // feat/net: socket fds (classified above)
+      return 0;
+    case W32FD_EPOLL:
+      (void)WboxEpollClose(fd);  // feat/net: epoll fds (classified above)
+      return 0;
+    case W32FD_SPECIAL:
+      return 0;
+  }
   W32SetAppend(fd, 0);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
@@ -1256,32 +1299,33 @@ int W32FileSize64(int fd, int64_t *out) {
 }
 
 int fstat(int fd, struct stat *st) {
-  unsigned sockmode;
-  if (WboxSockFstatMode(fd, &sockmode)) {  // feat/net
-    memset(st, 0, sizeof(*st));
-    st->st_mode = sockmode;
-    st->st_blksize = 4096;
-    st->st_nlink = 1;
-    return 0;
+  struct W32FdInfo fi;
+  switch (W32FdClassify(fd, &fi)) {
+    case W32FD_SOCKET: {  // feat/net
+      unsigned sockmode = 0;
+      (void)WboxSockFstatMode(fd, &sockmode);  // classified above
+      memset(st, 0, sizeof(*st));
+      st->st_mode = sockmode;
+      st->st_blksize = 4096;
+      st->st_nlink = 1;
+      return 0;
+    }
+    case W32FD_EPOLL:  // feat/net
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFCHR | 0600;
+      st->st_blksize = 4096;
+      st->st_nlink = 1;
+      return 0;
+    case W32FD_SPECIAL:
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFCHR | 0666;
+      st->st_blksize = 4096;
+      return 0;
+    case W32FD_BAD:
+      errno = EBADF;
+      return -1;
   }
-  if (WboxEpollIsFd(fd)) {  // feat/net
-    memset(st, 0, sizeof(*st));
-    st->st_mode = S_IFCHR | 0600;
-    st->st_blksize = 4096;
-    st->st_nlink = 1;
-    return 0;
-  }
-  if (IsSpecial(fd)) {
-    memset(st, 0, sizeof(*st));
-    st->st_mode = S_IFCHR | 0666;
-    st->st_blksize = 4096;
-    return 0;
-  }
-  HANDLE h = W32Handle(fd);
-  if (h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
+  HANDLE h = (HANDLE)fi.handle;
   // F1: resolve the path for the emulated-mode lookup (fails for pipes)
   wchar_t wbuf[MAX_PATH], *wp = NULL;
   DWORD wn = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
@@ -1714,20 +1758,26 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
   DWORD deadline = timeout >= 0 ? GetTickCount() + timeout : 0;
   int nsock = 0;
   for (nfds_t i = 0; i < n; ++i)
-    if (pfds[i].fd >= 0 && WboxSockIsFd(pfds[i].fd)) ++nsock;
+    if (pfds[i].fd >= 0 && W32FdClassify(pfds[i].fd, NULL) == W32FD_SOCKET)
+      ++nsock;
   for (;;) {
     int nready = 0;
     for (nfds_t i = 0; i < n; ++i) {
       struct pollfd *p = pfds + i;
+      struct W32FdInfo fi;
       p->revents = 0;
-      if (p->fd < 0 || WboxSockIsFd(p->fd)) continue;
-      if (IsSpecial(p->fd)) {
-        p->revents = p->events & (POLLIN | POLLOUT);
-      } else {
-        HANDLE h = W32Handle(p->fd);
-        if (h == INVALID_HANDLE_VALUE) {
+      if (p->fd < 0) continue;
+      switch (W32FdClassify(p->fd, &fi)) {
+        case W32FD_SOCKET:
+          continue;  // serviced by WboxSockPoll below
+        case W32FD_SPECIAL:
+          p->revents = p->events & (POLLIN | POLLOUT);
+          break;
+        case W32FD_BAD:
           p->revents = POLLNVAL;
-        } else {
+          break;
+        default: {
+          HANDLE h = (HANDLE)fi.handle;
           DWORD ft = GetFileType(h);
           if (ft == FILE_TYPE_PIPE) {
             DWORD avail = 0;
@@ -1761,6 +1811,7 @@ int poll(struct pollfd *pfds, nfds_t n, int timeout) {
           } else {
             p->revents = p->events & (POLLIN | POLLOUT);
           }
+          break;
         }
       }
       if (p->revents) ++nready;

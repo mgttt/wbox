@@ -89,6 +89,28 @@ int WboxSockPoll(struct pollfd *pfds, unsigned long n, int timeout);
 int WboxEpollIsFd(int fd);
 int WboxEpollClose(int fd);                // 1 = handled (fd was epoll)
 
+// ---------------------------------------------------------------- fd table
+// Unified CRT-namespace fd classification (w32fd.c). The win32 port juggles
+// three fd namespaces: per-System guest fds (blink/syscall.c, translated by
+// W32ResolveFd there), VFS fds, and host CRT fds. This is the single
+// classification entry for the CRT namespace; it subsumes the historical
+// ad-hoc WboxSockIsFd / WboxEpollIsFd / IsSpecial probes that caused the
+// epoll EBADF / FIONREAD / nonblock-gate bugs. Types stay opaque (HANDLE as
+// void*) so win32.h needs no windows.h.
+enum {
+  W32FD_BAD = 0,  // not a valid CRT fd (handle lookup failed)
+  W32FD_FILE,     // regular file / pipe / console: a HANDLE-backed CRT fd
+  W32FD_SOCKET,   // winsock socket wrapped in a CRT fd (w32sock.c table)
+  W32FD_EPOLL,    // epoll instance wrapped in a CRT fd (w32sock.c table)
+  W32FD_SPECIAL,  // fake device fd sentinel 1000000..1000002 (no CRT fd)
+};
+struct W32FdInfo {
+  int kind;
+  void *handle;  // Win32 HANDLE as void*; (void*)(intptr_t)-1 == invalid
+  int dev;       // sentinel number when kind == W32FD_SPECIAL
+};
+int W32FdClassify(int fd, struct W32FdInfo *out);
+
 // w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
 // the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets
 // (>2GiB) through these instead of VfsPreadv/VfsPwritev.
