@@ -260,3 +260,28 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 5. 自研 Win32 —— **不做**。
 
 注意成本：每加一个宿主，CI 矩阵与测试面翻倍。在 ① 达成前不宜开新宿主线。
+
+### 10.5 `LinuxNativeBackend` 实施方案（可执行分解）
+
+前置门槛（不满足则不开工，理由见 10.4）：Windows 链路 CI 全绿，即
+`build-wbox-linux` 的验收矩阵无 FAIL（当前阻塞项：KNOWN-FAILURES W1）。
+
+| 里程碑 | 范围 | 验收标准 |
+|---|---|---|
+| L0 骨架 | `backend/linux.rs` 实现 `Backend`；`classify_target` 按宿主分派；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | `cargo test` 覆盖 prepare 的执行计划（不 spawn），与 Blink/Native 同构 |
+| L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` `/dev` 最小挂载 | 非 root 用户跑 `wbox run alpine:3.20 -- id` 得 `uid=0(root)` 且宿主侧仍是原 uid |
+| L2 资源限额 | cgroup v2：`memory.max` / `cpu.max` / `pids.max`，对齐现有 `--memory`/`--cpu-pct`/`--max-procs` 语义 | 三个开关各有一条超限用例（OOM 被杀、CPU 占比受限、fork 炸弹被挡） |
+| L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
+| L4 跨架构 | 宿主 arch ≠ 镜像 arch 时自动切 `BlinkBackend`（arm64 上跑 x86-64 镜像） | arm64 CI 上 `wbox run --platform linux/amd64 alpine -- uname -m` 输出 `x86_64` |
+
+**语义一致性红线**：Linux 后端必须复用同一套 `--memory`/`--cpu-pct`/
+`--max-procs`/`--allow-network` 语义与同一套退出码约定（1 参数 / 2 profile /
+3 job / 4 进程创建 / 5 镜像）；宿主特有能力不得渗进通用 CLI。若某语义在
+Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不支持"而非
+静默忽略——静默忽略会让"同一条命令在两个宿主上隔离强度不同"，这是安全类
+工具最不该有的行为。
+
+**CI 增量**：新增 `test-linux-backend`（ubuntu runner，rootless 场景）。
+注意 GitHub ubuntu runner 默认允许 unprivileged user namespace，但
+`pivot_root` 与 cgroup v2 委派需要确认；不可用时按既有惯例记
+`::notice::` SKIP 而非 FAIL。
