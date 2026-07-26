@@ -45,6 +45,7 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
   u64 rng;
   int tmpdir;
   int fildes;
+  int sourcefd;
   int sysflags;
   char name[13];
   int supported;
@@ -87,8 +88,10 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
       }
       name[i] = 0;
       if ((fildes = VfsOpen(tmpdir, name, sysflags, mode)) != -1) {
+        sourcefd = fildes;
         unassert(!VfsUnlink(tmpdir, name, 0));
-        unassert(VfsDup2(fildes, tmpdir) == tmpdir);
+        unassert(VfsDup2(sourcefd, tmpdir) == tmpdir);
+        unassert(!VfsClose(sourcefd));
         fildes = tmpdir;
         if (oflags & O_CLOEXEC_LINUX) {
           unassert(!VfsFcntl(fildes, F_SETFD, FD_CLOEXEC));

@@ -1,5 +1,5 @@
 /* t_stress.c — slow stress cases (skippable via --skip-slow):
- * 100 fork loop, 1000 mmap/munmap loop, large-file checksum. */
+ * fork/mmap loops, 5000 O_TMPFILE cycles, large-file checksum. */
 #define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -87,6 +87,24 @@ int main(void) {
     for (int i = 0; i < cnt; i++) {
       if (((char *)ptrs[i])[0] != (char)i) { ok = 0; break; }
       munmap(ptrs[i], 4096);
+    }
+    T_ASSERT(ok);
+  }
+
+  /* --- 5000 O_TMPFILE cycles; hidden source VFS fds must not leak --- */
+  T_BEGIN("stress/otmpfile-x5000");
+  {
+    int ok = 1;
+    for (int i = 0; i < 5000; i++) {
+      int fd = open(".", O_RDWR | O_TMPFILE, 0600);
+      if (fd == -1) {
+        ok = 0;
+        break;
+      }
+      if (close(fd) == -1) {
+        ok = 0;
+        break;
+      }
     }
     T_ASSERT(ok);
   }
