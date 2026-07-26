@@ -307,6 +307,12 @@ static int Exec(char *execfn, char *prog, char **argv, char **envp) {
     memcpy(&oldmask, &old->system->exec_sigmask, sizeof(oldmask));
     UNLOCK(&old->system->exec_lock);
     // freeing the last machine in a system will free its system too
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // wbox win32: children of the old machine must keep their SIGCHLD
+    // parent across exec; repoint BEFORE FreeMachine(old)'s unlink
+    // clears the weak references for good.
+    W32ChildReparent(old, m);
+#endif
     FreeMachine(old);
 #if defined(_WIN32) && !defined(__CYGWIN__)
     if (m->system->w32child) {

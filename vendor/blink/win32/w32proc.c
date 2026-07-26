@@ -119,6 +119,59 @@ static void W32ChildrenUnlock(void) {
   LeaveCriticalSection(&g_children_lock);
 }
 
+// ---- live Machine registry (SIGCHLD UAF fix) ----
+// vpid records hold WEAK struct Machine pointers (parent_machine for the
+// SIGCHLD enqueue, child_machine for cross-pid kill). FreeMachine clears
+// them via W32ChildUnlinkMachine, but that only covers records already
+// linked at that moment and nothing covers a Machine freed through
+// RemoveOtherThreads (no unlink) or memory poisoned/reused between the
+// record lookup and the dereference. Track every live Machine so a weak
+// pointer can be re-validated under the table lock right before use.
+static void **g_live_machines;
+static size_t g_live_n, g_live_cap;
+
+// called from NewMachine(); takes the table lock itself
+void W32MachineTrack(void *m) {
+  void **nl;
+  W32ChildrenLock();
+  if (g_live_n == g_live_cap) {
+    size_t nc = g_live_cap ? g_live_cap * 2 : 64;
+    if (!(nl = realloc(g_live_machines, nc * sizeof(*nl)))) {
+      W32ChildrenUnlock();
+      fprintf(stderr, "wbox: live machine registry OOM\n");
+      abort();
+    }
+    g_live_machines = nl;
+    g_live_cap = nc;
+  }
+  g_live_machines[g_live_n++] = m;
+  W32ChildrenUnlock();
+}
+
+// called from FreeMachineUnlocked() — the single choke point for ALL
+// machine destruction (FreeMachine, RemoveOtherThreads)
+void W32MachineUntrack(void *m) {
+  size_t i;
+  W32ChildrenLock();
+  for (i = 0; i < g_live_n; ++i) {
+    if (g_live_machines[i] == m) {
+      g_live_machines[i] = g_live_machines[--g_live_n];
+      break;
+    }
+  }
+  W32ChildrenUnlock();
+}
+
+// caller MUST hold the table lock (W32ChildLock): 1 iff `m` is a live
+// Machine whose memory may be dereferenced
+int W32MachineLiveLocked(const void *m) {
+  size_t i;
+  for (i = 0; i < g_live_n; ++i) {
+    if (g_live_machines[i] == m) return 1;
+  }
+  return 0;
+}
+
 // Allocate a child record with a fresh virtual pid and the vfork
 // handshake event. Not yet visible to waitpid(); see W32ChildPublish.
 struct W32Child *W32ChildAlloc(void) {
@@ -162,6 +215,21 @@ void W32ChildPublish(struct W32Child *c, void *thread_handle) {
 
 void W32ChildSetParent(struct W32Child *c, void *parent_machine) {
   c->parent_machine = parent_machine;
+}
+
+// execve() replaces the parent System's machine in place: every vpid
+// record that named the OLD machine as parent must follow to the new
+// one, or the children's SIGCHLD enqueue on exit is silently lost
+// (the unlink in FreeMachine would otherwise NULL it out for good).
+void W32ChildReparent(void *old_machine, void *new_machine) {
+  struct W32Child *c;
+  W32ChildrenLock();
+  for (c = g_children; c; c = c->next) {
+    if (c->parent_machine == old_machine) {
+      c->parent_machine = new_machine;
+    }
+  }
+  W32ChildrenUnlock();
 }
 
 void *W32ChildParent(struct W32Child *c) {

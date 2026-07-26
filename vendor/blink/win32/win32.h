@@ -41,6 +41,12 @@ int W32ChildExited(struct W32Child *);
 void W32ChildSignalExec(struct W32Child *);
 void W32ChildSignalExit(struct W32Child *, int status);
 void W32ChildSignalKilled(struct W32Child *, int sig);
+// live Machine registry: weak parent/child pointers in the vpid table are
+// re-validated under the table lock before dereference (SIGCHLD UAF fix)
+void W32MachineTrack(void *);
+void W32MachineUntrack(void *);
+int W32MachineLiveLocked(const void *);
+void W32ChildReparent(void *old_machine, void *new_machine);
 void W32VforkWaitParent(struct W32Child *);
 // SIGCHLD delivery: the child record remembers the parent's Machine (as an
 // opaque pointer) so the exit path can enqueue SIGCHLD into the parent's

@@ -724,7 +724,12 @@ _Noreturn static void W32ChildExit(struct Machine *m, int rc, int termsig) {
   W32ChildLock();
   {
     struct Machine *pm = (struct Machine *)W32ChildParent(rec);
-    if (pm) EnqueueSignal(pm, SIGCHLD_LINUX);
+    // pm is a WEAK reference: in an A->B->C chain with B exiting first,
+    // B's FreeMachine may already have poisoned/freed the memory the
+    // record points at (apt method process exit hit this: page fault
+    // inside EnqueueSignal). Re-validate against the live-machine
+    // registry under the same lock before dereferencing.
+    if (pm && W32MachineLiveLocked(pm)) EnqueueSignal(pm, SIGCHLD_LINUX);
   }
   W32ChildUnlock();
   FreeMachine(m);  // last machine -> FreeSystem -> unmaps guest pages
@@ -5517,6 +5522,12 @@ static int SysKill(struct Machine *m, int pid, int sig) {
       if (!sig) {
         W32ChildUnlock();
         return 0;  // existence probe
+      }
+      if (!W32MachineLiveLocked(cm)) {
+        // stale weak pointer (freed via a path without unlink): the
+        // child is effectively gone; report success like a zombie kill
+        W32ChildUnlock();
+        return 0;
       }
       if (sig == SIGKILL_LINUX) {
         W32ChildUnlock();
