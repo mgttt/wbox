@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/ioctl.h>
+#include <wctype.h>
 #include <poll.h>
 #include <sys/select.h>
 #include <signal.h>
@@ -283,6 +284,111 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
   return buf;
 }
 
+// ------------------------------------------------- F1: POSIX mode emulation
+// Win32 only has a read-only attribute, so the mode passed to
+// open(O_CREAT)/mkdir/chmod is kept in a process-local table keyed by
+// the normalized absolute wide path; W32FillStat prefers it over the
+// attribute heuristic. Single-process scope (like the rest of the L2
+// emulation); snapshot-fork children share it since they share the
+// process.
+#define W32MODE_CAP 4096
+static struct {
+  wchar_t *path;
+  mode_t mode;
+} g_modetab[W32MODE_CAP];
+static SRWLOCK g_modelock = SRWLOCK_INIT;
+static mode_t g_umask = 022;
+
+static uint32_t W32ModeHash(const wchar_t *w) {
+  uint32_t h = 2166136261u;
+  for (; *w; ++w) {
+    h ^= (uint32_t)towlower(*w);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+// absolutize an already-normalized path for use as a mode-table key
+static void W32AbsKey(const wchar_t *w, wchar_t out[MAX_PATH]) {
+  if (w[0] && w[1] == L':') {
+    wcscpy(out, w);
+    return;
+  }
+  DWORD m = GetCurrentDirectoryW(MAX_PATH, out);
+  if (!m || wcslen(out) + wcslen(w) + 2 >= MAX_PATH) {
+    wcscpy(out, w);
+    return;
+  }
+  wcscat(out, L"\\");
+  wcscat(out, w);
+}
+
+static void W32ModeSet(const wchar_t *w, mode_t mode) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n, firstfree = UINT32_MAX;
+  W32AbsKey(w, key);
+  AcquireSRWLockExclusive(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (!g_modetab[i].path) {
+      if (firstfree == UINT32_MAX) firstfree = i;
+      continue;
+    }
+    if (!_wcsicmp(g_modetab[i].path, key)) {
+      g_modetab[i].mode = mode;
+      ReleaseSRWLockExclusive(&g_modelock);
+      return;
+    }
+  }
+  if (firstfree != UINT32_MAX &&
+      (g_modetab[firstfree].path = _wcsdup(key))) {
+    g_modetab[firstfree].mode = mode;
+  }
+  ReleaseSRWLockExclusive(&g_modelock);
+}
+
+static int W32ModeGet(const wchar_t *w, mode_t *mode) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n;
+  W32AbsKey(w, key);
+  AcquireSRWLockShared(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (!g_modetab[i].path) continue;
+    if (!_wcsicmp(g_modetab[i].path, key)) {
+      *mode = g_modetab[i].mode;
+      ReleaseSRWLockShared(&g_modelock);
+      return 1;
+    }
+  }
+  ReleaseSRWLockShared(&g_modelock);
+  return 0;
+}
+
+static void W32ModeClear(const wchar_t *w) {
+  wchar_t key[MAX_PATH];
+  uint32_t i, n;
+  W32AbsKey(w, key);
+  AcquireSRWLockExclusive(&g_modelock);
+  i = W32ModeHash(key) & (W32MODE_CAP - 1);
+  for (n = 0; n < W32MODE_CAP; ++n, i = (i + 1) & (W32MODE_CAP - 1)) {
+    if (g_modetab[i].path && !_wcsicmp(g_modetab[i].path, key)) {
+      free(g_modetab[i].path);
+      g_modetab[i].path = NULL;
+      break;
+    }
+  }
+  ReleaseSRWLockExclusive(&g_modelock);
+}
+
+static void W32ModeMove(const wchar_t *old, const wchar_t *new_) {
+  mode_t m;
+  if (W32ModeGet(old, &m)) {
+    W32ModeSet(new_, m);
+    W32ModeClear(old);
+  }
+}
+
 static DWORD W32Access(int flags, mode_t mode) {
   switch (flags & O_ACCMODE) {
     case O_RDONLY:
@@ -468,6 +574,10 @@ int openat(int dirfd, const char *path, int flags, ...) {
   if (h == INVALID_HANDLE_VALUE) {
     errno = W32Err();
     return -1;
+  }
+  // F1: mode applies only at creation (attr was INVALID before CreateFile)
+  if ((flags & O_CREAT) && attr == INVALID_FILE_ATTRIBUTES) {
+    W32ModeSet(wbuf, mode & ~g_umask & 07777);
   }
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
   return W32ToCrt(h, flags);
@@ -891,6 +1001,13 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
     }
     if (!st->st_nlink) st->st_nlink = 1;
   }
+  // F1: the emulated POSIX mode table wins over the attribute heuristic
+  if (wpath && (ft == FILE_TYPE_DISK)) {
+    mode_t em;
+    if (W32ModeGet(wpath, &em)) {
+      st->st_mode = (st->st_mode & S_IFMT) | (em & 07777);
+    }
+  }
   // win32 filetime (100ns since 1601) -> unix timespec
   uint64_t t;
   t = ((uint64_t)ct.dwHighDateTime << 32) | ct.dwLowDateTime;
@@ -933,7 +1050,14 @@ int fstat(int fd, struct stat *st) {
     errno = EBADF;
     return -1;
   }
-  W32FillStat(st, h, NULL);
+  // F1: resolve the path for the emulated-mode lookup (fails for pipes)
+  wchar_t wbuf[MAX_PATH], *wp = NULL;
+  DWORD wn = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
+  if (wn && wn < MAX_PATH) {
+    wp = wbuf;
+    if (!wcsncmp(wp, L"\\\\?\\", 4)) wp += 4;
+  }
+  W32FillStat(st, h, wp);
   return 0;
 }
 
@@ -993,16 +1117,44 @@ int faccessat(int dirfd, const char *path, int mode, int flags) {
 }
 
 int unlink(const char *path) {
-  wchar_t wbuf[MAX_PATH];
-  if (!W32Path(path, wbuf) || !DeleteFileW(wbuf)) {
-    errno = W32Err();
+  return unlinkat(AT_FDCWD, path, 0);
+}
+
+// F5: POSIX unlink of an open file. DeleteFile on Win32/wine only marks
+// the file delete-pending — the name stays visible (stat succeeds) until
+// the last handle closes, violating POSIX unlink semantics. Emulation:
+// rename the victim to a hidden sibling (open handles stay valid and
+// keep the inode), then delete the temp name; its delete-pending residue
+// disappears at the last close and can only ever show up as a hidden
+// dotfile in readdir in between.
+static int W32UnlinkPosix(const wchar_t *wbuf) {
+  wchar_t tmp[MAX_PATH];
+  wchar_t *base;
+  static volatile long seq;
+  if (DeleteFileW(wbuf) &&
+      GetFileAttributesW(wbuf) == INVALID_FILE_ATTRIBUTES) {
+    return 0;  // not open anywhere: plain delete removed the name
+  }
+  if (wcslen(wbuf) + 40 >= MAX_PATH) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
     return -1;
   }
+  wcscpy(tmp, wbuf);
+  base = wcsrchr(tmp, L'\\');
+  base = base ? base + 1 : tmp;
+  swprintf(base, (size_t)(tmp + MAX_PATH - base), L".wbox-unlink-%lx-%lx",
+           (unsigned long)GetCurrentProcessId(),
+           (unsigned long)InterlockedIncrement(&seq));
+  if (!MoveFileExW(wbuf, tmp, MOVEFILE_REPLACE_EXISTING)) {
+    return -1;  // original DeleteFile error is the better errno; restore
+  }
+  DeleteFileW(tmp);  // may go delete-pending; freed at last close
   return 0;
 }
 
 int unlinkat(int dirfd, const char *path, int flags) {
   wchar_t wbuf[MAX_PATH];
+  DWORD attr;
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1012,12 +1164,20 @@ int unlinkat(int dirfd, const char *path, int flags) {
       errno = W32Err();
       return -1;
     }
+    W32ModeClear(wbuf);
     return 0;
   }
-  if (!DeleteFileW(wbuf)) {
+  // F6: Linux reports EISDIR for unlink(dir), not EACCES
+  attr = GetFileAttributesW(wbuf);
+  if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+    errno = EISDIR;
+    return -1;
+  }
+  if (W32UnlinkPosix(wbuf)) {
     errno = W32Err();
     return -1;
   }
+  W32ModeClear(wbuf);
   return 0;
 }
 
@@ -1040,6 +1200,7 @@ int rename(const char *old, const char *new_) {
     errno = W32Err();
     return -1;
   }
+  W32ModeMove(wo, wn);
   return 0;
 }
 
@@ -1053,6 +1214,7 @@ int renameat(int oldfd, const char *old, int newfd, const char *new_) {
     errno = W32Err();
     return -1;
   }
+  W32ModeMove(wo, wn);
   return 0;
 }
 
@@ -1071,6 +1233,7 @@ int mkdir(const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & ~g_umask & 07777);
   return 0;
 }
 
@@ -1084,6 +1247,7 @@ int mkdirat(int dirfd, const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & ~g_umask & 07777);
   return 0;
 }
 
@@ -1104,11 +1268,26 @@ int chmod(const char *path, mode_t mode) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & 07777);
   return 0;
 }
 
 int fchmod(int fd, mode_t mode) {
-  return 0;  // L1
+  // F1: attribute emulation only covers the read-only bit; record the
+  // full mode in the emulation table so fstat reports it.
+  wchar_t wbuf[MAX_PATH];
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  DWORD n = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
+  if (n && n < MAX_PATH) {
+    wchar_t *d = wbuf;
+    if (!wcsncmp(d, L"\\\\?\\", 4)) d += 4;
+    W32ModeSet(d, mode & 07777);
+  }
+  return 0;
 }
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
@@ -1128,13 +1307,13 @@ int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
     errno = W32Err();
     return -1;
   }
+  W32ModeSet(wbuf, mode & 07777);
   return 0;
 }
 
 mode_t umask(mode_t m) {
-  static mode_t cur = 022;
-  mode_t old = cur;
-  cur = m & 0777;
+  mode_t old = g_umask;
+  g_umask = m & 0777;
   return old;
 }
 
