@@ -208,7 +208,7 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 
 **两个利好**：`jit.h` 已内建 Win64 ABI（JIT 移植成本大幅降低）；guest `execve` 是进程内重建 Machine，不依赖宿主 exec（fork+exec 特判的工程量比预判小）。
 
-## 10. 多宿主后端（Linux 宿主 L0/L1 已落地，其余为设计）
+## 10. 多宿主后端（Linux 宿主台阶①② 已落地，③④ 为设计）
 
 > 起因：wbox 最初只做「Windows 宿主」。把宿主维度打开后，`Backend` trait
 > 天然可以承载更多组合。本节记录**评估结论与优先级**，避免把"能做"当成
@@ -221,10 +221,27 @@ Linux 侧不是"顺手也支持一下"，而是与 Windows 侧对等的一条主
 
 | 台阶 | 内容 | 状态 | 对标 |
 |---|---|---|---|
-| ① 沙箱 Linux 程序 | 宿主已有的 ELF 关进 namespace + cgroup | ✅ L0/L1 已落地（L2 进行中） | `bwrap` / `systemd-run` |
-| ② 沙箱 Linux 容器 | OCI 镜像 rootfs 直接跑 | ✅ 同上（复用整个 `oci/`） | podman / docker（**只对标 runner，不对标生态**） |
+| ① 沙箱 Linux 程序 | 宿主已有的 ELF 关进 namespace + cgroup | ✅ L0/L1/L2 已落地（`LinuxMode::Host`） | `bwrap` / `systemd-run` |
+| ② 沙箱 Linux 容器 | OCI 镜像 rootfs 直接跑 | ✅ 同上（`LinuxMode::Image`，复用整个 `oci/`） | podman / docker（**只对标 runner，不对标生态**） |
 | ③ 沙箱 Windows 程序 | Linux 上跑 PE，**聚焦 CLI/TUI** | 📐 见 §10.3 | wine（集成而非取代） |
 | ④ Windows 容器 | Linux 上跑 Windows 容器镜像 | 🔭 远期愿景，仅记录 | Windows Container |
+
+关于 ① 与 ② 的**关系**：两者共用同一套隔离原语（user/mount/pid/net
+namespace + cgroup v2），由 `LinuxMode` 二选一，**唯一差别是要不要
+`pivot_root`**：
+
+| | `LinuxMode::Image`（台阶②） | `LinuxMode::Host`（台阶①） |
+|---|---|---|
+| 入口 | `wbox run <镜像> -- <cmd>` | `wbox run -- <本机程序>` |
+| 根文件系统 | `pivot_root` 进镜像 rootfs，宿主不可见 | **不换根**，宿主文件系统照常可见 |
+| `--workdir` | 即 rootfs 路径（内部用） | 工作目录 |
+| `/dev`、`/proc` | wbox 建最小设备集并挂 `/proc` | 用宿主的 |
+| 身份/进程/网络/限额 | 完全相同 | 完全相同 |
+
+台阶① 的用途是**环境控制**而非文件系统隔离：给 harness / CI 跑宿主已有的
+程序时，限住资源、隔开进程树、默认断网，但不要求先做出一个镜像。文件系统
+不隔离这件事与 Windows 侧一致（README「不提供什么」已写明 `--workdir` 不是
+只读视图），故不是 Linux 侧的特殊约定。真要文件系统隔离就用台阶②。
 
 关于 ②：**明确不以功能数对标 podman/docker**。它们的护城河是网络/卷/
 compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是它在 Windows
@@ -314,6 +331,8 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
 | ✅ L0 骨架 | `backend/linux.rs` 实现 `Backend`；镜像目标按宿主分派（`image_backend_kind`）；`prepare` 复用 `oci::config` 合并与 `backend::env` 策略 | **已完成**：6 项单测覆盖执行计划（无模拟器前缀 / resolv.conf 注入 / POSIX 环境风味 / 共享保留键策略 / 参数校验 / spawn 拒绝），与 Blink/Native 同构 |
 | ✅ L1 rootless 隔离 | user + mount + pid namespace（`unshare`）、`uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` 与最小 `/dev`（bind 宿主节点，user ns 内不能 mknod） | **已完成并实测**：非 root（uid=1001）跑容器内 `id` 得 `uid=0 gid=0`；`ls /` 只见 rootfs（`bin dev etc proc`），`/home` 不存在；容器内 `$$`=1（PID ns）；退出码 7/0 原样转发 |
 | ✅ L2 资源限额 | cgroup v2 优先（`memory.max`/`cpu.max`/`pids.max`）；无 cgroup v2 时 `--memory`→`RLIMIT_AS`、`--max-procs`→`RLIMIT_NPROC` 兜底，而 **`--cpu-pct` 明确报错**（无 rlimit 对应物，不静默忽略） | **已完成并实测**（开发容器是 cgroup v1，故验的是兜底路径）：`--memory 16` 下 64MB 分配 `dd: out of memory`、不限时同样操作成功；`--max-procs 8` 下 fork 炸弹 `can't fork: Resource temporarily unavailable`；`--cpu-pct 50` 报错且退出码 1（参数错误）。cgroup v2 路径由 ubuntu CI runner 覆盖 |
+| ✅ LN 网络默认一致 | 默认新建空 network namespace（`CLONE_NEWNET`），`--allow-network` 才共享宿主网络栈；新 netns 内把 `lo` 拉起来 | **已完成并实测**：默认下 `connect(1.1.1.1:53)` 得 `ENETUNREACH`、`getent hosts github.com` 无结果；加 `--allow-network` 后解析成功；默认下 `bind/connect 127.0.0.1` 仍可用（对照：裸 `unshare -Urn` 同样操作报 `Network is unreachable`，证明 `lo` 是 wbox 拉起来的） |
+| ✅ H 宿主程序模式 | `LinuxMode::Host`：`wbox run -- <本机程序>` 复用全部隔离原语但不 `pivot_root`；按宿主分派（`host_program_backend_kind`） | **已完成并实测**：宿主程序 `$$`=1；`ls /` 见宿主 `usr/etc`（与镜像模式相反）；`--workdir /etc` 后 `pwd`=`/etc`；退出码 9 原样转发；工作目录无 `.wbox_oldroot`/`dev` 残留 |
 | L3 生命周期 | 进程树收割（对齐 Windows 侧 `KILL_ON_JOB_CLOSE` 的语义承诺） | wbox 被 SIGKILL 后容器内无残留进程 |
 | L4 跨架构 | 宿主 arch ≠ 镜像 arch 时自动切 `BlinkBackend`（arm64 上跑 x86-64 镜像） | arm64 CI 上 `wbox run --platform linux/amd64 alpine -- uname -m` 输出 `x86_64` |
 
@@ -330,6 +349,20 @@ fork 炸弹够用，但不等于"容器内进程数上限"。故 `-V` 会打印�
 Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不支持"而非
 静默忽略——静默忽略会让"同一条命令在两个宿主上隔离强度不同"，这是安全类
 工具最不该有的行为。
+
+这条红线已经抓到过两次真实违规，都不是"设计时想到的"而是"实测时撞见的"：
+
+1. **`--max-procs` 以 root 静默失效**。无 cgroup v2 时退化到 `RLIMIT_NPROC`，
+   但内核让特权进程绕过该上限：同一条 `--max-procs 8`，uid=1001 下 fork 炸弹
+   `can't fork`，root 下 40 个子进程全部起来。用户以为有上限而实际没有，比
+   直接报错危险。现在这种组合明确拒绝执行。
+2. **Linux 侧默认联网**。Windows 侧默认不授 `INTERNET_CLIENT`，而 Linux 侧
+   最初根本没做网络隔离——同一条命令在两个宿主上默认强度不同，正是红线禁止
+   的情形。现在默认 `CLONE_NEWNET`（见上表 LN 行）。
+
+共同教训：**默认值的不一致比功能缺失更隐蔽**，因为两边都"能跑"，只有并排
+实测同一条命令才会暴露。故 `scripts/test-linux-backend.sh` 断言的是**默认
+行为**，而不只是"带上参数后有效"。
 
 **CI 增量**：新增 `test-linux-backend`（ubuntu runner，rootless 场景）。
 注意 GitHub ubuntu runner 默认允许 unprivileged user namespace，但

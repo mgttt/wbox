@@ -23,12 +23,49 @@ use super::{Backend, Prepared, RunSpec};
 mod ns;
 use crate::error::{Result, WboxError};
 
-/// Linux 原生容器后端（无状态）。
-pub struct LinuxNativeBackend;
+/// 运行形态：镜像容器 vs 宿主程序。
+///
+/// 两者共用同一套隔离原语（namespace + cgroup），差别只在**根文件系统**：
+/// - `Image`：`pivot_root` 进镜像 rootfs，容器看到的是镜像的 `/`；
+/// - `Host`：**不** `pivot_root`，宿主文件系统照常可见，`--workdir` 只作
+///   工作目录。这与 Windows 侧的语义一致（README「不提供什么」已写明
+///   `--workdir` 不是只读视图），故不是 Linux 侧的特殊约定。
+///   用途是"环境控制"而非"文件系统隔离"：资源限额、进程树隔离、
+///   默认断网——给 harness / CI 跑宿主已有程序时用。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxMode {
+    /// OCI 镜像 rootfs（pivot_root 进去）
+    Image,
+    /// 宿主程序（不换根）
+    Host,
+}
+
+/// Linux 原生后端。`mode` 决定是否 `pivot_root` 进镜像 rootfs。
+pub struct LinuxNativeBackend(pub LinuxMode);
 
 impl Backend for LinuxNativeBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
         super::require_cmd(&spec.cmd)?;
+        if self.0 == LinuxMode::Host {
+            // 宿主模式：不换根，故不校验 rootfs、不注入 resolv.conf
+            // （用宿主自己的 /etc/resolv.conf）。workdir 就是工作目录。
+            let env = super::build_sanitized_env(
+                &spec.env,
+                &[],
+                spec.env_pass_all,
+                spec.verbose,
+                super::env::GuestFlavor::Linux,
+            );
+            if spec.verbose {
+                super::verbose_kv("宿主后端", "linux-native（宿主程序模式，不换根）");
+                super::verbose_kv("工作目录", spec.workdir.display());
+            }
+            return Ok(Prepared {
+                cmd: spec.cmd.clone(),
+                workdir: spec.workdir.clone(),
+                env,
+            });
+        }
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
         if !rootfs.is_dir() {
             return Err(WboxError::registry(format!(
@@ -52,7 +89,7 @@ impl Backend for LinuxNativeBackend {
         // 宿主即 Linux，guest 命令直接就是最终命令行（无模拟器前缀）。
         let cmd = spec.cmd.clone();
         if spec.verbose {
-            super::verbose_kv("宿主后端", "linux-native（L0 骨架：仅执行计划）");
+            super::verbose_kv("宿主后端", "linux-native（镜像模式，pivot_root 进 rootfs）");
             super::verbose_kv("rootfs", rootfs.display());
             super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", cmd));
         }
@@ -65,7 +102,7 @@ impl Backend for LinuxNativeBackend {
 
     #[cfg(target_os = "linux")]
     fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32> {
-        ns::spawn_isolated(spec, prepared)
+        ns::spawn_isolated(spec, prepared, self.0)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -108,7 +145,7 @@ mod tests {
     fn prepare_builds_plan_without_emulator_prefix() {
         let rootfs = temp_rootfs("plan");
         let s = spec(&rootfs, &["/bin/sh", "-l"], vec![]);
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
         // 与 Blink 的关键差异：命令行就是 guest 命令本身，前面不插模拟器
         assert_eq!(p.cmd, vec!["/bin/sh", "-l"]);
         assert_eq!(p.workdir, rootfs);
@@ -119,7 +156,7 @@ mod tests {
     fn prepare_injects_resolv_conf() {
         let rootfs = temp_rootfs("resolv");
         let s = spec(&rootfs, &["/bin/true"], vec![]);
-        LinuxNativeBackend.prepare(&s).unwrap();
+        LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
         let resolv = std::fs::read_to_string(rootfs.join("etc/resolv.conf")).unwrap();
         assert!(resolv.contains("nameserver"), "{}", resolv);
         let _ = std::fs::remove_dir_all(&rootfs);
@@ -131,7 +168,7 @@ mod tests {
     fn prepare_env_is_posix_flavored() {
         let rootfs = temp_rootfs("env");
         let s = spec(&rootfs, &["/bin/true"], vec![]);
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
         assert!(
             !p.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")),
             "Linux 容器不应出现 SystemRoot：{:?}",
@@ -159,7 +196,7 @@ mod tests {
                 ("BLINK_PREFIX".to_string(), "/evil".to_string()),
             ],
         );
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
         assert!(p.env.iter().any(|(k, v)| k == "APP_TOKEN" && v == "hunter2"));
         assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
         assert!(!p.env.iter().any(|(k, _)| k == "BLINK_PREFIX"));
@@ -169,9 +206,9 @@ mod tests {
     #[test]
     fn prepare_rejects_empty_cmd_and_missing_rootfs() {
         let rootfs = temp_rootfs("reject");
-        assert!(LinuxNativeBackend.prepare(&spec(&rootfs, &[], vec![])).is_err());
+        assert!(LinuxNativeBackend(LinuxMode::Image).prepare(&spec(&rootfs, &[], vec![])).is_err());
         let missing = rootfs.join("nope");
-        assert!(LinuxNativeBackend
+        assert!(LinuxNativeBackend(LinuxMode::Image)
             .prepare(&spec(&missing, &["/bin/true"], vec![]))
             .is_err());
         let _ = std::fs::remove_dir_all(&rootfs);
@@ -183,8 +220,8 @@ mod tests {
     fn spawn_reports_missing_command() {
         let rootfs = temp_rootfs("nocmd");
         let s = spec(&rootfs, &["/bin/definitely-not-here"], vec![]);
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
-        let err = LinuxNativeBackend.spawn(&s, &p).unwrap_err();
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
+        let err = LinuxNativeBackend(LinuxMode::Image).spawn(&s, &p).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("启动容器进程"), "{}", msg);
         let _ = std::fs::remove_dir_all(&rootfs);
@@ -195,8 +232,8 @@ mod tests {
     fn spawn_rejects_non_linux_host() {
         let rootfs = temp_rootfs("wrong-host");
         let s = spec(&rootfs, &["/bin/true"], vec![]);
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
-        let err = LinuxNativeBackend.spawn(&s, &p).unwrap_err();
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
+        let err = LinuxNativeBackend(LinuxMode::Image).spawn(&s, &p).unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("只能在 Linux 宿主上执行"), "{}", msg);
         let _ = std::fs::remove_dir_all(&rootfs);
@@ -227,8 +264,8 @@ mod tests {
             &["/bin/sh", "-c", "[ \"$(/bin/id -u)\" = 0 ]"],
             vec![],
         );
-        let p = LinuxNativeBackend.prepare(&s).unwrap();
-        match LinuxNativeBackend.spawn(&s, &p) {
+        let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
+        match LinuxNativeBackend(LinuxMode::Image).spawn(&s, &p) {
             Ok(0) => {} // 容器内 id -u == 0：uid 映射生效
             Ok(rc) => panic!("容器内 id -u 不为 0（rc={}），uid 映射未生效", rc),
             Err(e) => {
