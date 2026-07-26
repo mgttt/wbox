@@ -12,4 +12,14 @@
 # 有些失败只在真 Windows 上出现（wine 不复现），反之亦然；不加标注 = 两种模式都算。
 # 用 WBOX_GUEST_NO_BASELINE=1 可关闭基线判定，回到"任一失败即非零"的原始语义。
 
-# 当前无已知失败项。
+# 真机（native）当前无已知失败项——AF_UNIX / errno 语义 / 长路径均已修复。
+#
+# W4：t_net_sockopt 只在 **wine** 下失败（真 Windows 通过），故标 @wine。
+#     现象：socket(AF_UNIX, SOCK_STREAM, 0) 返回 -1，连带 afunix-path 的
+#     bind/unlink 断言失败（SUMMARY pass=67 fail=3）。
+#     根因：w32sock.c 把 AF_UNIX **透传给宿主 winsock**，依赖 Windows 10
+#     1803+ 的原生 AF_UNIX 支持；wine 的 winsock 未实现该地址族。
+#     即 wbox 侧无缺陷，是 wine 的能力缺口——不该让 Linux 开发者本地跑
+#     套件时收到"回归"误报（docs/DEVELOPMENT.md §3.1 推荐的正是 wine 流程）。
+#     真机侧不加标注地留空，才能在 AF_UNIX 真出问题时立刻报回归。
+t_net_sockopt @wine
