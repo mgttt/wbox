@@ -3,6 +3,7 @@
  * Stream pairs use AF_UNIX socketpair when available; otherwise fall back
  * to a TCP loopback connection. */
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -81,6 +82,54 @@ int main(void) {
     T_ASSERT_EQ(n, 0);
     T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_DEL, sv[0], NULL));
     close(sv[0]); close(sv[1]);
+  }
+
+  /* --- ET: report transitions, not persistent readiness --- */
+  T_BEGIN("epoll/et-transitions");
+  {
+    int sv[2];
+    char b[4];
+    T_ASSERT_OK(mkpair(sv));
+    ev.events = EPOLLIN | EPOLLET; ev.data.u32 = 0xEE;
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_ADD, sv[0], &ev));
+    T_ASSERT_EQ(write(sv[1], "abcd", 4), 4);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(out[0].data.u32, 0xEE);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 100), 0);
+    T_ASSERT_EQ(read(sv[0], b, 2), 2);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 100), 0);
+    ev.events = EPOLLIN | EPOLLET; ev.data.u32 = 0xEF;
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_MOD, sv[0], &ev));
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(out[0].data.u32, 0xEF);
+    T_ASSERT_EQ(read(sv[0], b, 2), 2);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 100), 0);
+    T_ASSERT_EQ(write(sv[1], "z", 1), 1);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(read(sv[0], b, 1), 1);
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_DEL, sv[0], NULL));
+    close(sv[0]); close(sv[1]);
+  }
+
+  /* --- ET also applies to non-socket pollable fds --- */
+  T_BEGIN("epoll/et-pipe");
+  {
+    int p[2];
+    char b[4];
+    T_ASSERT_OK(pipe2(p, O_NONBLOCK | O_CLOEXEC));
+    ev.events = EPOLLIN | EPOLLET; ev.data.u32 = 0xE1;
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev));
+    T_ASSERT_EQ(write(p[1], "pipe", 4), 4);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 100), 0);
+    T_ASSERT_EQ(read(p[0], b, 2), 2);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 100), 0);
+    T_ASSERT_EQ(read(p[0], b, 2), 2);
+    T_ASSERT_EQ(write(p[1], "x", 1), 1);
+    T_ASSERT_EQ(epoll_wait(ep, out, 4, 500), 1);
+    T_ASSERT_EQ(read(p[0], b, 1), 1);
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_DEL, p[0], NULL));
+    close(p[0]); close(p[1]);
   }
 
   /* --- ONESHOT: fires once, rearms only via MOD --- */

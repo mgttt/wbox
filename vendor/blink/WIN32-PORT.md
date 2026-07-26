@@ -18,7 +18,7 @@
 **已知限制汇总**：
 
 - glibc pthread 程序崩溃（musl/busybox 不受影响）
-- epoll：`EPOLLET` 按水平触发处理（`EPOLLONESHOT`、eventfd、timerfd、signalfd 支持）
+- epoll：LT、`EPOLLET`、`EPOLLONESHOT` 均支持，覆盖 socket、pipe、eventfd、timerfd、signalfd
 - mremap 收缩外仅失败
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
@@ -137,7 +137,6 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 - mremap 扩容（ENOMEM）
 - glibc pthread/clone
-- `EPOLLET` 当前按水平触发
 - 宿主异步信号投递不完整；不可中断等待中的 SIGKILL 使用线程终止兜底
 - ptrace/调试接口
 - 终端 feat/net：tcgetattr/tcsetattr 映射 Console API（ICANON→LINE_INPUT、ECHO→ECHO_INPUT、ISIG→PROCESSED_INPUT），TIOCGWINSZ 取真实控制台尺寸；无 pty

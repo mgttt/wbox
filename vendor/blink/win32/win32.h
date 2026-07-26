@@ -143,6 +143,7 @@ int WboxSockPoll(struct pollfd *pfds, unsigned long n, int timeout);
 int WboxEpollIsFd(int fd);
 int WboxEpollClose(int fd);                // 1 = handled (fd was epoll)
 void WboxEpollPurgeFd(int fd);
+void WboxEpollRefreshFd(int fd);
 
 // ---------------------------------------------------------------- wait
 // Shared wait primitive (w32fd.c): readiness for an array of CRT-namespace

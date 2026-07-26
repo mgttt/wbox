@@ -146,6 +146,33 @@ int main(void) {
     close(fd);
   }
 
+  T_BEGIN("eventfd/epollet-rearms-after-drain");
+  {
+    int fd = efd(0, EFD_NONBLOCK);
+    int ep = epoll_create1(0);
+    struct epoll_event ev = {
+        .events = EPOLLIN | EPOLLET,
+        .data.u64 = 0xe7fd,
+    };
+    struct epoll_event out;
+    T_ASSERT(fd >= 0);
+    T_ASSERT(ep >= 0);
+    T_ASSERT_OK(epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev));
+    value = 1;
+    T_ASSERT_EQ(write(fd, &value, sizeof value), sizeof value);
+    T_ASSERT_EQ(epoll_wait(ep, &out, 1, 500), 1);
+    T_ASSERT_EQ(epoll_wait(ep, &out, 1, 100), 0);
+    T_ASSERT_EQ(read(fd, &value, sizeof value), sizeof value);
+    value = 2;
+    T_ASSERT_EQ(write(fd, &value, sizeof value), sizeof value);
+    T_ASSERT_EQ(epoll_wait(ep, &out, 1, 500), 1);
+    T_ASSERT_EQ(out.data.u64, 0xe7fd);
+    T_ASSERT_EQ(read(fd, &value, sizeof value), sizeof value);
+    T_ASSERT_EQ(value, 2);
+    close(ep);
+    close(fd);
+  }
+
   T_BEGIN("eventfd/epoll-close-purge");
   {
     int ep = epoll_create1(0);

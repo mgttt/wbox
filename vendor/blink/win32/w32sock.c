@@ -634,6 +634,8 @@ int getpeername(int fd, struct sockaddr *addr, socklen_t *len) {
 
 // ---------------------------------------------------------------- io on sockets
 
+void WboxEpollRefreshFd(int fd);  // defined in the epoll section below
+
 // winsock send/recv flags: MSG_OOB=1 MSG_PEEK=2 MSG_DONTROUTE=4 match the
 // compat low bits; MSG_NOSIGNAL/MSG_DONTWAIT/etc must be stripped.
 static int WsMsgFlags(int flags) {
@@ -677,9 +679,11 @@ ssize_t sendto(int fd, const void *buf, size_t n, int flags,
   if (rc < 0) {
     errno = WsaErrno();
     NET_LOGF("sendto(fd=%d n=%d fl=%x) -> -1 wsaerr=%d", fd, (int)n, flags, ws.WSAGetLastError());
+    WboxEpollRefreshFd(fd);
     return -1;
   }
   NET_LOGF("sendto(fd=%d n=%d fl=%x) -> %d", fd, (int)n, flags, rc);
+  WboxEpollRefreshFd(fd);
   return rc;
 }
 
@@ -734,6 +738,7 @@ ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *addr,
           SockAddrOut(addr, &wa);
           *len = wlen;
         }
+        WboxEpollRefreshFd(fd);
         return (ssize_t)pending;
       }
       NET_LOGF("recvfrom(fd=%d) WSAEMSGSIZE -> truncate to %d", fd, (int)n);
@@ -741,10 +746,12 @@ ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *addr,
         SockAddrOut(addr, &wa);
         *len = wlen;
       }
+      WboxEpollRefreshFd(fd);
       return (ssize_t)n;
     }
     errno = WsaErrno();
     NET_LOGF("recvfrom(fd=%d fl=%x) -> -1 wsaerr=%d", fd, flags, werr);
+    WboxEpollRefreshFd(fd);
     return -1;
   }
   NET_LOGF("recvfrom(fd=%d fl=%x) -> %d", fd, flags, rc);
@@ -755,6 +762,7 @@ ssize_t recvfrom(int fd, void *buf, size_t n, int flags, struct sockaddr *addr,
     SockAddrOut(addr, &wa);
     *len = wlen;
   }
+  WboxEpollRefreshFd(fd);
   return rc;
 }
 
@@ -1109,9 +1117,8 @@ int WboxSockPoll(struct pollfd *pfds, nfds_t n, int timeout) {
 }
 
 // ---------------------------------------------------------------- epoll
-// Level-triggered epoll over w32fd.c's poll(). EPOLLET is accepted but
-// behaves as level-triggered (known limitation); EPOLLONESHOT honored.
-// signalfd is not supported (ENOSYS upstream in blink anyway).
+// epoll over w32fd.c's shared poll primitive. Level-triggered,
+// edge-triggered and one-shot registrations share one interest table.
 
 #define WBOX_MAXEPOLL 32
 
@@ -1120,6 +1127,7 @@ struct WboxEpollEnt {
   uint32_t events;
   epoll_data_t data;
   int oneshot_armed;  // EPOLLONESHOT: already delivered once
+  uint32_t edge_ready;
 };
 
 struct WboxEpoll {
@@ -1272,6 +1280,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
       ep->ents[ep->n].events = ev->events | EPOLLERR | EPOLLHUP;
       ep->ents[ep->n].data = ev->data;
       ep->ents[ep->n].oneshot_armed = 0;
+      ep->ents[ep->n].edge_ready = 0;
       ++ep->n;
       return 0;
     case EPOLL_CTL_MOD:
@@ -1286,6 +1295,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
       ep->ents[idx].events = ev->events | EPOLLERR | EPOLLHUP;
       ep->ents[idx].data = ev->data;
       ep->ents[idx].oneshot_armed = 0;
+      ep->ents[idx].edge_ready = 0;
       return 0;
     case EPOLL_CTL_DEL:
       if (idx == -1) {
@@ -1298,6 +1308,50 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
       errno = EINVAL;
       return -1;
   }
+}
+
+static uint32_t EpollReadyEvents(const struct WboxEpollEnt *ent,
+                                 int16_t revents) {
+  uint32_t ready = revents & (POLLIN | POLLOUT | POLLPRI | POLLERR | POLLHUP);
+  if (revents & POLLHUP) ready |= EPOLLRDHUP;
+  return ready & ent->events;
+}
+
+void WboxEpollRefreshFd(int fd) {
+  int saved_errno;
+  int16_t interests;
+  struct pollfd pfd;
+  saved_errno = errno;
+  interests = 0;
+  for (int i = 0; i < WBOX_MAXEPOLL; ++i) {
+    struct WboxEpoll *ep = &g_epolls[i];
+    if (!ep->used) continue;
+    for (int j = 0; j < ep->n; ++j) {
+      if (ep->ents[j].fd == fd && (ep->ents[j].events & EPOLLET)) {
+        interests |= ep->ents[j].events & (EPOLLIN | EPOLLOUT | EPOLLPRI);
+      }
+    }
+  }
+  if (!interests) {
+    errno = saved_errno;
+    return;
+  }
+  pfd.fd = fd;
+  pfd.events = interests;
+  pfd.revents = 0;
+  if (W32WaitFds(&pfd, 1, 0) >= 0) {
+    for (int i = 0; i < WBOX_MAXEPOLL; ++i) {
+      struct WboxEpoll *ep = &g_epolls[i];
+      if (!ep->used) continue;
+      for (int j = 0; j < ep->n; ++j) {
+        struct WboxEpollEnt *ent = &ep->ents[j];
+        if (ent->fd == fd && (ent->events & EPOLLET)) {
+          ent->edge_ready &= EpollReadyEvents(ent, pfd.revents);
+        }
+      }
+    }
+  }
+  errno = saved_errno;
 }
 
 int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
@@ -1320,30 +1374,60 @@ int epoll_wait(int epfd, struct epoll_event *events, int maxevents,
     errno = ENOMEM;
     return -1;
   }
-  for (int i = 0; i < ep->n; ++i) {
-    pfds[i].fd = ep->ents[i].fd;
-    // EPOLLIN/OUT/PRI low bits coincide with POLLIN/OUT/PRI in the compat ABI
-    pfds[i].events = (int16_t)(ep->ents[i].events & (EPOLLIN | EPOLLOUT | EPOLLPRI));
-    pfds[i].revents = 0;
+  DWORD started = GetTickCount();
+  for (;;) {
+    for (int i = 0; i < ep->n; ++i) {
+      pfds[i].fd = ((ep->ents[i].events & EPOLLONESHOT) &&
+                    ep->ents[i].oneshot_armed)
+                       ? -1
+                       : ep->ents[i].fd;
+      // EPOLLIN/OUT/PRI low bits coincide with POLLIN/OUT/PRI.
+      pfds[i].events =
+          (int16_t)(ep->ents[i].events & (EPOLLIN | EPOLLOUT | EPOLLPRI));
+      pfds[i].revents = 0;
+    }
+    int wait = timeout;
+    if (timeout > 0) {
+      DWORD elapsed = GetTickCount() - started;
+      if (elapsed >= (DWORD)timeout) {
+        free(pfds);
+        return 0;
+      }
+      wait = timeout - elapsed;
+    }
+    int rc = W32WaitFds(pfds, ep->n, wait);
+    if (rc <= 0) {
+      free(pfds);
+      return rc < 0 ? -1 : 0;
+    }
+    int out = 0;
+    for (int i = 0; i < ep->n; ++i) {
+      struct WboxEpollEnt *ent = &ep->ents[i];
+      uint32_t ready = EpollReadyEvents(ent, pfds[i].revents);
+      if (ent->events & EPOLLET) {
+        uint32_t edge = ready & ~ent->edge_ready;
+        if (!edge) {
+          ent->edge_ready = ready;
+          continue;
+        }
+        if (out >= maxevents) continue;
+        ent->edge_ready = ready;
+      } else {
+        if (!ready || out >= maxevents) continue;
+      }
+      events[out].events = ready;
+      events[out].data = ent->data;
+      if (ent->events & EPOLLONESHOT) ent->oneshot_armed = 1;
+      ++out;
+    }
+    if (out || timeout == 0) {
+      free(pfds);
+      return out;
+    }
+    // A latched ET fd remains poll-readable. Avoid returning early or
+    // spinning while waiting for it to leave and re-enter the ready state.
+    Sleep(1);
   }
-  int rc = W32WaitFds(pfds, ep->n, timeout);  // shared wait primitive
-  if (rc <= 0) {
-    free(pfds);
-    return rc < 0 ? -1 : 0;
-  }
-  int out = 0;
-  for (int i = 0; i < ep->n && out < maxevents; ++i) {
-    if (!pfds[i].revents) continue;
-    if ((ep->ents[i].events & EPOLLONESHOT) && ep->ents[i].oneshot_armed)
-      continue;
-    events[out].events = pfds[i].revents;
-    if (pfds[i].revents & POLLHUP) events[out].events |= EPOLLRDHUP;
-    events[out].data = ep->ents[i].data;
-    if (ep->ents[i].events & EPOLLONESHOT) ep->ents[i].oneshot_armed = 1;
-    ++out;
-  }
-  free(pfds);
-  return out;
 }
 
 int epoll_pwait(int epfd, struct epoll_event *events, int maxevents,

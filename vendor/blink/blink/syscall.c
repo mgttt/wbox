@@ -1671,6 +1671,7 @@ static i64 W32ReadSignalfd(struct Machine *m, struct Fd *fd,
   count = MIN(total / sizeof(info), ARRAYLEN(signals));
   if ((crtfd = VfsHostFileFd(fd->hostfd)) == -1) return -1;
   RESTARTABLE(rc = WboxSignalfdRead(crtfd, signals, pids, codes, count));
+  WboxEpollRefreshFd(crtfd);
   if (rc <= 0) return rc;
   LOCK(&m->system->sig_lock);
   for (i = 0; i < rc; ++i) {

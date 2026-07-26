@@ -1497,14 +1497,19 @@ static ssize_t W32PwriteAt(HANDLE h, const void *buf, size_t n, uint64_t off) {
   return put;
 }
 
+static ssize_t EpollIoResult(int fd, ssize_t rc) {
+  WboxEpollRefreshFd(fd);
+  return rc;
+}
+
 ssize_t read(int fd, void *buf, size_t n) {
   struct W32FdInfo fi;
   switch (W32FdClassify(fd, &fi)) {
     case W32FD_SOCKET:
-      return WboxSockRead(fd, buf, n);  // feat/net
+      return EpollIoResult(fd, WboxSockRead(fd, buf, n));  // feat/net
     case W32FD_EVENTFD:
     case W32FD_TIMERFD:
-      return EventfdRead(fd, buf, n);
+      return EpollIoResult(fd, EventfdRead(fd, buf, n));
     case W32FD_SIGNALFD:
       errno = EINVAL;
       return -1;
@@ -1536,23 +1541,23 @@ ssize_t read(int fd, void *buf, size_t n) {
   DWORD got = 0;
   if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, NULL)) {
     DWORD e = GetLastError();
-    if (e == ERROR_BROKEN_PIPE) return 0;
-    if (e == ERROR_HANDLE_EOF) return 0;
+    if (e == ERROR_BROKEN_PIPE) return EpollIoResult(fd, 0);
+    if (e == ERROR_HANDLE_EOF) return EpollIoResult(fd, 0);
     errno = W32Err();
-    return -1;
+    return EpollIoResult(fd, -1);
   }
-  return got;
+  return EpollIoResult(fd, got);
 }
 
 ssize_t write(int fd, const void *buf, size_t n) {
   struct W32FdInfo fi;
   switch (W32FdClassify(fd, &fi)) {
     case W32FD_SOCKET:
-      return WboxSockWrite(fd, buf, n);  // feat/net
+      return EpollIoResult(fd, WboxSockWrite(fd, buf, n));  // feat/net
     case W32FD_EVENTFD:
     case W32FD_TIMERFD:
     case W32FD_SIGNALFD:
-      return EventfdWrite(fd, buf, n);
+      return EpollIoResult(fd, EventfdWrite(fd, buf, n));
     case W32FD_SPECIAL:
       if (fi.dev == 1000002) {  // full
         errno = ENOSPC;
@@ -1570,9 +1575,9 @@ ssize_t write(int fd, const void *buf, size_t n) {
   if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, NULL)) {
     errno = W32Err();
     if (errno == 0) errno = EIO;
-    return -1;
+    return EpollIoResult(fd, -1);
   }
-  return put;
+  return EpollIoResult(fd, put);
 }
 
 int close(int fd) {
@@ -1624,7 +1629,7 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
-    return EventfdRead(fd, buf, n);
+    return EpollIoResult(fd, EventfdRead(fd, buf, n));
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1638,7 +1643,7 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
-    return EventfdWrite(fd, buf, n);
+    return EpollIoResult(fd, EventfdWrite(fd, buf, n));
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1722,7 +1727,7 @@ ssize_t readv(int fd, const struct iovec *iov, int n) {
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
-    return EventfdReadv(fd, iov, n);
+    return EpollIoResult(fd, EventfdReadv(fd, iov, n));
   ssize_t total = 0;
   int i;
   for (i = 0; i < n; ++i) {
@@ -1738,7 +1743,7 @@ ssize_t writev(int fd, const struct iovec *iov, int n) {
   int kind = W32FdClassify(fd, NULL);
   if (kind == W32FD_EVENTFD || kind == W32FD_TIMERFD ||
       kind == W32FD_SIGNALFD)
-    return EventfdWritev(fd, iov, n);
+    return EpollIoResult(fd, EventfdWritev(fd, iov, n));
   ssize_t total = 0;
   int i;
   for (i = 0; i < n; ++i) {

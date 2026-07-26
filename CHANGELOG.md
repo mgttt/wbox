@@ -44,6 +44,10 @@
   handler 竞争消费时的 pending/就绪同步；同时修复 self-kill 未进入 guest
   pending 集合及 SIGKILL/SIGSTOP 可被错误屏蔽。新增 `t_signalfd` 后真机
   套件达到 **20/20 文件通过，710 pass / 0 fail / 9 skip**。
+- **epoll 边沿触发**：Win32 `EPOLLET` 现跟踪每项已交付的就绪位，持续 ready
+  不再重复上报；I/O 排空后重新进入 ready 会产生新边沿，`EPOLL_CTL_MOD`
+  可显式重装。socket、匿名管道与 eventfd 均有真机覆盖，套件现为
+  **20/20 文件通过，751 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为
