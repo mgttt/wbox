@@ -66,7 +66,15 @@ int main(void) {
   {
     unlink("t_sec_link");
     if (symlink("../../..", "t_sec_link") != 0) {
-      T_ASSERT_OK(symlink("../../..", "t_sec_link")); /* FAIL line w/ errno */
+      /* EPERM on the win32 host is the known host limitation (wine 11
+       * cannot create followable symlinks — probe-verified), not a wbox
+       * defect: degrade to SKIP. Any other errno is a real FAIL. */
+      if (errno != EPERM) {
+        T_ASSERT_OK(symlink("../../..", "t_sec_link")); /* FAIL w/ errno */
+      } else {
+        wtest_skip++; printf("SKIP %s — %s\n", wtest_cur,
+                             "symlink unavailable (win32 host)");
+      }
       T_SKIP("sec/symlink-escape-probes", "symlink creation unavailable");
     } else {
       deny_open("t_sec_link/etc/hostname");
