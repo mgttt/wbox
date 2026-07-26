@@ -173,7 +173,7 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
 
 ## 6. 当前状态（v1.0.0-rc2 基线）
 
-- guest C 套件真 Windows：751 pass / 0 fail / 9 skip，20/20 用例文件通过，
+- guest C 套件真 Windows：784 pass / 0 fail / 9 skip，20/20 用例文件通过，
   native 基线为空（Wine 单列 `t_net_sockopt @wine`）。
 - Rust 单测：Linux 177 passed；真 Windows 188 passed / 0 failed /
   **0 ignored**，其中 11 项直接覆盖 AppContainer、Job Object 与完整启动链。
@@ -183,7 +183,7 @@ wbox.exe + wbox-linux.exe + SHA256SUMS.txt 发 GitHub Release。
   （ls/cat/bash/uname/apt）✅；shell 8 项 + fork 矩阵 ✅（快照式 fork）；
   wget 公网 md5 ✅；epoll/socket ✅；`apt-get update` rc=0（aliyun 源实测）。
 - 残留限制（WIN32-PORT.md §0）：宿主异步信号投递不完整；
-  glibc pthread/clone、mremap 扩容和 ptrace 尚不支持；
+  glibc pthread/clone、文件映射的 mremap 扩容/搬移和 ptrace 尚不支持；
   JIT 默认开启（`WBOX_JIT=0` 关闭）。
 
 ## 7. 已知坑 / 冷启动注意事项

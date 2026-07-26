@@ -204,11 +204,22 @@ int main(void) {
     char buf[PGSZ];
     for (int i = 0; i < PGSZ; i++) buf[i] = (char)(i * 7 + 1);
     T_ASSERT_EQ(write(fd, buf, PGSZ), PGSZ);
-    char *fm = mmap(NULL, PGSZ, PROT_READ, MAP_PRIVATE, fd, 0);
+    T_ASSERT_EQ(write(fd, buf, PGSZ), PGSZ);
+    char *fm = mmap(NULL, PGSZ * 2, PROT_READ, MAP_PRIVATE, fd, 0);
     T_ASSERT(fm != MAP_FAILED);
     if (fm != MAP_FAILED) {
       T_ASSERT_EQ(memcmp(fm, buf, PGSZ), 0);
-      T_ASSERT_OK(munmap(fm, PGSZ));
+      char *shrunk = mremap(fm, PGSZ * 2, PGSZ, 0);
+      T_ASSERT(shrunk == fm);
+      if (shrunk != MAP_FAILED) {
+        T_ASSERT_EQ(memcmp(shrunk, buf, PGSZ), 0);
+        T_ASSERT_ERRNO(mremap(shrunk, PGSZ, PGSZ * 2, MREMAP_MAYMOVE),
+                       ENOMEM);
+        T_ASSERT_EQ(memcmp(shrunk, buf, PGSZ), 0);
+        T_ASSERT_OK(munmap(shrunk, PGSZ));
+      } else {
+        T_ASSERT_OK(munmap(fm, PGSZ * 2));
+      }
     }
     /* shared writable file mapping persists to disk */
     T_BEGIN("mmap/file-shared-persist");

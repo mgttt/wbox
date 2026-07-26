@@ -19,7 +19,7 @@
 
 - glibc pthread 程序崩溃（musl/busybox 不受影响）
 - epoll：LT、`EPOLLET`、`EPOLLONESHOT` 均支持，覆盖 socket、pipe、eventfd、timerfd、signalfd
-- mremap 收缩外仅失败
+- mremap：匿名映射支持原地扩缩、MAYMOVE/FIXED 搬移；文件映射仅支持同大小返回和缩小
 - setuid/setgid 族恒返回 0（容器内语义，不穿透宿主）
 - 卡在不可中断宿主等待的子进程被 SIGKILL 时走 TerminateThread，其 System/窗口按设计泄漏（长期改可轮询等待）
 - 宿主 symlink/reparse point 不防护（rootfs 内勿放行特权创建的 symlink）
@@ -125,7 +125,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 | 3 | socket 族 | ✅ Winsock2 映射：AF_INET/INET6 STREAM/DGRAM、pathname AF_UNIX stream、匿名 AF_UNIX stream/datagram socketpair、epoll/poll、errno 与 O_NONBLOCK。socketpair 内部 loopback 承载层在 Hostfs 对外保持未命名 AF_UNIX 身份 |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
-| 6 | mremap | ⚠️ 仅缩小或直接失败（ENOMEM）；busybox 罕见使用，L1 接受 |
+| 6 | mremap | ✅ 匿名映射支持原地扩缩、`MREMAP_MAYMOVE` / `MREMAP_FIXED` 搬移、数据保留和新增页清零；⚠️ 文件映射扩容/搬移仍返回 ENOMEM |
 | 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回和 fork 后共享页可见性均由 `t_mmap` / `t_fork_mem` 覆盖 |
 | 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
@@ -135,7 +135,7 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 ## 5. 已知不工作项
 
-- mremap 扩容（ENOMEM）
+- 文件映射的 mremap 扩容/搬移（ENOMEM；现有 FileMap 元数据不保留可重开 fd）
 - glibc pthread/clone
 - 宿主异步信号投递不完整；不可中断等待中的 SIGKILL 使用线程终止兜底
 - ptrace/调试接口
