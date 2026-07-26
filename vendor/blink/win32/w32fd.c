@@ -111,14 +111,25 @@ static int W32RootComps(const wchar_t *root) {
 
 static int W32EscapeName(wchar_t *w);
 
+// Shared escape+join+normalize step of THE path-resolution entry points
+// (W32Path for cwd/absolute, W32ResolveAt for the dirfd-anchored *at
+// family): escapes `rel` in place (%XXXX form), joins it under `anchor`
+// with one separator, and component-normalizes the result, rejecting any
+// ".." that pops above `floor` anchor components. Sets LastError on
+// failure. Previously this sequence was open-coded twice.
+static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
+                       wchar_t out[MAX_PATH]);
+
 // C2 (security-audit): THE jail root. Every host path that reaches a
 // Win32 API must textually resolve inside this directory — this is the
 // single egress check shared by all path entries (W32Path for cwd-based
-// and absolute paths, W32ResolveAt for the dirfd-anchored *at family).
-// It is the 雏形 of the planned unified path-normalization entry point:
+// and absolute paths, W32ResolveAt for the dirfd-anchored *at family;
+// both share the W32JoinNorm escape/join/normalize step).
 // VfsInit publishes the VFS root via WBOX_ROOT (BLINK_PREFIX, or the
 // launch cwd under jail-by-default), so the VFS layer and this fd layer
 // never disagree about what "outside the sandbox" means.
+// (Audit: w32stubs.c's opendir/realpath intentionally bypass this — they
+// serve the VFS hostfs with already host-rooted paths, a different layer.)
 static const wchar_t *W32JailRoot(int *comps) {
   static wchar_t root[MAX_PATH];
   static int root_init, root_comps;
@@ -191,15 +202,10 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
     // F7/F8: escape the guest part BEFORE joining — the jail root is
     // cached in escaped form, and escaping twice would corrupt '%'.
     // "." / ".." are ASCII, so normalization below is unaffected.
-    if (W32EscapeName(tmp)) return NULL;
-    if (wcslen(root) + wcslen(tmp) + 2 >= MAX_PATH) return NULL;
-    wcscpy(joined, root);
-    wcscat(joined, tmp);
     // C2: component-level normalization; reject any result that escapes
     // above the jail root (e.g. "/../outside" reaching the host).
-    if (W32NormalizeW(joined, buf, root_comps)) {
-      SetLastError(ERROR_ACCESS_DENIED);
-      return NULL;
+    if (W32JoinNorm(root, tmp + 1 /* skip leading '/' */, root_comps, buf)) {
+      return NULL;  // error already set
     }
   } else {
     n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
@@ -288,6 +294,24 @@ toolong:
   return -1;
 }
 
+static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
+                       wchar_t out[MAX_PATH]) {
+  wchar_t joined[MAX_PATH];
+  if (W32EscapeName(rel)) return -1;  // error already set
+  if (wcslen(anchor) + wcslen(rel) + 3 > MAX_PATH) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+    return -1;
+  }
+  wcscpy(joined, anchor);
+  wcscat(joined, L"\\");
+  wcscat(joined, rel);
+  if (W32NormalizeW(joined, out, floor)) {
+    SetLastError(ERROR_ACCESS_DENIED);
+    return -1;
+  }
+  return 0;
+}
+
 static int W32HexDig(wchar_t c) {
   return c >= L'0' && c <= L'9' ? c - L'0'
        : c >= L'a' && c <= L'f' ? c - L'a' + 10
@@ -318,7 +342,7 @@ void W32UnescapeName(wchar_t *w) {
 // path resolved against the process-global cwd).
 static wchar_t *W32ResolveAt(int dirfd, const char *path,
                              wchar_t buf[MAX_PATH]) {
-  wchar_t dir[MAX_PATH], rel[MAX_PATH], joined[MAX_PATH];
+  wchar_t dir[MAX_PATH], rel[MAX_PATH];
   wchar_t *d;
   DWORD n;
   HANDLE h;
@@ -340,18 +364,10 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
   // F7/F8: the anchor `d` comes from the host (already escaped); escape
   // the relative part before joining. "." / ".." components are ASCII
   // and unaffected, so normalization below still sees them.
-  if (W32EscapeName(rel)) return NULL;
-  if (wcslen(d) + wcslen(rel) + 2 >= MAX_PATH) return NULL;
-  wcscpy(joined, d);
-  wcscat(joined, L"\\");
-  wcscat(joined, rel);
   // the anchor is absolute; ".." may not climb above the drive root.
   // (the VFS/hostfs layer already clamps ".." at the guest root — this
   // is defense in depth.)
-  if (W32NormalizeW(joined, buf, 0)) {
-    SetLastError(ERROR_ACCESS_DENIED);
-    return NULL;
-  }
+  if (W32JoinNorm(d, rel, 0, buf)) return NULL;  // error already set
   // C2 unified egress check: the resolved path must stay inside the
   // jail root, no matter which directory the dirfd points at (S3).
   if (W32WithinRoot(buf)) {
