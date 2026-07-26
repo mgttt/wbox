@@ -67,6 +67,12 @@
   子映射搬到不同 VA 后仍更新父进程原映射。`t_fork_mem` / `t_exec` 分别
   增至 58 / 33 项，完整套件现为
   **20/20 文件通过，889 pass / 0 fail / 9 skip**。
+- **fork 建立失败回滚**：`NewMachine`、快照参数分配或 `CreateThread`
+  失败时先切换到子 VA window，再释放子 System/Machine、VFS 映射和回收页，
+  最后切回父 window；旧路径会按父窗口偏移执行 `FreeVirtual`，可能清掉仍在
+  运行的父进程内存。guest runner 通过一次性故障注入覆盖 system/machine/
+  args/thread 四阶段，并验证失败后父共享文件映射仍可 mremap、后续 fork
+  仍可成功。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为

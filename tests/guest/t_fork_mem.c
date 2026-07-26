@@ -16,7 +16,58 @@ static int wait_status_ok(pid_t pid, int expect_code) {
   return WIFEXITED(st) && WEXITSTATUS(st) == expect_code;
 }
 
-int main(void) {
+static int fork_failure_probe(void) {
+  int st;
+  int fd = open("t_fork_failure.bin",
+                O_RDWR | O_CREAT | O_TRUNC, 0600);
+  if (fd == -1 || ftruncate(fd, 8192) == -1) return 1;
+  unsigned char value = 0x5a;
+  if (pwrite(fd, &value, 1, 4096) != 1) return 2;
+  unsigned char *fm =
+      mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (fm == MAP_FAILED) return 3;
+  void *blocker = mmap(fm + 4096, 4096, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  if (blocker != fm + 4096) return 4;
+  int *guard = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (guard == MAP_FAILED) return 5;
+  *guard = 0x12345678;
+  errno = 0;
+  pid_t pid = fork();
+  if (pid == 0) _exit(10);
+  if (pid > 0) {
+    waitpid(pid, &st, 0);
+    return 6;
+  }
+  if ((errno != EAGAIN && errno != ENOMEM) ||
+      *guard != 0x12345678) {
+    return 7;
+  }
+  unsigned char *moved = mremap(fm, 4096, 8192, MREMAP_MAYMOVE);
+  if (moved == MAP_FAILED || moved == fm || moved[4096] != 0x5a) return 8;
+  pid = fork();
+  if (pid == 0)
+    _exit(*guard == 0x12345678 && moved[4096] == 0x5a ? 0 : 11);
+  if (pid < 0 || !wait_status_ok(pid, 0) ||
+      *guard != 0x12345678 || moved[4096] != 0x5a) {
+    return 9;
+  }
+  if (munmap(moved, 8192) == -1 ||
+      munmap(blocker, 4096) == -1 ||
+      munmap(guard, 4096) == -1 ||
+      close(fd) == -1 ||
+      unlink("t_fork_failure.bin") == -1) {
+    return 10;
+  }
+  return 0;
+}
+
+int main(int argc, char **argv) {
+  if (argc == 2 && strcmp(argv[1], "--fork-failure") == 0) {
+    return fork_failure_probe();
+  }
+
   /* --- private anon page: child write invisible to parent --- */
   T_BEGIN("fork/child-write-isolation");
   int *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE,

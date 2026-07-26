@@ -113,6 +113,22 @@ for b in "$WORK"/t_*; do
   esac
   OUT=$(timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" 2>&1); rc=$?
   OUT=$(printf '%s' "$OUT" | tr -d '\r')
+  probe_detail=
+  if [ "$name" = t_fork_mem ] && [ "$rc" -eq 0 ]; then
+    for stage in system machine args thread; do
+      PROBE=$(env WBOX_TEST_FORK_FAIL="$stage" \
+        timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
+        --fork-failure 2>&1)
+      prc=$?
+      if [ "$prc" -ne 0 ]; then
+        OUT="$OUT
+FAIL fork/failure-$stage: rc=$prc $(printf '%s' "$PROBE" | tail -2 | head -c 160)"
+        rc=$prc
+        break
+      fi
+      probe_detail="${probe_detail}${probe_detail:+,}$stage"
+    done
+  fi
   nfail=$(printf '%s\n' "$OUT" | grep -c '^FAIL ' || true)
   if [ "$rc" -eq 124 ]; then
     report FAIL "$name" "timeout ${TIMEOUT}s"
@@ -128,6 +144,8 @@ for b in "$WORK"/t_*; do
     sum=$(printf '%s\n' "$OUT" | grep '^SUMMARY ' | tail -1)
     report PASS "$name" "$sum"
     [ "$LIST" = 1 ] || printf '    %s\n' "$sum"
+    [ "$LIST" = 1 ] || [ -z "$probe_detail" ] ||
+      printf '    fork failure probes: %s\n' "$probe_detail"
   fi
 done
 

@@ -525,6 +525,28 @@ static void W32SnapFixTable(u64 *tab, int level, uintptr_t lo, uintptr_t hi,
   }
 }
 
+static bool W32ForkShouldFail(const char *stage) {
+  static LONG consumed;
+  const char *want = getenv("WBOX_TEST_FORK_FAIL");
+  return want && !strcmp(want, stage) &&
+         InterlockedCompareExchange(&consumed, 1, 0) == 0;
+}
+
+static void W32DiscardSnapshot(void *srcwin, void *dstwin,
+                               struct System *s, struct Machine *m) {
+  uintptr_t lo = WboxMemHandleBase(dstwin);
+  uintptr_t hi = WboxMemHandleLimit(dstwin);
+  WboxMemSetWindow(dstwin);
+  if (m) {
+    FreeMachine(m);
+  } else if (s) {
+    FreeSystem(s);
+  }
+  WboxPurgeHostPagesInRange(lo, hi);
+  WboxMemSetWindow(srcwin);
+  WboxMemDestroyWindow(dstwin);
+}
+
 static int W32Fork(struct Machine *m) {
   int i;
   int rc;
@@ -606,8 +628,9 @@ static int W32Fork(struct Machine *m) {
   clonedmaps = true;
 #endif
   // 2. build the child's own System
-  if (!(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
-    rc = enomem();  // snapshot window leaks (fatal ENOMEM anyway)
+  if (W32ForkShouldFail("system") ||
+      !(s2 = NewSystem(XED_MACHINE_MODE_LONG))) {
+    rc = enomem();
     goto unlock_and_abandon;
   }
   s2->w32child = rec;
@@ -662,9 +685,9 @@ static int W32Fork(struct Machine *m) {
   UNLOCK(&m->system->sig_lock);
   UNLOCK(&m->system->exec_lock);
   // 4. child Machine: clone the register state, then reparent to s2
-  if (!(m2 = NewMachine(m->system, m))) {
-    FreeSystem(s2);
-    WboxMemDestroyWindow(dstwin);  // M3: no 1TB snapshot window leak
+  if (W32ForkShouldFail("machine") ||
+      !(m2 = NewMachine(m->system, m))) {
+    W32DiscardSnapshot(srcwin, dstwin, s2, 0);
     W32ChildAbandon(rec);
     return eagain();
   }
@@ -686,19 +709,21 @@ static int W32Fork(struct Machine *m) {
   atomic_store_explicit(&m2->opcache->invalidated, true,
                         memory_order_release);
   // 5. spawn the child thread; the parent returns immediately
-  if (!(a = calloc(1, sizeof(*a)))) {
-    FreeMachine(m2);  // orphan -> frees s2 as well
-    WboxMemDestroyWindow(dstwin);  // M3
+  if (W32ForkShouldFail("args") ||
+      !(a = calloc(1, sizeof(*a)))) {
+    W32DiscardSnapshot(srcwin, dstwin, 0, m2);
     W32ChildAbandon(rec);
     return eagain();
   }
   a->m = m2;
   a->win = dstwin;
-  thr = CreateThread(NULL, 0, W32SnapThreadMain, a, CREATE_SUSPENDED, NULL);
+  thr = W32ForkShouldFail("thread")
+            ? NULL
+            : CreateThread(NULL, 0, W32SnapThreadMain, a,
+                           CREATE_SUSPENDED, NULL);
   if (!thr) {
     free(a);
-    FreeMachine(m2);
-    WboxMemDestroyWindow(dstwin);  // M3
+    W32DiscardSnapshot(srcwin, dstwin, 0, m2);
     W32ChildAbandon(rec);
     return eagain();
   }

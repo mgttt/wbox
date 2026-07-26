@@ -78,6 +78,11 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   当前真机断言级结果为 **889 pass / 0 fail / 9 skip**；文件映射覆盖
   fork 后父窗口可见性、磁盘写回、私有/共享 mremap、exec 地址复用、
   MAP_FIXED 清理及内部 fd 0。
+- `t_fork_mem` 文件级结果之外，runner 会用
+  `WBOX_TEST_FORK_FAIL=system|machine|args|thread` 各重跑一次轻量探针，
+  验证 fork 建立失败不会损坏父窗口、误删父 VFS/Fshare 条目或阻断后续 fork。
+  这四次故障注入不进入 `wtest` 断言统计，但任一失败都会把 `t_fork_mem`
+  判为 FAIL。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 

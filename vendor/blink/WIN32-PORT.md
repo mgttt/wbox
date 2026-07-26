@@ -292,6 +292,9 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
 6. **VFS 映射元数据**：fork 快照将父窗口内的文件 backing 条目平移克隆到
    子窗口，使继承映射可继续 `mremap`；exec wipe 前按当前窗口清除旧条目，
    新映像可安全复用同一 guest 地址且不会删除父窗口记录。
+7. **建立失败回滚**：子线程启动前的 System/Machine/参数/线程创建失败统一
+   临时切到子 VA window 清理，再恢复父 window；runner 对四阶段逐一故障
+   注入，并验证父共享文件映射和后续 fork 均保持可用。
 
 **apt-get update 已实测通过（2026-07-25）**：`Get:1..18` 全量下载、
 gpgv 验签通过、`Reading package lists...` 完成、rc=0，
