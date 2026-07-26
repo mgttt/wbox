@@ -248,6 +248,28 @@ int main(void) {
       T_ASSERT(rb[0] == (char)0xAA && rb[1] == (char)0xBB);
     }
 
+    T_BEGIN("mmap/file-shared-low-host-fd");
+    {
+      int saved_stdin = dup(STDIN_FILENO);
+      T_ASSERT(saved_stdin >= 0);
+      if (saved_stdin >= 0) {
+        T_ASSERT_OK(close(STDIN_FILENO));
+        fm = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        T_ASSERT(fm != MAP_FAILED);
+        if (fm != MAP_FAILED) {
+          fm[2] = (char)0xCC;
+          T_ASSERT_OK(munmap(fm, PGSZ));
+        }
+        T_ASSERT_EQ(dup2(saved_stdin, STDIN_FILENO), STDIN_FILENO);
+        T_ASSERT_OK(close(saved_stdin));
+        if (fm != MAP_FAILED) {
+          char rb;
+          T_ASSERT_EQ(pread(fd, &rb, 1, 2), 1);
+          T_ASSERT(rb == (char)0xCC);
+        }
+      }
+    }
+
     T_BEGIN("mremap/file-private-move-after-close");
     fm = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
     T_ASSERT(fm != MAP_FAILED);

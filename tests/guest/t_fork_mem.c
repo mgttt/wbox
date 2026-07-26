@@ -1,7 +1,9 @@
 /* t_fork_mem.c — fork snapshot memory isolation (core invariant of snapshot fork),
  * plus exec memory cleanliness. */
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -119,6 +121,38 @@ int main(void) {
         T_ASSERT(*sp == 8);
       }
       munmap(sp, 4096);
+    }
+  }
+
+  /* --- file-backed MAP_SHARED: child writes reach parent and disk --- */
+  T_BEGIN("fork/file-shared-visible-writeback");
+  {
+    int fd = open("t_fork_mem_shared.bin",
+                  O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      int initial = 17;
+      T_ASSERT_EQ(write(fd, &initial, sizeof(initial)), sizeof(initial));
+      int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(sp != MAP_FAILED);
+      if (sp != MAP_FAILED) {
+        pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          *sp = 29;
+          _exit(msync(sp, 4096, MS_SYNC) == 0 ? 0 : 1);
+        }
+        if (pid > 0) {
+          int ondisk = 0;
+          T_ASSERT(wait_status_ok(pid, 0));
+          T_ASSERT(*sp == 29);
+          T_ASSERT_EQ(pread(fd, &ondisk, sizeof(ondisk), 0), sizeof(ondisk));
+          T_ASSERT(ondisk == 29);
+        }
+        T_ASSERT_OK(munmap(sp, 4096));
+      }
+      close(fd);
+      unlink("t_fork_mem_shared.bin");
     }
   }
 

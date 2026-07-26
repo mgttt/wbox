@@ -1,5 +1,6 @@
 /* t_exec.c — exec variants, argv/env passing, post-exec state. */
 #define _GNU_SOURCE
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -63,6 +64,40 @@ int main(int argc, char **argv) {
     int st;
     T_ASSERT_EQ(waitpid(pid, &st, 0), pid);
     T_ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+  }
+
+  /* --- exec flushes and detaches inherited file-shared mappings --- */
+  T_BEGIN("exec/file-shared-writeback");
+  {
+    int fd = open("t_exec_shared.bin", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      int initial = 31;
+      T_ASSERT_EQ(write(fd, &initial, sizeof(initial)), sizeof(initial));
+      int *sp = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+      T_ASSERT(sp != MAP_FAILED);
+      if (sp != MAP_FAILED) {
+        pid_t pid = fork();
+        T_ASSERT(pid >= 0);
+        if (pid == 0) {
+          *sp = 47;
+          execl(self, self, "--child-mem", (char *)0);
+          _exit(111);
+        }
+        if (pid > 0) {
+          int st;
+          int ondisk = 0;
+          T_ASSERT_EQ(waitpid(pid, &st, 0), pid);
+          T_ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+          T_ASSERT(*sp == 47);
+          T_ASSERT_EQ(pread(fd, &ondisk, sizeof(ondisk), 0), sizeof(ondisk));
+          T_ASSERT(ondisk == 47);
+        }
+        T_ASSERT_OK(munmap(sp, 4096));
+      }
+      T_ASSERT_OK(close(fd));
+      T_ASSERT_OK(unlink("t_exec_shared.bin"));
+    }
   }
 
   /* --- exec of missing path: ENOENT --- */
