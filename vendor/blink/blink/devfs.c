@@ -18,6 +18,7 @@
 ╚─────────────────────────────────────────────────────────────────────────────*/
 #include "blink/devfs.h"
 
+#include <limits.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -164,7 +165,26 @@ static int DevfsInit(const char *source, u64 flags, const void *data,
     return efault();
   }
   if (*source == '\0') {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // wbox win32 A6: the historical fallback (host "/dev") breaks under
+    // jail-by-default: "Z:/dev" resolves outside the WBOX_ROOT jail (and
+    // does not exist), so every stat/readdir of the /dev mount root was
+    // denied/ENOENT and busybox `ls /` silently dropped the "dev" entry.
+    // VfsInit creates a real <jailroot>/dev directory before mounting, so
+    // anchor the delegated hostfs there instead; the well-known device
+    // names (null/zero/...) are still intercepted by DevfsOpen/Finddir
+    // above and never touch this directory.
+    const char *jroot = getenv("WBOX_ROOT");
+    if (jroot && *jroot) {
+      static char jdev[PATH_MAX];
+      snprintf(jdev, sizeof(jdev), "%s/dev", jroot);
+      source = jdev;
+    } else {
+      source = "/dev";
+    }
+#else
     source = "/dev";
+#endif
   }
   VFS_LOGF("real devfs not implemented, delegating to hostfs");
   if ((ret = HostfsInit(source, flags, data, device, mount)) != -1) {
