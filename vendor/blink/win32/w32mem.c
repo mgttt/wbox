@@ -17,6 +17,89 @@
 
 #define W32PAGE 4096ULL
 
+// MAP_SHARED file mappings: dup'd fd + file offset per committed range,
+// written back on msync()/munmap(). The shim populates shared mappings by
+// pread() just like private ones, so without this registry guest writes
+// to a MAP_SHARED file mapping never reached the host file.
+#define W32MAXFSHARE 128
+struct Fshare {
+  uintptr_t lo, hi;  // committed range (page aligned)
+  int fd;            // dup() of the mapping fd; closed when fully unmapped
+  off_t off;         // file offset corresponding to lo
+};
+static struct Fshare g_fshare[W32MAXFSHARE];
+
+static void FshareRegister(uintptr_t lo, uintptr_t hi, int fd, off_t off) {
+  int i, d;
+  for (i = 0; i < W32MAXFSHARE && g_fshare[i].fd; ++i)
+    ;
+  if (i == W32MAXFSHARE) return;  // table full: degrade to no-writeback
+  if ((d = dup(fd)) == -1) return;
+  g_fshare[i].lo = lo;
+  g_fshare[i].hi = hi;
+  g_fshare[i].fd = d;
+  g_fshare[i].off = off;
+}
+
+// write back the overlap of [a,b) with every registered shared mapping
+static void FshareWriteback(uintptr_t a, uintptr_t b) {
+  int i;
+  for (i = 0; i < W32MAXFSHARE; ++i) {
+    uintptr_t lo, hi;
+    size_t done;
+    if (!g_fshare[i].fd) continue;
+    lo = a > g_fshare[i].lo ? a : g_fshare[i].lo;
+    hi = b < g_fshare[i].hi ? b : g_fshare[i].hi;
+    if (lo >= hi) continue;
+    done = 0;
+    while (done < (size_t)(hi - lo)) {
+      ssize_t rc = pwrite(g_fshare[i].fd, (void *)(lo + done),
+                          (size_t)(hi - lo) - done,
+                          g_fshare[i].off + (off_t)(lo - g_fshare[i].lo) +
+                              (off_t)done);
+      if (rc <= 0) break;
+      done += (size_t)rc;
+    }
+  }
+}
+
+// drop [a,b) from the registry (munmap), trimming/splitting entries
+static void FshareRemove(uintptr_t a, uintptr_t b) {
+  int i;
+  for (i = 0; i < W32MAXFSHARE; ++i) {
+    uintptr_t lo, hi;
+    if (!g_fshare[i].fd) continue;
+    if (g_fshare[i].lo >= b || g_fshare[i].hi <= a) continue;
+    lo = g_fshare[i].lo;
+    hi = g_fshare[i].hi;
+    if (a <= lo && b >= hi) {
+      close(g_fshare[i].fd);
+      g_fshare[i].fd = 0;
+    } else if (a <= lo) {
+      g_fshare[i].off += (off_t)(b - lo);
+      g_fshare[i].lo = b;
+    } else if (b >= hi) {
+      g_fshare[i].hi = a;
+    } else {
+      // punch a hole: keep the tail in this slot, move the head to a
+      // free slot with its own dup() so either can be closed alone
+      int j, d;
+      for (j = 0; j < W32MAXFSHARE && g_fshare[j].fd; ++j)
+        ;
+      if (j == W32MAXFSHARE || (d = dup(g_fshare[i].fd)) == -1) {
+        g_fshare[i].hi = a;  // lose tail writeback rather than corrupt
+      } else {
+        g_fshare[j].lo = lo;
+        g_fshare[j].hi = a;
+        g_fshare[j].fd = d;
+        g_fshare[j].off = g_fshare[i].off;
+        g_fshare[i].off += (off_t)(b - lo);
+        g_fshare[i].lo = b;
+      }
+    }
+  }
+}
+
 // runtime guest->host skew (base of the reserved guest VA window).
 // Declared extern in blink/tunables.h for the win32 build.
 // THREAD-LOCAL since the fork work: each guest "process" (vfork child
@@ -244,6 +327,10 @@ int WboxMemInit(void) {
   g_win = w;
   kSkew = (uint64_t)w->base;
   g_vabits = w->bits;
+  // wbox: install the VEH + console ctrl handler. This was previously
+  // never called anywhere, so a guest page fault went straight to the
+  // wine default handler and killed the whole process.
+  WboxSigInit();
   return 0;
 }
 
@@ -598,6 +685,9 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     errno = ENOMEM;
     return MAP_FAILED;
   }
+  if ((flags & MAP_SHARED) && !(flags & MAP_ANONYMOUS) && fd >= 0) {
+    FshareRegister(a, a + len, fd, off);
+  }
   if (getenv("WBOX_DEBUG_MEM"))
     fprintf(stderr, "wbox mmap: a=%p len=%#zx prot=%d flags=%#x fd=%d off=%lld\n",
             (void *)a, len, prot, flags, fd, (long long)off);
@@ -621,7 +711,6 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
       DWORD old;
       VirtualProtect((LPVOID)r, len, W32Prot(prot), &old);
     }
-    // NB: MAP_SHARED writeback not implemented (L1 gap)
   }
   return r;
 }
@@ -646,6 +735,8 @@ int munmap(void *addr, size_t len) {
     errno = EINVAL;
     return -1;
   }
+  FshareWriteback(a, a + len);  // flush MAP_SHARED file mappings first
+  FshareRemove(a, a + len);
   IvRemove(a, a + len);
   // decommit subrange; ignore failure (may straddle uncommitted)
   uintptr_t p;
@@ -695,6 +786,9 @@ int msync(void *addr, size_t len, int flags) {
     errno = ENOMEM;
     return -1;
   }
+  AcquireSRWLockExclusive(&g_lock);
+  FshareWriteback((uintptr_t)addr, (uintptr_t)addr + len);
+  ReleaseSRWLockExclusive(&g_lock);
   return 0;
 }
 

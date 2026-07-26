@@ -593,6 +593,7 @@ static int W32Fork(struct Machine *m) {
   memcpy(s2->hands, m->system->hands, sizeof(s2->hands));
   s2->blinksigs = m->system->blinksigs;
   s2->brk = m->system->brk;
+  s2->brkfloor = m->system->brkfloor;
   s2->automap = m->system->automap;
   s2->ender = m->system->ender;
   s2->codestart = m->system->codestart;
@@ -1471,8 +1472,13 @@ static i64 SysBrk(struct Machine *m, i64 addr) {
              GetMaxRss(m->system));
       }
     } else if (addr < m->system->brk) {
-      if (FreeVirtual(m->system, addr, m->system->brk - addr) != -1) {
-        m->system->brk = addr;
+      // wbox: Linux refuses to lower the break below its post-load minimum
+      // (brk returns the current, unchanged break); without the floor a
+      // guest could shrink into the loaded image and corrupt it.
+      if (addr >= m->system->brkfloor) {
+        if (FreeVirtual(m->system, addr, m->system->brk - addr) != -1) {
+          m->system->brk = addr;
+        }
       }
     }
   }
