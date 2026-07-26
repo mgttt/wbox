@@ -246,6 +246,7 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
 }
 
 static HANDLE W32Handle(int fd);
+static void W32SetAppend(int fd, int on);
 
 // ------------------------------------------------ F7/F8: host filename escaping
 // Wine maps Win32 filenames onto the Unix filesystem through the LOCALE
@@ -665,7 +666,9 @@ int openat(int dirfd, const char *path, int flags, ...) {
     W32ModeSet(wbuf, mode & ~g_umask & 07777);
   }
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
-  return W32ToCrt(h, flags);
+  int ofd = W32ToCrt(h, flags);
+  W32SetAppend(ofd, (flags & O_APPEND) != 0);
+  return ofd;
 }
 
 // ---------------------------------------------------------------- io
@@ -674,6 +677,27 @@ int openat(int dirfd, const char *path, int flags, ...) {
 static int IsSpecial(int fd) {
   return fd >= 1000000 && fd <= 1000002;
 }
+
+// F2: per-fd O_APPEND table. File IO here goes through bare
+// WriteFile/ReadFile, which bypass the CRT's _O_APPEND handling, so the
+// Linux append semantics (every write lands at EOF — even after lseek,
+// and pwrite on an O_APPEND fd still appends) must be re-implemented.
+// Atomicity is best-effort: seek-to-END immediately before the write.
+#define W32_FDTRACK_MAX 65536
+static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
+static void W32SetAppend(int fd, int on) {
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  if (on) {
+    g_fdappend[fd >> 3] |= 1u << (fd & 7);
+  } else {
+    g_fdappend[fd >> 3] &= ~(1u << (fd & 7));
+  }
+}
+static int W32IsAppend(int fd) {
+  return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+}
+
+
 
 ssize_t read(int fd, void *buf, size_t n) {
   if (WboxSockIsFd(fd)) return WboxSockRead(fd, buf, n);  // feat/net
@@ -722,6 +746,8 @@ ssize_t write(int fd, const void *buf, size_t n) {
     errno = EBADF;
     return -1;
   }
+  // F2: O_APPEND — every write goes to EOF regardless of the fd position.
+  if (W32IsAppend(fd)) SetFilePointerEx(h, (LARGE_INTEGER){0}, NULL, FILE_END);
   DWORD put = 0;
   if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, NULL)) {
     errno = W32Err();
@@ -735,6 +761,7 @@ int close(int fd) {
   if (WboxSockClose(fd)) return 0;    // feat/net: socket fds
   if (WboxEpollClose(fd)) return 0;   // feat/net: epoll fds
   if (IsSpecial(fd)) return 0;
+  W32SetAppend(fd, 0);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
 
@@ -784,6 +811,15 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
     return -1;
+  }
+  // F2: pwrite on an O_APPEND fd ignores the offset and appends (Linux).
+  if (W32IsAppend(fd)) {
+    LARGE_INTEGER end;
+    if (!GetFileSizeEx(h, &end)) {
+      errno = W32Err();
+      return -1;
+    }
+    off = (off_t)end.QuadPart;
   }
   OVERLAPPED ov;
   memset(&ov, 0, sizeof(ov));
@@ -858,7 +894,9 @@ int dup(int fd) {
     errno = W32Err();
     return -1;
   }
-  return W32ToCrt(duph, 0);
+  int nfd = W32ToCrt(duph, 0);
+  W32SetAppend(nfd, W32IsAppend(fd));  // dup shares the file status flags
+  return nfd;
 }
 
 int dup2(int fd, int fd2) {
@@ -896,6 +934,7 @@ int dup2(int fd, int fd2) {
     errno = EBADF;
     return -1;
   }
+  W32SetAppend(fd2, W32IsAppend(fd));
   return fd2;
 }
 
@@ -947,8 +986,11 @@ int fcntl(int fd, int cmd, ...) {
   }
   switch (cmd) {
     case F_GETFL:
-      return O_RDWR;  // good enough for L1 (busybox checks & clears NONBLOCK)
+      // good enough for L1 (busybox checks & clears NONBLOCK); keep the
+      // append bit truthful since F2 made O_APPEND meaningful.
+      return O_RDWR | (W32IsAppend(fd) ? O_APPEND : 0);
     case F_SETFL:
+      W32SetAppend(fd, (arg & O_APPEND) != 0);
       return 0;  // ignore NONBLOCK toggling (console/pipes stay blocking)
     case F_GETFD:
       return 0;  // FD_CLOEXEC meaningless without fork
