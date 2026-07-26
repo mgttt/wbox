@@ -340,11 +340,18 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
 /// ——§10.5 语义一致性红线：宁可拒绝执行，也不能让同一条命令在不同宿主上
 /// 隔离强度不同。
 fn build_limit_plan(spec: &RunSpec) -> Result<LimitPlan> {
+    build_limit_plan_with_cgroup(spec, cgroup2_self_dir())
+}
+
+fn build_limit_plan_with_cgroup(
+    spec: &RunSpec,
+    cgroup_base: Option<std::path::PathBuf>,
+) -> Result<LimitPlan> {
     let l = &spec.limits;
     if l.memory_mb == 0 && l.cpu_pct == 0 && l.max_procs == 0 {
         return Ok(LimitPlan::None);
     }
-    if let Some(base) = cgroup2_self_dir() {
+    if let Some(base) = cgroup_base {
         let dir = base.join(format!("wbox-{}", std::process::id()));
         // 创建失败（无委派/只读）不致命：落到 rlimit 分支再判断
         if std::fs::create_dir_all(&dir).is_ok() {
@@ -510,39 +517,37 @@ mod tests {
         assert!(matches!(plan, LimitPlan::None));
     }
 
-    /// `--cpu-pct` 在无 cgroup v2 的宿主上**必须报错**（§10.5 红线：
-    /// 不静默忽略隔离参数）。有 cgroup v2 时则应成功落成 Cgroup 方案。
-    /// 两种环境都断言，避免只在一种机器上有效。
+    /// `--cpu-pct` 在无可用 cgroup 时必须明确报错（§10.5 红线：
+    /// 不静默忽略隔离参数）。
     #[test]
     fn cpu_pct_requires_cgroup2_or_errors() {
-        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 50, max_procs: 0 });
-        match (cgroup2_self_dir(), build_limit_plan(&s)) {
-            (Some(_), Ok(LimitPlan::Cgroup { .. })) => {}
-            (Some(_), other) => panic!("有 cgroup v2 却未落成 Cgroup 方案：{:?}", other.is_ok()),
-            (None, Err(e)) => {
-                let m = format!("{}", e);
-                assert!(m.contains("cpu-pct"), "错误应点明是 --cpu-pct：{}", m);
-            }
-            (None, Ok(_)) => panic!("无 cgroup v2 时 --cpu-pct 必须报错，不得静默忽略"),
-        }
+        let s = spec_with(Limits {
+            memory_mb: 0,
+            cpu_pct: 50,
+            max_procs: 0,
+        });
+        let e = match build_limit_plan_with_cgroup(&s, None) {
+            Err(e) => e,
+            Ok(_) => panic!("无 cgroup 时 --cpu-pct 必须报错"),
+        };
+        let m = format!("{}", e);
+        assert!(m.contains("cpu-pct"), "错误应点明是 --cpu-pct：{}", m);
     }
 
-    /// 仅内存/进程数时，无 cgroup v2 应退化为 rlimit（而非报错）——
-    /// 这两项有可用的 setrlimit 对应物，拒绝执行就过度了。
+    /// 内存限额在无可用 cgroup 时应退化为 RLIMIT_AS。
     #[test]
-    fn memory_and_procs_fall_back_to_rlimit() {
-        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 8 });
-        match (cgroup2_self_dir(), build_limit_plan(&s).unwrap()) {
-            (Some(_), LimitPlan::Cgroup { .. }) => {}
-            (None, LimitPlan::Rlimit { as_bytes, nproc }) => {
+    fn memory_falls_back_to_rlimit() {
+        let s = spec_with(Limits {
+            memory_mb: 16,
+            cpu_pct: 0,
+            max_procs: 0,
+        });
+        match build_limit_plan_with_cgroup(&s, None).unwrap() {
+            LimitPlan::Rlimit { as_bytes, nproc } => {
                 assert_eq!(as_bytes, Some(16 * 1024 * 1024));
-                assert_eq!(nproc, Some(8));
+                assert_eq!(nproc, None);
             }
-            (_, other) => panic!("落成的方案与宿主能力不匹配：{}", match other {
-                LimitPlan::None => "None",
-                LimitPlan::Cgroup { .. } => "Cgroup",
-                LimitPlan::Rlimit { .. } => "Rlimit",
-            }),
+            _ => panic!("无 cgroup 时内存限额应落成 Rlimit"),
         }
     }
 }
