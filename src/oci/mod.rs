@@ -58,7 +58,7 @@ impl ImageRef {
             (n.to_string(), d.to_string())
         } else {
             match s.rfind(':') {
-                Some(i) if s.rfind('/').map_or(true, |j| i > j) => {
+                Some(i) if s.rfind('/').is_none_or(|j| i > j) => {
                     (s[..i].to_string(), s[i + 1..].to_string())
                 }
                 _ => (s.to_string(), "latest".to_string()),
@@ -147,6 +147,15 @@ pub fn image_dir(iref: &ImageRef) -> crate::error::Result<PathBuf> {
         .join(sanitize_segment(&iref.registry))
         .join(iref.cache_name())
         .join(sanitize_segment(&iref.reference)))
+}
+
+/// "镜像已 pull"的唯一判定入口：缓存目录存在且 rootfs 已解包。
+/// `run` 目标判别（classify_target 的 is_pulled 回调）与 image rm
+/// 等路径一律经此判定，避免各处重复拼接 `rootfs.is_dir()`。
+pub fn is_pulled(iref: &ImageRef) -> bool {
+    image_dir(iref)
+        .map(|d| d.join("rootfs").is_dir())
+        .unwrap_or(false)
 }
 
 /// `wbox image pull` 的入口编排。

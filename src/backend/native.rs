@@ -5,8 +5,11 @@
 //! 同时暴露 [`spawn_native`] 供 BlinkBackend 复用——wbox-linux.exe
 //! 也是 Windows 原生程序，经同一条隔离链路启动即成"双层隔离"。
 
+// prepare 的校验与环境构造为纯逻辑，跨平台可编译/可测；
+// 仅 spawn 链路（AppContainer/Job/CreateProcessW）为 Windows 专属。
 use super::{Backend, Prepared, RunSpec};
-use crate::error::{ErrKind, Result, WboxError};
+use crate::error::{Result, WboxError};
+#[cfg(windows)]
 use crate::{job, sandbox, token};
 
 /// Windows 原生进程后端（无状态）。
@@ -14,9 +17,7 @@ pub struct NativeBackend;
 
 impl Backend for NativeBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
-        if spec.cmd.is_empty() {
-            return Err(WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
-        }
+        super::require_cmd(&spec.cmd)?;
         if !spec.workdir.is_dir() {
             return Err(WboxError::args(format!(
                 "工作目录 '{}' 不存在或不是目录",
@@ -24,15 +25,9 @@ impl Backend for NativeBackend {
             )));
         }
         // H2/H6：默认不继承完整宿主环境——构造显式白名单环境；
-        // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入。
-        let (img_env, dropped) = super::env::sanitize_image_env(&spec.env);
-        if spec.verbose && !dropped.is_empty() {
-            println!(
-                "wbox: 已丢弃环境变量中的保留键（隔离/凭证相关）：{}",
-                dropped.join(", ")
-            );
-        }
-        let env = super::env::build_child_env(&img_env, &[], spec.env_pass_all);
+        // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入（统一策略见
+        // backend::build_sanitized_env）。
+        let env = super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose);
         Ok(Prepared {
             cmd: spec.cmd.clone(),
             workdir: spec.workdir.clone(),
@@ -40,8 +35,17 @@ impl Backend for NativeBackend {
         })
     }
 
+    #[cfg(windows)]
     fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32> {
         spawn_native(spec, prepared, "原生进程")
+    }
+
+    /// 非 Windows 平台：隔离原语为 Win32 API，明确报错（与 run_native 一致）。
+    #[cfg(not(windows))]
+    fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
+        Err(WboxError::spawn(
+            "原生后端仅在 Windows 上可用（AppContainer/Job Object 为 Win32 原语）",
+        ))
     }
 }
 
@@ -50,6 +54,7 @@ impl Backend for NativeBackend {
 /// - `spec` 提供容器名 / 限额 / capability / verbose 开关；
 /// - `prepared` 提供最终命令行、工作目录与注入环境变量；
 /// - `target_desc`：verbose 输出中的目标描述（原生进程 / wbox-linux 模拟器）。
+#[cfg(windows)]
 pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> Result<u32> {
     // ---- 0. 子进程环境：prepared.env 为 prepare 阶段构造的**显式白名单**
     //    环境（含强制覆盖项），经 lpEnvironment 直接传给 CreateProcessW，
@@ -124,8 +129,56 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
     Ok(code)
 }
 
-// 供 main.rs 在 verbose 等处复用的错误构造辅助（保持 ErrKind 使用集中）。
-#[allow(dead_code)]
-pub(crate) fn spawn_err(msg: impl Into<String>) -> WboxError {
-    WboxError::new(ErrKind::Spawn, anyhow::anyhow!(msg.into()))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(workdir: std::path::PathBuf, cmd: &[&str]) -> RunSpec {
+        RunSpec {
+            name: "t".to_string(),
+            limits: Default::default(),
+            allow_network: false,
+            keep_profile: false,
+            workdir,
+            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            env: vec![
+                ("LANG".to_string(), "C".to_string()),
+                ("WBOX_VA_BITS".to_string(), "43".to_string()),
+            ],
+            verbose: false,
+            env_pass_all: false,
+        }
+    }
+
+    #[test]
+    fn prepare_rejects_empty_cmd_and_missing_workdir() {
+        let dir = std::env::temp_dir();
+        assert!(NativeBackend.prepare(&spec(dir.clone(), &[])).is_err());
+        let missing = dir.join("wbox-definitely-missing-workdir");
+        let e = NativeBackend.prepare(&spec(missing, &["cmd.exe"])).unwrap_err();
+        assert!(format!("{}", e).contains("工作目录"), "{}", e);
+    }
+
+    #[test]
+    fn prepare_builds_sanitized_env_and_echoes_cmd() {
+        let p = NativeBackend
+            .prepare(&spec(std::env::temp_dir(), &["cmd.exe", "/c", "echo"]))
+            .unwrap();
+        assert_eq!(p.cmd, vec!["cmd.exe", "/c", "echo"]);
+        // 保留键被过滤，普通键保留；SystemRoot 兜底存在
+        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
+        assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
+        assert!(p.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn spawn_on_non_windows_is_explicit_error() {
+        let p = NativeBackend
+            .prepare(&spec(std::env::temp_dir(), &["x"]))
+            .unwrap();
+        let s = spec(std::env::temp_dir(), &["x"]);
+        let e = NativeBackend.spawn(&s, &p).unwrap_err();
+        assert!(format!("{}", e).contains("仅在 Windows"), "{}", e);
+    }
 }

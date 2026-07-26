@@ -12,7 +12,7 @@
 //! "Linux 后端尚未就绪"的明确错误（而不是含糊的"文件不存在"）。
 
 use super::{Backend, Prepared, RunSpec};
-use crate::error::{ErrKind, Result, WboxError};
+use crate::error::{Result, WboxError};
 use std::path::{Path, PathBuf};
 
 /// Linux 模拟器二进制文件名。
@@ -57,14 +57,11 @@ fn locate_linux_exe() -> Result<(PathBuf, &'static str)> {
 
 /// 统一的"后端未就绪"错误（退出码 4 = 进程创建类，语义最接近）。
 fn not_ready_error(detail: String) -> WboxError {
-    WboxError::new(
-        ErrKind::Spawn,
-        anyhow::anyhow!(
+    WboxError::spawn(format!(
             "Linux 后端尚未就绪：{}。wbox-linux（blink Win32 移植）仍在开发中，\
              目前 `wbox run` 只能直接运行 Windows 原生程序",
             detail
-        ),
-    )
+        ))
 }
 
 /// 公共 DNS（阿里公共 DNS）。rootfs 内缺失 /etc/resolv.conf 时注入，
@@ -111,11 +108,7 @@ fn build_blink_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
 
 impl Backend for BlinkBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
-        if spec.cmd.is_empty() {
-            return Err(WboxError::args(
-                "镜像未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
-            ));
-        }
+        super::require_cmd(&spec.cmd)?;
         let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
         if !rootfs.is_dir() {
@@ -125,39 +118,33 @@ impl Backend for BlinkBackend {
             )));
         }
         if spec.verbose {
-            println!("wbox: Linux 后端模拟器 = {}（{}）", exe.display(), src);
-            println!("wbox: rootfs = {}", rootfs.display());
+            super::verbose_kv("Linux 后端模拟器", format!("{}（{}）", exe.display(), src));
+            super::verbose_kv("rootfs", rootfs.display());
         }
         // rootfs 网络可用性：缺失/空的 /etc/resolv.conf 注入公共 DNS，
         // 使 guest 程序（apt/wget 等）开箱即可解析域名。
         if ensure_resolv_conf(rootfs)? && spec.verbose {
-            println!(
-                "wbox: rootfs 缺少 /etc/resolv.conf，已注入公共 DNS {}",
-                DEFAULT_DNS
+            super::verbose_kv(
+                "resolv.conf",
+                format!("rootfs 缺失/为空，已注入公共 DNS {}", DEFAULT_DNS),
             );
         }
         // H2 修复：镜像 config.Env 中的隔离/凭证保留键（BLINK_*/WBOX_*）一律
         // 丢弃；BLINK_PREFIX 由 wbox 强制为 rootfs（镜像/宿主均不可覆盖），
-        // 子进程环境为显式白名单（不直通宿主环境，H6）。
-        let (img_env, dropped) = super::env::sanitize_image_env(&spec.env);
-        if spec.verbose && !dropped.is_empty() {
-            println!(
-                "wbox: 已丢弃镜像 Env 中的保留键（隔离/凭证相关）：{}",
-                dropped.join(", ")
-            );
-        }
+        // 子进程环境为显式白名单（不直通宿主环境，H6）。策略实现统一在
+        // backend::build_sanitized_env（与 NativeBackend 单一出口）。
         let forced = [(
             BLINK_PREFIX_ENV.to_string(),
             rootfs.to_string_lossy().into_owned(),
         )];
-        let env = super::env::build_child_env(&img_env, &forced, spec.env_pass_all);
+        let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose);
         let cmd = build_blink_command(&exe, &spec.cmd);
         if spec.verbose {
-            println!("wbox: guest 命令行（Entrypoint/Cmd 合并后）= {:?}", &spec.cmd);
-            println!("wbox: 最终命令行 = {:?}", cmd);
+            super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", spec.cmd));
+            super::verbose_kv("最终命令行", format!("{:?}", cmd));
             for (k, v) in &env {
                 if k == BLINK_PREFIX_ENV {
-                    println!("wbox: {} = {}", k, v);
+                    super::verbose_kv(k, v);
                 }
             }
         }
@@ -182,10 +169,7 @@ impl Backend for BlinkBackend {
 
     #[cfg(not(windows))]
     fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
-        Err(WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）"),
-        ))
+        Err(WboxError::spawn("Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）"))
     }
 }
 

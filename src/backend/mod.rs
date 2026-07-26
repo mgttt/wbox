@@ -15,11 +15,11 @@
 
 mod blink;
 pub mod env;
-#[cfg(windows)]
+// native 的 prepare 纯逻辑跨平台可编译（spawn 链路内部 cfg），
+// 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;
 
 pub use blink::BlinkBackend;
-#[cfg(windows)]
 pub use native::NativeBackend;
 
 use crate::error::Result;
@@ -80,6 +80,43 @@ pub trait Backend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared>;
     /// 启动进程并等待退出，返回子进程退出码。
     fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32>;
+}
+
+// ---- 后端共享的 prepare 辅助（native / blink 公共逻辑下沉）----
+
+/// 校验命令非空：两后端 prepare 的第一道闸门。
+pub(crate) fn require_cmd(cmd: &[String]) -> Result<()> {
+    if cmd.is_empty() {
+        return Err(crate::error::WboxError::args(
+            "缺少要执行的命令（镜像模式请合并 Entrypoint/Cmd，或在 `--` 后显式给出）",
+        ));
+    }
+    Ok(())
+}
+
+/// verbose 输出的统一结构化形式：`wbox: <key> = <value>`。
+/// 各后端/CLI 的 verbose 行统一经此输出，避免格式漂移。
+pub(crate) fn verbose_kv(key: &str, value: impl std::fmt::Display) {
+    println!("wbox: {} = {}", key, value);
+}
+
+/// 构造子进程显式环境（H2/H6 统一路径）：
+/// 过滤 spec.env 的保留键（verbose 时报告丢弃清单），并入 wbox 强制项，
+/// 最后按 pass_all 决定白名单/全量继承。两后端共用，保证策略单一出口。
+pub(crate) fn build_sanitized_env(
+    spec_env: &[(String, String)],
+    forced: &[(String, String)],
+    pass_all: bool,
+    verbose: bool,
+) -> Vec<(String, String)> {
+    let (img_env, dropped) = env::sanitize_image_env(spec_env);
+    if verbose && !dropped.is_empty() {
+        println!(
+            "wbox: 已丢弃环境变量中的保留键（隔离/凭证相关）：{}",
+            dropped.join(", ")
+        );
+    }
+    env::build_child_env(&img_env, forced, pass_all)
 }
 
 /// `run` 的执行目标判别结果。
@@ -239,8 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_is_pulled_receives_parsed_ref() {
-        // is_pulled 回调收到的必须是完整解析后的引用（含 library/ 补全与 tag）
+    fn classify_is_pulled_receives_parsed_ref() {        // is_pulled 回调收到的必须是完整解析后的引用（含 library/ 补全与 tag）
         let seen = std::cell::RefCell::new(None);
         let spy = |r: &crate::oci::ImageRef| {
             *seen.borrow_mut() = Some(r.clone());
@@ -251,5 +287,46 @@ mod tests {
         assert_eq!(r.registry, crate::oci::DEFAULT_REGISTRY);
         assert_eq!(r.repo, "library/ubuntu");
         assert_eq!(r.reference, "24.04");
+    }
+
+    // ---- 共享 prepare 辅助 ----
+
+    #[test]
+    fn require_cmd_rejects_empty_and_accepts_nonempty() {
+        assert!(require_cmd(&[]).is_err());
+        assert!(require_cmd(&["x".to_string()]).is_ok());
+        // 错误提示需引导用户给出 Entrypoint/Cmd 或 `--` 后命令
+        let e = require_cmd(&[]).unwrap_err();
+        assert!(format!("{}", e).contains("Entrypoint/Cmd"), "{}", e);
+    }
+
+    #[test]
+    fn build_sanitized_env_drops_reserved_and_applies_forced() {
+        let spec_env = vec![
+            ("LANG".to_string(), "C".to_string()),
+            ("WBOX_VA_BITS".to_string(), "43".to_string()),
+            ("BLINK_PREFIX".to_string(), "/".to_string()),
+        ];
+        let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
+        let env = build_sanitized_env(&spec_env, &forced, false, false);
+        // 保留键丢弃后由 forced 提供唯一 BLINK_PREFIX
+        let prefix: Vec<&str> = env
+            .iter()
+            .filter(|(k, _)| k == "BLINK_PREFIX")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(prefix, vec!["/rootfs"]);
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
+        assert!(env.iter().any(|(k, v)| k == "LANG" && v == "C"));
+        // SystemRoot 兜底存在（白名单路径）
+        assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+    }
+
+    #[test]
+    fn build_sanitized_env_pass_all_still_filters_reserved() {
+        std::env::set_var("WBOX_TEST_SECRET", "hunter2");
+        let env = build_sanitized_env(&[], &[], true, false);
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_TEST_SECRET"));
+        std::env::remove_var("WBOX_TEST_SECRET");
     }
 }

@@ -512,19 +512,17 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
 
         // 硬链接：延迟创建（目标可能尚未解包）
         if entry_type == tar::EntryType::Link {
-            if let Ok(link_name) = entry.link_name() {
-                if let Some(target) = link_name {
-                    let tcomps: Vec<_> = target.components().collect();
-                    if !tcomps.iter().any(|c| {
-                        matches!(
-                            c,
-                            std::path::Component::ParentDir
-                                | std::path::Component::RootDir
-                                | std::path::Component::Prefix(_)
-                        )
-                    }) {
-                        hardlinks.push((path.to_path_buf(), target.to_path_buf()));
-                    }
+            if let Ok(Some(target)) = entry.link_name() {
+                let tcomps: Vec<_> = target.components().collect();
+                if !tcomps.iter().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                }) {
+                    hardlinks.push((path.to_path_buf(), target.to_path_buf()));
                 }
             }
             continue;

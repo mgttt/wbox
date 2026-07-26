@@ -7,8 +7,8 @@
 //!   对当前用户**不需要 SeAssignPrimaryTokenPrivilege**，普通用户可用；
 //! - CreateProcessAsUser/CreateProcessWithToken 需要该特权（或服务上下文），
 //!   与"portable、默认非管理员"的定位冲突。
-//! 代价：SECURITY_CAPABILITIES 路径无法显式指定完整性级别——
-//! 但 AppContainer 派生令牌的 IL 恒为 Low（内核强制），满足 SPEC 的 Low IL 要求。
+//!   代价：SECURITY_CAPABILITIES 路径无法显式指定完整性级别——
+//!   但 AppContainer 派生令牌的 IL 恒为 Low（内核强制），满足 SPEC 的 Low IL 要求。
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
@@ -22,7 +22,7 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOEXW, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
 };
 
-use crate::error::{ErrKind, Result};
+use crate::error::Result;
 use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
 
 /// 启动子进程并等待退出，返回子进程退出码。
@@ -73,23 +73,17 @@ pub fn run_container(
     }
     if attr_list_size == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}", err),
-        ));
+        return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}", err)));
     }
     // 用 u64 对齐的缓冲区承载 attribute list。
-    let mut attr_buf = vec![0u64; (attr_list_size + 7) / 8];
+    let mut attr_buf = vec![0u64; attr_list_size.div_ceil(8)];
     let attr_list: LPPROC_THREAD_ATTRIBUTE_LIST =
         attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
     // # Safety: attr_buf 大小/对齐满足要求，attr_list_size 来自上一步查询。
     let ok = unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_list_size) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("InitializeProcThreadAttributeList 失败，GetLastError={}", err),
-        ));
+        return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList 失败，GetLastError={}", err)));
     }
     // RAII：离开作用域时销毁 attribute list。
     let _attr_guard = AttrListGuard(attr_list);
@@ -111,10 +105,7 @@ pub fn run_container(
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}", err),
-        ));
+        return Err(crate::error::WboxError::spawn(format!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}", err)));
     }
 
     // ---- STARTUPINFOEXW：stdio 直接继承当前控制台 ----
@@ -153,13 +144,10 @@ pub fn run_container(
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!(
+        return Err(crate::error::WboxError::spawn(format!(
                 "CreateProcessW 失败，GetLastError={}（2=找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
                 err
-            ),
-        ));
+            )));
     }
     let process = OwnedHandle(pi.hProcess);
     let thread = OwnedHandle(pi.hThread);
@@ -177,10 +165,7 @@ pub fn run_container(
     if prev == u32::MAX {
         let err = unsafe { GetLastError() };
         // 进程已入 Job，KILL_ON_JOB_CLOSE 会负责收割；直接报错即可。
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("ResumeThread 失败，GetLastError={}", err),
-        ));
+        return Err(crate::error::WboxError::spawn(format!("ResumeThread 失败，GetLastError={}", err)));
     }
 
     // ---- 等待退出并转发退出码 ----
@@ -191,10 +176,7 @@ pub fn run_container(
     let ok = unsafe { GetExitCodeProcess(process.raw(), &mut code) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::new(
-            ErrKind::Spawn,
-            anyhow::anyhow!("GetExitCodeProcess 失败，GetLastError={}", err),
-        ));
+        return Err(crate::error::WboxError::spawn(format!("GetExitCodeProcess 失败，GetLastError={}", err)));
     }
     Ok(code)
 }

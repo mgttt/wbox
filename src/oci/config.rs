@@ -8,8 +8,8 @@
 //! - 显式 cmd（`wbox run <img> -- <cmd>`）覆盖镜像 Cmd；
 //! - Entrypoint 始终前置（无论显式 cmd 是否给出）；
 //! - 两者皆空则视为无命令（由调用方报错提示）。
-//! Env 以 `KEY=VALUE` 形式存储，由后端在 spawn 前注入子进程环境；
-//! WorkingDir 为空字符串时按 docker 语义视为未设置（默认 `/`）。
+//!   Env 以 `KEY=VALUE` 形式存储，由后端在 spawn 前注入子进程环境；
+//!   WorkingDir 为空字符串时按 docker 语义视为未设置（默认 `/`）。
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
 use anyhow::Context;
@@ -225,7 +225,8 @@ mod tests {
     #[test]
     fn merge_all_combinations() {
         // (entrypoint, cmd, explicit) -> 期望输出；None 表示未提供显式 cmd
-        let cases: &[(&[&str], &[&str], Option<&[&str]>, &[&str])] = &[
+        type Case = (&'static [&'static str], &'static [&'static str], Option<&'static [&'static str]>, &'static [&'static str]);
+        let cases: &[Case] = &[
             (&[], &[], None, &[]),
             (&[], &["c"], None, &["c"]),
             (&["e"], &[], None, &["e"]),

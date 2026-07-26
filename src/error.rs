@@ -66,17 +66,46 @@ impl WboxError {
 
     /// 便捷构造：参数错误。
     pub fn args(msg: impl Into<String>) -> Self {
-        Self::new(ErrKind::Args, anyhow::anyhow!(msg.into()))
+        Self::msg(ErrKind::Args, msg)
+    }
+
+    /// 便捷构造：AppContainer profile 错误。
+    // 仅 Windows 专属模块与测试使用。
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn profile(msg: impl Into<String>) -> Self {
+        Self::msg(ErrKind::Profile, msg)
+    }
+
+    /// 便捷构造：Job Object 错误。
+    #[cfg_attr(not(any(windows, test)), allow(dead_code))]
+    pub fn job(msg: impl Into<String>) -> Self {
+        Self::msg(ErrKind::Job, msg)
+    }
+
+    /// 便捷构造：进程创建错误。
+    pub fn spawn(msg: impl Into<String>) -> Self {
+        Self::msg(ErrKind::Spawn, msg)
     }
 
     /// 便捷构造：registry/镜像错误。
     pub fn registry(msg: impl Into<String>) -> Self {
-        Self::new(ErrKind::Registry, anyhow::anyhow!(msg.into()))
+        Self::msg(ErrKind::Registry, msg)
+    }
+
+    /// 内部：字符串消息版构造（便捷构造共用）。
+    fn msg(kind: ErrKind, msg: impl Into<String>) -> Self {
+        Self::new(kind, anyhow::anyhow!(msg.into()))
     }
 
     /// 对应的进程退出码。
     pub fn exit_code(&self) -> u32 {
         self.kind.exit_code()
+    }
+
+    /// 错误类别（测试与审计用；非 test 构建暂无调用方）。
+    #[allow(dead_code)]
+    pub fn kind(&self) -> ErrKind {
+        self.kind
     }
 }
 
@@ -104,5 +133,66 @@ pub trait KindExt<T> {
 impl<T> KindExt<T> for anyhow::Result<T> {
     fn ctx(self, kind: ErrKind) -> Result<T> {
         self.map_err(|e| WboxError::new(kind, e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_mapping_is_spec_fixed() {
+        // SPEC §2：1=参数 2=profile 3=job 4=spawn 5=registry。
+        // 这张映射表是 main.rs 错误到退出码的唯一出口，不得漂移。
+        assert_eq!(ErrKind::Args.exit_code(), 1);
+        assert_eq!(ErrKind::Profile.exit_code(), 2);
+        assert_eq!(ErrKind::Job.exit_code(), 3);
+        assert_eq!(ErrKind::Spawn.exit_code(), 4);
+        assert_eq!(ErrKind::Registry.exit_code(), 5);
+    }
+
+    #[test]
+    fn convenience_constructors_carry_kind_and_message() {
+        let cases: [(WboxError, ErrKind); 5] = [
+            (WboxError::args("a"), ErrKind::Args),
+            (WboxError::profile("p"), ErrKind::Profile),
+            (WboxError::job("j"), ErrKind::Job),
+            (WboxError::spawn("s"), ErrKind::Spawn),
+            (WboxError::registry("r"), ErrKind::Registry),
+        ];
+        for (e, kind) in cases {
+            assert_eq!(e.kind(), kind);
+            assert_eq!(e.exit_code(), kind.exit_code());
+            // Display 含类别标签与消息
+            let s = format!("{}", e);
+            assert!(s.contains(kind.label()), "{}", s);
+        }
+    }
+
+    #[test]
+    fn ctx_wraps_anyhow_with_kind() {
+        let r: anyhow::Result<()> = Err(anyhow::anyhow!("底层原因"));
+        let e = r.ctx(ErrKind::Job).unwrap_err();
+        assert_eq!(e.kind(), ErrKind::Job);
+        assert_eq!(e.exit_code(), 3);
+        assert!(format!("{}", e).contains("底层原因"));
+    }
+
+    #[test]
+    fn label_strings_are_nonempty_and_unique() {
+        let labels = [
+            ErrKind::Args.label(),
+            ErrKind::Profile.label(),
+            ErrKind::Job.label(),
+            ErrKind::Spawn.label(),
+            ErrKind::Registry.label(),
+        ];
+        for l in labels {
+            assert!(!l.is_empty());
+        }
+        let mut uniq = labels.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), labels.len());
     }
 }

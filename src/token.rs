@@ -77,13 +77,10 @@ impl AppContainerProfile {
                     keep: false,
                 });
             }
-            return Err(crate::error::WboxError::new(
-                ErrKind::Profile,
-                anyhow::anyhow!(
+            return Err(crate::error::WboxError::profile(format!(
                     "CreateAppContainerProfile 失败，HRESULT=0x{:08X}（可能 profile 已损坏，可尝试删除后重建）",
                     hr as u32
-                ),
-            ));
+                )));
         }
         Ok(Self {
             name: name.to_string(),
@@ -103,10 +100,7 @@ impl AppContainerProfile {
         // # Safety: name_wide 为 NUL 结尾 UTF-16；sid 为有效输出指针。
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) };
         if hr < 0 {
-            return Err(crate::error::WboxError::new(
-                ErrKind::Profile,
-                anyhow::anyhow!("DeriveAppContainerSidFromAppContainerName 失败，HRESULT=0x{:08X}", hr as u32),
-            ));
+            return Err(crate::error::WboxError::profile(format!("DeriveAppContainerSidFromAppContainerName 失败，HRESULT=0x{:08X}", hr as u32)));
         }
         Ok(sid)
     }
@@ -176,10 +170,7 @@ impl CapabilitySid {
         };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::new(
-                ErrKind::Profile,
-                anyhow::anyhow!("CreateWellKnownSid(InternetClient) 失败，GetLastError={}", err),
-            ));
+            return Err(crate::error::WboxError::profile(format!("CreateWellKnownSid(InternetClient) 失败，GetLastError={}", err)));
         }
         buffer.truncate(size as usize);
         let sid = buffer.as_mut_ptr() as PSID;
