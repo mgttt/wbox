@@ -67,7 +67,7 @@ int SysIoctl(struct Machine *, int, u64, i64);
 _Noreturn void SysExitGroup(struct Machine *, int);
 _Noreturn void SysExit(struct Machine *, int);
 
-int GetDirFildes(int);
+int GetDirFildes(struct System *, int);
 void AddStdFd(struct Fds *, int);
 int GetOflags(struct Machine *, int);
 int GetFildes(struct Machine *, int);

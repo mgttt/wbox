@@ -72,7 +72,8 @@ static int SysTmpfile(struct Machine *m, i32 dirfildes, i64 pathaddr,
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   unassert(!sigfillset(&ss));
   unassert(!pthread_sigmask(SIG_BLOCK, &ss, &oldss));
-  if ((tmpdir = VfsOpen(GetDirFildes(dirfildes), LoadStr(m, pathaddr),
+  if ((tmpdir = VfsOpen(GetDirFildes(m->system, dirfildes),
+                        LoadStr(m, pathaddr),
                         O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0)) != -1) {
 #if !defined(_WIN32) || defined(__CYGWIN__)
     if (tmpdir >= lim) {
@@ -150,7 +151,8 @@ int SysOpenat(struct Machine *m, i32 dirfildes, i64 pathaddr, i32 oflags,
   if ((sysflags = XlatOpenFlags(oflags)) == -1) return -1;
   if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
   if (!(path = LoadStr(m, pathaddr))) return -1;
-  RESTARTABLE(fildes = VfsOpen(GetDirFildes(dirfildes), path, sysflags, mode));
+  RESTARTABLE(fildes = VfsOpen(GetDirFildes(m->system, dirfildes), path,
+                               sysflags, mode));
   if (fildes != -1) {
 #if !defined(_WIN32) || defined(__CYGWIN__)
     if (fildes >= lim) {

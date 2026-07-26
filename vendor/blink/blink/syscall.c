@@ -209,8 +209,21 @@ struct Fd *GetAndLockFd(struct Machine *m, int fildes) {
   return fd;
 }
 
-int GetDirFildes(int fildes) {
+int GetDirFildes(struct System *s, int fildes) {
   if (fildes == AT_FDCWD_LINUX) return AT_FDCWD;
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  struct Fd *fd;
+  // Snapshot children keep guest numbers but own duplicated VFS descriptors.
+  LOCK(&s->fds.lock);
+  if ((fd = GetFd(&s->fds, fildes))) {
+    fildes = fd->hostfd;
+  } else {
+    fildes = ebadf();
+  }
+  UNLOCK(&s->fds.lock);
+#else
+  (void)s;
+#endif
   return fildes;
 }
 
@@ -3947,7 +3960,8 @@ static int XlatFaccessatFlags(int x) {
 
 static int SysFaccessat2(struct Machine *m, i32 dirfd, i64 path, i32 mode,
                          i32 flags) {
-  return VfsAccess(GetDirFildes(dirfd), LoadStr(m, path), XlatAccess(mode),
+  return VfsAccess(GetDirFildes(m->system, dirfd), LoadStr(m, path),
+                   XlatAccess(mode),
                    XlatFaccessatFlags(flags));
 }
 
@@ -4022,8 +4036,8 @@ static int SysFstatat(struct Machine *m, i32 dirfd, i64 pathaddr, i64 staddr,
     }
   }
 #endif
-  if ((rc = VfsStat(GetDirFildes(dirfd), path, &st, XlatFstatatFlags(flags))) !=
-      -1) {
+  if ((rc = VfsStat(GetDirFildes(m->system, dirfd), path, &st,
+                    XlatFstatatFlags(flags))) != -1) {
     XlatStatToLinux(&gst, &st);
     if (CopyToUserWrite(m, staddr, &gst, sizeof(gst)) == -1) rc = -1;
   }
@@ -4077,7 +4091,7 @@ static int SysFchownat(struct Machine *m, i32 dirfd, i64 pathaddr, u32 uid,
     }
   }
 #endif
-  return VfsChown(GetDirFildes(dirfd), path, uid, gid,
+  return VfsChown(GetDirFildes(m->system, dirfd), path, uid, gid,
                   XlatFchownatFlags(flags));
 }
 
@@ -4253,7 +4267,7 @@ static int SysListen(struct Machine *m, i32 fd, i32 backlog) {
 }
 
 static int SysMkdirat(struct Machine *m, i32 dirfd, i64 path, i32 mode) {
-  return VfsMkdir(GetDirFildes(dirfd), LoadStr(m, path), mode);
+  return VfsMkdir(GetDirFildes(m->system, dirfd), LoadStr(m, path), mode);
 }
 
 static int SysMkdir(struct Machine *m, i64 path, i32 mode) {
@@ -4268,7 +4282,7 @@ static int SysFchmod(struct Machine *m, i32 fd, u32 mode) {
 }
 
 static int SysFchmodat(struct Machine *m, i32 dirfd, i64 path, u32 mode) {
-  return VfsChmod(GetDirFildes(dirfd), LoadStr(m, path), mode, 0);
+  return VfsChmod(GetDirFildes(m->system, dirfd), LoadStr(m, path), mode, 0);
 }
 
 static int SysFcntlLock(struct Machine *m, int systemfd, int cmd, i64 arg) {
@@ -4518,8 +4532,8 @@ static ssize_t SysReadlinkat(struct Machine *m, int dirfd, i64 path,
   // implementations (e.g. Musl) consider it to be posixly incorrect.
   if (bufsiz <= 0) return einval();
   if (!(buf = (char *)AddToFreeList(m, malloc(bufsiz)))) return -1;
-  if ((rc = VfsReadlink(GetDirFildes(dirfd), LoadStr(m, path), buf, bufsiz)) !=
-      -1) {
+  if ((rc = VfsReadlink(GetDirFildes(m->system, dirfd), LoadStr(m, path), buf,
+                        bufsiz)) != -1) {
     if (CopyToUserWrite(m, bufaddr, buf, rc) == -1) rc = -1;
   }
   return rc;
@@ -4555,7 +4569,8 @@ static int SysTruncate(struct Machine *m, i64 pathaddr, i64 length) {
 
 static int SysSymlinkat(struct Machine *m, i64 targetpath, i32 newdirfd,
                         i64 linkpath) {
-  return VfsSymlink(LoadStr(m, targetpath), GetDirFildes(newdirfd),
+  return VfsSymlink(LoadStr(m, targetpath),
+                    GetDirFildes(m->system, newdirfd),
                     LoadStr(m, linkpath));
 }
 
@@ -4578,7 +4593,8 @@ static int SysMknodat(struct Machine *m, i32 dirfd, i64 path, i32 mode,
   _Static_assert(S_IFSOCK == 0140000, "");  // socket
   _Static_assert(S_IFMT == 0170000, "");    // mask of file types above
   if ((mode & S_IFMT) == S_IFIFO) {
-    return VfsMkfifo(GetDirFildes(dirfd), LoadStr(m, path), mode & ~S_IFMT);
+    return VfsMkfifo(GetDirFildes(m->system, dirfd), LoadStr(m, path),
+                     mode & ~S_IFMT);
   } else {
     LOGF("mknod mode %#o not supported yet", mode);
     return enosys();
@@ -4627,7 +4643,7 @@ static int XlatUnlinkatFlags(int x) {
 static int SysUnlinkat(struct Machine *m, i32 dirfd, i64 pathaddr, i32 flags) {
   int rc;
   const char *path;
-  dirfd = GetDirFildes(dirfd);
+  dirfd = GetDirFildes(m->system, dirfd);
   if ((flags = XlatUnlinkatFlags(flags)) == -1) return -1;
   if (!(path = LoadStr(m, pathaddr))) return -1;
   rc = VfsUnlink(dirfd, path, flags);
@@ -4667,12 +4683,13 @@ static int SysRenameat2(struct Machine *m, int srcdirfd, i64 srcpath,
   if (!(dstpath = LoadStr(m, dstpathaddr))) return -1;
   // TODO: check for renameat2 in configure script
   if ((flags & RENAME_NOREPLACE_LINUX) &&
-      !VfsStat(GetDirFildes(dstdirfd), dstpath, &st, AT_SYMLINK_NOFOLLOW)) {
+      !VfsStat(GetDirFildes(m->system, dstdirfd), dstpath, &st,
+               AT_SYMLINK_NOFOLLOW)) {
     errno = EEXIST;
     return -1;
   }
-  return VfsRename(GetDirFildes(srcdirfd), LoadStr(m, srcpath),
-                   GetDirFildes(dstdirfd), dstpath);
+  return VfsRename(GetDirFildes(m->system, srcdirfd), LoadStr(m, srcpath),
+                   GetDirFildes(m->system, dstdirfd), dstpath);
 }
 
 static int SysRenameat(struct Machine *m, int srcdirfd, i64 srcpath,
@@ -4706,8 +4723,8 @@ static i32 SysLinkat(struct Machine *m,  //
                      i32 newdirfd,       //
                      i64 newpath,        //
                      i32 flags) {
-  return VfsLink(GetDirFildes(olddirfd), LoadStr(m, oldpath),
-                 GetDirFildes(newdirfd), LoadStr(m, newpath),
+  return VfsLink(GetDirFildes(m->system, olddirfd), LoadStr(m, oldpath),
+                 GetDirFildes(m->system, newdirfd), LoadStr(m, newpath),
                  XlatLinkatFlags(flags));
 }
 
@@ -5605,11 +5622,11 @@ static int SysFutimesat(struct Machine *m, i32 dirfd, i64 pathaddr,
   struct timespec ts[2];
   const struct timeval_linux *tv;
   if (!(path = LoadStr(m, pathaddr))) return -1;
-  if (!tvsaddr) return VfsUtime(GetDirFildes(dirfd), path, 0, 0);
+  if (!tvsaddr) return VfsUtime(GetDirFildes(m->system, dirfd), path, 0, 0);
   if ((tv = (const struct timeval_linux *)SchlepR(
            m, tvsaddr, sizeof(struct timeval_linux) * 2))) {
     ConvertUtimeTimevals(ts, tv);
-    return VfsUtime(GetDirFildes(dirfd), path, ts, 0);
+    return VfsUtime(GetDirFildes(m->system, dirfd), path, ts, 0);
   } else {
     return -1;
   }
@@ -5638,7 +5655,7 @@ static int SysUtimensat(struct Machine *m, i32 fd, i64 pathaddr, i64 tvsaddr,
   }
   if ((flags = XlatUtimensatFlags(flags)) == -1) return -1;
   if (path) {
-    return VfsUtime(GetDirFildes(fd), path, tsp, flags);
+    return VfsUtime(GetDirFildes(m->system, fd), path, tsp, flags);
   } else {
     if (flags) {
       LOGF("%s() flags %d not supported", "utimensat(path=null)", flags);

@@ -1,5 +1,4 @@
-/* t_fd_open.c — open flag matrix: O_RDWR/O_APPEND/O_TRUNC/O_CREAT mode bits,
- * O_TMPFILE, plus dup family semantics. */
+/* t_fd_open.c — open flags, dup semantics, and fork-safe fd namespaces. */
 #define _GNU_SOURCE
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
@@ -209,6 +208,75 @@ int main(void) {
       T_ASSERT(WIFEXITED(status));
       T_ASSERT_EQ(WEXITSTATUS(status), 0);
     }
+  }
+
+  T_BEGIN("openat/fork-child-reused-dirfd");
+  {
+    int parent_dirfd;
+    int setupfd;
+    pid_t pid;
+    int status = 0;
+    mkdir("t_fo_dir_a", 0700);
+    mkdir("t_fo_dir_b", 0700);
+    unlink("t_fo_dir_a/only_a");
+    unlink("t_fo_dir_b/only_b");
+    setupfd = open("t_fo_dir_a/only_a",
+                   O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(setupfd >= 0);
+    if (setupfd >= 0) {
+      T_ASSERT_EQ(write(setupfd, "a", 1), 1);
+      close(setupfd);
+    }
+    setupfd = open("t_fo_dir_b/only_b",
+                   O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(setupfd >= 0);
+    if (setupfd >= 0) {
+      T_ASSERT_EQ(write(setupfd, "b", 1), 1);
+      close(setupfd);
+    }
+    parent_dirfd = open("t_fo_dir_a", O_RDONLY | O_DIRECTORY);
+    T_ASSERT(parent_dirfd >= 0);
+    pid = fork();
+    T_ASSERT(pid >= 0);
+    if (pid == 0) {
+      int child_dirfd;
+      int childfd;
+      char value = 0;
+      struct stat childst;
+      close(parent_dirfd);
+      child_dirfd = open("t_fo_dir_b", O_RDONLY | O_DIRECTORY);
+      if (child_dirfd != parent_dirfd) _exit(1);
+      childfd = openat(child_dirfd, "only_b", O_RDONLY);
+      if (childfd == -1) _exit(2);
+      if (read(childfd, &value, 1) != 1 || value != 'b') _exit(3);
+      close(childfd);
+      if (fstatat(child_dirfd, "only_b", &childst, 0) == -1 ||
+          !S_ISREG(childst.st_mode)) _exit(4);
+      if (faccessat(child_dirfd, "only_b", F_OK, 0) == -1) _exit(5);
+      if (mkdirat(child_dirfd, "made", 0700) == -1) _exit(6);
+      if (linkat(child_dirfd, "only_b", child_dirfd, "linked", 0) == -1)
+        _exit(7);
+      if (renameat(child_dirfd, "only_b", child_dirfd, "renamed") == -1)
+        _exit(8);
+      if (unlinkat(child_dirfd, "linked", 0) == -1) _exit(9);
+      if (unlinkat(child_dirfd, "renamed", 0) == -1) _exit(10);
+      if (unlinkat(child_dirfd, "made", AT_REMOVEDIR) == -1) _exit(11);
+      close(child_dirfd);
+      _exit(0);
+    }
+    if (pid > 0) {
+      T_ASSERT_EQ(waitpid(pid, &status, 0), pid);
+      T_ASSERT(WIFEXITED(status));
+      T_ASSERT_EQ(WEXITSTATUS(status), 0);
+    }
+    close(parent_dirfd);
+    unlink("t_fo_dir_a/only_a");
+    unlink("t_fo_dir_b/only_b");
+    unlink("t_fo_dir_b/linked");
+    unlink("t_fo_dir_b/renamed");
+    rmdir("t_fo_dir_b/made");
+    rmdir("t_fo_dir_a");
+    rmdir("t_fo_dir_b");
   }
 
   unlink("t_fo_a");

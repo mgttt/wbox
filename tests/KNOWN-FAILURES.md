@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1217 条：pass=1208 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1226 条：pass=1217 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -158,6 +158,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F20 | `prlimit` 在读取坏 `new_limit` 前改写 `old_limit`，且坏 `old_limit` 阻止有效新限制生效 | ✅ t_negative 覆盖 Linux 输入→更新→输出顺序及空操作 resource 校验 |
 | F21 | Win32 open/socket/accept 用全局 VFS fd 与 guest `RLIMIT_NOFILE` 比较，编号分离后误报 `EMFILE` | ✅ t_negative 覆盖 open、O_TMPFILE、socket、accept 及双 fd 原子失败后的最低号复用 |
 | F22 | O_TMPFILE 仿真复制到返回槽位后未关闭 source VFS fd，循环约 4092 次耗尽为 `EMFILE` | ✅ t_stress 连续 5000 次 open/close 验证无隐藏 VFS/host fd 泄漏 |
+| F23 | snapshot fork 子进程重用目录 guest fd 后，`*at()` 仍按同号全局 VFS fd 锚定到父进程旧目录 | ✅ t_fd_open 强制 guest/VFS 编号分离，覆盖 openat/fstatat/faccessat/mkdirat/linkat/renameat/unlinkat |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 
