@@ -85,7 +85,7 @@ target terminal viewport.
 & $r send-mouse -t build -x 10 -y 5 --button left --action press --protocol sgr
 & $r send-mouse -t build -x 10 -y 5 --button left --action release --protocol sgr
 
-`auto`（默认）会优先兼容 Windows RMUX。若点击位于末三行且能识别出
+`auto`（默认）会优先兼容 Windows RMUX。若点击行能识别出
 RMUX Byobu 的 `N:name` 与 `[N:name]`，则会通过已验证的 F3/F4 路径
 完成切换；这是当前 RMUX Windows attach 客户端不消费鼠标输入时的兼容桥。
 其余位置尝试 Win32 控制台鼠标记录，失败时回退到 xterm SGR。`native`

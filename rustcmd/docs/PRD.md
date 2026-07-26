@@ -70,6 +70,9 @@ The product must be usable in two equal ways:
 - [x] Changed frames use GDI double buffering and one final `BitBlt`.
 - [x] Raw escaped output, styled cell dumps, and synthetic terminal mouse input
   are exposed for rendering diagnostics.
+- [x] RMUX Byobu F3/F4 changes update the active marker immediately.
+- [x] RMUX Byobu status labels can be clicked in RustCmd to activate a window,
+  including the RMUX 0.9.1 Windows mouse-input compatibility bridge.
 - [ ] Keyboard, mouse, resize, ANSI color, CJK, and long-output behavior have
   repeatable regression coverage.
 - [ ] High-throughput terminal rendering is visually verified with no flicker.
@@ -87,9 +90,8 @@ operations return an explicit error. One tab currently maps to one pane, so
 ### Near term
 
 - Add automated CLI/visual smoke tests.
-- Add RMUX-in-RustCmd rendering and function-key regression tests.
-- Replace recursive RMUX `#()` status jobs with native formats or an
-  independently maintained cache.
+- Expand RMUX-in-RustCmd rendering, function-key, and status-click regression
+  tests beyond the current feedback-driven coverage.
 - Add `stream-pane` output subscriptions.
 - Add `set-composer --stdin` and file input for lossless multiline drafts.
 - Add configurable shell, font, colors, working directory, and startup tabs.

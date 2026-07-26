@@ -90,5 +90,5 @@ xterm SGR 鼠标模式。RustCmd 的 GUI 终端点击和 `send-mouse` 默认会�
 `rmux-pty` 注入原生控制台点击；`--protocol sgr` 可用于明确要求 SGR 的程序。
 
 RMUX 0.9.1 的 Windows attach 客户端在 RustCmd 的 ConPTY 中暂未消费上述
-Win32 记录。为保证状态栏交互可用，RustCmd 会识别末三行的 `N:name` 标签及
+Win32 记录。为保证状态栏交互可用，RustCmd 会识别状态行的 `N:name` 标签及
 `[N:name]` 当前标签，并用 F3/F4 完成等价跳转；普通终端区域仍走通用鼠标协议。

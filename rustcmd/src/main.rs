@@ -541,7 +541,7 @@ impl TerminalTab {
 
     fn send_rmux_status_click(&mut self, x: u16, y: u16) -> bool {
         let (rows, cols) = self.last_size;
-        if rows < 3 || y < rows - 3 || y >= rows {
+        if y >= rows {
             return false;
         }
         let (target, active, mut windows) = {
@@ -549,7 +549,7 @@ impl TerminalTab {
             let mut target = None;
             let mut active = None;
             let mut windows = Vec::new();
-            for row in rows - 3..rows {
+            for row in 0..rows {
                 let mut line = String::with_capacity(cols as usize);
                 for col in 0..cols {
                     let text = screen
@@ -1684,11 +1684,16 @@ fn parse_status_windows(line: &str) -> Vec<StatusWindow> {
             position = colon.max(position + 1);
             continue;
         }
-        let mut end = colon + 1;
+        let name_start = colon + 1;
+        let mut end = name_start;
         while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b']' {
             end += 1;
         }
-        if end == colon + 1 {
+        if end == name_start
+            || bytes[name_start..end]
+                .iter()
+                .all(|byte| byte.is_ascii_digit())
+        {
             position = end;
             continue;
         }
@@ -2334,4 +2339,27 @@ fn tmux_key_bytes(key: &str) -> Option<Vec<u8>> {
         }
     };
     Some(bytes.to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_status_windows;
+
+    #[test]
+    fn parses_rmux_status_windows_and_active_marker() {
+        let windows = parse_status_windows(" 0:cmd [1:cmd.exe] 2:logs ");
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].index, 0);
+        assert!(!windows[0].active);
+        assert_eq!(windows[1].index, 1);
+        assert!(windows[1].active);
+        assert_eq!(windows[2].index, 2);
+        assert!(!windows[2].active);
+    }
+
+    #[test]
+    fn ignores_numbers_that_are_not_window_labels() {
+        let windows = parse_status_windows("cpu 41% 52G/249G Sun 2026-07-26 22:21");
+        assert!(windows.is_empty());
+    }
 }
