@@ -48,11 +48,12 @@
   不再重复上报；I/O 排空后重新进入 ready 会产生新边沿，`EPOLL_CTL_MOD`
   可显式重装。socket、匿名管道与 eventfd 均有真机覆盖，套件现为
   **20/20 文件通过，751 pass / 0 fail / 9 skip**。
-- **mremap 匿名映射**：guest syscall 支持原地扩缩、`MREMAP_MAYMOVE` 和
-  `MREMAP_FIXED` 搬移，逐页保留权限与原数据并保证新增页清零；参数、占位
-  冲突、只读源映射和文件映射降级均有回归覆盖。`t_mmap` 增至 71 项，
-  完整套件现为 **20/20 文件通过，784 pass / 0 fail / 9 skip**。文件映射
-  扩容/搬移因 backing fd 元数据不足仍明确返回 `ENOMEM`，且不损坏源映射。
+- **mremap 完整映射语义**：guest syscall 支持匿名及文件映射原地扩缩、
+  `MREMAP_MAYMOVE` 和 `MREMAP_FIXED` 搬移，逐页保留权限与原数据，并加载
+  文件新增页或清零匿名新增页。VFS 映射持有独立 backing，原 fd 关闭后仍可
+  搬移；MAP_PRIVATE 脏页保持隔离，MAP_SHARED 在搬移、msync、munmap 和
+  固定覆盖时正确写回。`t_mmap` 增至 107 项，完整套件现为
+  **20/20 文件通过，820 pass / 0 fail / 9 skip**。
 - **Win32 扩展长度路径（W3）**：路径层缓冲扩到 32768 个宽字符，在完成
   规范化和 jail 边界校验后才添加 `\\?\` 前缀；目录枚举链同步扩容。
   真机 `t_path` 的深层文件创建、读回及 `opendir`/`readdir` 回归现为
