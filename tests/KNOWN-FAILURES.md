@@ -37,6 +37,21 @@ A8「退出码转发 (0/1/7)」（此前 true/false/exit 7 全塌成 127，根�
 排查提示：B1 是最简单的管道（一次 fork + 两端 pipe），比 B2/B3 更易缩小范围；
 `WBOX_DEBUG_FORK=1` 可打快照/回收页诊断。矩阵现已有单项超时
 （`WBOX_MATRIX_TIMEOUT`，默认 60s），挂死会记 `rc=124` 而非拖死整个 job。
+CI 另有分层探针（build-wbox-linux 的「fork/管道挂死分层取证」步骤）：
+P1 无 fork / P2 纯 fork 子 shell / P3 fork+wait / P4 fork+管道，各 30s 上界，
+用通过-挂死的组合定位层次。
+
+**已排除的假设**（静态查证，勿重复走）：
+
+| 假设 | 结论 | 依据 |
+|---|---|---|
+| guest `close()` 只是延迟标记，host 写端要等 System 销毁才关，故读端永不 EOF | ❌ 不成立 | `blink/close.c` 的 `SysClose → CloseFd` 立即调 `fd->cb->close(fd->hostfd)` |
+| fork 后父子共享同一 host 描述符，一方 close 影响另一方 | ❌ 不成立 | `blink/syscall.c` fork 路径对每个 fd 做 `VfsDup`，子表持有自己的 host 副本 |
+| 快照 fork 子进程退出时不销毁 System，其 dup 出的写端泄漏到被 reap 为止 | ❌ 不成立 | `W32ChildExit` 末尾调 `FreeMachine(m)` → `FreeSystem` → `DestroyFds`，逐个关闭 host fd |
+
+已定位的**唯一无界等待**：`win32/w32proc.c` 的 `waitpid` 在子未退出时走
+`WaitForSingleObject(c->thread, INFINITE)`。它本身未必是根因，但只要子线程
+因任何原因卡住，父进程就会永久挂起——探针数据到手后应优先确认子线程状态。
 
 ## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 
