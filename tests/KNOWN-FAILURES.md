@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1083 条：pass=1074 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1113 条：pass=1104 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -149,6 +149,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F11 | epoll 新建泄漏 VFS 号、fork 复制后 alias 失效 | ✅ t_net_epoll 验证子进程最低 guest fd 与继承实例共享 interest table |
 | F12 | socket `dup` 别名丢失类型信息，关闭注册 fd 后 epoll 过早移除监听 | ✅ t_net_sockopt/t_net_epoll 覆盖 socket API、dup2、fork 与 watched-fd alias 生命周期 |
 | F13 | `dup` 别名不共享 socket `O_NONBLOCK` / 文件 `O_APPEND` 状态 | ✅ t_net_sockopt/t_fd_open 覆盖双向状态可见性及 append 实际写入位置 |
+| F14 | Win32 pipe `dup` 别名不共享 `O_NONBLOCK`；`FIONBIO`/`FIOCLEX` 错用 guest fd 且状态切换不完整 | ✅ t_fd_rw/t_net_sockopt/t_fd_open 覆盖 fcntl/ioctl 双向切换、空读 `EAGAIN` 与 close-on-exec 状态 |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 

@@ -1588,15 +1588,20 @@ Finished:
 }
 
 int GetOflags(struct Machine *m, int fildes) {
-  int oflags;
+  int hostfd, oflags;
   struct Fd *fd;
   LOCK(&m->system->fds.lock);
   if ((fd = GetFd(&m->system->fds, fildes))) {
+    hostfd = fd->hostfd;
     oflags = fd->oflags;
   } else {
+    hostfd = -1;
     oflags = -1;
   }
   UNLOCK(&m->system->fds.lock);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  if (hostfd != -1) oflags = VfsFcntl(hostfd, F_GETFL);
+#endif
   return oflags;
 }
 
@@ -3270,11 +3275,10 @@ static int SysGetsockopt(struct Machine *m, i32 fildes, i32 level, i32 optname,
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-// wbox win32: the host F_SETFL shim can not make Windows pipes
-// nonblocking, so a guest O_NDELAY on a non-socket fd lives only in
-// fd->oflags. Gate the host read/write with a zero-timeout poll so a
-// "nonblocking" guest fd yields EAGAIN instead of wedging the thread in
-// ReadFile/WriteFile (apt's http method sets its stdin O_NONBLOCK via
+// wbox win32: the host F_SETFL shim records O_NDELAY for Windows pipes,
+// but ReadFile/WriteFile remain blocking. Gate host I/O with a zero-timeout
+// poll so a "nonblocking" guest fd yields EAGAIN instead of wedging the
+// thread in ReadFile/WriteFile (apt's http method sets its stdin O_NONBLOCK via
 // SetNonBlock(STDIN_FILENO) and a blocking read(0) on the empty apt
 // pipe deadlocked the whole acquire loop: worker waited for the next
 // command while apt waited for the fetch result). Sockets are excluded:
@@ -3288,7 +3292,10 @@ static int W32NonblockPoll(struct Fd *fd, short events) {
   // fd; the two namespaces collide numerically (a pipe's VFS fd 17 matched
   // a DNS/TCP socket's CRT fd 17 inside apt's http method and the gate was
   // skipped, reintroducing the blocking-read deadlock).
-  if (fd->socktype) return 1;
+  if (fd->socktype || fd->eventfd) return 1;
+  int flags = VfsFcntl(fd->hostfd, F_GETFL);
+  if (flags == -1) return -1;
+  if (!(flags & O_NDELAY)) return 1;
   pfd.fd = fd->hostfd;
   pfd.events = events;
   pfd.revents = 0;
@@ -3316,13 +3323,11 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((oflags & O_NDELAY) && size) {
+  if (size) {
     i64 prc;
-    if (!fd->eventfd) {
-      RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
-      if (prc == 0) return eagain();
-      if (prc == -1) return -1;
-    }
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
   }
 #endif
   if (size) {
@@ -3365,13 +3370,11 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((oflags & O_NDELAY) && size) {
+  if (size) {
     i64 prc;
-    if (!fd->eventfd) {
-      RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
-      if (prc == 0) return eagain();
-      if (prc == -1) return -1;
-    }
+    RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
+    if (prc == 0) return eagain();
+    if (prc == -1) return -1;
   }
 #endif
   if (size) {
@@ -3499,7 +3502,7 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_WRONLY) return ebadf();
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((oflags & O_NDELAY) && iovlen && offset == -1) {
+  if (iovlen && offset == -1) {
     i64 prc;
     RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
     if (prc == 0) return eagain();
@@ -3573,7 +3576,7 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
   if (!fd) return -1;
   if ((oflags & O_ACCMODE) == O_RDONLY) return ebadf();
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  if ((oflags & O_NDELAY) && iovlen && offset == -1) {
+  if (iovlen && offset == -1) {
     i64 prc;
     RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
     if (prc == 0) return eagain();
@@ -4401,8 +4404,6 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
     {
       int hostflags = VfsFcntl(fd->hostfd, F_GETFL);
-      if (!fd->eventfd && !fd->socktype)
-        hostflags |= fd->oflags & O_NDELAY;
       rc = hostflags == -1 ? -1 : UnXlatOpenFlags(hostflags);
     }
 #else

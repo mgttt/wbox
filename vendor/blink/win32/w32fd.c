@@ -284,6 +284,7 @@ static wchar_t *W32Path(const char *path, wchar_t buf[W32_PATH_MAX]) {
 
 static HANDLE W32Handle(int fd);
 static void W32SetAppend(int fd, int on);
+static void W32SetNonblock(int fd, int on);
 static void W32SetAccess(int fd, int flags);
 static int W32GetAccess(int fd);
 
@@ -689,6 +690,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
   int ofd = W32ToCrt(h, flags);
   W32SetAppend(ofd, (flags & O_APPEND) != 0);
+  W32SetNonblock(ofd, (flags & O_NDELAY) != 0);
   return ofd;
 }
 
@@ -706,11 +708,13 @@ static int IsSpecial(int fd) {
 // Atomicity is best-effort: seek-to-END immediately before the write.
 #define W32_FDTRACK_MAX 65536
 static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
-struct W32AppendState {
+static unsigned char g_fdnonblock[W32_FDTRACK_MAX / 8];
+struct W32FdStatus {
   int refs;
   int append;
+  int nonblock;
 };
-static struct W32AppendState *g_fdappendstate[W32_FDTRACK_MAX];
+static struct W32FdStatus *g_fdstatus[W32_FDTRACK_MAX];
 // Access mode is needed by F_GETFL. MinGW's CRT doesn't expose a query for
 // the mode passed to _open_osfhandle(), and reporting O_RDWR unconditionally
 // makes blink treat stdin and read-only files as writable.
@@ -718,8 +722,8 @@ static struct W32AppendState *g_fdappendstate[W32_FDTRACK_MAX];
 static unsigned char g_fdaccess[W32_FDTRACK_MAX];
 static void W32SetAppend(int fd, int on) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
-  if (g_fdappendstate[fd]) {
-    g_fdappendstate[fd]->append = !!on;
+  if (g_fdstatus[fd]) {
+    g_fdstatus[fd]->append = !!on;
     return;
   }
   if (on) {
@@ -729,23 +733,42 @@ static void W32SetAppend(int fd, int on) {
   }
 }
 static int W32IsAppend(int fd) {
-  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdappendstate[fd])
-    return g_fdappendstate[fd]->append;
+  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdstatus[fd])
+    return g_fdstatus[fd]->append;
   return fd >= 0 && fd < W32_FDTRACK_MAX &&
          (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
 }
-static void W32DropAppend(int fd) {
-  struct W32AppendState *state;
+static void W32SetNonblock(int fd, int on) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
-  state = g_fdappendstate[fd];
-  g_fdappendstate[fd] = NULL;
+  if (g_fdstatus[fd]) {
+    g_fdstatus[fd]->nonblock = !!on;
+    return;
+  }
+  if (on) {
+    g_fdnonblock[fd >> 3] |= 1u << (fd & 7);
+  } else {
+    g_fdnonblock[fd >> 3] &= ~(1u << (fd & 7));
+  }
+}
+static int W32IsNonblock(int fd) {
+  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdstatus[fd])
+    return g_fdstatus[fd]->nonblock;
+  return fd >= 0 && fd < W32_FDTRACK_MAX &&
+         (g_fdnonblock[fd >> 3] >> (fd & 7)) & 1;
+}
+static void W32DropStatus(int fd) {
+  struct W32FdStatus *state;
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  state = g_fdstatus[fd];
+  g_fdstatus[fd] = NULL;
   if (state && !--state->refs) free(state);
   g_fdappend[fd >> 3] &= ~(1u << (fd & 7));
+  g_fdnonblock[fd >> 3] &= ~(1u << (fd & 7));
 }
-static int W32EnsureAppendState(int fd) {
-  struct W32AppendState *state;
+static int W32EnsureStatus(int fd) {
+  struct W32FdStatus *state;
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return 0;
-  if (g_fdappendstate[fd]) return 0;
+  if (g_fdstatus[fd]) return 0;
   state = malloc(sizeof(*state));
   if (!state) {
     errno = ENOMEM;
@@ -753,16 +776,17 @@ static int W32EnsureAppendState(int fd) {
   }
   state->refs = 1;
   state->append = (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
-  g_fdappendstate[fd] = state;
+  state->nonblock = (g_fdnonblock[fd >> 3] >> (fd & 7)) & 1;
+  g_fdstatus[fd] = state;
   return 0;
 }
-static void W32ShareAppendState(int fd, int fd2) {
+static void W32ShareStatus(int fd, int fd2) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX || fd2 < 0 ||
       fd2 >= W32_FDTRACK_MAX)
     return;
-  W32DropAppend(fd2);
-  g_fdappendstate[fd2] = g_fdappendstate[fd];
-  ++g_fdappendstate[fd2]->refs;
+  W32DropStatus(fd2);
+  g_fdstatus[fd2] = g_fdstatus[fd];
+  ++g_fdstatus[fd2]->refs;
 }
 static void W32SetAccess(int fd, int flags) {
   if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
@@ -1348,7 +1372,7 @@ static int EventfdDup2(int fd, int fd2) {
     errno = EBADF;
     return -1;
   }
-  W32DropAppend(fd2);
+  W32DropStatus(fd2);
   W32SetAccess(fd2, O_RDWR);
   if (EventfdMap(fd2, obj) == -1) {
     _close(fd2);
@@ -1626,7 +1650,7 @@ ssize_t write(int fd, const void *buf, size_t n) {
 
 int close(int fd) {
   if (!IsSpecial(fd)) {
-    W32DropAppend(fd);
+    W32DropStatus(fd);
     W32SetAccess(fd, -1);
   }
   switch (W32FdClassify(fd, NULL)) {
@@ -1877,13 +1901,13 @@ int dup(int fd) {
     errno = W32Err();
     return -1;
   }
-  if (W32EnsureAppendState(fd) == -1) {
+  if (W32EnsureStatus(fd) == -1) {
     CloseHandle(duph);
     return -1;
   }
   int nfd = W32ToCrt(duph, W32GetAccess(fd));
   if (nfd == -1) return -1;
-  W32ShareAppendState(fd, nfd);
+  W32ShareStatus(fd, nfd);
   return nfd;
 }
 
@@ -1921,7 +1945,7 @@ int dup2(int fd, int fd2) {
       return -1;
     }
     close(tmp);
-    W32DropAppend(fd2);
+    W32DropStatus(fd2);
     W32SetAccess(fd2, O_RDWR);
     return fd2;
   }
@@ -1929,12 +1953,12 @@ int dup2(int fd, int fd2) {
     errno = EBADF;
     return -1;
   }
-  if (W32EnsureAppendState(fd) == -1) return -1;
+  if (W32EnsureStatus(fd) == -1) return -1;
   if (_dup2(fd, fd2)) {
     errno = EBADF;
     return -1;
   }
-  W32ShareAppendState(fd, fd2);
+  W32ShareStatus(fd, fd2);
   W32SetAccess(fd2, W32GetAccess(fd));
   return fd2;
 }
@@ -1993,10 +2017,12 @@ int fcntl(int fd, int cmd, ...) {
         errno = EBADF;
         return -1;
       }
-      return W32GetAccess(fd) | (W32IsAppend(fd) ? O_APPEND : 0);
+      return W32GetAccess(fd) | (W32IsAppend(fd) ? O_APPEND : 0) |
+             (W32IsNonblock(fd) ? O_NONBLOCK : 0);
     case F_SETFL:
       W32SetAppend(fd, (arg & O_APPEND) != 0);
-      return 0;  // ignore NONBLOCK toggling (console/pipes stay blocking)
+      W32SetNonblock(fd, (arg & O_NONBLOCK) != 0);
+      return 0;  // read/write emulate nonblocking pipes before host I/O
     case F_GETFD:
       return 0;  // FD_CLOEXEC meaningless without fork
     case F_SETFD:

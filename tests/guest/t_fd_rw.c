@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <sys/stat.h>
 #include <sys/sendfile.h>
+#include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -96,6 +97,35 @@ int main(void) {
     T_ASSERT_ERRNO(pread(fd, rb, 1, -1), EINVAL);
     close(fd);
     unlink("t_frw_x");
+  }
+
+  T_BEGIN("pipe/dup-shares-nonblock");
+  {
+    int pp[2];
+    char ch = 0;
+    struct iovec one = {.iov_base = &ch, .iov_len = 1};
+    T_ASSERT_OK(pipe(pp));
+    int alias = dup(pp[0]);
+    T_ASSERT(alias >= 0);
+    T_ASSERT_OK(fcntl(alias, F_SETFL, O_NONBLOCK));
+    T_ASSERT(fcntl(pp[0], F_GETFL) & O_NONBLOCK);
+    T_ASSERT_ERRNO(read(pp[0], &ch, 1), EAGAIN);
+    T_ASSERT_ERRNO(readv(alias, &one, 1), EAGAIN);
+    T_ASSERT_OK(fcntl(pp[0], F_SETFL, 0));
+    T_ASSERT(!(fcntl(alias, F_GETFL) & O_NONBLOCK));
+    int enabled = 1;
+    int zero = 0;
+    T_ASSERT_OK(ioctl(pp[0], FIONBIO, &enabled));
+    T_ASSERT(fcntl(alias, F_GETFL) & O_NONBLOCK);
+    T_ASSERT_ERRNO(read(alias, &ch, 1), EAGAIN);
+    T_ASSERT_OK(ioctl(alias, FIONBIO, &zero));
+    T_ASSERT(!(fcntl(pp[0], F_GETFL) & O_NONBLOCK));
+    T_ASSERT_EQ(write(pp[1], "p", 1), 1);
+    T_ASSERT_EQ(read(alias, &ch, 1), 1);
+    T_ASSERT_EQ(ch, 'p');
+    close(alias);
+    close(pp[0]);
+    close(pp[1]);
   }
 
   /* --- readv/writev --- */

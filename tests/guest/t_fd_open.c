@@ -1,6 +1,7 @@
 /* t_fd_open.c — open flag matrix: O_RDWR/O_APPEND/O_TRUNC/O_CREAT mode bits,
  * O_TMPFILE, plus dup family semantics. */
 #define _GNU_SOURCE
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <fcntl.h>
@@ -130,6 +131,15 @@ int main(void) {
     T_ASSERT(fl >= 0 && (fl & FD_CLOEXEC));
     close(d6);
   }
+  close(fd);
+
+  T_BEGIN("ioctl/cloexec-toggle");
+  fd = open("/dev/null", O_RDONLY);
+  T_ASSERT(fd >= 0);
+  T_ASSERT_OK(ioctl(fd, FIOCLEX));
+  T_ASSERT(fcntl(fd, F_GETFD) & FD_CLOEXEC);
+  T_ASSERT_OK(ioctl(fd, FIONCLEX));
+  T_ASSERT(!(fcntl(fd, F_GETFD) & FD_CLOEXEC));
   close(fd);
 
   T_BEGIN("dup/shared-append-status");

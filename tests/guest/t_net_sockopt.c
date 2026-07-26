@@ -240,6 +240,25 @@ int main(void) {
   }
   close(s);
 
+  T_BEGIN("ioctl/fionbio-toggle");
+  {
+    int sv[2];
+    char ch = 0;
+    int enabled = 1;
+    int disabled = 0;
+    T_ASSERT_OK(mkpair(sv));
+    T_ASSERT_OK(ioctl(sv[0], FIONBIO, &enabled));
+    T_ASSERT(fcntl(sv[0], F_GETFL) & O_NONBLOCK);
+    T_ASSERT_ERRNO(read(sv[0], &ch, 1), EAGAIN);
+    T_ASSERT_OK(ioctl(sv[0], FIONBIO, &disabled));
+    T_ASSERT(!(fcntl(sv[0], F_GETFL) & O_NONBLOCK));
+    T_ASSERT_EQ(write(sv[1], "i", 1), 1);
+    T_ASSERT_EQ(read(sv[0], &ch, 1), 1);
+    T_ASSERT_EQ(ch, 'i');
+    close(sv[0]);
+    close(sv[1]);
+  }
+
   /* --- FIONREAD --- */
   T_BEGIN("ioctl/fionread");
   {

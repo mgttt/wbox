@@ -200,18 +200,29 @@ static int IoctlSiocgifaddr(struct Machine *m, int systemfd, i64 ifreq_addr,
 
 #endif /* HAVE_SIOCGIFCONF */
 
-static int IoctlFionbio(struct Machine *m, int fildes) {
-  int oflags;
+static int IoctlFionbio(struct Machine *m, int fildes, int hostfd, i64 addr) {
+  int arg, oflags;
+  const u8 *p;
+  if (!(p = (const u8 *)SchlepR(m, addr, 4))) return -1;
+  arg = Read32(p);
   if ((oflags = GetOflags(m, fildes)) == -1) return -1;
-  return VfsFcntl(fildes, F_SETFL, (oflags & SETFL_FLAGS) | O_NDELAY);
+  if (arg)
+    oflags |= O_NDELAY;
+  else
+    oflags &= ~O_NDELAY;
+  return VfsFcntl(hostfd, F_SETFL, oflags & SETFL_FLAGS);
 }
 
-static int IoctlFioclex(struct Machine *m, int fildes) {
-  return VfsFcntl(fildes, F_SETFD, FD_CLOEXEC);
-}
-
-static int IoctlFionclex(struct Machine *m, int fildes) {
-  return VfsFcntl(fildes, F_SETFD, 0);
+static int IoctlFioclex(struct Fd *fd, int enabled) {
+  int rc;
+  LockFd(fd);
+  rc = VfsFcntl(fd->hostfd, F_SETFD, enabled ? FD_CLOEXEC : 0);
+  if (rc != -1) {
+    fd->oflags &= ~O_CLOEXEC;
+    if (enabled) fd->oflags |= O_CLOEXEC;
+  }
+  UnlockFd(fd);
+  return rc;
 }
 
 static int IoctlTcsbrk(struct Machine *m, int fildes, int drain) {
@@ -338,11 +349,11 @@ int SysIoctl(struct Machine *m, int fildes, u64 request, i64 addr) {
       return IoctlTiocspgrp(m, fildes, addr);
 #ifndef DISABLE_NONPOSIX
     case FIONBIO_LINUX:
-      return IoctlFionbio(m, fildes);
+      return IoctlFionbio(m, fildes, fd->hostfd, addr);
     case FIOCLEX_LINUX:
-      return IoctlFioclex(m, fildes);
+      return IoctlFioclex(fd, true);
     case FIONCLEX_LINUX:
-      return IoctlFionclex(m, fildes);
+      return IoctlFioclex(fd, false);
 #endif
     case TCSBRK_LINUX:
       return IoctlTcsbrk(m, fildes, addr);
