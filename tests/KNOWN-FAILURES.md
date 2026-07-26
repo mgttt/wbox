@@ -10,19 +10,18 @@
 
 | 环境 | 当前基线 | 失败项 |
 |---|---|---|
-| 真 Windows（本机，native） | 16 个用例：**13 PASS / 3 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt、**t_path（W3，仅真机）** |
+| 真 Windows（本机，native） | 16 个用例：**14 PASS / 2 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt |
 | wine（wine 模式当前基线） | 16 个用例：**14 PASS / 2 FAIL / 0 SKIP** | t_net_epoll、t_net_sockopt |
 
-两者只差 `t_path`：W3 长路径超 `MAX_PATH`，wine 不施加该限制故通过。真机
-断言级统计为 **433 条：pass=418 fail=5 skip=10**；5 条失败断言分别为
-N1 两条、W3 三条，skip 均为 symlink EPERM 宿主限制降级与
-t_exec/t_net_epoll 内个别环境降级项。
+真机断言级统计为 **436 条：pass=424 fail=2 skip=10**；两条失败断言均为
+N1，skip 均为 symlink EPERM 宿主限制降级与 t_exec/t_net_epoll 内个别
+环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
 build-wbox-linux 的 artifact + zig 交叉编译 + 基线判定），不再是 SKIP 空转。
 全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
 epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
-机器基线因此只保留 N1 两项和 `t_path @native`。
+机器基线因此只保留 N1 两项。
 
 复现方法（任一条目）：
 
@@ -84,11 +83,11 @@ N1/E1/E2；E1/E2 后续已修复，见下方 P2。
 "命令能被 PATH 找到"的用例都可能在 Linux 宿主上假绿。新增用例一律用
 工作目录内的相对路径显式指定被测二进制。
 
-## W3 真 Windows 专有：长路径超 MAX_PATH（**新增，由 guest-tests 门禁首次真跑抓到**）
+## W3 ~~真 Windows 专有：长路径超 MAX_PATH~~ → **已修复**（2026-07-26）
 
 | # | 现象 | 根因 | 状态 |
 |---|------|------|------|
-| W3 | `t_path` 的 `path/long-nested` 在真 Windows 失败（wine 通过） | 宿主绝对路径超 `MAX_PATH`(260)，`mkdir`/`open` 返回 ENOENT | 未修复，已入基线（`t_path @native`） |
+| W3 | `t_path` 的 `path/long-nested` 在真 Windows 失败（wine 通过） | 宿主绝对路径超 `MAX_PATH`(260)，`mkdir`/`open` 返回 ENOENT | ✅ 已修复，已从基线移除 |
 
 证据（CI run 52，真机）：
 
@@ -102,16 +101,15 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 （wine 不施加 MAX_PATH 限制）——**这正是 guest-tests 成为真门禁后抓到的
 第一个真机缺陷**，此前它一直走 SKIP 路径空转。
 
-根因与修法：`win32/w32fd.c` 的路径层整体以 `MAX_PATH` 为界
+根因：`win32/w32fd.c` 的路径层整体以 `MAX_PATH` 为界
 （`wchar_t out[MAX_PATH]`、`wcslen(s) >= MAX_PATH` 直接拒绝），未使用
-`\\?\` 扩展长度前缀。要支持长路径需把路径缓冲扩到 32767 并在所有
-Win32 调用点加前缀；注意该前缀会**关闭系统侧路径规范化**，故传入前必须
-已是反斜杠、无 `.`/`..` 的规范形式（`W32JoinNorm` 已做规范化，可复用）。
-改动面横跨 w32fd.c 多个调用点，且 **wine 无法验证修复是否生效**，故先
-登记为已知限制，不做盲改。
+`\\?\` 扩展长度前缀。
 
-影响面：guest 侧任何使宿主绝对路径超过 260 字符的操作。rootfs 放在较深
-目录时更容易触发——实用规避是把 `BLINK_PREFIX`/工作目录放浅一些。
+修复将 Win32 路径缓冲统一扩到 32768 个宽字符；路径仍先经
+`W32JoinNorm` 规范化并通过 `W32WithinRoot` jail 校验，随后才添加 `\\?\`
+前缀交给 Win32 API。目录枚举缓冲也同步扩容，保证深目录下
+`opendir`/`readdir` 可用。真机回归 `t_path` 为
+**pass=50 fail=0 skip=3**，覆盖深层文件创建、读回和目录枚举。
 
 ## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 

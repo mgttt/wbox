@@ -45,8 +45,8 @@ int _dup2(int, int);
 // `in` must be absolute (drive-letter prefixed) or relative; the drive
 // prefix ("X:") is preserved verbatim and counts as 0 components.
 static int W32NormalizeW(const wchar_t *in, wchar_t *out, int floor) {
-  wchar_t tmp[MAX_PATH];
-  wchar_t *comps[MAX_PATH / 2];
+  wchar_t tmp[W32_PATH_MAX];
+  wchar_t *comps[W32_PATH_MAX / 2];
   int n = 0;
   const wchar_t *s = in;
   wchar_t *o = out, *t;
@@ -58,7 +58,7 @@ static int W32NormalizeW(const wchar_t *in, wchar_t *out, int floor) {
   } else if (in[0] == L'\\') {
     return -1;  // UNC / device paths are never legitimate here
   }
-  if (wcslen(s) >= MAX_PATH) return -1;
+  if (wcslen(s) >= W32_PATH_MAX) return -1;
   wcscpy(tmp, s);
   for (t = tmp;;) {
     wchar_t *e, save;
@@ -109,6 +109,10 @@ static int W32RootComps(const wchar_t *root) {
   return n;
 }
 
+static const wchar_t *W32StripExtendedPrefix(const wchar_t *w) {
+  return !wcsncmp(w, L"\\\\?\\", 4) ? w + 4 : w;
+}
+
 static int W32EscapeName(wchar_t *w);
 
 // Shared escape+join+normalize step of THE path-resolution entry points
@@ -118,7 +122,7 @@ static int W32EscapeName(wchar_t *w);
 // ".." that pops above `floor` anchor components. Sets LastError on
 // failure. Previously this sequence was open-coded twice.
 static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
-                       wchar_t out[MAX_PATH]);
+                       wchar_t out[W32_PATH_MAX]);
 
 // C2 (security-audit): THE jail root. Every host path that reaches a
 // Win32 API must textually resolve inside this directory — this is the
@@ -131,20 +135,23 @@ static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
 // (Audit: w32stubs.c's opendir/realpath intentionally bypass this — they
 // serve the VFS hostfs with already host-rooted paths, a different layer.)
 static const wchar_t *W32JailRoot(int *comps) {
-  static wchar_t root[MAX_PATH];
+  static wchar_t root[W32_PATH_MAX];
   static int root_init, root_comps;
   if (!root_init) {
     char *r = getenv("WBOX_ROOT");
     if (!r || !*r) {
       // jail-by-default fallback (VfsInit not run yet): the launch cwd
-      DWORD m = GetCurrentDirectoryW(MAX_PATH, root);
-      if (!m || m >= MAX_PATH) {
+      DWORD m = GetCurrentDirectoryW(W32_PATH_MAX, root);
+      if (!m || m >= W32_PATH_MAX) {
         wcscpy(root, L"Z:\\");  // last resort: wine unix fs root
       }
     } else {
       root[0] = 0;
-      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, MAX_PATH - 1);
-      root[MAX_PATH - 1] = 0;
+      MultiByteToWideChar(CP_UTF8, 0, r, -1, root, W32_PATH_MAX - 1);
+      root[W32_PATH_MAX - 1] = 0;
+    }
+    if (!wcsncmp(root, L"\\\\?\\", 4)) {
+      memmove(root, root + 4, (wcslen(root + 4) + 1) * sizeof(*root));
     }
     for (int n = 0; root[n]; ++n)
       if (root[n] == L'/') root[n] = L'\\';
@@ -169,6 +176,7 @@ static const wchar_t *W32JailRoot(int *comps) {
 // ("X:\..." drive-prefixed) resolves inside the jail root.
 static int W32WithinRoot(const wchar_t *abs) {
   const wchar_t *root = W32JailRoot(NULL);
+  abs = W32StripExtendedPrefix(abs);
   size_t rl = wcslen(root);
   if (rl >= 2 && root[1] == L':' && rl == 2) {
     // bare drive root "Z:" — everything on the drive is inside
@@ -185,10 +193,30 @@ static int W32IsDeviceName(const wchar_t *w) {
          !wcscmp(w, L"CONOUT$") || !wcscmp(w, L"CONSOLE$");
 }
 
-static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
+// Extended-length Win32 paths bypass MAX_PATH without opting into the
+// process-wide longPathAware policy. Call only after textual normalization
+// and the jail egress check: the \\?\ prefix disables Win32 normalization.
+static int W32MakeExtendedPath(wchar_t *w) {
+  size_t n;
+  if (W32IsDeviceName(w) || !wcsncmp(w, L"\\\\?\\", 4)) return 0;
+  if (!(iswalpha(w[0]) && w[1] == L':' && w[2] == L'\\')) {
+    SetLastError(ERROR_INVALID_NAME);
+    return -1;
+  }
+  n = wcslen(w);
+  if (n + 4 >= W32_PATH_MAX) {
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+    return -1;
+  }
+  memmove(w + 4, w, (n + 1) * sizeof(*w));
+  memcpy(w, L"\\\\?\\", 4 * sizeof(*w));
+  return 0;
+}
+
+static wchar_t *W32Path(const char *path, wchar_t buf[W32_PATH_MAX]) {
   int n;
-  wchar_t tmp[MAX_PATH];
-  wchar_t joined[MAX_PATH];
+  wchar_t tmp[W32_PATH_MAX];
+  wchar_t joined[W32_PATH_MAX];
   if (!path) return NULL;
   if (!strcmp(path, "/dev/null")) path = "NUL";
   if (path[0] == '/') {
@@ -197,7 +225,7 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
     const wchar_t *root = W32JailRoot(&root_comps);
     if (getenv("WBOX_DEBUG_PATH"))
       fprintf(stderr, "[w32path] abs '%s'\n", path);
-    n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
+    n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, W32_PATH_MAX);
     if (n <= 0) return NULL;
     // F7/F8: escape the guest part BEFORE joining — the jail root is
     // cached in escaped form, and escaping twice would corrupt '%'.
@@ -208,10 +236,10 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
       return NULL;  // error already set
     }
   } else {
-    n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, MAX_PATH);
+    n = MultiByteToWideChar(CP_UTF8, 0, path, -1, tmp, W32_PATH_MAX);
     if (n <= 0) {
       // retry as ANSI
-      n = MultiByteToWideChar(CP_ACP, 0, path, -1, tmp, MAX_PATH);
+      n = MultiByteToWideChar(CP_ACP, 0, path, -1, tmp, W32_PATH_MAX);
       if (n <= 0) return NULL;
     }
     // C2: cwd-relative paths may not climb above the cwd either
@@ -227,14 +255,14 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
       if (buf[0] && buf[1] == L':') {
         wcscpy(joined, buf);  // already drive-prefixed absolute
       } else {
-        DWORD m = GetCurrentDirectoryW(MAX_PATH, joined);
-        if (!m || m >= MAX_PATH) return NULL;
-        if (wcslen(joined) + wcslen(buf) + 2 >= MAX_PATH) return NULL;
+        DWORD m = GetCurrentDirectoryW(W32_PATH_MAX, joined);
+        if (!m || m >= W32_PATH_MAX) return NULL;
+        if (wcslen(joined) + wcslen(buf) + 2 >= W32_PATH_MAX) return NULL;
         wcscat(joined, L"\\");
         wcscat(joined, buf);
       }
       {
-        wchar_t full[MAX_PATH];
+        wchar_t full[W32_PATH_MAX];
         if (W32NormalizeW(joined, full, 0) || W32WithinRoot(full)) {
           if (getenv("WBOX_DEBUG_PATH"))
             fprintf(stderr, "[w32path] DENY rel '%s' full '%S' root '%S'\n",
@@ -242,12 +270,14 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
           SetLastError(ERROR_ACCESS_DENIED);
           return NULL;
         }
+        wcscpy(buf, full);
       }
     }
   }
   // normalize slashes to backslashes (some win32 apis insist)
   for (n = 0; buf[n]; ++n)
     if (buf[n] == L'/') buf[n] = L'\\';
+  if (W32MakeExtendedPath(buf)) return NULL;
   return buf;
 }
 
@@ -267,7 +297,7 @@ static int W32GetAccess(int fd);
 // losslessly. (Known limit: guest names ending in '.' or ' ' collide
 // with win32 trailing-dot/space stripping and are not yet escaped.)
 static int W32EscapeName(wchar_t *w) {
-  wchar_t tmp[MAX_PATH];
+  wchar_t tmp[W32_PATH_MAX];
   wchar_t *o = tmp;
   int has_drive = iswalpha(w[0]) && w[1] == L':';
   for (size_t i = 0; w[i]; ++i) {
@@ -276,10 +306,10 @@ static int W32EscapeName(wchar_t *w) {
               c == L'|' || c == L'?' || c == L'*' || c == L'"' ||
               (c == L':' && !(has_drive && i == 1));
     if (!esc) {
-      if (o - tmp >= MAX_PATH - 1) goto toolong;
+      if (o - tmp >= W32_PATH_MAX - 1) goto toolong;
       *o++ = c;
     } else {
-      if (o - tmp >= MAX_PATH - 5) goto toolong;
+      if (o - tmp >= W32_PATH_MAX - 5) goto toolong;
       *o++ = L'%';
       static const wchar_t hexd[] = L"0123456789abcdef";
       *o++ = hexd[(c >> 12) & 15];
@@ -297,10 +327,10 @@ toolong:
 }
 
 static int W32JoinNorm(const wchar_t *anchor, wchar_t *rel, int floor,
-                       wchar_t out[MAX_PATH]) {
-  wchar_t joined[MAX_PATH];
+                       wchar_t out[W32_PATH_MAX]) {
+  wchar_t joined[W32_PATH_MAX];
   if (W32EscapeName(rel)) return -1;  // error already set
-  if (wcslen(anchor) + wcslen(rel) + 3 > MAX_PATH) {
+  if (wcslen(anchor) + wcslen(rel) + 3 > W32_PATH_MAX) {
     SetLastError(ERROR_FILENAME_EXCED_RANGE);
     return -1;
   }
@@ -343,8 +373,8 @@ void W32UnescapeName(wchar_t *w) {
 // dirfd handle refers to (previously dirfd was silently ignored and the
 // path resolved against the process-global cwd).
 static wchar_t *W32ResolveAt(int dirfd, const char *path,
-                             wchar_t buf[MAX_PATH]) {
-  wchar_t dir[MAX_PATH], rel[MAX_PATH];
+                             wchar_t buf[W32_PATH_MAX]) {
+  wchar_t dir[W32_PATH_MAX], rel[W32_PATH_MAX];
   wchar_t *d;
   DWORD n;
   HANDLE h;
@@ -355,12 +385,12 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
     SetLastError(ERROR_INVALID_HANDLE);
     return NULL;
   }
-  n = GetFinalPathNameByHandleW(h, dir, MAX_PATH, FILE_NAME_NORMALIZED);
-  if (!n || n >= MAX_PATH) return NULL;
+  n = GetFinalPathNameByHandleW(h, dir, W32_PATH_MAX, FILE_NAME_NORMALIZED);
+  if (!n || n >= W32_PATH_MAX) return NULL;
   d = dir;
   if (!wcsncmp(d, L"\\\\?\\", 4)) d += 4;  // strip the \\?\ prefix
-  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, rel, MAX_PATH) <= 0 &&
-      MultiByteToWideChar(CP_ACP, 0, path, -1, rel, MAX_PATH) <= 0) {
+  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, rel, W32_PATH_MAX) <= 0 &&
+      MultiByteToWideChar(CP_ACP, 0, path, -1, rel, W32_PATH_MAX) <= 0) {
     return NULL;
   }
   // F7/F8: the anchor `d` comes from the host (already escaped); escape
@@ -379,6 +409,7 @@ static wchar_t *W32ResolveAt(int dirfd, const char *path,
     SetLastError(ERROR_ACCESS_DENIED);
     return NULL;
   }
+  if (W32MakeExtendedPath(buf)) return NULL;
   return buf;
 }
 
@@ -407,13 +438,14 @@ static uint32_t W32ModeHash(const wchar_t *w) {
 }
 
 // absolutize an already-normalized path for use as a mode-table key
-static void W32AbsKey(const wchar_t *w, wchar_t out[MAX_PATH]) {
+static void W32AbsKey(const wchar_t *w, wchar_t out[W32_PATH_MAX]) {
+  w = W32StripExtendedPrefix(w);
   if (w[0] && w[1] == L':') {
     wcscpy(out, w);
     return;
   }
-  DWORD m = GetCurrentDirectoryW(MAX_PATH, out);
-  if (!m || wcslen(out) + wcslen(w) + 2 >= MAX_PATH) {
+  DWORD m = GetCurrentDirectoryW(W32_PATH_MAX, out);
+  if (!m || wcslen(out) + wcslen(w) + 2 >= W32_PATH_MAX) {
     wcscpy(out, w);
     return;
   }
@@ -422,7 +454,7 @@ static void W32AbsKey(const wchar_t *w, wchar_t out[MAX_PATH]) {
 }
 
 static void W32ModeSet(const wchar_t *w, mode_t mode) {
-  wchar_t key[MAX_PATH];
+  wchar_t key[W32_PATH_MAX];
   uint32_t i, n, firstfree = UINT32_MAX;
   W32AbsKey(w, key);
   AcquireSRWLockExclusive(&g_modelock);
@@ -446,7 +478,7 @@ static void W32ModeSet(const wchar_t *w, mode_t mode) {
 }
 
 static int W32ModeGet(const wchar_t *w, mode_t *mode) {
-  wchar_t key[MAX_PATH];
+  wchar_t key[W32_PATH_MAX];
   uint32_t i, n;
   W32AbsKey(w, key);
   AcquireSRWLockShared(&g_modelock);
@@ -464,7 +496,7 @@ static int W32ModeGet(const wchar_t *w, mode_t *mode) {
 }
 
 static void W32ModeClear(const wchar_t *w) {
-  wchar_t key[MAX_PATH];
+  wchar_t key[W32_PATH_MAX];
   uint32_t i, n;
   W32AbsKey(w, key);
   AcquireSRWLockExclusive(&g_modelock);
@@ -602,7 +634,7 @@ static int W32OpenSpecial(const char *path, int flags) {
 }
 
 int openat(int dirfd, const char *path, int flags, ...) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   HANDLE h;
   DWORD attr;
   int sp;
@@ -1345,9 +1377,9 @@ int fstat(int fd, struct stat *st) {
   }
   HANDLE h = (HANDLE)fi.handle;
   // F1: resolve the path for the emulated-mode lookup (fails for pipes)
-  wchar_t wbuf[MAX_PATH], *wp = NULL;
-  DWORD wn = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
-  if (wn && wn < MAX_PATH) {
+  wchar_t wbuf[W32_PATH_MAX], *wp = NULL;
+  DWORD wn = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, FILE_NAME_NORMALIZED);
+  if (wn && wn < W32_PATH_MAX) {
     wp = wbuf;
     if (!wcsncmp(wp, L"\\\\?\\", 4)) wp += 4;
   }
@@ -1364,7 +1396,7 @@ int lstat(const char *path, struct stat *st) {
 }
 
 int fstatat(int dirfd, const char *path, struct stat *st, int flags) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1393,7 +1425,7 @@ int access(const char *path, int mode) {
 }
 
 int faccessat(int dirfd, const char *path, int mode, int flags) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1422,21 +1454,21 @@ int unlink(const char *path) {
 // disappears at the last close and can only ever show up as a hidden
 // dotfile in readdir in between.
 static int W32UnlinkPosix(const wchar_t *wbuf) {
-  wchar_t tmp[MAX_PATH];
+  wchar_t tmp[W32_PATH_MAX];
   wchar_t *base;
   static volatile long seq;
   if (DeleteFileW(wbuf) &&
       GetFileAttributesW(wbuf) == INVALID_FILE_ATTRIBUTES) {
     return 0;  // not open anywhere: plain delete removed the name
   }
-  if (wcslen(wbuf) + 40 >= MAX_PATH) {
+  if (wcslen(wbuf) + 40 >= W32_PATH_MAX) {
     SetLastError(ERROR_FILENAME_EXCED_RANGE);
     return -1;
   }
   wcscpy(tmp, wbuf);
   base = wcsrchr(tmp, L'\\');
   base = base ? base + 1 : tmp;
-  swprintf(base, (size_t)(tmp + MAX_PATH - base), L".wbox-unlink-%lx-%lx",
+  swprintf(base, (size_t)(tmp + W32_PATH_MAX - base), L".wbox-unlink-%lx-%lx",
            (unsigned long)GetCurrentProcessId(),
            (unsigned long)InterlockedIncrement(&seq));
   if (!MoveFileExW(wbuf, tmp, MOVEFILE_REPLACE_EXISTING)) {
@@ -1447,7 +1479,7 @@ static int W32UnlinkPosix(const wchar_t *wbuf) {
 }
 
 int unlinkat(int dirfd, const char *path, int flags) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   DWORD attr;
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
@@ -1476,7 +1508,7 @@ int unlinkat(int dirfd, const char *path, int flags) {
 }
 
 int rmdir(const char *path) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32Path(path, wbuf) || !RemoveDirectoryW(wbuf)) {
     errno = W32Err();
     return -1;
@@ -1485,7 +1517,7 @@ int rmdir(const char *path) {
 }
 
 int rename(const char *old, const char *new_) {
-  wchar_t wo[MAX_PATH], wn[MAX_PATH];
+  wchar_t wo[W32_PATH_MAX], wn[W32_PATH_MAX];
   if (!W32Path(old, wo) || !W32Path(new_, wn)) {
     errno = ENOENT;
     return -1;
@@ -1499,7 +1531,7 @@ int rename(const char *old, const char *new_) {
 }
 
 int renameat(int oldfd, const char *old, int newfd, const char *new_) {
-  wchar_t wo[MAX_PATH], wn[MAX_PATH];
+  wchar_t wo[W32_PATH_MAX], wn[W32_PATH_MAX];
   if (!W32ResolveAt(oldfd, old, wo) || !W32ResolveAt(newfd, new_, wn)) {
     errno = ENOENT;
     return -1;
@@ -1518,7 +1550,7 @@ int renameat2(int oldfd, const char *old, int newfd, const char *new_,
 }
 
 int mkdir(const char *path, mode_t mode) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32Path(path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1532,7 +1564,7 @@ int mkdir(const char *path, mode_t mode) {
 }
 
 int mkdirat(int dirfd, const char *path, mode_t mode) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1546,7 +1578,7 @@ int mkdirat(int dirfd, const char *path, mode_t mode) {
 }
 
 int chmod(const char *path, mode_t mode) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32Path(path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1569,14 +1601,14 @@ int chmod(const char *path, mode_t mode) {
 int fchmod(int fd, mode_t mode) {
   // F1: attribute emulation only covers the read-only bit; record the
   // full mode in the emulation table so fstat reports it.
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
     return -1;
   }
-  DWORD n = GetFinalPathNameByHandleW(h, wbuf, MAX_PATH, FILE_NAME_NORMALIZED);
-  if (n && n < MAX_PATH) {
+  DWORD n = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, FILE_NAME_NORMALIZED);
+  if (n && n < W32_PATH_MAX) {
     wchar_t *d = wbuf;
     if (!wcsncmp(d, L"\\\\?\\", 4)) d += 4;
     W32ModeSet(d, mode & 07777);
@@ -1585,7 +1617,7 @@ int fchmod(int fd, mode_t mode) {
 }
 
 int fchmodat(int dirfd, const char *path, mode_t mode, int flags) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32ResolveAt(dirfd, path, wbuf)) {
     errno = ENOENT;
     return -1;
@@ -1612,7 +1644,7 @@ mode_t umask(mode_t m) {
 }
 
 int link(const char *old, const char *new_) {
-  wchar_t wo[MAX_PATH], wn[MAX_PATH];
+  wchar_t wo[W32_PATH_MAX], wn[W32_PATH_MAX];
   if (!W32Path(old, wo) || !W32Path(new_, wn)) {
     errno = ENOENT;
     return -1;
@@ -1625,7 +1657,7 @@ int link(const char *old, const char *new_) {
 }
 
 int linkat(int ofd, const char *old, int nfd, const char *new_, int flags) {
-  wchar_t wo[MAX_PATH], wn[MAX_PATH];
+  wchar_t wo[W32_PATH_MAX], wn[W32_PATH_MAX];
   if (!W32ResolveAt(ofd, old, wo) || !W32ResolveAt(nfd, new_, wn)) {
     errno = ENOENT;
     return -1;
@@ -1662,7 +1694,7 @@ ssize_t readlinkat(int dirfd, const char *path, char *buf, size_t size) {
 // guest-controlled resolution base. All guest-relative host paths go
 // through the *at functions, which honor dirfd (W32ResolveAt).
 int chdir(const char *path) {
-  wchar_t wbuf[MAX_PATH];
+  wchar_t wbuf[W32_PATH_MAX];
   if (!W32Path(path, wbuf) || !SetCurrentDirectoryW(wbuf)) {
     errno = W32Err();
     return -1;
@@ -1676,8 +1708,8 @@ int fchdir(int fd) {
 }
 
 char *getcwd(char *buf, size_t size) {
-  wchar_t wbuf[MAX_PATH];
-  DWORD n = GetCurrentDirectoryW(MAX_PATH, wbuf);
+  wchar_t wbuf[W32_PATH_MAX];
+  DWORD n = GetCurrentDirectoryW(W32_PATH_MAX, wbuf);
   if (!n) {
     errno = W32Err();
     return NULL;
@@ -1685,7 +1717,8 @@ char *getcwd(char *buf, size_t size) {
   // convert backslashes and prepend drive-relative root:
   // wine cwd like Z:\tmp\wbox5 -> /tmp/wbox5 (drop drive letter)
   wchar_t *p = wbuf;
-  if (n >= 2 && wbuf[1] == L':') p = wbuf + 2;
+  p = (wchar_t *)W32StripExtendedPrefix(p);
+  if (p[0] && p[1] == L':') p += 2;
   for (wchar_t *q = p; *q; ++q)
     if (*q == L'\\') *q = L'/';
   int m = WideCharToMultiByte(CP_UTF8, 0, p, -1, buf, size, NULL, NULL);

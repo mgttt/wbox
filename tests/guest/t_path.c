@@ -1,6 +1,7 @@
 /* t_path.c — rename/link/symlink/readlink/unlink edge cases,
  * long paths, UTF-8 and special-char filenames. */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -142,6 +143,7 @@ int main(void) {
   T_BEGIN("path/long-nested");
   {
     char p[512] = {0};
+    char dirpath[512] = {0};
     strcpy(p, "t_p_L");
     T_ASSERT_OK(mkdir(p, 0700));
     int ok = 1;
@@ -150,9 +152,20 @@ int main(void) {
       if (mkdir(p, 0700) != 0) { ok = 0; break; }
     }
     T_ASSERT(ok);
+    strcpy(dirpath, p);
     strcat(p, "/leaf.txt");
     T_ASSERT_OK(write_file(p, "deep"));
     T_ASSERT_EQ(read_file(p, buf, sizeof buf), 4);
+    DIR *d = opendir(dirpath);
+    T_ASSERT(d != NULL);
+    int saw_leaf = 0;
+    if (d) {
+      struct dirent *de;
+      while ((de = readdir(d)))
+        if (!strcmp(de->d_name, "leaf.txt")) saw_leaf = 1;
+      T_ASSERT_OK(closedir(d));
+    }
+    T_ASSERT(saw_leaf);
   }
 
   /* --- UTF-8 filename --- */

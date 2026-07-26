@@ -16,13 +16,3 @@
 #     返回码干净、语义明确，本期不实现。
 t_net_epoll
 t_net_sockopt
-
-# W3：path/long-nested 只在**真 Windows** 上失败（wine 无此限制故通过）。
-#     测试构造 t_p_L + 20×/1234567890 + /leaf.txt = 234 字符相对路径，
-#     加上宿主 jail 根前缀后超过 MAX_PATH(260)，mkdir/open 返回 ENOENT。
-#     根因：win32/w32fd.c 的路径层整体以 MAX_PATH 为界（out[MAX_PATH]、
-#     `wcslen(s) >= MAX_PATH` 直接拒绝），未使用 `\\?\` 扩展长度前缀。
-#     修复需把路径缓冲扩到 32767 并在所有 Win32 调用点加前缀（前缀会关闭
-#     系统侧规范化，故路径必须已是反斜杠、无 . / .. 的规范形式）——改动面
-#     大且 wine 无法验证，故先登记。详见 KNOWN-FAILURES.md W3。
-t_path @native

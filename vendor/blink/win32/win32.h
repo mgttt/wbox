@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#define W32_PATH_MAX 32768
+
 struct pollfd;
 
 // ---------------------------------------------------------------- mem

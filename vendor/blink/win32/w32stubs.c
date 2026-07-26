@@ -23,6 +23,7 @@ intptr_t _get_osfhandle(int);
 
 #include "blink/pty.h"
 #include "blink/machine.h"
+#include "win32.h"
 
 // ---------------------------------------------------------------- termios
 // tcgetattr/tcsetattr (and console-mode application) live in w32sock.c
@@ -72,7 +73,7 @@ struct __wbox_DIR {
   WIN32_FIND_DATAW data;
   int first;
   long pos;  // entries returned so far; backs telldir()/d_off
-  wchar_t wpath[520];
+  wchar_t wpath[W32_PATH_MAX];
   struct dirent ent;
 };
 
@@ -88,16 +89,34 @@ static ino_t WboxDirentIno(const char *name) {
   return (ino_t)(h ? h : 1);
 }
 
+static int WboxDirApiPath(const wchar_t *wpath,
+                          wchar_t out[W32_PATH_MAX]) {
+  DWORD n;
+  size_t len;
+  if (!wcsncmp(wpath, L"\\\\?\\", 4)) {
+    if (wcslen(wpath) >= W32_PATH_MAX) return -1;
+    wcscpy(out, wpath);
+    return 0;
+  }
+  n = GetFullPathNameW(wpath, W32_PATH_MAX, out, NULL);
+  if (!n || n >= W32_PATH_MAX) return -1;
+  if (!(out[0] && out[1] == L':' && out[2] == L'\\')) return -1;
+  len = wcslen(out);
+  if (len + 4 >= W32_PATH_MAX) return -1;
+  memmove(out + 4, out, (len + 1) * sizeof(*out));
+  memcpy(out, L"\\\\?\\", 4 * sizeof(*out));
+  return 0;
+}
+
 static DIR *OpendirW(const wchar_t *wpath, const char *path) {
   DIR *d = calloc(1, sizeof(DIR));
   if (!d) return NULL;
-  wchar_t wbuf[520];
-  if (wcslen(wpath) + 3 >= 520) {
+  wchar_t wbuf[W32_PATH_MAX];
+  if (WboxDirApiPath(wpath, wbuf) || wcslen(wbuf) + 3 >= W32_PATH_MAX) {
     free(d);
     errno = ENAMETOOLONG;
     return NULL;
   }
-  wcscpy(wbuf, wpath);
   wcscat(wbuf, L"\\*");
   wcscpy(d->wpath, wbuf);
   (void)path;
@@ -112,8 +131,8 @@ static DIR *OpendirW(const wchar_t *wpath, const char *path) {
 }
 
 DIR *opendir(const char *path) {
-  wchar_t wbuf[520];
-  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, 520) <= 0) {
+  wchar_t wbuf[W32_PATH_MAX];
+  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, W32_PATH_MAX) <= 0) {
     errno = ENOENT;
     return NULL;
   }
@@ -129,16 +148,13 @@ DIR *fdopendir(int fd) {
     errno = EBADF;
     return NULL;
   }
-  wchar_t wbuf[520];
-  DWORD n = GetFinalPathNameByHandleW(h, wbuf, 520, 0);
-  if (!n || n >= 520) {
+  wchar_t wbuf[W32_PATH_MAX];
+  DWORD n = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, 0);
+  if (!n || n >= W32_PATH_MAX) {
     errno = ENOENT;
     return NULL;
   }
-  // wine returns "\\?\Z:\path"; strip the "\\?\" prefix
-  wchar_t *p = wbuf;
-  if (!wcsncmp(p, L"\\\\?\\", 4)) p += 4;
-  return OpendirW(p, NULL);
+  return OpendirW(wbuf, NULL);
 }
 
 int closedir(DIR *d) {
@@ -386,4 +402,3 @@ void Redraw(bool force) {}
 long HasPendingKeyboard(void) { return 0; }
 void HandleAppReadInterrupt(void) {}
 int ReadAnsi(int fd, char *buf, int size) { return -1; }
-
