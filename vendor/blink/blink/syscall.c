@@ -558,23 +558,36 @@ static int W32Fork(struct Machine *m) {
   // fds.lock and machines_lock are still taken at their inner sites to
   // keep the critical section non-recursive (NewSystem/NewMachine take
   // machines_lock internally).
+  // wbox win32：逐把锁打点。真机首测（KNOWN-FAILURES W1）显示 fork 卡在
+  // "fork enter" 与下一条日志之间，而这中间是六把锁 + 快照——没有中间打点
+  // 就无法区分"卡在哪把锁"与"卡在快照里"。诊断由 WBOX_DEBUG_FORK 控制，
+  // 关闭时只是一次 getenv，无实质开销。
+  W32ForkDbg("lock exec..", 0, 0);
   LOCK(&m->system->exec_lock);
+  W32ForkDbg("lock sig..", 0, 0);
   LOCK(&m->system->sig_lock);
+  W32ForkDbg("lock mmap..", 0, 0);
   LOCK(&m->system->mmap_lock);
+  W32ForkDbg("lock pagelocks..", 0, 0);
   LOCK(&m->system->pagelocks_lock);
 #ifndef HAVE_PTHREAD_PROCESS_SHARED
+  W32ForkDbg("lock futexes..", 0, 0);
   LOCK(&g_bus->futexes.lock);
 #endif
 #ifdef HAVE_JIT
+  W32ForkDbg("lock jit..", 0, 0);
   LOCK(&m->system->jit.lock);
 #endif
+  W32ForkDbg("locks acquired", 0, 0);
   // 1. synchronously snapshot every committed page into a fresh window;
   //    the parent window can not be mutated or released mid-copy because
   //    the copy runs here, on the parent's own thread
+  W32ForkDbg("snapshot begin", 0, 0);
   if (WboxMemSnapshotWindow(srcwin, &dstwin) == -1) {
     rc = eagain();
     goto unlock_and_abandon;
   }
+  W32ForkDbg("snapshot done", 0, 0);
   lo = WboxMemHandleBase(srcwin);
   hi = WboxMemHandleLimit(srcwin);
   delta = (i64)(WboxMemHandleBase(dstwin) - lo);
