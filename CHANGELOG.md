@@ -6,7 +6,25 @@
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 里程碑以功能线回溯标注（项目以 trunk 滚动开发，tag 自 v1.0-rc 起）。
 
-## [Unreleased]
+## [v1.0.0-rc2] —— 终审通过（2026-07-26）
+
+合并 win32 层抽象重构（R1-R5）与 Rust 重构（错误统一 / backend 下沉 /
+cli 拆分 / `image rm`）后的发布终审，全部验证项实测通过：
+
+- **缺陷歼灭**：累计修复 50+ 项（P0 路径安全 4 项、P1 内存/fd/进程/网络、
+  errno 校准、>4GiB、devfs A6、epoll 组、brk、fork MAP_SHARED、kill 语义、
+  self-exe 等，详见 tests/KNOWN-FAILURES.md 台账）。
+- **重构**：win32 侧 R1-R5（w32 抽象统一，STUB_RENAMES 改名 hack 全删，
+  w32stubs.c 干净编译）+ Rust 侧六项（错误统一 / backend 下沉 / cli 拆分 /
+  `wbox image rm` 新命令 + 18 新测）。
+- **测试基线（wine 11.11 实测）**：
+  - guest C 回归套件 433 断言：**pass=419 / fail=4 / skip=10**（4 fail 为
+    KNOWN-FAILURES 基线固有项：N1 AF_UNIX ×2、E1/E2 errno 精度 ×2）；
+  - Rust 单测 **141 passed / 0 failed**；`cargo check --target
+    x86_64-pc-windows-msvc` 与 `cargo clippy --all-targets` 均 0 warning；
+  - 验收矩阵 **PASS=36 / FAIL=3（同 KNOWN-FAILURES）/ SKIP=1（epoll 预编译缺失）**；
+  - `apt-get update`（ubuntu-base 24.04 rootfs，aliyun noble 源）rc=0，
+    索引全数落盘；busybox wget md5=01718454f79b3bd9fa51e0e1f8966103 精确匹配。
 
 ### Added
 - `scripts/test-matrix.sh`：wbox-linux 验收矩阵产品化脚本——11 项基础矩阵 +
