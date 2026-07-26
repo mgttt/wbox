@@ -894,18 +894,59 @@ void *sbrk(intptr_t n) {
   return (void *)-1;
 }
 
+// 对齐分配：**必须返回可被普通 free() 释放的内存**。
+//
+// 原实现用 _aligned_malloc，而调用方（blink/memorymalloc.c 的 FreeSystem /
+// FreeMachine）用普通 free() 释放。在 UCRT/msvcrt 上这是未定义行为：
+// _aligned_malloc 会在用户指针前放置自己的簿记头，free() 拿到的不是块首，
+// 堆检测直接判定损坏 → 进程以 0xC0000374 (STATUS_HEAP_CORRUPTION) 终止。
+// 症状极具迷惑性：guest 程序完整跑完、输出全对，只在退出清理时崩，
+// msys2 bash 再把异常终止归一成 rc=127（真机验收矩阵 24 项全红即此因）。
+// wine 与 zig cc 构建的堆不做同等校验，故长期未暴露。
+//
+// x86_64 的 malloc 本就保证 16 字节对齐，而实际调用点只需要
+// _Alignof(struct System) / _Alignof(struct Machine)（均 ≤ 16，见下方
+// 静态断言），故直接用 malloc 即可，且与 free() 天然配对。
+// 超过 malloc 保证的对齐无法同时满足"free() 可释放"，明确返回 EINVAL，
+// 而不是再交回一块会炸堆的内存。
+#define W32_MALLOC_ALIGN 16u
+
+static void *W32AlignedAlloc(size_t align, size_t size) {
+  // POSIX：align 必须是 2 的幂且为 sizeof(void*) 的倍数
+  if (align == 0 || (align & (align - 1)) != 0 || align % sizeof(void *) != 0) {
+    return NULL;
+  }
+  if (align > W32_MALLOC_ALIGN) {
+    return NULL;  // 见上：无法兼顾 free() 兼容性
+  }
+  return malloc(size);
+}
+
 int posix_memalign(void **p, size_t align, size_t size) {
-  void *r = _aligned_malloc(size, align);
+  void *r;
+  if (align == 0 || (align & (align - 1)) != 0 || align % sizeof(void *) != 0 ||
+      align > W32_MALLOC_ALIGN) {
+    return EINVAL;
+  }
+  r = malloc(size);
   if (!r) return ENOMEM;
   *p = r;
   return 0;
 }
 
 void *memalign(size_t align, size_t size) {
-  return _aligned_malloc(size, align);
+  void *r = W32AlignedAlloc(align, size);
+  if (!r) errno = EINVAL;
+  return r;
 }
 
-void *valloc(size_t size) { return _aligned_malloc(size, 4096); }
+// 页对齐（4096）超出 malloc 的保证，无法返回 free() 可释放的内存。
+// blink 当前不调用 valloc；保留桩并明确失败，好过悄悄埋一颗堆损坏地雷。
+void *valloc(size_t size) {
+  (void)size;
+  errno = ENOSYS;
+  return NULL;
+}
 
 int mkostemp(char *tmpl, int flags) { return mkstemp(tmpl); }
 

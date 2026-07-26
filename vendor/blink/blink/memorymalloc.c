@@ -232,6 +232,20 @@ long GetMaxRss(struct System *s) {
   return MIN(kMaxResident, Read64(s->rlim[RLIMIT_AS_LINUX].cur)) / 4096;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32 护栏：下面两处用 posix_memalign 分配、却用普通 free() 释放
+// （FreeSystem/FreeMachine）。Windows 上要同时满足"对齐"与"free() 可释放"，
+// 只能落在 malloc 的对齐保证（x86_64 为 16 字节）之内——见
+// win32/w32proc.c 的 posix_memalign 说明（原实现用 _aligned_malloc，
+// 与 free() 配错导致进程退出时 0xC0000374 堆损坏）。
+// 若将来结构体对齐要求超过 16，必须在**编译期**炸出来，而不是等运行期
+// 变成 NewSystem 返回 NULL 或又一次堆损坏。
+_Static_assert(_Alignof(struct System) <= 16,
+               "wbox win32: System 对齐超过 malloc 保证，见 win32/w32proc.c");
+_Static_assert(_Alignof(struct Machine) <= 16,
+               "wbox win32: Machine 对齐超过 malloc 保证，见 win32/w32proc.c");
+#endif
+
 struct System *NewSystem(struct XedMachineMode mode) {
   long i;
   struct System *s;
