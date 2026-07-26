@@ -95,6 +95,7 @@ enum {
   W32FD_FILE,     // regular file / pipe / console: a HANDLE-backed CRT fd
   W32FD_SOCKET,   // winsock socket wrapped in a CRT fd (w32sock.c table)
   W32FD_EPOLL,    // epoll instance wrapped in a CRT fd (w32sock.c table)
+  W32FD_EVENTFD,  // eventfd counter wrapped in a CRT fd (w32fd.c table)
   W32FD_SPECIAL,  // fake device fd sentinel 1000000..1000002 (no CRT fd)
 };
 struct W32FdInfo {
@@ -103,6 +104,7 @@ struct W32FdInfo {
   int dev;       // sentinel number when kind == W32FD_SPECIAL
 };
 int W32FdClassify(int fd, struct W32FdInfo *out);
+int WboxEventfdCreate(unsigned int initval, int flags);
 
 // w32fd.c (F3): 64-bit-offset positioned IO. The VFS chain truncates to
 // the 32-bit CRT off_t, so syscall.c routes large pread/pwrite offsets
@@ -126,6 +128,7 @@ int WboxSockFionread(int fd, int *out);        // -2 = not a socket
 int WboxSockPoll(struct pollfd *pfds, unsigned long n, int timeout);
 int WboxEpollIsFd(int fd);
 int WboxEpollClose(int fd);                // 1 = handled (fd was epoll)
+void WboxEpollPurgeFd(int fd);
 
 // ---------------------------------------------------------------- wait
 // Shared wait primitive (w32fd.c): readiness for an array of CRT-namespace

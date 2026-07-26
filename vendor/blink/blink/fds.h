@@ -38,6 +38,7 @@ struct Fd {
   int hostfd;
   int oflags;      // host O_XXX constants
   int socktype;    // host SOCK_XXX constants
+  bool eventfd;    // wbox win32: shared eventfd status lives in host object
   bool norestart;  // is SO_RCVTIMEO in play?
   DIR *dirstream;  // for getdents() lazilly
   struct Dll elem;

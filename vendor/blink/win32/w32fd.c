@@ -736,6 +736,332 @@ static int W32GetAccess(int fd) {
   return O_RDWR;
 }
 
+// ---------------------------------------------------------------- eventfd
+
+#define WBOX_MAXEVENTFD 1024
+#define WBOX_EFD_SEMAPHORE 1
+#define WBOX_EFD_NONBLOCK O_NONBLOCK
+
+struct WboxEventfd {
+  SRWLOCK lock;
+  CONDITION_VARIABLE changed;
+  uint64_t counter;
+  int semaphore;
+  int nonblock;
+  int refs;  // descriptor mappings plus in-flight operations
+};
+
+struct WboxEventfdMap {
+  int used;
+  int fd;
+  struct WboxEventfd *obj;
+};
+
+static SRWLOCK g_eventfds_lock = SRWLOCK_INIT;
+static struct WboxEventfdMap g_eventfds[WBOX_MAXEVENTFD];
+
+static void EventfdRelease(struct WboxEventfd *);
+
+static int EventfdSlot(int fd) {
+  for (int i = 0; i < WBOX_MAXEVENTFD; ++i)
+    if (g_eventfds[i].used && g_eventfds[i].fd == fd) return i;
+  return -1;
+}
+
+static struct WboxEventfd *EventfdAcquire(int fd) {
+  struct WboxEventfd *obj = NULL;
+  AcquireSRWLockExclusive(&g_eventfds_lock);
+  int i = EventfdSlot(fd);
+  if (i != -1) {
+    obj = g_eventfds[i].obj;
+    ++obj->refs;
+  }
+  ReleaseSRWLockExclusive(&g_eventfds_lock);
+  return obj;
+}
+
+static void EventfdRelease(struct WboxEventfd *obj) {
+  int destroy = 0;
+  AcquireSRWLockExclusive(&g_eventfds_lock);
+  if (!--obj->refs) destroy = 1;
+  ReleaseSRWLockExclusive(&g_eventfds_lock);
+  if (destroy) free(obj);
+}
+
+static int EventfdMap(int fd, struct WboxEventfd *obj) {
+  int slot = -1;
+  AcquireSRWLockExclusive(&g_eventfds_lock);
+  for (int i = 0; i < WBOX_MAXEVENTFD; ++i) {
+    if (!g_eventfds[i].used) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot != -1) {
+    g_eventfds[slot].used = 1;
+    g_eventfds[slot].fd = fd;
+    g_eventfds[slot].obj = obj;
+    ++obj->refs;
+  }
+  ReleaseSRWLockExclusive(&g_eventfds_lock);
+  if (slot == -1) {
+    errno = EMFILE;
+    return -1;
+  }
+  return 0;
+}
+
+static int EventfdUnmap(int fd) {
+  struct WboxEventfd *obj = NULL;
+  int destroy = 0;
+  AcquireSRWLockExclusive(&g_eventfds_lock);
+  int i = EventfdSlot(fd);
+  if (i != -1) {
+    obj = g_eventfds[i].obj;
+    memset(&g_eventfds[i], 0, sizeof(g_eventfds[i]));
+    if (!--obj->refs) destroy = 1;
+  }
+  ReleaseSRWLockExclusive(&g_eventfds_lock);
+  if (destroy) free(obj);
+  return obj != NULL;
+}
+
+int WboxEventfdCreate(unsigned int initval, int flags) {
+  HANDLE h;
+  int fd;
+  struct WboxEventfd *obj;
+  if (flags & ~(WBOX_EFD_SEMAPHORE | O_NONBLOCK | O_CLOEXEC)) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(obj = calloc(1, sizeof(*obj)))) {
+    errno = ENOMEM;
+    return -1;
+  }
+  InitializeSRWLock(&obj->lock);
+  InitializeConditionVariable(&obj->changed);
+  obj->counter = initval;
+  obj->semaphore = !!(flags & WBOX_EFD_SEMAPHORE);
+  obj->nonblock = !!(flags & WBOX_EFD_NONBLOCK);
+  // NUL is only a CRT namespace anchor; event handles are rejected by
+  // wine's _open_osfhandle (same constraint as the epoll shim).
+  h = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0,
+                  NULL);
+  if (h == INVALID_HANDLE_VALUE) {
+    free(obj);
+    errno = W32Err();
+    return -1;
+  }
+  if ((fd = W32ToCrt(h, O_RDWR)) == -1) {
+    free(obj);
+    errno = EMFILE;
+    return -1;
+  }
+  if (EventfdMap(fd, obj) == -1) {
+    _close(fd);
+    free(obj);
+    return -1;
+  }
+  return fd;
+}
+
+static ssize_t EventfdRead(int fd, void *buf, size_t n) {
+  uint64_t value;
+  struct WboxEventfd *obj;
+  if (n != sizeof(value)) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(obj = EventfdAcquire(fd))) {
+    errno = EBADF;
+    return -1;
+  }
+  AcquireSRWLockExclusive(&obj->lock);
+  while (!obj->counter) {
+    if (obj->nonblock) {
+      ReleaseSRWLockExclusive(&obj->lock);
+      EventfdRelease(obj);
+      errno = EAGAIN;
+      return -1;
+    }
+    SleepConditionVariableSRW(&obj->changed, &obj->lock, INFINITE, 0);
+  }
+  if (obj->semaphore) {
+    value = 1;
+    --obj->counter;
+  } else {
+    value = obj->counter;
+    obj->counter = 0;
+  }
+  WakeAllConditionVariable(&obj->changed);
+  ReleaseSRWLockExclusive(&obj->lock);
+  EventfdRelease(obj);
+  memcpy(buf, &value, sizeof(value));
+  return sizeof(value);
+}
+
+static ssize_t EventfdWrite(int fd, const void *buf, size_t n) {
+  uint64_t value;
+  struct WboxEventfd *obj;
+  if (n != sizeof(value)) {
+    errno = EINVAL;
+    return -1;
+  }
+  memcpy(&value, buf, sizeof(value));
+  if (value == UINT64_MAX) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (!(obj = EventfdAcquire(fd))) {
+    errno = EBADF;
+    return -1;
+  }
+  AcquireSRWLockExclusive(&obj->lock);
+  while (value > UINT64_MAX - 1 - obj->counter) {
+    if (obj->nonblock) {
+      ReleaseSRWLockExclusive(&obj->lock);
+      EventfdRelease(obj);
+      errno = EAGAIN;
+      return -1;
+    }
+    SleepConditionVariableSRW(&obj->changed, &obj->lock, INFINITE, 0);
+  }
+  obj->counter += value;
+  WakeAllConditionVariable(&obj->changed);
+  ReleaseSRWLockExclusive(&obj->lock);
+  EventfdRelease(obj);
+  return sizeof(value);
+}
+
+static int EventfdDup(int fd) {
+  HANDLE h, duph;
+  int nfd;
+  struct WboxEventfd *obj;
+  if (!(obj = EventfdAcquire(fd))) return -2;
+  h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE ||
+      !DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &duph, 0,
+                       FALSE, DUPLICATE_SAME_ACCESS)) {
+    EventfdRelease(obj);
+    errno = W32Err();
+    return -1;
+  }
+  nfd = W32ToCrt(duph, O_RDWR);
+  if (nfd == -1 || EventfdMap(nfd, obj) == -1) {
+    if (nfd != -1) _close(nfd);
+    EventfdRelease(obj);
+    return -1;
+  }
+  EventfdRelease(obj);
+  return nfd;
+}
+
+static int EventfdDup2(int fd, int fd2) {
+  struct WboxEventfd *obj;
+  if (!(obj = EventfdAcquire(fd))) return -2;
+  if (fd == fd2) {
+    EventfdRelease(obj);
+    return fd2;
+  }
+  EventfdUnmap(fd2);
+  if (_dup2(fd, fd2)) {
+    EventfdRelease(obj);
+    errno = EBADF;
+    return -1;
+  }
+  if (EventfdMap(fd2, obj) == -1) {
+    _close(fd2);
+    EventfdRelease(obj);
+    return -1;
+  }
+  EventfdRelease(obj);
+  return fd2;
+}
+
+static int EventfdFcntl(int fd, int cmd, int arg) {
+  int rc;
+  struct WboxEventfd *obj;
+  if (!(obj = EventfdAcquire(fd))) return -2;
+  AcquireSRWLockExclusive(&obj->lock);
+  switch (cmd) {
+    case F_GETFL:
+      rc = O_RDWR | (obj->nonblock ? O_NONBLOCK : 0);
+      break;
+    case F_SETFL:
+      obj->nonblock = !!(arg & O_NONBLOCK);
+      WakeAllConditionVariable(&obj->changed);
+      rc = 0;
+      break;
+    case F_GETFD:
+    case F_SETFD:
+      rc = 0;
+      break;
+    default:
+      rc = -2;
+      break;
+  }
+  ReleaseSRWLockExclusive(&obj->lock);
+  EventfdRelease(obj);
+  return rc;
+}
+
+static int EventfdPoll(int fd, short events, short *revents) {
+  struct WboxEventfd *obj;
+  if (!(obj = EventfdAcquire(fd))) return 0;
+  AcquireSRWLockShared(&obj->lock);
+  *revents = 0;
+  if (obj->counter) *revents |= events & POLLIN;
+  if (obj->counter < UINT64_MAX - 1) *revents |= events & POLLOUT;
+  ReleaseSRWLockShared(&obj->lock);
+  EventfdRelease(obj);
+  return 1;
+}
+
+static ssize_t EventfdReadv(int fd, const struct iovec *iov, int n) {
+  uint64_t value;
+  size_t total = 0, off = 0;
+  for (int i = 0; i < n; ++i) {
+    if (iov[i].iov_len > sizeof(value) - total) {
+      errno = EINVAL;
+      return -1;
+    }
+    total += iov[i].iov_len;
+  }
+  if (total != sizeof(value)) {
+    errno = EINVAL;
+    return -1;
+  }
+  ssize_t rc = EventfdRead(fd, &value, sizeof(value));
+  if (rc == -1) return -1;
+  for (int i = 0; i < n; ++i) {
+    memcpy(iov[i].iov_base, (char *)&value + off, iov[i].iov_len);
+    off += iov[i].iov_len;
+  }
+  return rc;
+}
+
+static ssize_t EventfdWritev(int fd, const struct iovec *iov, int n) {
+  uint64_t value;
+  size_t total = 0, off = 0;
+  for (int i = 0; i < n; ++i) {
+    if (iov[i].iov_len > sizeof(value) - total) {
+      errno = EINVAL;
+      return -1;
+    }
+    total += iov[i].iov_len;
+  }
+  if (total != sizeof(value)) {
+    errno = EINVAL;
+    return -1;
+  }
+  for (int i = 0; i < n; ++i) {
+    memcpy((char *)&value + off, iov[i].iov_base, iov[i].iov_len);
+    off += iov[i].iov_len;
+  }
+  return EventfdWrite(fd, &value, sizeof(value));
+}
+
 // Unified CRT-fd classification — THE single lookup that decides which
 // backing object a host-side fd refers to (see win32.h). The namespaces are
 // disjoint: specials are sentinels >= 1000000, epoll/socket are real CRT
@@ -752,6 +1078,12 @@ int W32FdClassify(int fd, struct W32FdInfo *out) {
   }
   if (WboxEpollIsFd(fd)) {
     out->kind = W32FD_EPOLL;
+    return out->kind;
+  }
+  struct WboxEventfd *eventfd = EventfdAcquire(fd);
+  if (eventfd) {
+    EventfdRelease(eventfd);
+    out->kind = W32FD_EVENTFD;
     return out->kind;
   }
   if (WboxSockIsFd(fd)) {
@@ -828,6 +1160,8 @@ ssize_t read(int fd, void *buf, size_t n) {
   switch (W32FdClassify(fd, &fi)) {
     case W32FD_SOCKET:
       return WboxSockRead(fd, buf, n);  // feat/net
+    case W32FD_EVENTFD:
+      return EventfdRead(fd, buf, n);
     case W32FD_SPECIAL:
       if (fi.dev == 1000001) {  // zero
         memset(buf, 0, n);
@@ -869,6 +1203,8 @@ ssize_t write(int fd, const void *buf, size_t n) {
   switch (W32FdClassify(fd, &fi)) {
     case W32FD_SOCKET:
       return WboxSockWrite(fd, buf, n);  // feat/net
+    case W32FD_EVENTFD:
+      return EventfdWrite(fd, buf, n);
     case W32FD_SPECIAL:
       if (fi.dev == 1000002) {  // full
         errno = ENOSPC;
@@ -899,6 +1235,10 @@ int close(int fd) {
     case W32FD_EPOLL:
       (void)WboxEpollClose(fd);  // feat/net: epoll fds (classified above)
       return 0;
+    case W32FD_EVENTFD:
+      WboxEpollPurgeFd(fd);
+      EventfdUnmap(fd);
+      return _close(fd) ? (errno = EBADF, -1) : 0;
     case W32FD_SPECIAL:
       return 0;
   }
@@ -909,6 +1249,10 @@ int close(int fd) {
 
 off_t lseek(int fd, off_t off, int whence) {
   if (IsSpecial(fd)) return 0;
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
+    errno = ESPIPE;
+    return -1;
+  }
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -927,6 +1271,10 @@ off_t lseek(int fd, off_t off, int whence) {
 
 ssize_t pread(int fd, void *buf, size_t n, off_t off) {
   if (IsSpecial(fd)) return read(fd, buf, n);
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
+    errno = ESPIPE;
+    return -1;
+  }
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -937,6 +1285,10 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD) {
+    errno = ESPIPE;
+    return -1;
+  }
   HANDLE h = W32Handle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1017,6 +1369,8 @@ ssize_t W32Pwritev64(int fd, const struct iovec *iov, int n, int64_t off) {
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int n) {
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+    return EventfdReadv(fd, iov, n);
   ssize_t total = 0;
   int i;
   for (i = 0; i < n; ++i) {
@@ -1029,6 +1383,8 @@ ssize_t readv(int fd, const struct iovec *iov, int n) {
 }
 
 ssize_t writev(int fd, const struct iovec *iov, int n) {
+  if (W32FdClassify(fd, NULL) == W32FD_EVENTFD)
+    return EventfdWritev(fd, iov, n);
   ssize_t total = 0;
   int i;
   for (i = 0; i < n; ++i) {
@@ -1066,6 +1422,8 @@ ssize_t pwritev(int fd, const struct iovec *iov, int n, off_t off) {
 
 int dup(int fd) {
   if (IsSpecial(fd)) return fd + 10;  // fake: another special id band
+  int eventfd = EventfdDup(fd);
+  if (eventfd != -2) return eventfd;
   HANDLE h = W32Handle(fd), duph;
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -1083,6 +1441,9 @@ int dup(int fd) {
 
 int dup2(int fd, int fd2) {
   if (fd == fd2) return fd2;
+  int eventfd = EventfdDup2(fd, fd2);
+  if (eventfd != -2) return eventfd;
+  EventfdUnmap(fd2);
   if (IsSpecial(fd)) {
     // redirect: replace target handle with our fake marker is impossible;
     // busybox redirects to /dev/null etc via open+dup2 so map fake->NUL
@@ -1165,6 +1526,8 @@ int fcntl(int fd, int cmd, ...) {
   va_end(ap);
   // feat/net: socket fds get real O_NONBLOCK (FIONBIO) semantics
   if (cmd == F_GETFL || cmd == F_SETFL || cmd == F_GETFD || cmd == F_SETFD) {
+    int erc = EventfdFcntl(fd, cmd, arg);
+    if (erc != -2) return erc;
     int src = WboxSockFcntl(fd, cmd, arg);
     if (src != -2) return src;
   }
@@ -1361,6 +1724,12 @@ int fstat(int fd, struct stat *st) {
       return 0;
     }
     case W32FD_EPOLL:  // feat/net
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFCHR | 0600;
+      st->st_blksize = 4096;
+      st->st_nlink = 1;
+      return 0;
+    case W32FD_EVENTFD:
       memset(st, 0, sizeof(*st));
       st->st_mode = S_IFCHR | 0600;
       st->st_blksize = 4096;
@@ -1826,6 +2195,9 @@ int W32WaitFds(struct pollfd *pfds, nfds_t n, int timeout) {
       switch (W32FdClassify(p->fd, &fi)) {
         case W32FD_SOCKET:
           continue;  // serviced by WboxSockPoll below
+        case W32FD_EVENTFD:
+          EventfdPoll(p->fd, p->events, &p->revents);
+          break;
         case W32FD_SPECIAL:
           p->revents = p->events & (POLLIN | POLLOUT);
           break;

@@ -157,7 +157,8 @@ echo "linking..."
 # D:\a\_temp\msys64\ucrt64\bin 恰在 PATH 里能找到 DLL 而掩盖了这个问题。
 # -static 让 libgcc/libwinpthread/libmsvcrt 都 statically link 进 exe，
 # 代价是 exe 体积略增，但 wbox 的 portable 定位要求这一层。
-$CC -O2 -static -o "$BUILD/wbox-linux.exe" @"$OBJLIST" -lws2_32 -lwinmm -lbcrypt
+$CC -O2 -static -o "$BUILD/wbox-linux.exe" @"$OBJLIST" \
+  -lwinpthread -lws2_32 -lwinmm -lbcrypt
 PRE=$(wc -c <"$BUILD/wbox-linux.exe")
 # strip debug/symbol residue when a PE-capable strip is at hand (mingw
 # gcc builds carry a symbol table; zig cc -g0 output is already

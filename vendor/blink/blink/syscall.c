@@ -2965,9 +2965,11 @@ static i64 SysRead(struct Machine *m, i32 fildes, i64 addr, u64 size) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
   if ((oflags & O_NDELAY) && size) {
     i64 prc;
-    RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
-    if (prc == 0) return eagain();
-    if (prc == -1) return -1;
+    if (!fd->eventfd) {
+      RESTARTABLE(prc = W32NonblockPoll(fd, POLLIN));
+      if (prc == 0) return eagain();
+      if (prc == -1) return -1;
+    }
   }
 #endif
   if (size) {
@@ -3005,9 +3007,11 @@ static i64 SysWrite(struct Machine *m, i32 fildes, i64 addr, u64 size) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
   if ((oflags & O_NDELAY) && size) {
     i64 prc;
-    RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
-    if (prc == 0) return eagain();
-    if (prc == -1) return -1;
+    if (!fd->eventfd) {
+      RESTARTABLE(prc = W32NonblockPoll(fd, POLLOUT));
+      if (prc == 0) return eagain();
+      if (prc == -1) return -1;
+    }
   }
 #endif
   if (size) {
@@ -3993,7 +3997,15 @@ static int SysFcntl(struct Machine *m, i32 fildes, i32 cmd, i64 arg) {
   if (cmd == F_GETFD_LINUX) {
     rc = (fd->oflags & O_CLOEXEC) ? FD_CLOEXEC_LINUX : 0;
   } else if (cmd == F_GETFL_LINUX) {
-    rc = UnXlatOpenFlags(fd->oflags);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    if (fd->eventfd) {
+      int hostflags = VfsFcntl(fd->hostfd, F_GETFL);
+      rc = hostflags == -1 ? -1 : UnXlatOpenFlags(hostflags);
+    } else
+#endif
+    {
+      rc = UnXlatOpenFlags(fd->oflags);
+    }
   } else if (cmd == F_SETFD_LINUX) {
     if (!(arg & ~FD_CLOEXEC_LINUX)) {
       if (VfsFcntl(fd->hostfd, F_SETFD, arg ? FD_CLOEXEC : 0) != -1) {
@@ -6079,6 +6091,58 @@ static int SysPipe(struct Machine *m, i64 pipefds_addr) {
   return SysPipe2(m, pipefds_addr, 0);
 }
 
+static int SysEventfd2(struct Machine *m, u32 initval, i32 flags) {
+#if defined(_WIN32) && !defined(__CYGWIN__)
+  int rawfd, hostfd, guestfd, lim, oflags;
+  struct Fd *fd;
+#ifndef DISABLE_VFS
+  struct VfsInfo *info;
+#endif
+  if (flags & ~(EFD_SEMAPHORE_LINUX | EFD_CLOEXEC_LINUX |
+                EFD_NONBLOCK_LINUX)) {
+    return einval();
+  }
+  if (!(lim = GetFileDescriptorLimit(m->system))) return emfile();
+  if ((rawfd = WboxEventfdCreate(initval, flags)) == -1) return -1;
+#ifndef DISABLE_VFS
+  if (HostfsWrapFd(rawfd, false, &info) == -1) {
+    close(rawfd);
+    return -1;
+  }
+  if ((hostfd = VfsAddFd(info)) == -1) {
+    unassert(!VfsFreeInfo(info));
+    return -1;
+  }
+#else
+  hostfd = rawfd;
+#endif
+  oflags = O_RDWR;
+  if (flags & EFD_CLOEXEC_LINUX) oflags |= O_CLOEXEC;
+  if (flags & EFD_NONBLOCK_LINUX) oflags |= O_NDELAY;
+  LOCK(&m->system->fds.lock);
+  guestfd = AllocGuestFd(&m->system->fds, 0);
+  if (guestfd >= lim) {
+    UNLOCK(&m->system->fds.lock);
+    VfsClose(hostfd);
+    return emfile();
+  }
+  unassert(fd = AddFd(&m->system->fds, guestfd, oflags));
+  fd->hostfd = hostfd;
+  fd->eventfd = true;
+  UNLOCK(&m->system->fds.lock);
+  return guestfd;
+#else
+  (void)m;
+  (void)initval;
+  (void)flags;
+  return enosys();
+#endif
+}
+
+static int SysEventfd(struct Machine *m, u32 initval) {
+  return SysEventfd2(m, initval, 0);
+}
+
 #ifdef HAVE_EPOLL_PWAIT1
 
 static i32 SysEpollCreate1(struct Machine *m, i32 flags) {
@@ -6533,6 +6597,8 @@ void OpSyscall(P) {
     SYSCALL(3, 0x13E, "getrandom", SysGetrandom, STRACE_GETRANDOM);
     SYSCALL(5, 0x147, "preadv2", SysPreadv2, STRACE_PREADV2);
     SYSCALL(5, 0x148, "pwritev2", SysPwritev2, STRACE_PWRITEV2);
+    SYSCALL(1, 0x11C, "eventfd", SysEventfd, STRACE_1);
+    SYSCALL(2, 0x122, "eventfd2", SysEventfd2, STRACE_2);
     SYSCALL(3, 0x1B4, "close_range", SysCloseRange, STRACE_3);
 #ifdef HAVE_EPOLL_PWAIT1
     SYSCALL(1, 0x0D5, "epoll_create", SysEpollCreate, STRACE_1);
