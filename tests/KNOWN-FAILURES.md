@@ -15,7 +15,7 @@
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
 | wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
-真机断言级统计为 **1191 条：pass=1182 fail=0 skip=9**；skip 均为 symlink
+真机断言级统计为 **1195 条：pass=1186 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
 
 **guest 套件自 2026-07-26 起为 CI 真门禁**（`guest-tests` job，取
@@ -155,6 +155,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F17 | `F_DUPFD*` 负/超限 `minfd` 返回 `EMFILE` 或触发断言，且坏源 fd 的 errno 优先级错误 | ✅ t_negative 覆盖两命令的范围错误与 `EBADF` 优先级 |
 | F18 | dup2/dup3 替换现有目标后残留旧 `socktype`、目录流等 guest 元数据 | ✅ t_net_sockopt/t_fd_open 覆盖监听 socket accept、CLOEXEC 与已打开目录流替换 |
 | F19 | `setrlimit`/`prlimit` 接受 soft limit 大于 hard limit 并污染进程限制 | ✅ t_negative 覆盖 `EINVAL` 及失败后限制保持不变 |
+| F20 | `prlimit` 在读取坏 `new_limit` 前改写 `old_limit`，且坏 `old_limit` 阻止有效新限制生效 | ✅ t_negative 覆盖 Linux 输入→更新→输出顺序及空操作 resource 校验 |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 

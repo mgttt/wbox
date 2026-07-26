@@ -4864,10 +4864,31 @@ static void GetResourceLimit_(struct Machine *m, int resource,
   UNLOCK(&m->system->mmap_lock);
 }
 
+static int GetResourceLimit(struct Machine *m, int resource,
+                            struct rlimit_linux *lux) {
+  int rc, sysresource;
+  struct rlimit rlim;
+  if (IsSupportedResourceLimit(resource)) {
+    GetResourceLimit_(m, resource, lux);
+    return 0;
+  }
+  if ((sysresource = XlatResource(resource)) == -1) return -1;
+  if ((rc = getrlimit(sysresource, &rlim)) != -1) {
+    XlatRlimitToLinux(lux, &rlim);
+  }
+  return rc;
+}
+
 static int SetResourceLimit(struct Machine *m, int resource,
                             const struct rlimit_linux *lux) {
-  int rc;
+  int rc, sysresource;
+  struct rlimit rlim;
   u64 cur, max, oldmax;
+  if (!IsSupportedResourceLimit(resource)) {
+    if ((sysresource = XlatResource(resource)) == -1) return -1;
+    XlatLinuxToRlimit(sysresource, &rlim, lux);
+    return setrlimit(sysresource, &rlim);
+  }
   LOCK(&m->system->mmap_lock);
   cur = Read64(lux->cur);
   max = Read64(lux->max);
@@ -4885,55 +4906,44 @@ static int SetResourceLimit(struct Machine *m, int resource,
 }
 
 static int SysGetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
-  int rc;
-  struct rlimit rlim;
   struct rlimit_linux lux;
-  if (IsSupportedResourceLimit(resource)) {
-    GetResourceLimit_(m, resource, &lux);
-    return CopyToUserWrite(m, rlimitaddr, &lux, sizeof(lux));
-  }
-  if ((rc = getrlimit(XlatResource(resource), &rlim)) != -1) {
-    XlatRlimitToLinux(&lux, &rlim);
-    if (CopyToUserWrite(m, rlimitaddr, &lux, sizeof(lux)) == -1) rc = -1;
-  }
-  return rc;
+  if (GetResourceLimit(m, resource, &lux) == -1) return -1;
+  return CopyToUserWrite(m, rlimitaddr, &lux, sizeof(lux));
 }
 
 static int SysSetrlimit(struct Machine *m, i32 resource, i64 rlimitaddr) {
-  int sysresource;
-  struct rlimit rlim;
   const struct rlimit_linux *lux;
   if (!(lux = (const struct rlimit_linux *)SchlepR(m, rlimitaddr,
                                                    sizeof(*lux)))) {
     return -1;
   }
-  if (IsSupportedResourceLimit(resource)) {
-    return SetResourceLimit(m, resource, lux);
-  }
-  if ((sysresource = XlatResource(resource)) == -1) return -1;
-  XlatLinuxToRlimit(sysresource, &rlim, lux);
-  return setrlimit(sysresource, &rlim);
+  return SetResourceLimit(m, resource, lux);
 }
 
 static int SysPrlimit(struct Machine *m, i32 pid, i32 resource,
                       i64 new_rlimit_addr, i64 old_rlimit_addr) {
+  const struct rlimit_linux *newp;
+  struct rlimit_linux old, new;
   if (pid && pid != m->system->pid) {
     return eperm();
   }
-#ifndef TINY
-  if ((old_rlimit_addr &&
-       !IsValidMemory(m, old_rlimit_addr, sizeof(struct rlimit_linux),
-                      PROT_WRITE)) &&
-      (new_rlimit_addr &&
-       !IsValidMemory(m, new_rlimit_addr, sizeof(struct rlimit_linux),
-                      PROT_READ))) {
+  newp = NULL;
+  if (new_rlimit_addr) {
+    if (!(newp = (const struct rlimit_linux *)SchlepR(
+              m, new_rlimit_addr, sizeof(struct rlimit_linux)))) {
+      return -1;
+    }
+    memcpy(&new, newp, sizeof(new));
+    newp = &new;
+  }
+  if ((old_rlimit_addr || !newp) &&
+      GetResourceLimit(m, resource, &old) == -1) {
     return -1;
   }
-#endif
-  if ((old_rlimit_addr && SysGetrlimit(m, resource, old_rlimit_addr) == -1) ||
-      (new_rlimit_addr && SysSetrlimit(m, resource, new_rlimit_addr) == -1)) {
+  if (newp && SetResourceLimit(m, resource, newp) == -1) return -1;
+  if (old_rlimit_addr &&
+      CopyToUserWrite(m, old_rlimit_addr, &old, sizeof(old)) == -1)
     return -1;
-  }
   return 0;
 }
 

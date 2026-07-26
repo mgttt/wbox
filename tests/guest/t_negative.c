@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -90,6 +91,36 @@ static int chk_prlimit_cur_above_max(void) {
   return check_rlimit_unchanged(&before) ? 0 : 1;
 }
 
+static int chk_prlimit_bad_new_preserves_old(void) {
+  struct rlimit before;
+  struct rlimit old = {123, 456};
+  if (getrlimit(RLIMIT_NOFILE, &before) == -1) return 1;
+  errno = 0;
+  if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, (void *)0x1000, &old) != -1 ||
+      errno != EFAULT) {
+    return 1;
+  }
+  return old.rlim_cur == 123 && old.rlim_max == 456 &&
+                 check_rlimit_unchanged(&before)
+             ? 0
+             : 1;
+}
+
+static int chk_prlimit_bad_old_applies_new(void) {
+  struct rlimit before, after, lim;
+  if (getrlimit(RLIMIT_NOFILE, &before) == -1 || before.rlim_cur == 0) return 1;
+  lim = before;
+  --lim.rlim_cur;
+  errno = 0;
+  if (syscall(SYS_prlimit64, 0, RLIMIT_NOFILE, &lim, (void *)0x1000) != -1 ||
+      errno != EFAULT) {
+    return 1;
+  }
+  if (getrlimit(RLIMIT_NOFILE, &after) == -1) return 1;
+  return after.rlim_cur == lim.rlim_cur && after.rlim_max == lim.rlim_max ? 0
+                                                                         : 1;
+}
+
 int main(void) {
   char b[16];
   struct stat st;
@@ -150,6 +181,14 @@ int main(void) {
   in_child(chk_setrlimit_cur_above_max);
   T_BEGIN("neg/prlimit-soft-above-hard");
   in_child(chk_prlimit_cur_above_max);
+  T_BEGIN("neg/prlimit-bad-new-preserves-old");
+  in_child(chk_prlimit_bad_new_preserves_old);
+  T_BEGIN("neg/prlimit-bad-old-applies-new");
+  in_child(chk_prlimit_bad_old_applies_new);
+  T_BEGIN("neg/prlimit-invalid-resource");
+  T_ASSERT_ERRNO(syscall(SYS_prlimit64, 0, INT_MAX, NULL, NULL), EINVAL);
+  T_ASSERT_ERRNO(
+      syscall(SYS_prlimit64, 0, INT_MAX, (void *)0x1000, NULL), EFAULT);
 
   /* --- syscall arg edges --- */
   T_BEGIN("neg/unknown-open-flag");
