@@ -199,10 +199,11 @@ int main(void) {
   /* --- file-backed mapping --- */
   T_BEGIN("mmap/file-private-readback");
   int fd = open("t_mmap_tmp.bin", O_RDWR | O_CREAT | O_TRUNC, 0600);
-  T_ASSERT(fd >= 0);
+    T_ASSERT(fd >= 0);
   if (fd >= 0) {
     char buf[PGSZ];
     for (int i = 0; i < PGSZ; i++) buf[i] = (char)(i * 7 + 1);
+    T_ASSERT_EQ(write(fd, buf, PGSZ), PGSZ);
     T_ASSERT_EQ(write(fd, buf, PGSZ), PGSZ);
     T_ASSERT_EQ(write(fd, buf, PGSZ), PGSZ);
     char *fm = mmap(NULL, PGSZ * 2, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -213,10 +214,21 @@ int main(void) {
       T_ASSERT(shrunk == fm);
       if (shrunk != MAP_FAILED) {
         T_ASSERT_EQ(memcmp(shrunk, buf, PGSZ), 0);
-        T_ASSERT_ERRNO(mremap(shrunk, PGSZ, PGSZ * 2, MREMAP_MAYMOVE),
-                       ENOMEM);
-        T_ASSERT_EQ(memcmp(shrunk, buf, PGSZ), 0);
-        T_ASSERT_OK(munmap(shrunk, PGSZ));
+        char *grown = mremap(shrunk, PGSZ, PGSZ * 2, 0);
+        T_ASSERT(grown == shrunk);
+        if (grown != MAP_FAILED) {
+          T_ASSERT_EQ(memcmp(grown + PGSZ, buf, PGSZ), 0);
+          char *grown_again = mremap(grown, PGSZ * 2, PGSZ * 3, 0);
+          T_ASSERT(grown_again == grown);
+          if (grown_again != MAP_FAILED) {
+            T_ASSERT_EQ(memcmp(grown_again + PGSZ * 2, buf, PGSZ), 0);
+            T_ASSERT_OK(munmap(grown_again, PGSZ * 3));
+          } else {
+            T_ASSERT_OK(munmap(grown, PGSZ * 2));
+          }
+        } else {
+          T_ASSERT_OK(munmap(shrunk, PGSZ));
+        }
       } else {
         T_ASSERT_OK(munmap(fm, PGSZ * 2));
       }
@@ -228,11 +240,109 @@ int main(void) {
     if (fm != MAP_FAILED) {
       fm[0] = (char)0xAA;
       T_ASSERT_OK(msync(fm, PGSZ, MS_SYNC));
+      fm[1] = (char)0xBB;
+      T_ASSERT_OK(mprotect(fm, PGSZ, PROT_NONE));
       T_ASSERT_OK(munmap(fm, PGSZ));
+      char rb[2];
+      T_ASSERT_EQ(pread(fd, rb, sizeof(rb), 0), sizeof(rb));
+      T_ASSERT(rb[0] == (char)0xAA && rb[1] == (char)0xBB);
+    }
+
+    T_BEGIN("mremap/file-private-move-after-close");
+    fm = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    T_ASSERT(fm != MAP_FAILED);
+    if (fm != MAP_FAILED) {
+      fm[0] = (char)0x55;
+      char *blocker = mmap(fm + PGSZ * 2, PGSZ, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      T_ASSERT(blocker == fm + PGSZ * 2);
+      T_ASSERT_OK(close(fd));
+      fd = -1;
+      char *moved = mremap(fm, PGSZ * 2, PGSZ * 3, MREMAP_MAYMOVE);
+      T_ASSERT(moved != MAP_FAILED && moved != fm);
+      if (moved != MAP_FAILED) {
+        T_ASSERT(moved[0] == (char)0x55);
+        T_ASSERT_EQ(memcmp(moved + PGSZ * 2, buf, PGSZ), 0);
+        T_ASSERT_OK(munmap(moved, PGSZ * 3));
+      } else {
+        T_ASSERT_OK(munmap(fm, PGSZ * 2));
+      }
+      T_ASSERT_OK(munmap(blocker, PGSZ));
+    }
+    if (fd >= 0) close(fd);
+    fd = open("t_mmap_tmp.bin", O_RDWR);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
       char rb;
       T_ASSERT_EQ(pread(fd, &rb, 1, 0), 1);
-      T_ASSERT(rb == (char)0xAA);
+      T_ASSERT(rb == (char)0xAA); /* private dirty byte was not written back */
     }
+
+    T_BEGIN("mremap/file-shared-move-writeback");
+    fm = mmap(NULL, PGSZ * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    T_ASSERT(fm != MAP_FAILED);
+    if (fm != MAP_FAILED) {
+      char *blocker = mmap(fm + PGSZ * 2, PGSZ, PROT_NONE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      T_ASSERT(blocker == fm + PGSZ * 2);
+      T_ASSERT_OK(close(fd));
+      fd = -1;
+      char *moved = mremap(fm, PGSZ * 2, PGSZ * 3, MREMAP_MAYMOVE);
+      T_ASSERT(moved != MAP_FAILED && moved != fm);
+      if (moved != MAP_FAILED) {
+        T_ASSERT_EQ(memcmp(moved + PGSZ * 2, buf, PGSZ), 0);
+        moved[0] = (char)0x66;
+        moved[PGSZ * 2 + 17] = (char)0x77;
+        T_ASSERT_OK(msync(moved, PGSZ * 3, MS_SYNC));
+        T_ASSERT_OK(munmap(moved, PGSZ * 3));
+      } else {
+        T_ASSERT_OK(munmap(fm, PGSZ * 2));
+      }
+      T_ASSERT_OK(munmap(blocker, PGSZ));
+    }
+    if (fd >= 0) close(fd);
+    fd = open("t_mmap_tmp.bin", O_RDONLY);
+    T_ASSERT(fd >= 0);
+    if (fd >= 0) {
+      char rb[2];
+      T_ASSERT_EQ(pread(fd, rb, 1, 0), 1);
+      T_ASSERT(rb[0] == (char)0x66);
+      T_ASSERT_EQ(pread(fd, rb + 1, 1, PGSZ * 2 + 17), 1);
+      T_ASSERT(rb[1] == (char)0x77);
+    }
+
+    T_BEGIN("mremap/file-fixed-replaces-shared-target");
+    int targetfd = open("t_mmap_target.bin",
+                        O_RDWR | O_CREAT | O_TRUNC, 0600);
+    T_ASSERT(targetfd >= 0);
+    if (fd >= 0 && targetfd >= 0) {
+      T_ASSERT_EQ(write(targetfd, buf, PGSZ), PGSZ);
+      char *source = mmap(NULL, PGSZ, PROT_READ, MAP_PRIVATE, fd, 0);
+      char *target = mmap(NULL, PGSZ, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, targetfd, 0);
+      T_ASSERT(source != MAP_FAILED && target != MAP_FAILED);
+      if (source != MAP_FAILED && target != MAP_FAILED) {
+        target[0] = (char)0x22;
+        char *moved = mremap(source, PGSZ, PGSZ,
+                             MREMAP_MAYMOVE | MREMAP_FIXED, target);
+        T_ASSERT(moved == target);
+        if (moved != MAP_FAILED) {
+          char rb;
+          T_ASSERT(moved[0] == (char)0x66);
+          T_ASSERT_EQ(pread(targetfd, &rb, 1, 0), 1);
+          T_ASSERT(rb == (char)0x22);
+          T_ASSERT_OK(munmap(moved, PGSZ));
+        } else {
+          T_ASSERT_OK(munmap(source, PGSZ));
+          T_ASSERT_OK(munmap(target, PGSZ));
+        }
+      } else {
+        if (source != MAP_FAILED) T_ASSERT_OK(munmap(source, PGSZ));
+        if (target != MAP_FAILED) T_ASSERT_OK(munmap(target, PGSZ));
+      }
+    }
+    if (targetfd >= 0) close(targetfd);
+    unlink("t_mmap_target.bin");
     close(fd);
     unlink("t_mmap_tmp.bin");
   }

@@ -45,20 +45,46 @@ static void FshareRegister(uintptr_t lo, uintptr_t hi, int fd, off_t off) {
 static void FshareWriteback(uintptr_t a, uintptr_t b) {
   int i;
   for (i = 0; i < W32MAXFSHARE; ++i) {
-    uintptr_t lo, hi;
-    size_t done;
+    uintptr_t lo, hi, p;
     if (!g_fshare[i].fd) continue;
     lo = a > g_fshare[i].lo ? a : g_fshare[i].lo;
     hi = b < g_fshare[i].hi ? b : g_fshare[i].hi;
     if (lo >= hi) continue;
-    done = 0;
-    while (done < (size_t)(hi - lo)) {
-      ssize_t rc = pwrite(g_fshare[i].fd, (void *)(lo + done),
-                          (size_t)(hi - lo) - done,
-                          g_fshare[i].off + (off_t)(lo - g_fshare[i].lo) +
-                              (off_t)done);
-      if (rc <= 0) break;
-      done += (size_t)rc;
+    for (p = lo; p < hi;) {
+      MEMORY_BASIC_INFORMATION mbi;
+      uintptr_t end;
+      DWORD old = 0;
+      int changed = 0;
+      size_t done = 0;
+      if (!VirtualQuery((void *)p, &mbi, sizeof(mbi)) ||
+          mbi.State != MEM_COMMIT) {
+        break;
+      }
+      end = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+      if (end > hi) end = hi;
+      if ((mbi.Protect & PAGE_GUARD) ||
+          !(mbi.Protect &
+            (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+             PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+             PAGE_EXECUTE_WRITECOPY))) {
+        if (!VirtualProtect((void *)p, end - p, PAGE_READONLY, &old)) break;
+        changed = 1;
+      }
+      while (done < (size_t)(end - p)) {
+        ssize_t rc =
+            pwrite(g_fshare[i].fd, (void *)(p + done),
+                   (size_t)(end - p) - done,
+                   g_fshare[i].off + (off_t)(p - g_fshare[i].lo) +
+                       (off_t)done);
+        if (rc <= 0) break;
+        done += (size_t)rc;
+      }
+      if (changed) {
+        DWORD ignored;
+        VirtualProtect((void *)p, end - p, old, &ignored);
+      }
+      if (done != (size_t)(end - p)) break;
+      p = end;
     }
   }
 }
@@ -867,6 +893,8 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off) {
     }
     // clobber: decommit any overlapping committed pages
     if (IvOverlaps(a, a + len)) {
+      FshareWriteback(a, a + len);
+      FshareRemove(a, a + len);
       WboxShsegRemove(a, a + len);
       IvRemove(a, a + len);
       VirtualFree((LPVOID)a, len, MEM_DECOMMIT);

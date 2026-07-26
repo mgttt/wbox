@@ -1816,8 +1816,11 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
   u8 *protections;
   char buf[4096];
   u64 i, copy_size, pages;
+  u64 mapid;
   i64 result, destination, delta;
-  bool fixed, maymove, file_backed;
+  int mapfd, mapflags;
+  off_t mapoff;
+  bool fixed, maymove, file_backed, shared;
 
   if (flags & ~(MREMAP_MAYMOVE_LINUX | MREMAP_FIXED_LINUX)) return einval();
   fixed = !!(flags & MREMAP_FIXED_LINUX);
@@ -1837,6 +1840,11 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
   }
 
   result = -1;
+  mapfd = -1;
+  mapflags = 0;
+  mapoff = 0;
+  mapid = 0;
+  shared = false;
   protections = 0;
   BEGIN_NO_PAGE_FAULTS;
   LOCK(&m->system->mmap_lock);
@@ -1868,11 +1876,23 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
     file_backed |= !!(pte & PAGE_FILE);
   }
   if (file_backed) {
-    // FileMap records are descriptive and don't retain a reopenable fd, so a
-    // moved or enlarged file mapping can't be reconstructed without changing
-    // MAP_SHARED / MAP_PRIVATE semantics.
+#ifndef DISABLE_VFS
+    if (!HasLinearMapping() ||
+        (mapfd = VfsDupMapFd(ToHost(old_address), old_size, &mapoff,
+                             &mapflags, &mapid)) == -1) {
+      enomem();
+      goto Finished;
+    }
+    shared = !!(mapflags & MAP_SHARED);
+    if (mapoff < 0 ||
+        (u64)mapoff > (u64)NUMERIC_MAX(off_t) - old_size) {
+      eoverflow();
+      goto Finished;
+    }
+#else
     enomem();
     goto Finished;
+#endif
   }
 
   delta = new_size - old_size;
@@ -1885,9 +1905,18 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
 
   if (!fixed && IsFullyUnmapped(m->system, old_address + old_size, delta)) {
     if (ReserveVirtual(m->system, old_address + old_size, delta,
-                       SetProtection(protections[pages - 1]), -1, 0, false,
-                       false) != -1) {
-      result = old_address;
+                       SetProtection(protections[pages - 1]), mapfd,
+                       mapoff + old_size, shared, false) != -1) {
+      if (!file_backed) {
+        result = old_address;
+#ifndef DISABLE_VFS
+      } else if (VfsSetMapId(ToHost(old_address + old_size), delta, mapid) !=
+                 -1) {
+        result = old_address;
+#endif
+      } else {
+        FreeVirtual(m->system, old_address + old_size, delta);
+      }
     }
     goto Finished;
   }
@@ -1903,7 +1932,8 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
     goto Finished;
   }
   if (ReserveVirtual(m->system, destination, new_size,
-                     PAGE_RW | PAGE_U | PAGE_XD, -1, 0, false, fixed) == -1) {
+                     PAGE_RW | PAGE_U | PAGE_XD, mapfd, mapoff, shared,
+                     fixed) == -1) {
     goto Finished;
   }
 
@@ -1943,6 +1973,13 @@ static i64 SysMremap(struct Machine *m, i64 old_address, u64 old_size,
   result = destination;
 
 Finished:
+#ifndef DISABLE_VFS
+  if (mapfd != -1) {
+    int saved_errno = errno;
+    VfsClose(mapfd);
+    errno = saved_errno;
+  }
+#endif
   free(protections);
   unassert(CheckMemoryInvariants(m->system));
   UNLOCK(&m->system->mmap_lock);

@@ -278,6 +278,8 @@ void *VfsMmap(void *, size_t, int, int, int, off_t);
 int VfsMunmap(void *, size_t);
 int VfsMprotect(void *, size_t, int);
 int VfsMsync(void *, size_t, int);
+int VfsDupMapFd(void *, size_t, off_t *, int *, u64 *);
+int VfsSetMapId(void *, size_t, u64);
 
 int VfsInit(const char *);
 int VfsRegister(struct VfsSystem *);

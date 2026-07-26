@@ -55,12 +55,15 @@ struct VfsMap {
   void *addr;
   size_t len;
   off_t offset;
+  u64 id;
   int prot;
   int flags;
 };
 
 #define VFS_FD_CONTAINER(e)  DLL_CONTAINER(struct VfsFd, elem, (e))
 #define VFS_MAP_CONTAINER(e) DLL_CONTAINER(struct VfsMap, elem, (e))
+
+static u64 g_nextmapid;
 
 static struct VfsDevice g_rootdevice = {
     .mounts = NULL,
@@ -2398,6 +2401,7 @@ static int VfsMapSplit(struct VfsMap *map, void *addr, size_t len,
     l->addr = map->addr;
     l->len = (uintptr_t)addr - (uintptr_t)map->addr;
     l->offset = map->offset;
+    l->id = map->id;
     l->prot = map->prot;
     l->flags = map->flags;
     unassert(!VfsAcquireInfo(map->data, &l->data));
@@ -2413,6 +2417,7 @@ static int VfsMapSplit(struct VfsMap *map, void *addr, size_t len,
     r->addr = (void *)((uintptr_t)addr + len);
     r->len = (uintptr_t)map->addr + map->len - ((uintptr_t)addr + len);
     r->offset = map->offset + ((uintptr_t)addr + len - (uintptr_t)map->addr);
+    r->id = map->id;
     r->prot = map->prot;
     r->flags = map->flags;
     unassert(!VfsAcquireInfo(map->data, &r->data));
@@ -2451,6 +2456,7 @@ static int VfsMapListExtractAffectedRange(struct Dll **maps, void *addr,
     newmap->addr = map->addr;
     newmap->len = map->len;
     newmap->offset = map->offset;
+    newmap->id = map->id;
     newmap->prot = map->prot;
     newmap->flags = map->flags;
     unassert(!VfsAcquireInfo(map->data, &newmap->data));
@@ -2519,6 +2525,126 @@ static void VfsMapListFree(struct Dll **tofree) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+int VfsDupMapFd(void *addr, size_t len, off_t *offset, int *flags,
+                u64 *mapid) {
+  struct VfsInfo *info, *newinfo;
+  struct VfsMap *map;
+  struct Dll *e;
+  uintptr_t start, end, p, mapend;
+  off_t baseoff;
+  u64 id;
+  int fd, mapflags;
+  if (!addr || !len || !offset || !flags || !mapid) return einval();
+  start = (uintptr_t)addr;
+  if (len > UINTPTR_MAX - start) return einval();
+  end = start + len;
+  p = start;
+  id = 0;
+  info = 0;
+  baseoff = 0;
+  mapflags = 0;
+  LOCK(&g_vfs.mapslock);
+  while (p < end) {
+    map = NULL;
+    for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+      struct VfsMap *candidate = VFS_MAP_CONTAINER(e);
+      uintptr_t candidate_end =
+          (uintptr_t)candidate->addr + candidate->len;
+      if ((uintptr_t)candidate->addr <= p && p < candidate_end) {
+        map = candidate;
+        break;
+      }
+    }
+    if (!map) {
+      if (getenv("WBOX_DEBUG_VFS"))
+        fprintf(stderr, "VfsDupMapFd: hole at %p\n", (void *)p);
+      break;
+    }
+    mapend = (uintptr_t)map->addr + map->len;
+    if (!id) {
+      id = map->id;
+      baseoff = map->offset + (p - (uintptr_t)map->addr);
+      mapflags = map->flags;
+    } else if (map->id != id ||
+               map->offset + (p - (uintptr_t)map->addr) !=
+                   baseoff + (off_t)(p - start)) {
+      if (getenv("WBOX_DEBUG_VFS"))
+        fprintf(stderr,
+                "VfsDupMapFd: discontinuity at %p id=%llu/%llu "
+                "off=%lld/%lld\n",
+                (void *)p, (unsigned long long)map->id,
+                (unsigned long long)id,
+                (long long)(map->offset + (p - (uintptr_t)map->addr)),
+                (long long)(baseoff + (off_t)(p - start)));
+      break;
+    }
+    p = MIN(mapend, end);
+    if (p == end) {
+      unassert(!VfsAcquireInfo(map->data, &info));
+      break;
+    }
+  }
+  UNLOCK(&g_vfs.mapslock);
+  if (!info) {
+    if (getenv("WBOX_DEBUG_VFS"))
+      fprintf(stderr, "VfsDupMapFd: no backing for [%p,%p), stopped at %p\n",
+              (void *)start, (void *)end, (void *)p);
+    return efault();
+  }
+  if (!info->device->ops->Dup) {
+    VfsFreeInfo(info);
+    return enotsup();
+  }
+  fd = info->device->ops->Dup(info, &newinfo);
+  VfsFreeInfo(info);
+  if (fd == -1) return -1;
+  if ((fd = VfsAddFd(newinfo)) == -1) {
+    VfsFreeInfo(newinfo);
+    return -1;
+  }
+  *offset = baseoff;
+  *flags = mapflags;
+  *mapid = id;
+  return fd;
+}
+
+int VfsSetMapId(void *addr, size_t len, u64 id) {
+  struct VfsMap *map;
+  struct Dll *e;
+  uintptr_t start, end, p, mapend;
+  if (!addr || !len || !id) return einval();
+  start = (uintptr_t)addr;
+  if (len > UINTPTR_MAX - start) return einval();
+  end = start + len;
+  p = start;
+  LOCK(&g_vfs.mapslock);
+  while (p < end) {
+    map = NULL;
+    for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+      struct VfsMap *candidate = VFS_MAP_CONTAINER(e);
+      if ((uintptr_t)candidate->addr == p) {
+        map = candidate;
+        break;
+      }
+    }
+    if (!map) break;
+    mapend = (uintptr_t)map->addr + map->len;
+    if (mapend > end || !map->data) break;
+    p = mapend;
+  }
+  if (p != end) {
+    UNLOCK(&g_vfs.mapslock);
+    return efault();
+  }
+  for (e = dll_first(g_vfs.maps); e; e = dll_next(g_vfs.maps, e)) {
+    map = VFS_MAP_CONTAINER(e);
+    mapend = (uintptr_t)map->addr + map->len;
+    if ((uintptr_t)map->addr >= start && mapend <= end) map->id = id;
+  }
+  UNLOCK(&g_vfs.mapslock);
+  return 0;
+}
+
 void *VfsMmap(void *addr, size_t len, int prot, int flags, int fd,
               off_t offset) {
   struct VfsInfo *info;
@@ -2551,11 +2677,20 @@ void *VfsMmap(void *addr, size_t len, int prot, int flags, int fd,
     if (!newmap) {
       goto cleananddie;
     }
+    newmap->data = NULL;
     newmap->len = len;
     newmap->offset = offset;
+    newmap->id = ++g_nextmapid;
+    if (!newmap->id) newmap->id = ++g_nextmapid;
     newmap->prot = prot;
     newmap->flags = flags;
-    unassert(!VfsAcquireInfo(info, &newmap->data));
+    if (info->device->ops->Dup) {
+      if (info->device->ops->Dup(info, &newmap->data) == -1) {
+        goto cleananddie;
+      }
+    } else {
+      unassert(!VfsAcquireInfo(info, &newmap->data));
+    }
     dll_init(&newmap->elem);
     if (info->device->ops->Mmap) {
       if ((ret = info->device->ops->Mmap(info, addr, len, prot, flags,
