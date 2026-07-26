@@ -7,7 +7,9 @@
 # 最后一条是刻意的：docs/testing.md §四 约定"行为修复时测试会变红，强制同步更新"，
 # 否则修好的东西会被基线继续掩盖。
 #
-# 每行一个用例文件名（不含路径与扩展名）；# 起始为注释；空行忽略。
+# 每行格式：`<用例文件名> [@native|@wine]`（不含路径与扩展名）；
+# `#` 起始为注释；空行忽略。可选的模式标注让同一份基线适配两种运行环境——
+# 有些失败只在真 Windows 上出现（wine 不复现），反之亦然；不加标注 = 两种模式都算。
 # 用 WBOX_GUEST_NO_BASELINE=1 可关闭基线判定，回到"任一失败即非零"的原始语义。
 
 # N1：win32 宿主无 AF_UNIX —— socket(AF_UNIX,…)/socketpair(AF_UNIX) 返回 ENOSYS(38)。
@@ -19,3 +21,13 @@ t_net_sockopt
 #     E1 read(目录fd) 期望 EISDIR(21)，实测 EINVAL(22)
 #     E2 write(只读fd=stdin) 期望 EBADF(9)，实测 EACCES(13)
 t_negative
+
+# W3：path/long-nested 只在**真 Windows** 上失败（wine 无此限制故通过）。
+#     测试构造 t_p_L + 20×/1234567890 + /leaf.txt = 234 字符相对路径，
+#     加上宿主 jail 根前缀后超过 MAX_PATH(260)，mkdir/open 返回 ENOENT。
+#     根因：win32/w32fd.c 的路径层整体以 MAX_PATH 为界（out[MAX_PATH]、
+#     `wcslen(s) >= MAX_PATH` 直接拒绝），未使用 `\\?\` 扩展长度前缀。
+#     修复需把路径缓冲扩到 32767 并在所有 Win32 调用点加前缀（前缀会关闭
+#     系统侧规范化，故路径必须已是反斜杠、无 . / .. 的规范形式）——改动面
+#     大且 wine 无法验证，故先登记。详见 KNOWN-FAILURES.md W3。
+t_path @native

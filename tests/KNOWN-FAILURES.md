@@ -73,6 +73,35 @@ N1/E1/E2 既有基线。
 "命令能被 PATH 找到"的用例都可能在 Linux 宿主上假绿。新增用例一律用
 工作目录内的相对路径显式指定被测二进制。
 
+## W3 真 Windows 专有：长路径超 MAX_PATH（**新增，由 guest-tests 门禁首次真跑抓到**）
+
+| # | 现象 | 根因 | 状态 |
+|---|------|------|------|
+| W3 | `t_path` 的 `path/long-nested` 在真 Windows 失败（wine 通过） | 宿主绝对路径超 `MAX_PATH`(260)，`mkdir`/`open` 返回 ENOENT | 未修复，已入基线（`t_path @native`） |
+
+证据（CI run 52，真机）：
+
+```
+FAIL path/long-nested: t_path.c:154: write_file(p, "deep") => -1 errno=2 (No such file or directory)
+guest-suite: PASS=12 FAIL=4 SKIP=0
+```
+
+用例构造 `t_p_L` + 20×`/1234567890` + `/leaf.txt` = **234 字符相对路径**，
+加上宿主 jail 根前缀即越过 260。同一二进制在 wine 下 `PASS=13 FAIL=3`
+（wine 不施加 MAX_PATH 限制）——**这正是 guest-tests 成为真门禁后抓到的
+第一个真机缺陷**，此前它一直走 SKIP 路径空转。
+
+根因与修法：`win32/w32fd.c` 的路径层整体以 `MAX_PATH` 为界
+（`wchar_t out[MAX_PATH]`、`wcslen(s) >= MAX_PATH` 直接拒绝），未使用
+`\\?\` 扩展长度前缀。要支持长路径需把路径缓冲扩到 32767 并在所有
+Win32 调用点加前缀；注意该前缀会**关闭系统侧路径规范化**，故传入前必须
+已是反斜杠、无 `.`/`..` 的规范形式（`W32JoinNorm` 已做规范化，可复用）。
+改动面横跨 w32fd.c 多个调用点，且 **wine 无法验证修复是否生效**，故先
+登记为已知限制，不做盲改。
+
+影响面：guest 侧任何使宿主绝对路径超过 260 字符的操作。rootfs 放在较深
+目录时更容易触发——实用规避是把 `BLINK_PREFIX`/工作目录放浅一些。
+
 ## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 
 | # | 现象 | 期望 | 实测现状 |

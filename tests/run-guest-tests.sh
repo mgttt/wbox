@@ -148,7 +148,21 @@ if [ "${WBOX_GUEST_NO_BASELINE:-0}" = 1 ] || [ ! -f "$BASELINE" ]; then
   exit $?
 fi
 
-known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' | tr '\n' ' ')
+# 基线条目支持可选的模式标注：`<用例名> [@native|@wine]`。
+# 起因（实测）：t_path 的 path/long-nested 只在**真 Windows** 上失败——
+# 宿主绝对路径超过 MAX_PATH(260)，而 wine 无此限制故通过。没有模式标注时，
+# 把它写进基线会让 wine 下报"基线过期"，不写又会让真机报"回归"，
+# 两种环境无法共用一份基线。带标注的条目只在对应模式下生效。
+known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' |
+  while read -r name tag _rest; do
+    [ -n "$name" ] || continue
+    case $tag in
+      "")        printf '%s ' "$name" ;;
+      @native)   [ "$MODE" = native ] && printf '%s ' "$name" ;;
+      @wine)     [ "$MODE" = wine ]   && printf '%s ' "$name" ;;
+      *) echo "guest-suite: 基线条目 '$name' 的标注 '$tag' 无法识别（仅支持 @native/@wine）" >&2 ;;
+    esac
+  done)
 regressions=; fixed=
 for n in $failed_names; do
   in_set "$n" "$known" || regressions="$regressions $n"
