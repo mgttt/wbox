@@ -298,4 +298,116 @@ mod tests {
         let b = image_dir(&ImageRef::parse("docker.io/ns/app:1", None).unwrap()).unwrap();
         assert_ne!(a, b);
     }
+
+    // ---- ImageRef 解析边界 ----
+
+    #[test]
+    fn parse_digest_reference_dockerhub() {
+        // digest 引用走 @ 分隔，docker hub 补全照常
+        let r = ImageRef::parse("ubuntu@sha256:0123456789abcdef", None).unwrap();
+        assert_eq!(r.registry, DEFAULT_REGISTRY);
+        assert_eq!(r.repo, "library/ubuntu");
+        assert_eq!(r.reference, "sha256:0123456789abcdef");
+    }
+
+    #[test]
+    fn parse_registry_with_port_and_tag() {
+        // registry 端口里的冒号不是 tag 分隔符（tag 冒号在最后一个 / 之后）
+        let r = ImageRef::parse("localhost:5000/app:1.2.3", None).unwrap();
+        assert_eq!(r.registry, "localhost:5000");
+        assert_eq!(r.repo, "app");
+        assert_eq!(r.reference, "1.2.3");
+    }
+
+    #[test]
+    fn parse_multi_level_repo_path() {
+        let r = ImageRef::parse("quay.io/org/team/app:dev", None).unwrap();
+        assert_eq!(r.registry, "quay.io");
+        assert_eq!(r.repo, "org/team/app");
+        assert_eq!(r.reference, "dev");
+        // 多级路径 docker hub 也保持原样（已含 / 不补 library）
+        let r = ImageRef::parse("a/b/c:1", None).unwrap();
+        assert_eq!(r.registry, DEFAULT_REGISTRY);
+        assert_eq!(r.repo, "a/b/c");
+    }
+
+    #[test]
+    fn parse_uppercase_and_localhost_variants() {
+        // 大写字母原样保留（当前不做规范化，与 docker 不同——记录现状）
+        let r = ImageRef::parse("Library/Ubuntu:LATEST", None).unwrap();
+        assert_eq!(r.repo, "Library/Ubuntu");
+        assert_eq!(r.reference, "LATEST");
+        // localhost 精确匹配视为 registry；LOCALHOST 大小写不命中（记录现状：
+        // 首段无 . / : 时回退 docker hub 仓库名）
+        let r = ImageRef::parse("localhost/app:1", None).unwrap();
+        assert_eq!(r.registry, "localhost");
+        let r = ImageRef::parse("LOCALHOST/app:1", None).unwrap();
+        assert_eq!(r.registry, DEFAULT_REGISTRY);
+        assert_eq!(r.repo, "LOCALHOST/app");
+    }
+
+    #[test]
+    fn parse_rejects_malformed_refs() {
+        // 空引用 / 空白引用
+        assert!(ImageRef::parse("", None).is_err());
+        assert!(ImageRef::parse("   ", None).is_err());
+        // tag 为空（ubuntu:）
+        assert!(ImageRef::parse("ubuntu:", None).is_err());
+        // digest 为空（ubuntu@）
+        assert!(ImageRef::parse("ubuntu@", None).is_err());
+        // 名为空（@sha256:x）
+        assert!(ImageRef::parse("@sha256:x", None).is_err());
+        // registry 后无仓库名
+        assert!(ImageRef::parse("quay.io/", None).is_err());
+        assert!(ImageRef::parse("quay.io/:tag", None).is_err());
+    }
+
+    #[test]
+    fn parse_trimmed_whitespace() {
+        let r = ImageRef::parse("  ubuntu:24.04  ", None).unwrap();
+        assert_eq!(r.repo, "library/ubuntu");
+        assert_eq!(r.reference, "24.04");
+    }
+
+    #[test]
+    fn parse_registry_override_keeps_namespace() {
+        // override 时整段视为仓库名：有命名空间保持，无命名空间补 library/
+        let r = ImageRef::parse("ns/app:2", Some("mirror.local")).unwrap();
+        assert_eq!(r.registry, "mirror.local");
+        assert_eq!(r.repo, "ns/app");
+        let r = ImageRef::parse("quay.io/ns/app:2", Some("mirror.local")).unwrap();
+        // override 优先于引用内 registry 前缀，整段（含原 registry 字面量）作仓库名
+        assert_eq!(r.registry, "mirror.local");
+        assert_eq!(r.repo, "quay.io/ns/app");
+    }
+
+    #[test]
+    fn repo_tag_formats_tag_and_digest() {
+        let r = ImageRef::parse("ubuntu:24.04", None).unwrap();
+        assert_eq!(r.repo_tag(), "library/ubuntu:24.04");
+        let r = ImageRef::parse("ubuntu@sha256:abc", None).unwrap();
+        assert_eq!(r.repo_tag(), "library/ubuntu@sha256:abc");
+    }
+
+    #[test]
+    fn cache_name_flattens_slashes() {
+        let r = ImageRef::parse("quay.io/org/team/app:1", None).unwrap();
+        assert_eq!(r.cache_name(), "org_team_app");
+    }
+
+    #[test]
+    fn image_dir_layout_segments() {
+        // 布局 <root>/<registry>/<name_flat>/<reference>，全段无 ':'
+        let r = ImageRef::parse("localhost:5000/ns/app@sha256:deadbeef", None).unwrap();
+        let d = image_dir(&r).unwrap();
+        let segs: Vec<String> = d
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        for s in &segs {
+            assert!(!s.contains(':'), "路径段含 Windows 非法字符 ':'：{}", s);
+        }
+        let tail: Vec<&str> = segs.iter().rev().take(3).map(|s| s.as_str()).collect();
+        assert_eq!(tail, vec!["sha256_deadbeef", "ns_app", "localhost_5000"]);
+    }
 }

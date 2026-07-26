@@ -219,4 +219,95 @@ mod tests {
         assert_eq!(c.working_dir.as_deref(), Some("/root"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- 合并全组合：Entrypoint × Cmd × 显式 cmd ∈ {有, 无} ----
+
+    #[test]
+    fn merge_all_combinations() {
+        // (entrypoint, cmd, explicit) -> 期望输出；None 表示未提供显式 cmd
+        let cases: &[(&[&str], &[&str], Option<&[&str]>, &[&str])] = &[
+            (&[], &[], None, &[]),
+            (&[], &["c"], None, &["c"]),
+            (&["e"], &[], None, &["e"]),
+            (&["e"], &["c"], None, &["e", "c"]),
+            (&[], &[], Some(&["x"]), &["x"]),
+            (&[], &["c"], Some(&["x"]), &["x"]),       // 显式覆盖 Cmd
+            (&["e"], &[], Some(&["x"]), &["e", "x"]),  // Entrypoint 始终前置
+            (&["e"], &["c"], Some(&["x"]), &["e", "x"]),
+        ];
+        for (ep, cmd, x, want) in cases {
+            let c = cfg(ep, cmd);
+            let got = match x {
+                Some(x) => c.merged_command(&explicit(x)),
+                None => c.merged_command(&[]),
+            };
+            assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "ep={:?} cmd={:?} explicit={:?}", ep, cmd, x);
+        }
+    }
+
+    // ---- config.json 畸形输入 ----
+
+    #[test]
+    fn parse_skips_malformed_env_entries() {
+        let v = serde_json::json!({"config": {"Env": ["OK=1", "NO_EQUALS", "", "=emptykey", "A=B=C"]}});
+        let c = ImageConfig::from_json(&v);
+        // 拆不出 '=' 的项跳过；值内 '=' 保留
+        assert_eq!(
+            c.env,
+            vec![
+                ("OK".to_string(), "1".to_string()),
+                ("".to_string(), "emptykey".to_string()), // "=emptykey" 键为空但拆得出 '='
+                ("A".to_string(), "B=C".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_non_array_fields_fall_back_to_default() {
+        // Cmd/Entrypoint/Env 不是数组（如 docker 允许的字符串形式）→ 按未设置处理
+        let v = serde_json::json!({
+            "config": {"Cmd": "bash", "Entrypoint": 42, "Env": {"A": "1"}, "WorkingDir": 7}
+        });
+        let c = ImageConfig::from_json(&v);
+        assert_eq!(c, ImageConfig::default());
+    }
+
+    #[test]
+    fn parse_null_config_section() {
+        let c = ImageConfig::from_json(&serde_json::json!({"config": null}));
+        assert_eq!(c, ImageConfig::default());
+    }
+
+    #[test]
+    fn load_malformed_json_is_error() {
+        let dir = std::env::temp_dir().join("wbox-test-config-badjson");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), b"{not json").unwrap();
+        assert!(ImageConfig::load(&dir).is_err(), "解析失败必须报错而非静默 None");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_config_json_that_is_not_object_yields_default() {
+        let dir = std::env::temp_dir().join("wbox-test-config-nonobj");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // 合法 JSON 但顶层非对象：from_json 取不到 config 段 → 默认
+        std::fs::write(dir.join("config.json"), b"[1,2,3]").unwrap();
+        let c = ImageConfig::load(&dir).unwrap().unwrap();
+        assert_eq!(c, ImageConfig::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_env_entry_with_only_equals_and_empty_values() {
+        let v = serde_json::json!({"config": {"Env": ["=", "K="]}});
+        let c = ImageConfig::from_json(&v);
+        assert_eq!(
+            c.env,
+            vec![("".to_string(), "".to_string()), ("K".to_string(), "".to_string())]
+        );
+    }
 }

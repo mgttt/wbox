@@ -433,4 +433,144 @@ mod tests {
             "repository%3Alibrary%2Fubuntu%3Apull"
         );
     }
+
+    // ---- 表驱动：realm_host_allowed / url_host_matches 全组合 ----
+
+    #[test]
+    fn realm_host_allowed_table() {
+        let cases: &[(&str, &str, bool)] = &[
+            // 同 host
+            ("https://registry.example.com/token", "registry.example.com", true),
+            // 同 host 大小写不敏感
+            ("https://REGISTRY.EXAMPLE.COM/token", "registry.example.com", true),
+            // 同 host 带端口一致
+            ("https://localhost:5000/auth", "localhost:5000", true),
+            // 端口不一致
+            ("https://localhost:5001/auth", "localhost:5000", false),
+            // 允许列表（docker hub 已知 token 端点）
+            ("https://auth.docker.io/token", "registry-1.docker.io", true),
+            ("https://auth.docker.io/token", "quay.io", true), // 列表与 registry 无关
+            // 跨 host
+            ("https://evil.example/token", "registry.example.com", false),
+            // 相似域名欺骗
+            ("https://registry.example.com.evil.io/t", "registry.example.com", false),
+            ("https://evil-registry.example.com/t", "registry.example.com", false),
+            // 无 scheme / 空 host
+            ("//registry.example.com/token", "registry.example.com", false),
+            ("registry.example.com/token", "registry.example.com", false),
+            ("https:///token", "registry.example.com", false),
+            // 注意：http 同 host 在 url_host 层面匹配；https 强制由 authenticate
+            // 的 scheme 检查单独保证（见 realm_must_be_https）
+            ("http://registry.example.com/token", "registry.example.com", true),
+        ];
+        for (realm, registry, want) in cases {
+            assert_eq!(realm_host_allowed(realm, registry), *want,
+                "realm={} registry={}", realm, registry);
+        }
+    }
+
+    #[test]
+    fn url_host_matches_table() {
+        let cases: &[(&str, &str, bool)] = &[
+            // Basic 凭证作用域：仅 https + 同 host
+            ("https://reg.example/v2/x", "reg.example", true),
+            ("https://REG.EXAMPLE/v2/x", "reg.example", true),
+            ("http://reg.example/v2/x", "reg.example", false), // http 拒绝
+            ("https://other.example/v2/x", "reg.example", false), // 跨 host
+            ("https://reg.example:444/v2/x", "reg.example", false), // 端口参与比较
+            ("https://reg.example:444/v2/x", "reg.example:444", true),
+            ("https://reg.example.evil/v2/x", "reg.example", false),
+        ];
+        for (url, registry, want) in cases {
+            assert_eq!(url_host_matches(url, registry), *want,
+                "url={} registry={}", url, registry);
+        }
+    }
+
+    // ---- authenticate 的预网络失败路径（不触发 HTTP） ----
+
+    fn resp401(www_auth: Option<&str>) -> HttpResponse {
+        HttpResponse {
+            status: 401,
+            headers: www_auth
+                .map(|v| vec![("www-authenticate".to_string(), v.to_string())])
+                .unwrap_or_default(),
+            body: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn authenticate_missing_www_authenticate_header() {
+        let client = RegistryClient::new("example.com");
+        let e = client.authenticate(&resp401(None)).unwrap_err();
+        assert!(e.to_string().contains("WWW-Authenticate"), "{}", e);
+    }
+
+    #[test]
+    fn authenticate_rejects_non_bearer_scheme() {
+        let client = RegistryClient::new("example.com");
+        let e = client
+            .authenticate(&resp401(Some(r#"Basic realm="https://example.com/""#)))
+            .unwrap_err();
+        assert!(e.to_string().contains("不支持的认证方式"), "{}", e);
+    }
+
+    #[test]
+    fn authenticate_rejects_missing_realm() {
+        let client = RegistryClient::new("example.com");
+        let e = client
+            .authenticate(&resp401(Some(r#"Bearer service="s",scope="x""#)))
+            .unwrap_err();
+        assert!(e.to_string().contains("缺少 realm"), "{}", e);
+    }
+
+    #[test]
+    fn authenticate_http_realm_rejected_before_host_check() {
+        // http scheme 即使同 host 也先被 L10 检查拒绝
+        let client = RegistryClient::new("example.com");
+        let e = client
+            .authenticate(&resp401(Some(r#"Bearer realm="http://example.com/token""#)))
+            .unwrap_err();
+        assert!(e.to_string().contains("非 https"), "{}", e);
+    }
+
+    #[test]
+    fn authenticate_https_prefix_case_insensitive() {
+        // HTTPS:// 大写 scheme 也通过 https 检查，随后被 host 校验拒绝
+        // （说明 scheme 检查大小写不敏感，不触发网络）
+        let client = RegistryClient::new("example.com");
+        let e = client
+            .authenticate(&resp401(Some(r#"Bearer realm="HTTPS://evil.example/token""#)))
+            .unwrap_err();
+        assert!(e.to_string().contains("不在允许列表"), "{}", e);
+    }
+
+    // ---- parse_auth_params 健壮性 ----
+
+    #[test]
+    fn auth_params_handles_whitespace_and_unquoted() {
+        let m = parse_auth_params(r#"Bearer realm = "https://a.example/t" , service=svc"#);
+        assert_eq!(m.get("realm").unwrap(), "https://a.example/t");
+        assert_eq!(m.get("service").unwrap(), "svc");
+        // 无 Bearer 前缀（纯参数）也能解析
+        let m = parse_auth_params(r#"realm="https://a.example/t""#);
+        assert_eq!(m.get("realm").unwrap(), "https://a.example/t");
+    }
+
+    #[test]
+    fn url_encode_passthrough_and_non_ascii() {
+        // unreserved 字符原样
+        assert_eq!(url_encode("abcXYZ019-_.~"), "abcXYZ019-_.~");
+        // 非 ASCII 按字节百分号编码（'中' = E4 B8 AD）
+        assert_eq!(url_encode("中"), "%E4%B8%AD");
+        assert_eq!(url_encode("a b"), "a%20b");
+    }
+
+    #[test]
+    fn url_host_extraction() {
+        assert_eq!(url_host("https://a.b:443/x/y"), Some("a.b:443".to_string()));
+        assert_eq!(url_host("https://A.B/"), Some("a.b".to_string())); // 小写化
+        assert_eq!(url_host("no-scheme/x"), None);
+        assert_eq!(url_host("https://"), None);
+    }
 }
