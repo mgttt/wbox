@@ -120,13 +120,13 @@ wine 下对 ≥16TB 的 VirtualReserve 直接 SIGKILL 进程。修复：`WboxMem
 
 | # | 缺口 | 裁决 |
 |---|---|---|
-| 1 | fork/vfork | ✅ 快照式 fork：子 Machine 独立 VA 窗口，按区域复制可读页并保留 MAP_SHARED 共享映射；guest fd 表独立、host fd dup，父子并发与 fork 后 exec 可用（见 §7.4） |
+| 1 | fork/vfork | ✅ 快照式 fork：子 Machine 独立 VA 窗口，按区域复制可读页并克隆文件映射 backing 元数据；guest fd 表独立、host fd dup，父子并发、fork 后文件 mremap 与 exec 可用（见 §7.4） |
 | 2 | 管道组合命令（`a \| b`） | ✅ pipe2 + 快照 fork 已打通；busybox shell 管道、命令替换、后台任务和多段重定向矩阵通过 |
 | 3 | socket 族 | ✅ Winsock2 映射：AF_INET/INET6 STREAM/DGRAM、pathname AF_UNIX stream、匿名 AF_UNIX stream/datagram socketpair、epoll/poll、errno 与 O_NONBLOCK。socketpair 内部 loopback 承载层在 Hostfs 对外保持未命名 AF_UNIX 身份 |
 | 4 | wait/waitpid/wait3/wait4/waitid | ✅ 虚拟 PID 表（子线程句柄→退出码），waitpid/wait4 支持 WNOHANG；退出码精确透传 |
 | 5 | execve 族 | ❌ 宿主层 ENOSYS；guest execve 由 blink 进程内重建即可，不经宿主 |
 | 6 | mremap | ✅ 匿名及文件映射支持原地扩缩、`MREMAP_MAYMOVE` / `MREMAP_FIXED` 搬移、数据与逐页权限保留、新增页加载/清零；文件 backing 独立于原 fd 生命周期，MAP_PRIVATE 脏页隔离和 MAP_SHARED 写回均覆盖 |
-| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回、fork 后父窗口可见性、exec wipe、MAP_FIXED 清理及内部 fd 0 均由 `t_mmap` / `t_fork_mem` / `t_exec` 覆盖 |
+| 7 | MAP_SHARED 文件写回 | ✅ 文件映射写回按文件 ID/偏移同步，覆盖 fork 后父窗口可见性、子映射搬移、exec wipe、MAP_FIXED 清理及内部 fd 0；由 `t_mmap` / `t_fork_mem` / `t_exec` 验证 |
 | 8 | JIT | ✅ 已启用（WBOX_JIT=1 默认开，`WBOX_JIT=0` 回退纯解释器）；wine 11.11 实测相对解释器 sha256 6.13×、awk 6.32×（见第 7 节基准） |
 | 9 | 宿主异步信号投递 | ⚠️ record-only stub；guest 信号语义 blink 内部模拟，VEH 兜底同步异常，Ctrl+C 终止进程 |
 | 10 | clone/线程 | ❌ 未接入（静态 glibc pthread 在上游 blink 亦 100% 崩溃，列入不支持） |
@@ -285,9 +285,13 @@ rootfs 为 ubuntu-base-24.04.3 tar 解包（或 `wbox image pull` 缓存）。
 4. **UDP 语义**：win32 recvfrom 零长接收改按 Linux 返回 0（Windows 会
    WSAEMSGSIZE 丢包）；非零长 WSAEMSGSIZE 按截断语义返回缓冲长度。
    getent/glibc DNS 在 fork 子内解析成功。
-5. **文件 MAP_SHARED**：写回注册按 VA window 隔离，fork 快照克隆映射范围
-   和独立 backing fd；共享段同步使子写入在退出/exec 前回到父窗口，per-window
-   清理再落盘。显式槽占用状态保证 dup 复用宿主 fd 0 时仍能正确写回。
+5. **文件 MAP_SHARED**：写回注册按 VA window 隔离并持有独立 backing fd；
+   共享同步按 Windows 卷序列号、文件 ID 和重叠文件偏移匹配，因此子映射
+   搬到不同 VA 后仍更新父进程原映射。显式槽占用状态保证 dup 复用宿主
+   fd 0 时仍能正确写回。
+6. **VFS 映射元数据**：fork 快照将父窗口内的文件 backing 条目平移克隆到
+   子窗口，使继承映射可继续 `mremap`；exec wipe 前按当前窗口清除旧条目，
+   新映像可安全复用同一 guest 地址且不会删除父窗口记录。
 
 **apt-get update 已实测通过（2026-07-25）**：`Get:1..18` 全量下载、
 gpgv 验签通过、`Reading package lists...` 完成、rc=0，

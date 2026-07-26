@@ -75,8 +75,9 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
   `t_net_sockopt @wine`。模式专有缺陷可用 `@native` / `@wine` 标注；
   真机首次执行发现的 W1（fork 挂死）与 W3
   （长路径），以及最后两项 N1（AF_UNIX）均已修复并从基线移除。
-  当前真机断言级结果为 **849 pass / 0 fail / 9 skip**；文件共享映射覆盖
-  fork 后父窗口可见性、磁盘写回、exec wipe、MAP_FIXED 清理及内部 fd 0。
+  当前真机断言级结果为 **889 pass / 0 fail / 9 skip**；文件映射覆盖
+  fork 后父窗口可见性、磁盘写回、私有/共享 mremap、exec 地址复用、
+  MAP_FIXED 清理及内部 fd 0。
 
 ### 3. shell 真机矩阵（`scripts/test-matrix.sh`）
 
