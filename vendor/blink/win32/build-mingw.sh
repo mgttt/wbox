@@ -88,11 +88,15 @@ objfile() { echo "$BUILD/obj/$(echo "$1" | tr '/.' '__').o"; }
 # （@list）的内容不转**。native ld.exe 读到 /d/a/... 会把每个 .o 都报
 # "cannot find"（编译其实已成功，因为 -c -o 走的是 argv）。故清单里的路径
 # 在有 cygpath 时一律转成宿主原生形式；Linux/无 cygpath 环境原样输出。
+# 注意用 `cygpath -m`（D:/a/... 正斜杠形式）而非 -w（D:\a\...）：
+# GCC/ld 的 @响应文件按 C 转义规则解析内容，反斜杠会被吃掉
+# （D:\a\k3-wbox → D:ak3-wbox，CI run 30193233776 实锤）；
+# native ld.exe 同样接受正斜杠的驱动器路径。
 CYGPATH=$(command -v cygpath 2>/dev/null || true)
 : >"$OBJLIST"
 for src in $SRCS $ZSRCS; do
   obj=$(objfile "$src")
-  if [ -n "$CYGPATH" ]; then obj=$("$CYGPATH" -w "$obj"); fi
+  if [ -n "$CYGPATH" ]; then obj=$("$CYGPATH" -m "$obj"); fi
   echo "$obj" >>"$OBJLIST"
 done
 
