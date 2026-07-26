@@ -45,7 +45,15 @@ echo "WBOX_JIT = $JIT"
 
 # version stamp: wbox release + git short hash + UTC build time, consumed
 # by blink/blink.c's PrintVersion (wbox-linux.exe --version / -v).
-WBOX_VERSION=${WBOX_VERSION:-1.0.0-rc1}
+# 版本号单一来源：仓库根 Cargo.toml 的 [package] version。
+# 此前这里硬编码 1.0.0-rc1，而 Cargo.toml 是 0.1.0、CHANGELOG 是 v1.0.0-rc2——
+# 同一次发布的两个二进制自报三种版本，且 WIN32-PORT.md 还让用户报 issue 时
+# 附 --version 输出。改为读取，杜绝再次漂移。
+if [ -z "${WBOX_VERSION:-}" ]; then
+  WBOX_VERSION=$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' \
+                   "$BLINK_DIR/../../Cargo.toml" 2>/dev/null | head -1)
+fi
+WBOX_VERSION=${WBOX_VERSION:-0.0.0-unknown}
 GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo nogit)
 BUILD_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 mkdir -p "$BUILD"

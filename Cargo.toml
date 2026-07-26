@@ -1,6 +1,6 @@
 [package]
 name = "wbox"
-version = "0.1.0"
+version = "1.0.0-rc2"
 edition = "2021"
 description = "Portable Windows 进程容器（AppContainer + Job Object，无需 VT-x / 管理员权限）"
 license = "MIT OR Apache-2.0"
