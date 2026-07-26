@@ -78,6 +78,21 @@ P1 无 fork / P2 纯 fork 子 shell / P3 fork+wait / P4 fork+管道，各 30s �
 `WaitForSingleObject(c->thread, INFINITE)`。它本身未必是根因，但只要子线程
 因任何原因卡住，父进程就会永久挂起——探针数据到手后应优先确认子线程状态。
 
+## W2 真 Windows 专有：sh 内 applet 解析失败（**新增，与 W1 无关**）
+
+| # | 现象 | 证据 | 状态 |
+|---|------|------|------|
+| W2 | busybox `sh` 内执行 `cat` 报 `sh: cat: not found` | run 32 矩阵 B4「重定向链 && cat」：**rc=127**（不是超时），输出 `sh: cat: not found` | 未修复 |
+
+与 W1（fork 挂死）是两回事，注意别混淆：B4 是**快速失败**而非挂死，
+且矩阵 A3「`busybox cat t.txt`」是 PASS 的——直接以 applet 名调用没问题，
+问题出在 **`sh` 内部按名字解析 applet** 这条路径（busybox 靠
+`/proc/self/exe` 或 PATH 中的 busybox 重新 exec 自身）。故嫌疑集中在
+self-exe 解析或 PATH 查找，而非 cat 本身。
+
+排查提示：A3 与 B4 的差别就是"直接 argv[0]=cat" vs "经 sh 解析"，
+对比二者的 execve/openat 轨迹即可定位；`WBOX_DEBUG_VFS=1` 可看 VFS 解析。
+
 ## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 
 | # | 现象 | 期望 | 实测现状 |
