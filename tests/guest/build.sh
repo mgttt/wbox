@@ -35,10 +35,22 @@ for src in "$DIR"/t_*.c; do
   name=$(basename "$src" .c)
   out=$BIN/$name
   echo "[build] $name"
+  # 先编到本地临时盘再拷入 $BIN：部分宿主文件系统（FUSE/网络盘）上
+  # zig 直写产物会偶发零填充损坏；cp+校验可检出该环境噪音。
+  tmp=$(mktemp "${TMPDIR:-/tmp}/wbox-guest-build.XXXXXX")
   # shellcheck disable=SC2086
-  if ! $ZCC -target "$TARGET" -static $CFLAGS -I"$DIR" -o "$out" "$src"; then
+  if ! $ZCC -target "$TARGET" -static $CFLAGS -I"$DIR" -o "$tmp" "$src"; then
     echo "build.sh: FAILED to build $name" >&2
+    rm -f "$tmp"
     fail=1
+    continue
   fi
+  if ! cp "$tmp" "$out" || ! cmp -s "$tmp" "$out"; then
+    echo "build.sh: FAILED to install $name (copy verify mismatch)" >&2
+    rm -f "$tmp"
+    fail=1
+    continue
+  fi
+  rm -f "$tmp"
 done
 exit $fail

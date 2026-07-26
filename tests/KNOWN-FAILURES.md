@@ -1,8 +1,12 @@
 # wbox-linux 已知失败清单（C 层回归套件基线）
 
-基线来源：`tests/run-guest-tests.sh`（wine 模式，wbox-linux v1.0.0-rc1，wine 11.11）。
-基线统计：440+ 断言，FAIL 99（分布在下表 14 个用例文件；t_stress 全过）。
-**以下均为测试暴露的真实缺陷，按要求未修生产代码。** 每条附疑似归属层与复现方法。
+基线来源：`tests/run-guest-tests.sh`（wine 模式，wbox-linux v1.0，wine 11.11）。
+基线统计（v1.0 全绿基线，2026-07-26 实测）：**16 个用例文件：13 PASS / 3 FAIL；
+断言 423 条：pass=419 fail=4 skip=10**（skip 均为 symlink EPERM 宿主限制降级与
+t_exec/t_net_epoll 内个别环境降级项）。
+全部历史缺陷（P0 路径安全 / P1 内存·fd·进程·网络 / errno 校准 / >4GiB / devfs A6 /
+epoll 组 / brk / fork MAP_SHARED / MAP_SHARED 写回 / kill 语义 / self-exe）已修复并实测通过。
+残留仅下表 2 类共 4 条断言失败。
 
 复现方法（任一条目）：
 
@@ -14,66 +18,75 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
   WINEDEBUG=-all wine /path/to/wbox-linux.exe ./<t_xxx>
 ```
 
-## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复（fix/fs-sec）
+## P0 安全（审计 C2 防退化项）—— ✅ 已全部修复并复测通过（fix/fs-sec）
 
-| # | 现象 | 期望 | 实际 | 归属层 |
-|---|------|------|------|-----------|
-| S1 | `open("/bin/../..../etc/hostname")` | EACCES | ✅ EACCES/ENOENT（jail-by-default：无 BLINK_PREFIX 时 guest 根限定为启动 cwd；`..` 越根拒绝） | VfsInit + HostfsTraverse |
-| S2 | 绝对路径（/mnt/agents/...、/etc/hostname） | EACCES/ENOENT | ✅ ENOENT（绝对路径 jail 到 WBOX_ROOT 内解析；W32Path/W32ResolveAt 统一出口校验） | VfsInit + w32fd W32Path |
-| S3 | `openat(dirfd, "../..")` | EACCES | ✅ EACCES（VfsHandleDirfdName 尾随 `..` 不得越过 g_rootinfo + W32ResolveAt WithinRoot 复查） | vfs.c + w32fd.c |
-| S4 | 子目录 `open("../../etc/hostname")` | EACCES | ✅ 干净 ENOENT/EACCES——原为 NULL deref 崩溃（VfsTraverseStackBuild cleananddie 回卷越过 parent==NULL 的根节点；已加回卷护栏） | vfs.c + hostfs.c |
+| # | 现象 | 期望 | 实测现状 |
+|---|------|------|-----------|
+| S1 | `open("/bin/../..../etc/hostname")` | EACCES | ✅ t_sec_path 全过（jail-by-default；`..` 越根拒绝） |
+| S2 | 绝对路径（/mnt/agents/...、/etc/hostname） | EACCES/ENOENT | ✅ t_sec_path_abshost 全过（绝对路径 jail 到 WBOX_ROOT 内解析） |
+| S3 | `openat(dirfd, "../..")` | EACCES | ✅ t_sec_path 全过（VfsHandleDirfdName + W32ResolveAt WithinRoot 复查） |
+| S4 | 子目录 `open("../../etc/hostname")` | EACCES | ✅ t_sec_path_relesc 全过（原 NULL deref 崩溃已加回卷护栏） |
 
-## P1 内存语义
+## P1 内存语义 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 
-| # | 现象 | 期望 | 实际 | 疑似归属层 |
-|---|------|------|------|-----------|
-| M1 | `brk()` 增长（+64KiB/+8KiB） | 成功 | **ENOMEM**（任何增长都失败；sbrk 增量/负增量全链失败） | blink brk 堆管理（win32 提交粒度？） |
-| M2 | `munmap(未映射地址)` | -1/EINVAL | **返回 0**（静默成功） | blink munmap 校验 |
-| M3 | `mmap(MAP_SHARED)` 文件映射写入后 `pread` 文件 | 读到写入值 | **写未落盘**（shared 映射写不持久） | VFS/mmap 文件回写 |
-| M4 | `mmap(MAP_ANONYMOUS, fd=有效fd)` | -1/EBADF | **成功**（旗标组合未校验） | blink mmap 参数校验 |
-| M5 | fork 后 `MAP_SHARED\|MAP_ANONYMOUS` 页子写父读 | 父见子写（8） | **父读旧值（7）**——快照 fork 把 shared 页也复制了 | 快照 fork 共享页处理 |
-| M6 | 写已保留未提交的 guest VA（brk 失败区域） | guest SIGSEGV | **模拟器自身崩溃**（wine 调试器接管） | blink 信号/缺页处理（由 M1 触发） |
+| # | 现象 | 实测现状 |
+|---|------|-----------|
+| M1 | `brk()` 增长 ENOMEM | ✅ t_brk 全过 |
+| M2 | `munmap(未映射)` 静默成功 | ✅ t_mmap 全过 |
+| M3 | `MAP_SHARED` 文件映射写不落盘 | ✅ t_mmap 全过（写回已生效） |
+| M4 | `MAP_ANONYMOUS`+有效 fd 未校验 | ✅ t_mmap 全过 |
+| M5 | fork 后 shared 页子写父不可见 | ✅ t_fork_mem 全过 |
+| M6 | 写未提交 guest VA 模拟器自崩 | ✅ t_brk/t_mmap 全过（随 M1 修复） |
 
-## P1 fd/IO
+## P1 fd/IO —— ✅ 已全部修复并复测通过（fix/fs-sec + fix/mem-proc-2）
 
-| # | 现象 | 期望 | 实际 | 疑似归属层 |
-|---|------|------|------|-----------|
-| F1 | `open(O_CREAT, 0604)` 后 `fstat` 权限位 | 0604 | ✅ **已修**（fix/fs-sec：w32fd 进程内 mode 仿真表，创建套 umask，stat/fstat 优先采用；win32 宿主仅有只读位） | VFS open |
-| F2 | `open(O_APPEND)` + `lseek(0)` + `write` | 强制追加到 EOF | **写到偏移 0**（O_APPEND 未生效；pwrite 同病） | VFS 写路径 |
-| F3 | `pwrite` 到 >4GiB 偏移后 `fstat` | st_size = off+len | **尺寸不符**；空洞 `pread` 返回 -1；`pread` 后文件位置被移动 | VFS 大文件/off_t 64 位 |
-| F4 | `pread(pipe)` | -1/ESPIPE | **返回数据（当 read 用）**；**空管道 pread 直接挂死模拟器**（无任何返回，120s 超时） | fd 层 pread 分派 |
-| F5 | `unlink(仍打开的文件)` | 删除成功、名字消失（POSIX） | ✅ **已修**（fix/fs-sec：wine DeleteFile 对已打开文件仅标 delete-pending——重命名到隐藏临时名再删，fd 保持有效，残留随最后 close 消失） | VFS unlink |
-| F6 | `unlink(目录)` | EISDIR | ✅ **已修**（fix/fs-sec：unlink 前查目录属性，EACCES→EISDIR） | VFS unlink |
-| F7 | UTF-8 文件名创建（é你好） | 成功 | ✅ **已修**（fix/fs-sec：根因是 wine 在非 UTF-8 locale 下无法创建非 ASCII 名；宿主文件名统一 %XXXX 纯 ASCII 转义，readdir 反转义） | VFS 文件名 UTF-8↔UTF-16 |
-| F8 | 特殊字符文件名（空格/'/"/()/[]） | 成功 | ✅ **已修**（同上转义方案覆盖 win32 非法字符 <xx>"\|?* 与控制字符） | VFS 文件名校验 |
+| # | 现象 | 实测现状 |
+|---|------|-----------|
+| F1 | `O_CREAT 0604` 权限位 | ✅ t_fd_open 全过（进程内 mode 仿真表） |
+| F2 | `O_APPEND` 未生效 | ✅ t_fd_rw 全过（write/pwrite 强制追加到 EOF） |
+| F3 | >4GiB `pwrite`/`fstat`/`pread` | ✅ t_fd_rw 全过（全程 64 位偏移与尺寸） |
+| F4 | `pread(pipe)` 当 read 用/空管道挂死 | ✅ t_fd_rw 全过（返 ESPIPE） |
+| F5 | `unlink(打开中文件)` | ✅ t_fd_open 全过（重命名隐藏临时名再删） |
+| F6 | `unlink(目录)` 非 EISDIR | ✅ t_fd_open 全过 |
+| F7 | UTF-8 文件名 | ✅ t_path 全过（宿主名 %XXXX 纯 ASCII 转义） |
+| F8 | 特殊字符文件名 | ✅ t_path 全过（同转义方案） |
 
-## P1 进程
+## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 
-| # | 现象 | 期望 | 实际 | 疑似归属层 |
-|---|------|------|------|-----------|
-| P1 | `kill(pid,SIGTERM/SIGKILL)` + `waitpid` | WIFSIGNALED + WTERMSIG | **信号语义不成立**（子未按信号死亡/wait 状态错） | 进程/信号层 |
-| P2 | `readlink("/proc/self/exe")` | 自身路径 | **失败**（rc 合并区曾修 per-System self/exe，回归套件环境下仍失败） | /proc 模拟 |
+| # | 现象 | 实测现状 |
+|---|------|-----------|
+| P1 | `kill`+`waitpid` 信号语义 | ✅ t_proc 全过（WIFSIGNALED/WTERMSIG 成立） |
+| P2 | `readlink("/proc/self/exe")` | ✅ t_proc/t_exec 全过 |
 
-## P1 网络
+## P1 网络 —— 1 项残留（won't fix，宿主限制）
 
-| # | 现象 | 期望 | 实际 | 疑似归属层 |
-|---|------|------|------|-----------|
-| N1 | `socket(AF_UNIX, …)` / `socketpair(AF_UNIX)` | 成功 | EAFNOSUPPORT(97) / **ENOSYS(38)**（AF_UNIX 整体缺失）——**明确限制**（win32 宿主无 AF_UNIX；返回码干净、语义明确，本期不实现） | 网络层（won't fix，已确认） |
-| ~~N2~~ | ~~`epoll_ctl(ADD)` 于 pipe / TCP 连接 socket~~ | 成功 | **已修复**（fix/net-sem：guest/VFS fd 命名空间撞车，Fd 表优先解析 + epoll fd 注册进 VFS；LT/ONESHOT/MOD/DEL/RDHUP 矩阵全翻 PASS） | epoll 层 fd 注册 |
-| ~~N3~~ | ~~`socket(9999,…)` 非法 family~~ | EAFNOSUPPORT(97) | **已修复**（xlat.c 未知 family 校准为 EAFNOSUPPORT） | 网络层 |
+| # | 现象 | 期望 | 实测现状 |
+|---|------|------|-----------|
+| N1 | `socket(AF_UNIX,…)` / `socketpair(AF_UNIX)` | 成功 | **ENOSYS(38)**——**仍成立**（v1.0 实测：t_net_epoll:55 socketpair ENOSYS、t_net_sockopt:61 socket(AF_UNIX,SOCK_STREAM) 失败）。win32 宿主无 AF_UNIX，返回码干净、语义明确，本期不实现 |
+| N2 | `epoll_ctl(ADD)` pipe/TCP | 成功 | ✅ 已修复（fix/net-sem），t_net_epoll LT/ONESHOT/MOD/DEL/RDHUP 矩阵全过 |
+| N3 | `socket(9999,…)` errno | EAFNOSUPPORT | ✅ 已修复（xlat.c 校准），t_negative 全过该项 |
 
-## P2 errno 精度
+## P2 errno 精度 —— 1 项残留（真 bug，低优先级）
 
-| # | 现象 | 期望 | 实际 |
+| # | 现象 | 期望 | 实测现状（v1.0） |
 |---|------|------|------|
-| E1 | `read(目录fd)` | EISDIR(21) | EINVAL(22) |
-| E2 | `write(只读fd=stdin)` | EBADF(9) | EACCES(13) |
+| E1 | `read(目录fd)` | EISDIR(21) | **仍失败**：EINVAL(22)（t_negative.c:94 实测复现） |
+| E2 | `write(只读fd=stdin)` | EBADF(9) | **仍失败**：EACCES(13)（t_negative.c:100 实测复现） |
+
+裁决：E1/E2 为真实缺陷（errno 校准不完整），不影响功能正确性，列入后续版本。
 
 ## 备注
 
-- `symlink()` 创建全部 **EPERM**（含相对/绝对目标）——✅ **已判定为宿主限制并降级 SKIP**
-  （fix/fs-sec）：probe 实测 wine 11 的 CreateSymbolicLinkW 只生成无法跟随的 reparse 占位文件
-  （真实文件名带 `?` 后缀），非 wbox 缺陷；t_path 三个 symlink 块与 t_sec_path/t_sec_linkabs 的
-  创建断言已在 EPERM 时降级为 SKIP（其他 errno 仍 FAIL）。
-- t_exec 在 `/proc/self/exe` 缺失时回退 argv[0] 自 exec，exec 语义本体（argv/env/内存清洁）全过。
-- t_stress（100 fork / 20 并发 / 1000 mmap 循环 / 1000 并发映射 / 64MiB 校验）**全部通过**。
+- `symlink()` 创建 **EPERM**——✅ 已判定为宿主限制并降级 SKIP（fix/fs-sec）：
+  probe 实测 wine 11 的 CreateSymbolicLinkW 只生成无法跟随的 reparse 占位文件
+  （真实文件名带 `?` 后缀），非 wbox 缺陷；t_path 三个 symlink 块与
+  t_sec_path/t_sec_linkabs 的创建断言在 EPERM 时降级为 SKIP（其他 errno 仍 FAIL）。
+  v1.0 实测 skip=10 与此一致。
+- t_exec 在 `/proc/self/exe` 缺失时回退 argv[0] 自 exec，exec 语义本体全过。
+- t_stress（100 fork / 20 并发 / 1000 mmap 循环 / 1000 并发映射 / 64MiB 校验）全部通过。
+- 环境噪音备忘（非缺陷）：① 部分宿主文件系统（FUSE/portal 盘）上 zig 直写产物偶发
+  零填充损坏，tests/guest/build.sh 已改为本地临时盘编译 + cp/cmp 校验；② wine 首次
+  创建 prefix 时并发跑首个用例可能 rundll32 c0000135，重跑即过；③ busybox 解析器读
+  guest /etc/resolv.conf，test-matrix.sh 已在工作目录生成 nameserver 夹具；
+  ④ blink 每次启动向 stderr 打 "Initializing VFS" INFO 行（上游固有行为），
+  test-matrix.sh 的 bb() 已过滤该行。

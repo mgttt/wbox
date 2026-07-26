@@ -84,6 +84,10 @@ printf 'line1 from host file\n' > "$WORK/t.txt"
 mkdir -p "$WORK/subdir"
 printf 'a\n' > "$WORK/subdir/a.txt"
 printf 'b\n' > "$WORK/subdir/b.txt"
+# DNS 夹具：guest 根即 $WORK，busybox 解析器读 guest /etc/resolv.conf；
+# 缺失时 D 组 wget 报 "bad address"（环境噪音，非网络语义缺陷）。
+mkdir -p "$WORK/etc"
+printf 'nameserver %s\n' "${WBOX_MATRIX_DNS:-223.5.5.5}" > "$WORK/etc/resolv.conf"
 
 WBOX_ABS=$(cd "$(dirname "$WBOX_LINUX")" && pwd)/$(basename "$WBOX_LINUX")
 cd "$WORK" || die "无法进入工作目录"
@@ -94,6 +98,9 @@ bb() {
   rc=$?
   # 剥 \r：真 Windows 下控制台/管道输出可能带 CRLF
   OUT=$(printf '%s' "$OUT" | tr -d '\r')
+  # 剥 blink 固有的 stderr INFO 日志行（blink/vfs.c LogInfo "Initializing VFS"
+  # 每次启动无条件打印到 stderr，属模拟器固有行为，非被测程序输出）
+  OUT=$(printf '%s\n' "$OUT" | grep -v '^[IWEF][0-9]\{4\}.*:blink/.*Initializing VFS$')
   return $rc
 }
 
