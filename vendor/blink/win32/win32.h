@@ -40,6 +40,7 @@ int W32ChildVpid(struct W32Child *);
 int W32ChildExited(struct W32Child *);
 void W32ChildSignalExec(struct W32Child *);
 void W32ChildSignalExit(struct W32Child *, int status);
+void W32ChildSignalKilled(struct W32Child *, int sig);
 void W32VforkWaitParent(struct W32Child *);
 // SIGCHLD delivery: the child record remembers the parent's Machine (as an
 // opaque pointer) so the exit path can enqueue SIGCHLD into the parent's

@@ -89,7 +89,8 @@ struct W32Child {
   HANDLE thread;      // waitable handle of the child's host thread
   HANDLE exec_event;  // manual-reset: set when child execs or exits
   volatile LONG exited;
-  volatile LONG status;  // raw guest exit code (0..255)
+  volatile LONG status;   // raw guest exit code (0..255)
+  volatile LONG termsig;  // killing guest signal (0 = exited normally)
   int reaped;
   void *parent_machine;  // parent's struct Machine (for SIGCHLD enqueue)
   void *child_machine;   // child's own struct Machine (for kill signal)
@@ -239,6 +240,9 @@ int W32ChildTerminate(int vpid, int status) {
   }
   TerminateThread(c->thread, (DWORD)(128 + (status & 0x7f)));
   InterlockedExchange(&c->status, 128 + (status & 0x7f));
+  // terminated by a signal (SIGKILL or a wedged catchable kill): report
+  // WIFSIGNALED to waitpid
+  InterlockedExchange(&c->termsig, status & 0x7f);
   InterlockedExchange(&c->exited, 1);
   SetEvent(c->exec_event);
   W32ChildrenUnlock();
@@ -297,6 +301,15 @@ void W32ChildSignalExec(struct W32Child *c) {
 // Child exited (before or after exec): record status, wake everyone.
 void W32ChildSignalExit(struct W32Child *c, int status) {
   InterlockedExchange(&c->status, status & 0xff);
+  InterlockedExchange(&c->exited, 1);
+  SetEvent(c->exec_event);
+}
+
+// Child killed by an unhandled guest signal: waitpid must report
+// WIFSIGNALED/WTERMSIG, not a 128+sig exit code (POSIX wait status).
+void W32ChildSignalKilled(struct W32Child *c, int sig) {
+  InterlockedExchange(&c->status, 128 + (sig & 0x7f));
+  InterlockedExchange(&c->termsig, sig & 0x7f);
   InterlockedExchange(&c->exited, 1);
   SetEvent(c->exec_event);
 }
@@ -372,15 +385,24 @@ pid_t waitpid(pid_t pid, int *status, int flags) {
   }
   vpid = c->vpid;
   code = c->status;
-  W32ChildrenLock();
-  for (cp = &g_children; *cp; cp = &(*cp)->next) {
-    if (*cp == c) {
-      *cp = c->next;
-      break;
+  {
+    int ts = c->termsig;
+    W32ChildrenLock();
+    for (cp = &g_children; *cp; cp = &(*cp)->next) {
+      if (*cp == c) {
+        *cp = c->next;
+        break;
+      }
+    }
+    W32ChildrenUnlock();
+    if (status) {
+      if (ts) {
+        *status = ts & 0x7f;  // WIFSIGNALED encoding (no core flag)
+      } else {
+        *status = (code & 0xff) << 8;  // WIFEXITED encoding
+      }
     }
   }
-  W32ChildrenUnlock();
-  if (status) *status = (code & 0xff) << 8;  // WIFEXITED encoding
   CloseHandle(c->thread);
   CloseHandle(c->exec_event);
   free(c);
@@ -415,9 +437,14 @@ int waitid(idtype_t t, id_t id, siginfo_t *si, int flags) {
   if (si) {
     memset(si, 0, sizeof(*si));
     si->si_signo = 20;                     // SIGCHLD
-    si->si_code = 1;                       // CLD_EXITED
     si->si_pid = r;
-    si->si_status = (status >> 8) & 0xff;
+    if (WIFSIGNALED(status)) {
+      si->si_code = CLD_KILLED;
+      si->si_status = status & 0x7f;
+    } else {
+      si->si_code = CLD_EXITED;
+      si->si_status = (status >> 8) & 0xff;
+    }
   }
   return 0;
 }
