@@ -1651,6 +1651,28 @@ ssize_t VfsWrite(int fd, const void *buf, size_t nbyte) {
   return ret;
 }
 
+#if defined(_WIN32) && !defined(__CYGWIN__)
+// wbox win32 F3: resolve a VFS fd to the underlying host CRT fd so the
+// syscall layer can do 64-bit-offset positioned IO (W32Preadv64 /
+// W32Pwritev64) — the VfsOps Preadv/Pwritev chain truncates offsets to
+// the 32-bit CRT off_t. Returns -1 with EOVERFLOW for non-hostfs-backed
+// fds (proc/band devices never legitimately see >2GiB offsets).
+int VfsHostFileFd(int fd) {
+  struct VfsInfo *info;
+  int filefd;
+  if (VfsGetFd(fd, &info) == -1) {
+    return -1;
+  }
+  if (info->device->ops->Pread != HostfsPread || info->data == NULL) {
+    unassert(!VfsFreeInfo(info));
+    return eoverflow();
+  }
+  filefd = ((struct HostfsInfo *)info->data)->filefd;
+  unassert(!VfsFreeInfo(info));
+  return filefd;
+}
+#endif
+
 ssize_t VfsPread(int fd, void *buf, size_t nbyte, off_t offset) {
   struct VfsInfo *info;
   int ret;

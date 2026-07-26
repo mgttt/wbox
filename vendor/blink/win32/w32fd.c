@@ -246,6 +246,7 @@ static wchar_t *W32Path(const char *path, wchar_t buf[MAX_PATH]) {
 }
 
 static HANDLE W32Handle(int fd);
+static void W32SetAppend(int fd, int on);
 
 // ------------------------------------------------ F7/F8: host filename escaping
 // Wine maps Win32 filenames onto the Unix filesystem through the LOCALE
@@ -665,7 +666,9 @@ int openat(int dirfd, const char *path, int flags, ...) {
     W32ModeSet(wbuf, mode & ~g_umask & 07777);
   }
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
-  return W32ToCrt(h, flags);
+  int ofd = W32ToCrt(h, flags);
+  W32SetAppend(ofd, (flags & O_APPEND) != 0);
+  return ofd;
 }
 
 // ---------------------------------------------------------------- io
@@ -673,6 +676,80 @@ int openat(int dirfd, const char *path, int flags, ...) {
 // special fds 1000000..1000002 are fake device fds (no CRT fd)
 static int IsSpecial(int fd) {
   return fd >= 1000000 && fd <= 1000002;
+}
+
+// F2: per-fd O_APPEND table. File IO here goes through bare
+// WriteFile/ReadFile, which bypass the CRT's _O_APPEND handling, so the
+// Linux append semantics (every write lands at EOF — even after lseek,
+// and pwrite on an O_APPEND fd still appends) must be re-implemented.
+// Atomicity is best-effort: seek-to-END immediately before the write.
+#define W32_FDTRACK_MAX 65536
+static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
+static void W32SetAppend(int fd, int on) {
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  if (on) {
+    g_fdappend[fd >> 3] |= 1u << (fd & 7);
+  } else {
+    g_fdappend[fd >> 3] &= ~(1u << (fd & 7));
+  }
+}
+static int W32IsAppend(int fd) {
+  return fd >= 0 && fd < W32_FDTRACK_MAX && (g_fdappend[fd >> 3] >> (fd & 7)) & 1;
+}
+
+// positioned IO on pipes is ESPIPE on Linux; on win32 ReadFile with an
+// OVERLAPPED offset on a pipe handle can BLOCK forever (t_fd_rw /
+// t_negative empty-pipe hang), so reject before touching the handle.
+static int W32EspipeIfPipe(HANDLE h) {
+  if (GetFileType(h) == FILE_TYPE_PIPE) {
+    errno = ESPIPE;
+    return -1;
+  }
+  return 0;
+}
+
+// 64-bit positioned read. Saves/restores the file pointer: ReadFile
+// with lpOverlapped on a synchronous handle still advances the position,
+// which broke pread's "must not move the file offset" semantics (F3).
+static ssize_t W32PreadAt(HANDLE h, void *buf, size_t n, uint64_t off) {
+  OVERLAPPED ov;
+  LARGE_INTEGER save, back;
+  int have_save;
+  memset(&ov, 0, sizeof(ov));
+  ov.Offset = (DWORD)(off & 0xffffffffu);
+  ov.OffsetHigh = (DWORD)(off >> 32);
+  save.QuadPart = 0;
+  have_save = SetFilePointerEx(h, save, &save, FILE_CURRENT);
+  DWORD got = 0;
+  BOOL ok = ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, &ov);
+  DWORD e = ok ? 0 : GetLastError();
+  if (have_save) SetFilePointerEx(h, save, &back, FILE_BEGIN);
+  if (!ok) {
+    if (e == ERROR_HANDLE_EOF) return got ? got : 0;
+    errno = W32Err();
+    return -1;
+  }
+  return got;
+}
+
+// 64-bit positioned write (same position save/restore as W32PreadAt).
+static ssize_t W32PwriteAt(HANDLE h, const void *buf, size_t n, uint64_t off) {
+  OVERLAPPED ov;
+  LARGE_INTEGER save, back;
+  int have_save;
+  memset(&ov, 0, sizeof(ov));
+  ov.Offset = (DWORD)(off & 0xffffffffu);
+  ov.OffsetHigh = (DWORD)(off >> 32);
+  save.QuadPart = 0;
+  have_save = SetFilePointerEx(h, save, &save, FILE_CURRENT);
+  DWORD put = 0;
+  BOOL ok = WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, &ov);
+  if (have_save) SetFilePointerEx(h, save, &back, FILE_BEGIN);
+  if (!ok) {
+    errno = W32Err();
+    return -1;
+  }
+  return put;
 }
 
 ssize_t read(int fd, void *buf, size_t n) {
@@ -722,6 +799,8 @@ ssize_t write(int fd, const void *buf, size_t n) {
     errno = EBADF;
     return -1;
   }
+  // F2: O_APPEND — every write goes to EOF regardless of the fd position.
+  if (W32IsAppend(fd)) SetFilePointerEx(h, (LARGE_INTEGER){0}, NULL, FILE_END);
   DWORD put = 0;
   if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, NULL)) {
     errno = W32Err();
@@ -735,6 +814,7 @@ int close(int fd) {
   if (WboxSockClose(fd)) return 0;    // feat/net: socket fds
   if (WboxEpollClose(fd)) return 0;   // feat/net: epoll fds
   if (IsSpecial(fd)) return 0;
+  W32SetAppend(fd, 0);
   return _close(fd) ? (errno = EBADF, -1) : 0;
 }
 
@@ -763,20 +843,8 @@ ssize_t pread(int fd, void *buf, size_t n, off_t off) {
     errno = EBADF;
     return -1;
   }
-  OVERLAPPED ov;
-  memset(&ov, 0, sizeof(ov));
-  /* off_t is 32-bit on windows-gnu; widen before shifting (>>32 on a
-     32-bit value is UB). Files >=4GiB still need the CRT off_t fixed. */
-  ov.Offset = (DWORD)(uint64_t)off;
-  ov.OffsetHigh = (DWORD)((uint64_t)off >> 32);
-  DWORD got = 0;
-  if (!ReadFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &got, &ov)) {
-    DWORD e = GetLastError();
-    if (e == ERROR_HANDLE_EOF) return got ? got : 0;
-    errno = W32Err();
-    return -1;
-  }
-  return got;
+  if (W32EspipeIfPipe(h)) return -1;
+  return W32PreadAt(h, buf, n, (uint64_t)(uint32_t)off);
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
@@ -785,17 +853,78 @@ ssize_t pwrite(int fd, const void *buf, size_t n, off_t off) {
     errno = EBADF;
     return -1;
   }
-  OVERLAPPED ov;
-  memset(&ov, 0, sizeof(ov));
-  /* see pread(): widen the 32-bit off_t before shifting. */
-  ov.Offset = (DWORD)(uint64_t)off;
-  ov.OffsetHigh = (DWORD)((uint64_t)off >> 32);
-  DWORD put = 0;
-  if (!WriteFile(h, buf, n > 0x7fffffff ? 0x7fffffff : (DWORD)n, &put, &ov)) {
-    errno = W32Err();
+  if (W32EspipeIfPipe(h)) return -1;
+  // F2: pwrite on an O_APPEND fd ignores the offset and appends (Linux).
+  if (W32IsAppend(fd)) {
+    LARGE_INTEGER end;
+    if (!GetFileSizeEx(h, &end)) {
+      errno = W32Err();
+      return -1;
+    }
+    off = (off_t)end.QuadPart;
+  }
+  return W32PwriteAt(h, buf, n, (uint64_t)(uint32_t)off);
+}
+
+// F3: 64-bit-offset variants for the syscall layer. The VFS/hostfs chain
+// truncates offsets to the 32-bit CRT off_t, so SysPread/SysPwrite route
+// offsets beyond 2GiB here (only regular files legitimately reach such
+// offsets; proc/dev pipes are rejected with ESPIPE above).
+ssize_t W32Preadv64(int fd, const struct iovec *iov, int n, int64_t off) {
+  if (off < 0) {
+    errno = EINVAL;
     return -1;
   }
-  return put;
+  if (IsSpecial(fd)) {
+    errno = ESPIPE;
+    return -1;
+  }
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  if (W32EspipeIfPipe(h)) return -1;
+  ssize_t total = 0;
+  for (int i = 0; i < n; ++i) {
+    ssize_t rc = W32PreadAt(h, iov[i].iov_base, iov[i].iov_len,
+                            (uint64_t)off + total);
+    if (rc < 0) return total ? total : -1;
+    total += rc;
+    if ((size_t)rc < iov[i].iov_len) break;
+  }
+  return total;
+}
+
+ssize_t W32Pwritev64(int fd, const struct iovec *iov, int n, int64_t off) {
+  if (off < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  HANDLE h = W32Handle(fd);
+  if (h == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  if (W32EspipeIfPipe(h)) return -1;
+  // F2: pwrite on an O_APPEND fd appends at EOF (Linux semantics).
+  if (W32IsAppend(fd)) {
+    LARGE_INTEGER end;
+    if (!GetFileSizeEx(h, &end)) {
+      errno = W32Err();
+      return -1;
+    }
+    off = end.QuadPart;
+  }
+  ssize_t total = 0;
+  for (int i = 0; i < n; ++i) {
+    ssize_t rc = W32PwriteAt(h, iov[i].iov_base, iov[i].iov_len,
+                             (uint64_t)off + total);
+    if (rc < 0) return total ? total : -1;
+    total += rc;
+    if ((size_t)rc < iov[i].iov_len) break;
+  }
+  return total;
 }
 
 ssize_t readv(int fd, const struct iovec *iov, int n) {
@@ -858,7 +987,9 @@ int dup(int fd) {
     errno = W32Err();
     return -1;
   }
-  return W32ToCrt(duph, 0);
+  int nfd = W32ToCrt(duph, 0);
+  W32SetAppend(nfd, W32IsAppend(fd));  // dup shares the file status flags
+  return nfd;
 }
 
 int dup2(int fd, int fd2) {
@@ -896,6 +1027,7 @@ int dup2(int fd, int fd2) {
     errno = EBADF;
     return -1;
   }
+  W32SetAppend(fd2, W32IsAppend(fd));
   return fd2;
 }
 
@@ -947,8 +1079,11 @@ int fcntl(int fd, int cmd, ...) {
   }
   switch (cmd) {
     case F_GETFL:
-      return O_RDWR;  // good enough for L1 (busybox checks & clears NONBLOCK)
+      // good enough for L1 (busybox checks & clears NONBLOCK); keep the
+      // append bit truthful since F2 made O_APPEND meaningful.
+      return O_RDWR | (W32IsAppend(fd) ? O_APPEND : 0);
     case F_SETFL:
+      W32SetAppend(fd, (arg & O_APPEND) != 0);
       return 0;  // ignore NONBLOCK toggling (console/pipes stay blocking)
     case F_GETFD:
       return 0;  // FD_CLOEXEC meaningless without fork
@@ -1106,6 +1241,18 @@ static void W32FillStat(struct stat *st, HANDLE h, const wchar_t *wpath) {
   st->st_mtim.tv_nsec = (t % 10000000) * 100;
   st->st_blksize = 4096;
   st->st_blocks = (st->st_size + 511) / 512;
+}
+
+// F3: struct stat's st_size is the 32-bit CRT off_t on win32, so files
+// >=2GiB report truncated sizes. The syscall layer uses this to recover
+// the true 64-bit size after VfsFstat. Fails (returns -1) for handles
+// without a size (pipes, consoles) — callers keep the 32-bit value then.
+int W32FileSize64(int fd, int64_t *out) {
+  HANDLE h = W32Handle(fd);
+  LARGE_INTEGER sz;
+  if (h == INVALID_HANDLE_VALUE || !GetFileSizeEx(h, &sz)) return -1;
+  *out = sz.QuadPart;
+  return 0;
 }
 
 int fstat(int fd, struct stat *st) {

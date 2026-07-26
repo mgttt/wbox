@@ -212,6 +212,9 @@ int VfsFtruncate(int, off_t);
 int VfsClose(int);
 ssize_t VfsRead(int, void *, size_t);
 ssize_t VfsWrite(int, const void *, size_t);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+int VfsHostFileFd(int);  // wbox win32 F3: VFS fd -> host CRT fd (or -1)
+#endif
 ssize_t VfsPread(int, void *, size_t, off_t);
 ssize_t VfsPwrite(int, const void *, size_t, off_t);
 ssize_t VfsReadv(int, const struct iovec *, int);

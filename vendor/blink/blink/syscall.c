@@ -2979,7 +2979,18 @@ static i64 SysPread(struct Machine *m, i32 fildes, i64 addr, u64 size,
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_WRITE)) != -1) {
-      RESTARTABLE(rc = VfsPreadv(fildes, iv.p, iv.i, offset));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // F3: off_t is 32-bit on the win32 host; the VFS chain truncates.
+      // Route offsets that do not fit through the 64-bit w32fd path.
+      if ((i64)offset < 0) {
+        rc = einval();
+      } else if (offset > 0x7fffffffu) {
+        int hfd = VfsHostFileFd(fildes);
+        RESTARTABLE(rc = hfd == -1 ? -1
+                                   : W32Preadv64(hfd, iv.p, iv.i, offset));
+      } else
+#endif
+        RESTARTABLE(rc = VfsPreadv(fildes, iv.p, iv.i, offset));
       if (rc != -1) SetWriteAddr(m, addr, rc);
     }
     FreeIovs(&iv);
@@ -3001,7 +3012,17 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
   if (size) {
     InitIovs(&iv);
     if ((rc = AppendIovsReal(m, &iv, addr, size, PROT_READ)) != -1) {
-      RESTARTABLE(rc = VfsPwritev(fildes, iv.p, iv.i, offset));
+#if defined(_WIN32) && !defined(__CYGWIN__)
+      // F3: see SysPread — 64-bit-offset path for the 32-bit off_t host.
+      if ((i64)offset < 0) {
+        rc = einval();
+      } else if (offset > 0x7fffffffu) {
+        int hfd = VfsHostFileFd(fildes);
+        RESTARTABLE(rc = hfd == -1 ? -1
+                                   : W32Pwritev64(hfd, iv.p, iv.i, offset));
+      } else
+#endif
+        RESTARTABLE(rc = VfsPwritev(fildes, iv.p, iv.i, offset));
       if (rc != -1) SetReadAddr(m, addr, rc);
     }
     FreeIovs(&iv);
@@ -3051,12 +3072,19 @@ static i64 SysPreadv2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
           RESTARTABLE(rc = readv_impl(fd->hostfd, iv.p, iv.i));
         } else if (offset < 0) {
           return einval();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        // F3: off_t is 32-bit on the win32 host; route large offsets
+        // through the 64-bit w32fd path instead of EOVERFLOW/truncation.
+        } else if (offset > 0x7fffffff) {
+          int hfd = VfsHostFileFd(fd->hostfd);
+          RESTARTABLE(rc = hfd == -1 ? -1
+                                     : W32Preadv64(hfd, iv.p, iv.i, offset));
+        } else {
+          RESTARTABLE(rc = VfsPreadv(fd->hostfd, iv.p, iv.i, offset));
+#else
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-          RESTARTABLE(rc = VfsPreadv(fd->hostfd, iv.p, iv.i, offset));
-#else
           RESTARTABLE(rc = VfsPreadv(fildes, iv.p, iv.i, offset));
 #endif
         }
@@ -3112,12 +3140,18 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
           rc = HandleSigpipe(m, rc, 0);
         } else if (offset < 0) {
           return einval();
+#if defined(_WIN32) && !defined(__CYGWIN__)
+        // F3: see SysPreadv2 — 64-bit-offset path for the 32-bit off_t host.
+        } else if (offset > 0x7fffffff) {
+          int hfd = VfsHostFileFd(fd->hostfd);
+          RESTARTABLE(rc = hfd == -1 ? -1
+                                     : W32Pwritev64(hfd, iv.p, iv.i, offset));
+        } else {
+          RESTARTABLE(rc = VfsPwritev(fd->hostfd, iv.p, iv.i, offset));
+#else
         } else if (offset > NUMERIC_MAX(off_t)) {
           return eoverflow();
         } else {
-#if defined(_WIN32) && !defined(__CYGWIN__)
-          RESTARTABLE(rc = VfsPwritev(fd->hostfd, iv.p, iv.i, offset));
-#else
           RESTARTABLE(rc = VfsPwritev(fildes, iv.p, iv.i, offset));
 #endif
         }
@@ -3414,6 +3448,16 @@ static int SysFstat(struct Machine *m, i32 fd, i64 staddr) {
 #endif
   if ((rc = VfsFstat(fd, &st)) != -1) {
     XlatStatToLinux(&gst, &st);
+#if defined(_WIN32) && !defined(__CYGWIN__)
+    // F3: host struct stat truncated st_size to the 32-bit CRT off_t;
+    // recover the true size for regular host files.
+    int64_t sz64;
+    int hfd = VfsHostFileFd(fd);
+    if (hfd != -1 && W32FileSize64(hfd, &sz64) != -1) {
+      Write64(gst.size, sz64);
+      Write64(gst.blocks, (sz64 + 511) / 512);
+    }
+#endif
     if (CopyToUserWrite(m, staddr, &gst, sizeof(gst)) == -1) rc = -1;
   }
   return rc;
