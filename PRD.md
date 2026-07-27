@@ -894,7 +894,13 @@ request header
   mount id、Linux flags/mode 与 UTF-8 相对路径，并在任何宿主 open 前拒绝绝对路径、
   空组件、`.`/`..`、反斜杠、冒号、非法 UTF-8 和超过 1024 字节的路径。首个数据面
   仅允许 `O_RDONLY` 既有文件；Win32 access mask 由 broker allowlist 映射，不接收
-  guest 原始 access mask。逐组件 `NtCreateFile` 与 HANDLE 返回仍未接通，不能据此
+  guest 原始 access mask。`[done: readonly OPEN component gate]` mount 初始化只保留
+  owner 进程打开的根目录 HANDLE；每个组件都以 `NtCreateFile(RootDirectory=...)`
+  加 `FILE_OPEN_REPARSE_POINT` 打开并再次查询属性，任何中间 junction/reparse 均拒绝。
+  最终普通文件 HANDLE 通过 `DuplicateHandle` 注入已注册 AppContainer；
+  `appcontainer_hello_ping_is_pid_sid_and_job_bound` 已从无 AppContainer ACE 的独立
+  volume 读取 canary，`readonly_mount_rejects_intermediate_junction_escape` 证明
+  junction 外部 canary 不可达。Blink fd-backed hostfs 尚未消费该 HANDLE，不能据此
   宣称 Windows `-v` 可用。只读 mount 最终在 broker 与 VFS 两层都拒绝写/创建/截断。
 - broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
@@ -1552,8 +1558,9 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 2. `[active]` 完成 Windows OCI bind volume broker、逐组件 reparse 逃逸门禁与
    fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证、挂起期动态 HANDLE 注入和
    VFS `MS_RDONLY` 组件门禁已落地；owner-only 预连接通道的 `HELLO/PING`、Job 与
-   AppContainer SID 身份门禁也已通过真机测试。CLI 在 `OPEN`/hostfs 数据面完成前
-   继续明确拒绝。
+   AppContainer SID 身份门禁也已通过真机测试；broker 只读文件 `OPEN`、逐组件
+   junction 拒绝与 HANDLE 注入已取得真机证据。CLI 在 Blink fd-backed hostfs
+   消费该 HANDLE 并通过产品门禁前继续明确拒绝。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。

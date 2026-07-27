@@ -20,8 +20,10 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    CreateFileW, FileAttributeTagInfo, FlushFileBuffers, GetFileInformationByHandleEx, ReadFile,
+    WriteFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Pipes::{
@@ -46,6 +48,58 @@ const MAX_RELATIVE_PATH: usize = 1024;
 const STATUS_OK: i32 = 0;
 const STATUS_PROTOCOL: i32 = -71; // Linux EPROTO
 const STATUS_AUTH: i32 = -13; // Linux EACCES
+const STATUS_NOT_FOUND: i32 = -2; // Linux ENOENT
+
+const FILE_LIST_DIRECTORY: u32 = 0x0001;
+const FILE_READ_DATA: u32 = 0x0001;
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+const OBJ_CASE_INSENSITIVE: u32 = 0x0040;
+const FILE_OPEN: u32 = 1;
+const FILE_DIRECTORY_FILE: u32 = 0x0001;
+const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
+const FILE_OPEN_REPARSE_POINT_OPTION: u32 = 0x0020_0000;
+
+#[repr(C)]
+struct NtUnicodeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+
+#[repr(C)]
+struct NtObjectAttributes {
+    length: u32,
+    root_directory: HANDLE,
+    object_name: *mut NtUnicodeString,
+    attributes: u32,
+    security_descriptor: *mut core::ffi::c_void,
+    security_quality_of_service: *mut core::ffi::c_void,
+}
+
+#[repr(C)]
+struct NtIoStatusBlock {
+    status: isize,
+    information: usize,
+}
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtCreateFile(
+        file_handle: *mut HANDLE,
+        desired_access: u32,
+        object_attributes: *mut NtObjectAttributes,
+        io_status_block: *mut NtIoStatusBlock,
+        allocation_size: *mut i64,
+        file_attributes: u32,
+        share_access: u32,
+        create_disposition: u32,
+        create_options: u32,
+        ea_buffer: *mut core::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Request {
@@ -78,6 +132,73 @@ struct OpenRequest {
     linux_flags: u32,
     mode: u32,
     components: Vec<String>,
+}
+
+pub(crate) struct BrokerMount {
+    id: u32,
+    root: OwnedHandle,
+}
+
+impl BrokerMount {
+    pub(crate) fn open_readonly(id: u32, path: &std::path::Path) -> Result<Self> {
+        if id == 0 {
+            return Err(WboxError::args("broker mount id 必须非零"));
+        }
+        let path_wide = token::to_wide(&path.to_string_lossy());
+        let root = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if root == INVALID_HANDLE_VALUE {
+            return Err(last_error("打开 broker mount 根目录"));
+        }
+        let root = OwnedHandle(root);
+        let attributes = file_attributes(root.raw())?;
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(WboxError::args("broker mount 根目录不能是 reparse point"));
+        }
+        if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(WboxError::args("broker mount 根必须是目录"));
+        }
+        Ok(Self { id, root })
+    }
+
+    fn open_existing_file(&self, components: &[String]) -> Result<OwnedHandle> {
+        let mut parent: Option<OwnedHandle> = None;
+        for (index, component) in components.iter().enumerate() {
+            let root = parent.as_ref().map_or(self.root.raw(), OwnedHandle::raw);
+            let final_component = index + 1 == components.len();
+            let opened = nt_open_relative(root, component, final_component)?;
+            let attributes = file_attributes(opened.raw())?;
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(WboxError::spawn(format!(
+                    "broker 拒绝 reparse path component '{}'",
+                    component
+                )));
+            }
+            if final_component {
+                if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    return Err(WboxError::spawn("broker OPEN 首版只接受普通文件"));
+                }
+                return Ok(opened);
+            }
+            if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return Err(WboxError::spawn(format!(
+                    "broker path component '{}' 不是目录",
+                    component
+                )));
+            }
+            parent = Some(opened);
+        }
+        Err(WboxError::spawn("broker OPEN 缺少路径组件"))
+    }
 }
 
 impl OpenRequest {
@@ -125,6 +246,85 @@ impl OpenRequest {
             components,
         })
     }
+}
+
+fn file_attributes(handle: HANDLE) -> Result<u32> {
+    let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        return Err(last_error(
+            "GetFileInformationByHandleEx(FileAttributeTagInfo)",
+        ));
+    }
+    Ok(info.FileAttributes)
+}
+
+fn nt_open_relative(root: HANDLE, name: &str, final_component: bool) -> Result<OwnedHandle> {
+    let mut name_wide: Vec<u16> = name.encode_utf16().collect();
+    let byte_len = name_wide
+        .len()
+        .checked_mul(2)
+        .and_then(|length| u16::try_from(length).ok())
+        .ok_or_else(|| WboxError::spawn("broker path component 过长"))?;
+    let mut unicode = NtUnicodeString {
+        length: byte_len,
+        maximum_length: byte_len,
+        buffer: name_wide.as_mut_ptr(),
+    };
+    let mut attributes = NtObjectAttributes {
+        length: std::mem::size_of::<NtObjectAttributes>() as u32,
+        root_directory: root,
+        object_name: &mut unicode,
+        attributes: OBJ_CASE_INSENSITIVE,
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io = NtIoStatusBlock {
+        status: 0,
+        information: 0,
+    };
+    let mut opened = std::ptr::null_mut();
+    let desired_access = if final_component {
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS
+    } else {
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS
+    };
+    let create_options = FILE_SYNCHRONOUS_IO_NONALERT
+        | FILE_OPEN_REPARSE_POINT_OPTION
+        | if final_component {
+            FILE_NON_DIRECTORY_FILE
+        } else {
+            FILE_DIRECTORY_FILE
+        };
+    let status = unsafe {
+        NtCreateFile(
+            &mut opened,
+            desired_access,
+            &mut attributes,
+            &mut io,
+            std::ptr::null_mut(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+            create_options,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(WboxError::spawn(format!(
+            "NtCreateFile(relative '{}') 失败，NTSTATUS=0x{:08X}",
+            name, status as u32
+        )));
+    }
+    Ok(OwnedHandle(opened))
 }
 
 impl Request {
@@ -209,10 +409,23 @@ pub(crate) struct BrokerEndpoint {
     appcontainer_sid: String,
     generation: u64,
     nonce: [u8; 16],
+    mounts: Vec<BrokerMount>,
 }
 
 impl BrokerEndpoint {
     pub(crate) fn create(appcontainer_sid: &str) -> Result<Self> {
+        Self::create_with_mounts(appcontainer_sid, Vec::new())
+    }
+
+    pub(crate) fn create_with_mounts(
+        appcontainer_sid: &str,
+        mounts: Vec<BrokerMount>,
+    ) -> Result<Self> {
+        let mut ids = mounts.iter().map(|mount| mount.id).collect::<Vec<_>>();
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(WboxError::args("broker mount id 不能重复"));
+        }
         let mut random = [0u8; 32];
         let status = unsafe {
             BCryptGenRandom(
@@ -299,6 +512,7 @@ impl BrokerEndpoint {
             appcontainer_sid: appcontainer_sid.to_string(),
             generation,
             nonce,
+            mounts,
         })
     }
 
@@ -357,6 +571,7 @@ impl BrokerEndpoint {
             pid,
             generation: self.generation,
             nonce: self.nonce,
+            mounts: self.mounts,
         })
     }
 }
@@ -367,10 +582,19 @@ pub(crate) struct BrokerSession {
     pid: u32,
     generation: u64,
     nonce: [u8; 16],
+    mounts: Vec<BrokerMount>,
 }
 
 impl BrokerSession {
     pub(crate) fn serve_hello_ping(self) -> Result<()> {
+        self.serve(false)
+    }
+
+    pub(crate) fn serve_hello_ping_open(self) -> Result<()> {
+        self.serve(true)
+    }
+
+    fn serve(self, expect_open: bool) -> Result<()> {
         let connected = unsafe { ConnectNamedPipe(self.pipe.raw(), std::ptr::null_mut()) };
         if connected == 0 {
             let err = unsafe { GetLastError() };
@@ -423,6 +647,9 @@ impl BrokerSession {
                 payload: Vec::new(),
             },
         )?;
+        if ping_status == STATUS_OK && expect_open {
+            self.serve_open()?;
+        }
         unsafe {
             FlushFileBuffers(self.pipe.raw());
             DisconnectNamedPipe(self.pipe.raw());
@@ -432,6 +659,76 @@ impl BrokerSession {
         } else {
             Err(WboxError::spawn("broker PING 帧无效"))
         }
+    }
+
+    fn serve_open(&self) -> Result<()> {
+        let request = read_request(self.pipe.raw())?;
+        let request_id = request.request_id;
+        let opcode = request.opcode;
+        let parsed = match OpenRequest::decode(&request) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                return write_response(
+                    self.pipe.raw(),
+                    &Response {
+                        opcode,
+                        request_id,
+                        status: STATUS_PROTOCOL,
+                        payload: Vec::new(),
+                    },
+                );
+            }
+        };
+        let Some(mount) = self.mounts.iter().find(|mount| mount.id == parsed.mount_id) else {
+            return write_response(
+                self.pipe.raw(),
+                &Response {
+                    opcode,
+                    request_id,
+                    status: STATUS_NOT_FOUND,
+                    payload: Vec::new(),
+                },
+            );
+        };
+        let opened = match mount.open_existing_file(&parsed.components) {
+            Ok(opened) => opened,
+            Err(_) => {
+                return write_response(
+                    self.pipe.raw(),
+                    &Response {
+                        opcode,
+                        request_id,
+                        status: STATUS_AUTH,
+                        payload: Vec::new(),
+                    },
+                );
+            }
+        };
+        let mut remote = std::ptr::null_mut();
+        if unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                opened.raw(),
+                self.process.raw(),
+                &mut remote,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+        {
+            return Err(last_error("DuplicateHandle(broker OPEN)"));
+        }
+        let payload = (remote as usize as u64).to_le_bytes().to_vec();
+        write_response(
+            self.pipe.raw(),
+            &Response {
+                opcode,
+                request_id,
+                status: STATUS_OK,
+                payload,
+            },
+        )
     }
 }
 
@@ -743,6 +1040,50 @@ mod tests {
     }
 
     #[test]
+    fn readonly_mount_rejects_intermediate_junction_escape() {
+        let tag = format!(
+            "{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(format!("wbox_broker_root_{}", tag));
+        let outside = std::env::temp_dir().join(format!("wbox_broker_outside_{}", tag));
+        let jump = root.join("jump");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("canary.txt"), b"outside").unwrap();
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&jump)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let mount = BrokerMount::open_readonly(1, &root).unwrap();
+        let err = match mount.open_existing_file(&["jump".to_string(), "canary.txt".to_string()]) {
+            Ok(_) => panic!("junction component must be rejected"),
+            Err(err) => err,
+        };
+        assert!(format!("{}", err).contains("reparse"), "{}", err);
+        assert_eq!(
+            std::fs::read(outside.join("canary.txt")).unwrap(),
+            b"outside"
+        );
+
+        std::fs::remove_dir(&jump).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
     fn broker_child_probe() {
         let Ok(raw_handle) = std::env::var("WBOX_TEST_BROKER_HANDLE") else {
             return;
@@ -784,6 +1125,35 @@ mod tests {
         let ping = read_response(pipe.raw()).unwrap();
         assert_eq!(ping.status, STATUS_OK);
         assert_eq!(ping.request_id, 2);
+
+        if let Ok(path) = std::env::var("WBOX_TEST_BROKER_OPEN_PATH") {
+            write_request(pipe.raw(), &open_request(path.as_bytes(), 1, 0, 0)).unwrap();
+            let opened = read_response(pipe.raw()).unwrap();
+            assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
+            assert_eq!(opened.payload.len(), 8);
+            let remote = u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
+            let remote = OwnedHandle(remote);
+            let mut buffer = [0u8; 64];
+            let mut read = 0;
+            assert_ne!(
+                unsafe {
+                    ReadFile(
+                        remote.raw(),
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        &mut read,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                &buffer[..read as usize],
+                std::env::var("WBOX_TEST_BROKER_OPEN_EXPECTED")
+                    .unwrap()
+                    .as_bytes()
+            );
+        }
     }
 
     #[test]
@@ -805,13 +1175,19 @@ mod tests {
         }
 
         let base = std::env::temp_dir().join(unique("probe"));
+        let volume = std::env::temp_dir().join(unique("volume"));
         std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(volume.join("nested")).unwrap();
+        std::fs::write(volume.join("nested").join("canary.txt"), b"broker-canary").unwrap();
         let child = base.join("wbox-broker-probe.exe");
         std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
         crate::acl::grant_read_recursive(&base).unwrap();
 
         let profile = AppContainerProfile::create(&unique("profile"), &[]).unwrap();
-        let endpoint = BrokerEndpoint::create(&profile.sid_string().unwrap()).unwrap();
+        let mount = BrokerMount::open_readonly(1, &volume).unwrap();
+        let endpoint =
+            BrokerEndpoint::create_with_mounts(&profile.sid_string().unwrap(), vec![mount])
+                .unwrap();
         let mut env = crate::backend::env::build_child_env(
             &[],
             &[],
@@ -827,6 +1203,14 @@ mod tests {
             endpoint.generation().to_string(),
         ));
         env.push(("WBOX_TEST_BROKER_NONCE".to_string(), hex(&endpoint.nonce())));
+        env.push((
+            "WBOX_TEST_BROKER_OPEN_PATH".to_string(),
+            "nested/canary.txt".to_string(),
+        ));
+        env.push((
+            "WBOX_TEST_BROKER_OPEN_EXPECTED".to_string(),
+            "broker-canary".to_string(),
+        ));
         let cmdline = sandbox::build_cmdline(&[
             child.to_string_lossy().into_owned(),
             "--exact".to_string(),
@@ -847,7 +1231,7 @@ mod tests {
             &[client_handle],
             |process, assigned_job| {
                 let session = endpoint.register(process, assigned_job)?;
-                server = Some(std::thread::spawn(move || session.serve_hello_ping()));
+                server = Some(std::thread::spawn(move || session.serve_hello_ping_open()));
                 Ok(())
             },
         )
@@ -865,6 +1249,7 @@ mod tests {
 
         drop(profile);
         let _ = std::fs::remove_dir_all(base);
+        let _ = std::fs::remove_dir_all(volume);
     }
 
     #[test]
