@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.25 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -56,6 +56,8 @@ F9.1–F9.25 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.23 `wbox cp` | CP.1–CP.6 | 走 overlay 分层视图（读 upper→lower、写只写 upper），**不 setns**，故容器已退出也能取文件；必须认 whiteout，否则会把删掉的旧文件当现状拷出去 |
 | F9.24 `wbox stats` | ST.1–ST.5 | cgroup 只在设了限额时存在，故两条路（cgroup / `/proc`）并**标注来源**；CPU% 采两次差值，分母用真实经过时间 |
 | F9.25 `export`/`import` | EX.1–EX.7 | 与 `save`/`load` 搬的东西不同（裸 rootfs vs 镜像）；import 收任意来源归档，顶层无从白名单化，只能挡穿越 + 全落 `rootfs/` 下 |
+| F9.26 `wbox restart` | RT.1–RT.7 | 顺带补了真实缺口：`run -d` 的容器此前不记启动配置，退出后连 `start` 都不行；`run-args.json` 与 `create.json` 必须分开，后者的存在本身是「该走 start」的标记 |
+| F9.27 `rename`/`prune` | RN.1–RN.6 | rename 只对未运行容器开放（名字被用在可写层路径、默认主机名、Windows Job object 上，改名改不到这些）；prune 默认只列清单，`created` 不在清理范围 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -74,10 +76,21 @@ F9.1–F9.25 全部落地并有持续门禁。近期这一串是本轮做的：
 `resolve`（一处措辞，调用方只说"我要干什么"）、`lookup`（读先 upper 后 lower，
 认 whiteout）、`materialize`（硬链接铺下层 + 合并 upper，commit 与 export 共用）。
 
+### 写门禁本身也会踩的两个坑（本轮各踩一次）
+
+- **别跟别的组共用 HOME 做破坏性操作**。`prune -f` 会清掉该 HOME 下所有已退出
+  记录；跟别的组共用 `$WORK/home` 就会顺手扫掉它们的残留，制造跨组干扰。
+  RN 组因此独立 HOME，并改用宿主程序模式（rename/prune 只碰状态记录，
+  不需要镜像，所以独立 HOME 里没有镜像缓存也无所谓）。
+- **kill 完不能立刻 rm**。`rm` 按设计拒绝运行中的容器，而 kill 返回不等于状态
+  已翻成 exited。直接 kill 完就 rm，偶发会留下还在跑的容器污染后面按 `ps`
+  判断的用例（RT 组实测偶发红一次）。收尾要**轮询真实状态**再 rm，
+  固定 sleep 睡多久都只是猜。
+
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **381 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **167 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **391 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **180 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -89,7 +102,7 @@ F9.1–F9.25 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.25）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.27）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

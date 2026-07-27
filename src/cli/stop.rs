@@ -8,7 +8,7 @@ use crate::error::{Result, WboxError};
 use crate::runstate::{self, Kill, Liveness};
 
 /// 等待容器退出的默认上限（秒）。超时后升级为强制终止。
-const DEFAULT_TIMEOUT_SECS: u64 = 10;
+pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
 struct StopOptions<'a> {
     name: &'a str,
@@ -53,6 +53,31 @@ fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
 
 pub fn cmd_stop(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
+    stop_with(&opts, Say::Name)
+}
+
+/// 停容器时要不要把容器名打出来。
+///
+/// `wbox stop` 打（脚本靠它确认停的是哪个）；`restart` 不打——它自己会在整轮
+/// 结束时按批次汇报，让 stop 也打一遍会变成一个名字出现两次。
+/// 用一个开关而不是给 restart 另写一条停止路径：另写的那条迟早与这条出现
+/// 行为差异（先礼后兵的时序、Windows 的 Job 处理），而那种差异最难查。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Say {
+    Name,
+    Nothing,
+}
+
+pub(super) fn stop_quiet(name: &str, timeout: u64) -> Result<u32> {
+    stop_with(&StopOptions { name, timeout }, Say::Nothing)
+}
+
+fn stop_with(opts: &StopOptions, say: Say) -> Result<u32> {
+    let announce = |text: String| {
+        if say == Say::Name {
+            println!("{}", text);
+        }
+    };
     let locked = runstate::lock_existing(opts.name)?;
     let dir = locked.dir.clone();
     if runstate::liveness(&dir) == Liveness::Created {
@@ -65,7 +90,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
         // 已经停了不算错：stop 的意图是"让它别再跑"，这个状态已经满足。
         // 报错只会让 `wbox stop x || true` 这类脚本写得别扭。
         drop(locked);
-        println!("{}（已经是停止状态）", opts.name);
+        announce(format!("{}（已经是停止状态）", opts.name));
         return Ok(0);
     }
 
@@ -78,7 +103,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
     // Registration::drop 同样要取得操作锁后才能释放 owner 锁，等待前必须放锁。
     drop(locked);
     if wait_exit(&dir, opts.timeout) {
-        println!("{}", opts.name);
+        announce(opts.name.to_string());
         return Ok(0);
     }
 
@@ -89,7 +114,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
             "wbox: 容器 '{}' 未在 {} 秒内自行退出，已强制终止",
             opts.name, opts.timeout
         );
-        println!("{}", opts.name);
+        announce(opts.name.to_string());
         return Ok(0);
     }
     Err(WboxError::args(format!(
@@ -114,7 +139,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
                 // operation lock 才能标记 Exited。先放锁再复核，避免把正常退出报错。
                 drop(locked);
                 if wait_exit(&dir, 1) {
-                    println!("{}", opts.name);
+                    announce(opts.name.to_string());
                     return Ok(0);
                 }
                 return Err(open_error);
@@ -123,7 +148,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
         job.terminate(1)?;
         drop(locked);
         if wait_exit(&dir, opts.timeout) {
-            println!("{}", opts.name);
+            announce(opts.name.to_string());
             return Ok(0);
         }
 
@@ -135,7 +160,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
                 "wbox: 容器 '{}' 的 Job 已终止，supervisor 未在 {} 秒内退出，已强制终止",
                 opts.name, opts.timeout
             );
-            println!("{}", opts.name);
+            announce(opts.name.to_string());
             return Ok(0);
         }
         Err(WboxError::args(format!(

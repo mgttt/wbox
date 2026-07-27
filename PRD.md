@@ -175,6 +175,8 @@ wbox
 | `cp` | 有 | F9.23：宿主与容器双向拷贝，走 overlay 分层视图故不必 `setns`、容器已退出也能取（门禁 CP.1–CP.6）|
 | `stats` | 有 | F9.24：有专属 cgroup 时读内核记账，没有则按 `/proc` 逐进程累加并**标注来源**（门禁 ST.1–ST.5）|
 | `export` / `import` | 有 | F9.25：容器文件系统的**裸** tar（与 `save`/`load` 搬的东西不同，见下）；import 收任意来源归档故只挡穿越、全部落在 `rootfs/` 下（门禁 EX.1–EX.7）|
+| `restart` | 有 | F9.26：停掉再按原配置起来；**`run -d` 起的容器现在也记得住启动配置**，故 `start`/`restart` 对它同样可用（门禁 RT.1–RT.7）|
+| `rename` / `prune` | 有 | F9.27：改名只对未运行容器开放（名字被用在可写层路径等处）；prune 不加 `-f` 只列清单（门禁 RN.1–RN.6）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -229,7 +231,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + 模拟器 VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.25 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.27 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
@@ -901,7 +903,9 @@ F9
 ├── F9.22 `save` / `load` 离线搬运镜像          —— [done]（门禁 SL.1–SL.6）
 ├── F9.23 `wbox cp` 宿主↔容器拷贝             —— [done]（仅 Linux，门禁 CP.1–CP.6）
 ├── F9.24 `wbox stats` 实时资源占用           —— [done]（仅 Linux，门禁 ST.1–ST.5）
-└── F9.25 `export` / `import` 容器文件系统    —— [done]（export 仅 Linux，门禁 EX.1–EX.7）
+├── F9.25 `export` / `import` 容器文件系统    —— [done]（export 仅 Linux，门禁 EX.1–EX.7）
+├── F9.26 `wbox restart` 与可重启的 run -d    —— [done]（门禁 RT.1–RT.7）
+└── F9.27 `wbox rename` / `wbox prune`        —— [done]（门禁 RN.1–RN.6）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1033,6 +1037,54 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.27 `wbox rename` / `wbox prune`** `[done]`（门禁 RN.1–RN.6）。记录的改名与批量清理。
+
+**`rename` 只对没在运行的容器开放，这不是偷懒**。运行中的容器把自己的名字用在
+三处：overlay 可写层的路径（`dir_for(name)/layer`）、默认主机名、以及 Windows 上
+那个按名字创建的 Job object。改名只动状态目录，改不到已经跑起来的 supervisor
+手里的那几样，结果是容器名与它实际在用的资源对不上——一种改完看着成功、之后才
+出问题的状态。宁可明说不支持，并在错误里讲清楚为什么（RN.3）。
+
+改名要**连 `meta.json` 里的名字一起改**（RN.1）：只改目录的话 `ps` 还显示旧名，
+目录名与记录名各说各话，比不支持改名更让人困惑。日志随状态目录整体搬走，
+改名后 `wbox logs` 照样读得到（RN.2）——重建记录的做法会把日志丢掉，而 detach
+容器的日志正是保留记录的全部理由。
+
+**`prune` 默认不删**（RN.5）。删除不可逆而它一次删一批，所以先列清单、要求 `-f`
+确认。不做交互式 y/N：wbox 常在脚本和 CI 里跑，读 stdin 会挂住；"两步走"在这两种
+场景下都成立。预演返回 0 而不是非零——那是一次成功的预演，不是失败，否则
+`wbox prune || echo 出错` 会误报。
+
+**`created` 不在清理范围内**：那是用户 `wbox create` 特意留着待 `start` 的配置，
+不是残渣，扫掉会让人白丢参数（docker 的 `container prune` 同样只清已停止的）。
+判活取自 `runstate::liveness`，与 `ps` 同一份，不另写一套。
+
+**F9.26 `wbox restart`** `[done]`（门禁 RT.1–RT.7）。停掉再按原配置起来。
+
+**做这一格时发现了一个真实缺口**：此前只有 `wbox create` 的容器记得住启动配置，
+`run -d` 起的容器一退出就再也拉不回来——连 `wbox start` 都不行，而 docker 两种
+都能 `start`/`restart`。补法是在 `run -d` 的父进程里落一份 `run-args.json`
+（`runstate::save_run_args`）。
+
+**它和 `create.json` 必须是两个文件，不能合并**：`create.json` 的存在本身就是
+「这个名字被 create 占用了、该走 start」的标记（见 `reserve_detached`），而
+`run -d` 起的容器并不处于那个状态；共用一个文件会让 `run -d` 之后再 `run -d`
+同名容器被误判成「已有 create 配置」。两份文件格式相同，由同一个写入函数产出，
+权限都收到 0600——argv 里可能有 `-e TOKEN=...`，它不该比原命令行更容易被同机
+别的用户读到。
+
+**restart 本身是纯编排**：`stop` 与 `start` 各自已经把难的部分做完了（前者停的
+是 supervisor 而不是 guest、先礼后兵，后者在操作锁内原子领取配置）。不另写一条
+启停路径——另写的那条迟早与它们出现行为差异，而这种差异最难查。stop 只多了一个
+「要不要打印容器名」的开关：`restart` 自己按批次汇报，让 stop 也打一遍会变成同一个
+名字出现两次（RT.3 盯这条）。
+
+已退出的容器照样能 `restart`（docker 语义）：用户要的是「让它按原配置重新跑起来」，
+它当前是不是在跑属于实现细节。
+
+**判据是「换了一条命 + 配置照旧」**（RT.1/RT.2）：容器 PID 必须变，且 `run` 时给的
+`--hostname` 重启后仍生效。只断言 `rc=0` 的话，一个什么都不做的实现也能过。
 
 **F9.25 `wbox export` / `import`** `[done]`（export 仅 Linux，门禁 EX.1–EX.7）。
 容器文件系统的裸 tar 搬运。

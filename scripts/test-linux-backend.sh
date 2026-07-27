@@ -2030,6 +2030,166 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== RN wbox rename / prune（PRD F9.27）==="
+
+# **这一组必须用自己的 HOME**：RN.6 要跑 `prune -f`，那会清掉该 HOME 下所有
+# 已退出的记录。跟别的组共用 $WORK/home 的话，会顺手把它们的残留一起扫掉，
+# 制造出跨组干扰——最难查的那类偶发红。
+# 用宿主程序模式（`-- /bin/...`）而不是镜像：rename/prune 只碰状态记录，
+# 根本不需要镜像，于是这个独立 HOME 里没有镜像缓存也无所谓。
+RNH=$WORK/rnhome
+rm -rf "$RNH" && mkdir -p "$RNH"
+HOME=$RNH "$WBOX_ABS" run -d --name rnlive -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$RNH "$WBOX_ABS" run -d --name rndead -- /bin/echo hi >/dev/null 2>&1
+sleep 2
+
+# 改名要**连记录里的名字一起改**：只改目录的话 ps 还显示旧名，
+# 目录名与记录名各说各话，比不支持改名更让人困惑。
+nout=$(HOME=$RNH "$WBOX_ABS" rename rndead rnrenamed 2>&1); nrc=$?
+if [ "$nrc" -eq 0 ] \
+   && HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rnrenamed"{f=1} END{exit !f}' \
+   && ! HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rndead"{f=1} END{exit !f}'; then
+  report PASS "RN.1 rename 改掉目录与记录里的名字（ps 只认得新名）"
+else
+  report FAIL "RN.1 rename 生效" "rc=$nrc 输出: $(printf '%s' "$nout" | head -c 150)"
+fi
+
+# 改名后日志还得读得到：日志随状态目录一起搬，读不到等于把 logs 废掉
+nout=$(HOME=$RNH "$WBOX_ABS" logs rnrenamed 2>&1); nrc=$?
+if [ "$nrc" -eq 0 ] && printf '%s' "$nout" | grep -q hi; then
+  report PASS "RN.2 改名后日志仍可读（记录整体搬走，不是重建）"
+else
+  report FAIL "RN.2 改名后 logs" "rc=$nrc 输出: $(printf '%s' "$nout" | tr '\n' ' ' | head -c 120)"
+fi
+
+# 运行中的容器必须拒绝改名，且要说清为什么（名字被用在可写层路径等地方）
+nout=$(HOME=$RNH "$WBOX_ABS" rename rnlive rnother 2>&1); nrc=$?
+if [ "$nrc" -ne 0 ] && printf '%s' "$nout" | grep -q '正在运行' \
+   && HOME=$RNH "$WBOX_ABS" ps | awk '$1=="rnlive"{f=1} END{exit !f}'; then
+  report PASS "RN.3 拒绝给运行中的容器改名，且原容器不受影响"
+else
+  report FAIL "RN.3 运行中拒绝改名" "rc=$nrc 输出: $(printf '%s' "$nout" | head -c 150)"
+fi
+
+# 目标名已被占用时要拒绝：静默覆盖会把另一个容器的记录整个抹掉
+nout=$(HOME=$RNH "$WBOX_ABS" rename rnrenamed rnlive 2>&1); nrc=$?
+if [ "$nrc" -ne 0 ] && HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rnrenamed"{f=1} END{exit !f}'; then
+  report PASS "RN.4 目标名被占用时拒绝改名（不覆盖别的容器记录）"
+else
+  report FAIL "RN.4 重名拒绝" "rc=$nrc"
+fi
+
+# prune 不加 -f 时**一条都不能删**。默认就删的话，一次手误没掉一批记录。
+nout=$(HOME=$RNH "$WBOX_ABS" prune 2>&1); nrc=$?
+if [ "$nrc" -eq 0 ] && printf '%s' "$nout" | grep -q rnrenamed \
+   && HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rnrenamed"{f=1} END{exit !f}'; then
+  report PASS "RN.5 prune 不加 -f 时只列清单、不删任何东西"
+else
+  report FAIL "RN.5 prune 预演" "rc=$nrc 记录还在=$(HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rnrenamed"{f=1} END{print (f?"是":"否")}')"
+fi
+
+# -f 才真删，且运行中的一个都不许碰
+nout=$(HOME=$RNH "$WBOX_ABS" prune -f 2>&1); nrc=$?
+if [ "$nrc" -eq 0 ] \
+   && ! HOME=$RNH "$WBOX_ABS" ps -a | awk '$1=="rnrenamed"{f=1} END{exit !f}' \
+   && HOME=$RNH "$WBOX_ABS" ps | awk '$1=="rnlive"{f=1} END{exit !f}'; then
+  report PASS "RN.6 prune -f 清掉已退出记录，运行中的容器分毫未动"
+else
+  report FAIL "RN.6 prune 执行" "rc=$nrc 输出: $(printf '%s' "$nout" | tr '\n' '|' | head -c 150)"
+fi
+
+HOME=$RNH "$WBOX_ABS" kill rnlive >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  HOME=$RNH "$WBOX_ABS" ps 2>/dev/null | awk '$1=="rnlive"{f=1} END{exit !f}' || break
+  sleep 0.5
+done
+HOME=$RNH "$WBOX_ABS" rm rnlive >/dev/null 2>&1
+rm -rf "$RNH"
+
+echo
+echo "=== RT wbox restart（PRD F9.26）==="
+
+# 判据是**换了一条命 + 配置照旧**：容器 PID 必须变（真的重起了，不是没动），
+# 且原来的运行配置仍然生效。只断言 rc=0 的话，一个什么都不做的实现也能过。
+# 用与其它组同一个 HOME：镜像缓存在那里，另起一个干净 HOME 会因为找不到
+# lbetest 而整组失败（吃过一次亏）。
+RTH=$WORK/home
+HOME=$RTH "$WBOX_ABS" run -d --name rtc --hostname rtbox lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+rt1=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+rout=$(HOME=$RTH "$WBOX_ABS" restart rtc 2>&1); rrc=$?
+sleep 2
+rt2=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt1" ] && [ -n "$rt2" ] && [ "$rt1" != "$rt2" ]; then
+  report PASS "RT.1 restart 换了一条命（PID $rt1 → $rt2）且容器仍在运行"
+else
+  report FAIL "RT.1 restart 生效" "rc=$rrc 前=$rt1 后=$rt2（应都非空且不同）"
+fi
+
+# 原配置要照旧生效：--hostname 是 run 时给的，重启后必须还在
+rhost=$(HOME=$RTH "$WBOX_ABS" exec rtc -- /bin/hostname 2>&1)
+if printf '%s' "$rhost" | grep -qx 'rtbox'; then
+  report PASS "RT.2 重启后沿用原运行配置（--hostname 仍生效）"
+else
+  report FAIL "RT.2 沿用原配置" "容器内 hostname=$(printf '%s' "$rhost" | tr '\n' ' ' | head -c 80)（期望 rtbox）"
+fi
+
+# 名字只该出现一次：restart 内部要调 stop，但那一步不该也打一遍名字
+if [ "$(printf '%s\n' "$rout" | grep -c '^rtc$')" -eq 1 ]; then
+  report PASS "RT.3 restart 只汇报一次容器名（内部 stop 不重复打印）"
+else
+  report FAIL "RT.3 输出" "输出: $(printf '%s' "$rout" | tr '\n' '|' | head -c 120)"
+fi
+
+# 已退出的容器也能 restart（docker 语义）。这一条同时验证了 `run -d` 起的容器
+# 确实记下了启动配置——补这条之前只有 create 的容器能再启动。
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+sleep 1
+rout=$(HOME=$RTH "$WBOX_ABS" restart rtc 2>&1); rrc=$?
+sleep 2
+rt3=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt3" ]; then
+  report PASS "RT.4 已退出的容器也能 restart（run -d 的启动配置被记住了）"
+else
+  report FAIL "RT.4 重启已退出容器" "rc=$rrc PID=$rt3 输出: $(printf '%s' "$rout" | head -c 150)"
+fi
+
+# start 同样受益：这是同一份配置的另一个入口
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+sleep 1
+rout=$(HOME=$RTH "$WBOX_ABS" start rtc 2>&1); rrc=$?
+sleep 2
+rt4=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt4" ]; then
+  report PASS "RT.5 start 也能拉起 run -d 起过的已退出容器"
+else
+  report FAIL "RT.5 start 已退出容器" "rc=$rrc PID=$rt4 输出: $(printf '%s' "$rout" | head -c 150)"
+fi
+
+rout=$(HOME=$RTH "$WBOX_ABS" restart nosuchrt 2>&1); rrc=$?
+if [ "$rrc" -ne 0 ]; then
+  report PASS "RT.6 restart 不存在的容器时报错"
+else
+  report FAIL "RT.6 未知容器" "rc=$rrc"
+fi
+
+# 收尾必须**等它真的退出**再 rm：`rm` 按设计会拒绝运行中的容器，
+# kill 返回不等于状态已翻成 exited。直接 kill 完就 rm，偶发会留下一个还在跑的
+# rtc 污染后面按 `ps` 判断的用例——这正是本轮撞到过一次的偶发红。
+# 用轮询而不是固定 sleep：固定睡多久都只是猜，而轮询判的是真实状态。
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  HOME=$RTH "$WBOX_ABS" ps 2>/dev/null | awk '$1=="rtc"{found=1} END{exit !found}' || break
+  sleep 0.5
+done
+HOME=$RTH "$WBOX_ABS" rm rtc >/dev/null 2>&1
+if HOME=$RTH "$WBOX_ABS" ps -a 2>/dev/null | awk '$1=="rtc"{found=1} END{exit !found}'; then
+  report FAIL "RT.7 收尾清理" "rtc 未被清掉，会污染后面按 ps 判断的用例"
+else
+  report PASS "RT.7 收尾后不留 rtc 记录（不污染后续用例）"
+fi
+
+echo
 echo "=== EX wbox export / import（PRD F9.25）==="
 
 # export 导出的必须是**合并后的容器现状**：改过的以容器为准、删掉的不能复活、

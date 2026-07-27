@@ -507,12 +507,34 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
     spawn_reserved(name, &effective_args, reservation)
 }
 
+/// 拉起 detached supervisor 并打印容器名。
+///
+/// 打名字是为了 `NAME=$(wbox run -d ...)` 这种用法。`restart` 自己要按批次
+/// 汇报，所以走 [`spawn_reserved_quiet`]——两者共用同一条启动路径，只差这一行
+/// 输出；另写一条启动路径迟早会与这条产生行为差异。
 pub(crate) fn spawn_reserved(
     name: String,
     args: &[String],
-    mut reservation: crate::runstate::DetachedReservation,
+    reservation: crate::runstate::DetachedReservation,
 ) -> Result<u32> {
+    let shown = name.clone();
+    spawn_reserved_quiet(name, args, reservation)?;
+    println!("{}", shown);
+    Ok(0)
+}
+
+pub(crate) fn spawn_reserved_quiet(
+    _name: String,
+    args: &[String],
+    mut reservation: crate::runstate::DetachedReservation,
+) -> Result<()> {
     let dir = reservation.dir();
+    // 记下"怎么再启动一次"，好让 start/restart 对 `run -d` 起的容器同样可用
+    // （补这个之前只有 create 的容器能再启动）。写失败不该拦住容器启动——
+    // 容器照跑，代价只是这一个名字以后不能重启，所以出声而不中止。
+    if let Err(e) = crate::runstate::save_run_args(dir, args) {
+        eprintln!("wbox: 警告：未能记录重启配置，该容器退出后将无法 start/restart（{}）", e);
+    }
     let out = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDOUT)?;
     let err = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDERR)?;
 
@@ -536,11 +558,9 @@ pub(crate) fn spawn_reserved(
     let child = spawn_supervisor(&mut cmd)
         .map_err(|e| WboxError::spawn(format!("启动后台 wbox 失败：{}", e)))?;
     reservation.disarm();
-    // 只打名字，方便脚本 `NAME=$(wbox run -d ...)` 直接取用
-    println!("{}", name);
     // 不 wait：supervisor 要活得比我们久。它被 init 收养，不会成为僵尸。
     drop(child);
-    Ok(0)
+    Ok(())
 }
 
 /// 让 supervisor 脱离当前终端/会话，免得终端一关就被 SIGHUP 带走。
