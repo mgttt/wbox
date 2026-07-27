@@ -281,7 +281,8 @@ rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` �
 修复后，Win32 私有匿名映射直接由 `W32Mmap64` 在 guest 虚拟地址窗口内 commit，
 只有需要 snapshot-fork 文件身份的共享匿名映射保留临时文件路径；页表与映射
 保护失败也会明确报错，不再进入未定义行为。CI `30238223406` 的
-`WP.1-WP.5` 全部通过。
+`WP.1-WP.5` 全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
+Alpine 3.20 的 `/bin/sh`，执行 `uname` 与读取 `/etc/alpine-release` 均为 rc0。
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
 
@@ -442,7 +443,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
 | OCI pull/cache/config | active | Alpine 3.20 绝对 applet 链接与真实重拉通过；dangling symlink 和原子缓存仍有缺口 |
-| Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；portable 双 exe 在 AppContainer 内执行静态 BusyBox |
+| Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 210 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
