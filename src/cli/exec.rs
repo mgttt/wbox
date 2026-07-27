@@ -75,13 +75,7 @@ fn parse(args: &[String]) -> Result<ExecOptions<'_>> {
 
 pub fn cmd_exec(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::dir_for(opts.name)?;
-    if !dir.exists() {
-        return Err(WboxError::args(format!(
-            "没有名为 '{}' 的容器记录",
-            opts.name
-        )));
-    }
+    let dir = runstate::resolve_existing(opts.name)?;
     // 已退出的容器没有可附着的 namespace。必须明确拒绝——否则命令会跑在**宿主**
     // 上，而用户以为它跑在容器里，这比报错危险得多。
     if runstate::liveness(&dir) == Liveness::Exited {
@@ -187,18 +181,7 @@ fn exec_in_namespaces(_pid: u32, _cmd: &[&str]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
-    use std::path::PathBuf;
-
-    fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
-        let d = std::env::temp_dir().join(format!("wbox-exec-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let mut g = EnvGuard::new();
-        g.set("HOME", d.to_str().unwrap());
-        g.set("USERPROFILE", d.to_str().unwrap());
-        (d, g)
-    }
+    use crate::testenv::TempHome;
 
     #[test]
     fn parse_splits_name_and_command() {
@@ -222,38 +205,34 @@ mod tests {
     /// 而用户以为它跑在容器里。
     #[test]
     fn exited_container_is_rejected() {
-        let (home, _g) = tmp_home("exited");
+        let _home = TempHome::new("exited");
         let dir = runstate::dir_for("dead").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
         let err =
             cmd_exec(&["dead".to_string(), "--".to_string(), "true".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("已退出"), "{}", err);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 运行中但还没记下 container.pid（容器刚起）要给出可懂的提示。
     #[test]
     fn running_without_recorded_pid_explains() {
-        let (home, _g) = tmp_home("nopid");
+        let _home = TempHome::new("nopid");
         let _reg = runstate::register("live", &["/bin/true".into()], "(native)").unwrap();
         let err =
             cmd_exec(&["live".to_string(), "--".to_string(), "true".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("未记录容器内 pid"), "{}", err);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn unknown_container_is_an_error() {
-        let (home, _g) = tmp_home("unknown");
+        let _home = TempHome::new("unknown");
         assert!(cmd_exec(&["nope".to_string(), "--".to_string(), "true".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn name_cannot_escape_run_root() {
-        let (home, _g) = tmp_home("escape");
+        let _home = TempHome::new("escape");
         assert!(cmd_exec(&["../evil".to_string(), "--".to_string(), "true".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

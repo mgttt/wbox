@@ -47,18 +47,8 @@ pub fn cmd_rm(args: &[String]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
+    use crate::testenv::TempHome;
     use std::path::PathBuf;
-
-    fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
-        let d = std::env::temp_dir().join(format!("wbox-rm-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let mut g = EnvGuard::new();
-        g.set("HOME", d.to_str().unwrap());
-        g.set("USERPROFILE", d.to_str().unwrap());
-        (d, g)
-    }
 
     /// 造一条"已退出"的残留记录（有锁文件但无人持有）。
     fn plant_stale(name: &str) -> PathBuf {
@@ -78,55 +68,49 @@ mod tests {
 
     #[test]
     fn removes_exited_record() {
-        let (home, _g) = tmp_home("exited");
+        let _home = TempHome::new("exited");
         let dir = plant_stale("gone");
         assert_eq!(cmd_rm(&["gone".to_string()]).unwrap(), 0);
         assert!(!dir.exists(), "状态目录应已删除");
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 运行中的必须拒绝——rm 不会停容器，删了记录就等于放跑一个孤儿。
     #[test]
     fn refuses_running_container() {
-        let (home, _g) = tmp_home("running");
+        let _home = TempHome::new("running");
         let reg = runstate::register("live", &["/bin/true".into()], "(native)").unwrap();
         let err = cmd_rm(&["live".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("未能删除"), "{}", err);
         drop(reg);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn unknown_name_is_an_error() {
-        let (home, _g) = tmp_home("unknown");
+        let _home = TempHome::new("unknown");
         assert!(cmd_rm(&["nope".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 一个名字失败不该中断其余的：好的要真删掉，退出码仍反映有失败。
     #[test]
     fn continues_past_failures_and_still_reports() {
-        let (home, _g) = tmp_home("mixed");
+        let _home = TempHome::new("mixed");
         let ok_dir = plant_stale("good");
         let err = cmd_rm(&["missing".to_string(), "good".to_string()]).unwrap_err();
         assert!(!ok_dir.exists(), "失败的名字不该挡住后面能删的");
         assert!(format!("{}", err).contains("1 个"), "{}", err);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn rejects_flags_and_empty_args() {
-        let (home, _g) = tmp_home("args");
+        let _home = TempHome::new("args");
         assert!(cmd_rm(&[]).is_err());
         assert!(cmd_rm(&["--force".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 容器名不得逃出状态根目录（与 register 同一道防线）。
     #[test]
     fn name_cannot_escape_run_root() {
-        let (home, _g) = tmp_home("escape");
+        let _home = TempHome::new("escape");
         assert!(cmd_rm(&["../evil".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

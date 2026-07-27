@@ -41,13 +41,7 @@ fn parse<'a>(args: &'a [String]) -> Result<LogsOptions<'a>> {
 
 pub fn cmd_logs(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::dir_for(opts.name)?;
-    if !dir.exists() {
-        return Err(WboxError::args(format!(
-            "没有名为 '{}' 的容器记录",
-            opts.name
-        )));
-    }
+    let dir = runstate::resolve_existing(opts.name)?;
     let file = if opts.stderr {
         runstate::LOG_STDERR
     } else {
@@ -77,18 +71,7 @@ pub fn cmd_logs(args: &[String]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
-    use std::path::PathBuf;
-
-    fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
-        let d = std::env::temp_dir().join(format!("wbox-logs-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let mut g = EnvGuard::new();
-        g.set("HOME", d.to_str().unwrap());
-        g.set("USERPROFILE", d.to_str().unwrap());
-        (d, g)
-    }
+    use crate::testenv::TempHome;
 
     #[test]
     fn parse_accepts_name_and_stderr_flag() {
@@ -104,36 +87,32 @@ mod tests {
 
     #[test]
     fn reads_stdout_log() {
-        let (home, _g) = tmp_home("read");
+        let _home = TempHome::new("read");
         let dir = runstate::dir_for("c").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(runstate::LOG_STDOUT), b"hello\n").unwrap();
         assert_eq!(cmd_logs(&["c".to_string()]).unwrap(), 0);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 前台容器没有日志文件——要给出可懂的解释，不能让用户以为"没输出"。
     #[test]
     fn missing_log_explains_detach_requirement() {
-        let (home, _g) = tmp_home("nolog");
+        let _home = TempHome::new("nolog");
         let dir = runstate::dir_for("fg").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let err = cmd_logs(&["fg".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("--detach"), "{}", err);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn unknown_container_is_an_error() {
-        let (home, _g) = tmp_home("unknown");
+        let _home = TempHome::new("unknown");
         assert!(cmd_logs(&["nope".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn name_cannot_escape_run_root() {
-        let (home, _g) = tmp_home("escape");
+        let _home = TempHome::new("escape");
         assert!(cmd_logs(&["../evil".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

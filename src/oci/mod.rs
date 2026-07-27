@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn image_dir_never_escapes_cache_root() {
         use std::path::Component;
-        let home = crate::cli::TempHome::new("oci-escape");
+        let home = crate::testenv::TempHome::new("oci-escape");
         let root = home.dir.join(".wbox").join("images");
         for hostile in [
             "../evil",

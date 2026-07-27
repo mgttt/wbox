@@ -107,73 +107,10 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
     }
 }
 
-/// 测试共享脚手架：临时 HOME（构造期间把 HOME 指向独立临时目录，
-/// Drop 时恢复并清理；cache_root 优先 USERPROFILE，故同时摘掉它）。
-///
-/// HOME 是**进程级**状态：并行用例各自指向自己的临时目录必然互踩（且一方的
-/// 清理会删掉另一方正在读的文件）。因此内部持有 [`crate::testenv::EnvGuard`]，
-/// 存活期间独占进程环境——用例之间由此天然串行。需要额外临时环境变量时，
-/// 经 [`TempHome::env`] 借出**同一把**守卫，切勿另起 `EnvGuard`（会自死锁）。
-#[cfg(test)]
-pub(crate) struct TempHome {
-    pub dir: std::path::PathBuf,
-    env: crate::testenv::EnvGuard,
-}
-
-#[cfg(test)]
-impl TempHome {
-    pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "wbox-test-home-{}-{}",
-            std::process::id(),
-            tag
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut env = crate::testenv::EnvGuard::new();
-        env.set("HOME", &dir);
-        env.remove("USERPROFILE");
-        Self { dir, env }
-    }
-
-    /// 借出内部环境守卫：用例需要额外临时环境变量时经它设置（Drop 时一并还原）。
-    pub fn env(&mut self) -> &mut crate::testenv::EnvGuard {
-        &mut self.env
-    }
-
-    /// 在缓存布局中安放一个假镜像（rootfs + 元数据），返回缓存目录。
-    pub fn plant_fake_image(&self, registry: &str, name_flat: &str, tag: &str) -> std::path::PathBuf {
-        let dir = self
-            .dir
-            .join(".wbox/images")
-            .join(registry)
-            .join(name_flat)
-            .join(tag);
-        std::fs::create_dir_all(dir.join("rootfs/bin")).unwrap();
-        std::fs::write(dir.join("rootfs/bin/sh"), b"fake").unwrap();
-        std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
-        std::fs::write(dir.join("layers.json"), r#"["sha256:l1","sha256:l2"]"#).unwrap();
-        std::fs::write(
-            dir.join("config.json"),
-            r#"{"config":{"Env":["PATH=/usr/bin","APP_TOKEN=hunter2"],"Cmd":["-l"],"Entrypoint":["/bin/sh"],"WorkingDir":"/root"}}"#,
-        )
-        .unwrap();
-        dir
-    }
-}
-
-#[cfg(test)]
-impl Drop for TempHome {
-    fn drop(&mut self) {
-        // 只清目录；环境变量由字段 `env` 的 Drop 还原（本 Drop 先于字段执行，
-        // 故清理期间 HOME 仍指向本目录，不会误删他人）。
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testenv::TempHome;
     use crate::{backend, oci};
     use backend::Backend;
     use image::cmd_image_show;

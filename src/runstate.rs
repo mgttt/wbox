@@ -388,6 +388,31 @@ fn write_meta_entry(dir: &Path, entry: Entry) -> Result<()> {
         .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))
 }
 
+/// 读取状态目录里的 `meta.json`。读不懂返回 `None`——状态目录是用户可见的
+/// 普通目录，手改、残留、跨版本都可能出现，调用方按"这条不存在"处理即可。
+///
+/// **`meta.json` 只能由这一处解析**：`stop` 曾自己手写一份取 pid 的 JSON 解析，
+/// 于是同一个文件有了两个解析器；字段一改就得记得两边都改，而漏掉的那边只会
+/// 在运行时安静地取到 `None`。
+pub fn read_meta(dir: &Path) -> Option<Entry> {
+    Entry::from_json(&std::fs::read_to_string(dir.join("meta.json")).ok()?)
+}
+
+/// 解析容器名并要求该记录**存在**，返回状态目录。
+///
+/// `logs` / `stop` / `exec` / `rm` 开头都要做同一件事：名字合法性（挡路径分隔符）
+/// 加"有没有这条记录"，且报错文案必须一致——四份各写一遍时，任何一处措辞改动
+/// 都会让用户看到自相矛盾的提示。存活与否**不在这里判**：三个命令对"已退出"
+/// 的态度根本不同（`stop` 视作成功、`exec` 必须拒绝、`rm` 恰恰只接受它），
+/// 硬凑成一个函数只会逼调用方传布尔开关。
+pub fn resolve_existing(name: &str) -> Result<PathBuf> {
+    let dir = dir_for(name)?;
+    if !dir.exists() {
+        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+    }
+    Ok(dir)
+}
+
 /// 删除一条已退出的容器记录（`wbox rm`）。
 ///
 /// **运行中的一律拒绝**：`rm` 只是删记录，并不会停掉容器；真删了只会让一个
@@ -464,10 +489,7 @@ pub fn list() -> Result<Vec<(Entry, Liveness)>> {
         if !dir.is_dir() {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(dir.join("meta.json")) else {
-            continue;
-        };
-        let Some(entry) = Entry::from_json(&text) else {
+        let Some(entry) = read_meta(&dir) else {
             continue;
         };
         out.push((entry, liveness(&dir)));
@@ -480,18 +502,8 @@ pub fn list() -> Result<Vec<(Entry, Liveness)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
+    use crate::testenv::TempHome;
     use std::process::{Child, Command};
-
-    fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
-        let d = std::env::temp_dir().join(format!("wbox-rs-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let mut g = EnvGuard::new();
-        g.set("HOME", d.to_str().unwrap());
-        g.set("USERPROFILE", d.to_str().unwrap());
-        (d, g)
-    }
 
     /// 锁的语义就是存活判定的全部依据，两个平台都必须成立：
     /// 持有期间判 Running，释放后判 Exited。
@@ -500,7 +512,7 @@ mod tests {
     /// `share_mode(0)` 那半实现不是"写完就算"，而是真被跑过。
     #[test]
     fn lock_reflects_owner_liveness() {
-        let (home, _g) = tmp_home("lock");
+        let _home = TempHome::new("lock");
         let reg = register("c1", &["/bin/true".into()], "(native)").unwrap();
         let dir = reg.dir().to_path_buf();
         assert_eq!(liveness(&dir), Liveness::Running, "持锁期间应判为运行中");
@@ -509,26 +521,24 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
         assert_eq!(liveness(&dir), Liveness::Exited, "无人持锁时应判为已退出");
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 正常退出后状态目录应当消失，不给 `ps` 留垃圾。
     #[test]
     fn registration_cleans_up_on_drop() {
-        let (home, _g) = tmp_home("cleanup");
+        let _home = TempHome::new("cleanup");
         let dir = {
             let reg = register("c2", &["/bin/true".into()], "(native)").unwrap();
             reg.dir().to_path_buf()
         };
         assert!(!dir.exists(), "drop 后状态目录应已删除：{}", dir.display());
         assert!(list().unwrap().is_empty());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 同名且存活 → 必须报错，不能覆盖（PRD F8.c）。
     #[test]
     fn duplicate_running_name_is_rejected() {
-        let (home, _g) = tmp_home("dup");
+        let _home = TempHome::new("dup");
         let _held = register("dup", &["/bin/true".into()], "(native)").unwrap();
         let err = register("dup", &["/bin/true".into()], "(native)").unwrap_err();
         let m = format!("{}", err);
@@ -537,13 +547,12 @@ mod tests {
         // 所以文案不该提它。
         assert!(m.contains("换个 --name"), "报错要给出可行解法：{}", m);
         assert!(!m.contains("wbox rm"), "不该建议一条必然被拒的命令：{}", m);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 已亡的残留可以被同名容器复用——否则崩过一次就再也用不了这个名字。
     #[test]
     fn stale_entry_is_reused() {
-        let (home, _g) = tmp_home("stale");
+        let _home = TempHome::new("stale");
         let dir = dir_for("s1").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
@@ -555,13 +564,12 @@ mod tests {
         assert_eq!(liveness(&dir), Liveness::Exited);
         let reg = register("s1", &["/bin/true".into()], "(native)").unwrap();
         assert_eq!(liveness(reg.dir()), Liveness::Running);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// `list` 要能跳过坏条目而不是整个失败——状态目录是用户可见的普通目录。
     #[test]
     fn list_skips_unreadable_entries() {
-        let (home, _g) = tmp_home("bad");
+        let _home = TempHome::new("bad");
         let root = run_root().unwrap();
         std::fs::create_dir_all(root.join("broken")).unwrap();
         std::fs::write(root.join("broken/meta.json"), "{ not json").unwrap();
@@ -570,18 +578,16 @@ mod tests {
         let got = list().unwrap();
         assert_eq!(got.len(), 1, "只应列出可读的那条：{:?}", got);
         assert_eq!(got[0].0.name, "good");
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// 容器名不得逃出状态根目录。
     #[test]
     fn name_cannot_escape_run_root() {
-        let (home, _g) = tmp_home("escape");
+        let _home = TempHome::new("escape");
         for bad in ["../evil", "a/b", "..", r"a\b"] {
             assert!(dir_for(bad).is_err(), "'{}' 应被拒绝", bad);
         }
         assert!(dir_for("ok-name_1").is_ok());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -639,7 +645,8 @@ mod tests {
 
     #[test]
     fn cross_process_remove_register_is_atomic() {
-        let (home, _g) = tmp_home("cross-process-race");
+        let tmp = TempHome::new("cross-process-race");
+        let home = &tmp.dir;
         let sync = home.join("sync");
         std::fs::create_dir_all(&sync).unwrap();
         let stale = dir_for("race").unwrap();
@@ -653,8 +660,8 @@ mod tests {
                 .arg("--exact")
                 .arg("runstate::tests::cross_process_actor")
                 .arg("--nocapture")
-                .env("HOME", &home)
-                .env("USERPROFILE", &home)
+                .env("HOME", home)
+                .env("USERPROFILE", home)
                 .env("WBOX_RUNSTATE_ACTOR", mode)
                 .env("WBOX_RUNSTATE_SYNC", &sync);
             if mode == "remove" {
@@ -684,7 +691,6 @@ mod tests {
         std::fs::write(sync.join("release-register"), b"").unwrap();
         wait_child(registrar, "register");
         assert!(!stale.exists());
-        let _ = std::fs::remove_dir_all(&home);
     }
 }
 

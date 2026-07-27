@@ -200,7 +200,7 @@ pub(super) fn cmd_image_pull(args: &[String]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::TempHome;
+    use crate::testenv::TempHome;
 
     #[test]
     fn image_subcommand_arg_errors() {

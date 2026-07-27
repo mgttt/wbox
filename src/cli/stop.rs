@@ -53,13 +53,7 @@ fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
 
 pub fn cmd_stop(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::dir_for(opts.name)?;
-    if !dir.exists() {
-        return Err(WboxError::args(format!(
-            "没有名为 '{}' 的容器记录",
-            opts.name
-        )));
-    }
+    let dir = runstate::resolve_existing(opts.name)?;
     if runstate::liveness(&dir) == Liveness::Exited {
         // 已经停了不算错：stop 的意图是"让它别再跑"，这个状态已经满足。
         // 报错只会让 `wbox stop x || true` 这类脚本写得别扭。
@@ -67,7 +61,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
         return Ok(0);
     }
 
-    let pid = read_pid(&dir).ok_or_else(|| {
+    let pid = runstate::read_meta(&dir).map(|e| e.pid).ok_or_else(|| {
         WboxError::args(format!(
             "容器 '{}' 的 meta.json 不可读，无法确定要停的进程",
             opts.name
@@ -98,12 +92,6 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
     )))
 }
 
-fn read_pid(dir: &std::path::Path) -> Option<u32> {
-    let text = std::fs::read_to_string(dir.join("meta.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    u32::try_from(v.get("pid")?.as_u64()?).ok()
-}
-
 /// 轮询锁直到容器退出。**以锁为准而不是以 pid 为准**：pid 会被复用，
 /// 而锁被释放才真正等价于"持有它的那个 wbox 没了"。
 fn wait_exit(dir: &std::path::Path, secs: u64) -> bool {
@@ -122,18 +110,7 @@ fn wait_exit(dir: &std::path::Path, secs: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testenv::EnvGuard;
-    use std::path::PathBuf;
-
-    fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
-        let d = std::env::temp_dir().join(format!("wbox-stop-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        let mut g = EnvGuard::new();
-        g.set("HOME", d.to_str().unwrap());
-        g.set("USERPROFILE", d.to_str().unwrap());
-        (d, g)
-    }
+    use crate::testenv::TempHome;
 
     #[test]
     fn parse_reads_name_and_timeout() {
@@ -155,7 +132,7 @@ mod tests {
     /// 停一个已经停了的容器不该报错——否则 `wbox stop x` 在脚本里没法幂等使用。
     #[test]
     fn stopping_exited_container_is_not_an_error() {
-        let (home, _g) = tmp_home("already");
+        let _home = TempHome::new("already");
         let dir = runstate::dir_for("dead").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
@@ -165,20 +142,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cmd_stop(&["dead".to_string()]).unwrap(), 0);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn unknown_container_is_an_error() {
-        let (home, _g) = tmp_home("unknown");
+        let _home = TempHome::new("unknown");
         assert!(cmd_stop(&["nope".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
     fn name_cannot_escape_run_root() {
-        let (home, _g) = tmp_home("escape");
+        let _home = TempHome::new("escape");
         assert!(cmd_stop(&["../evil".to_string()]).is_err());
-        let _ = std::fs::remove_dir_all(&home);
     }
 }
