@@ -106,13 +106,31 @@ cgroup 的写权限、控制器下发和 no-internal-process 规则，不能仅�
 且 wbox 被放进 supervisor leaf 后仍退化到 rlimit，证明剩余问题确实出在 wbox
 自身布局，而非环境。
 
-代码已按此改造（`try_cgroup_plan`）：
+核心约束是：写限额的 cgroup，其**父级**必须已 enable `subtree_control`，
+而 enable 的前提是该父级没有直接进程。代码按两种策略依次尝试
+（`try_cgroup_plan`）：
+
+策略 A（首选，谁都不用挪）——target 建成 `own` 的兄弟：
 
 ```
-own/                 委派根：不放进程，控制器由此下发
-  ├── wbox-supervisor/   wbox 把自己挪进来
-  └── wbox-<pid>/        限额写这里，guest 加入这里
+parent/
+  ├── own/          wbox 与它的调用者都在这儿，不动
+  └── wbox-<pid>/   限额写这里
 ```
+
+策略 B（parent 不可写时兜底）——在 `own` 内部自建两个 leaf：
+
+```
+own/
+  ├── wbox-supervisor/   wbox 把自己挪进来
+  └── wbox-<pid>/        限额写这里
+```
+
+**策略 B 有一个前提容易被忽略**：`own` 里必须只有 wbox 自己。否则挪走 wbox
+之后 `own` 仍有别的进程，enable 依旧 `EBUSY`。典型情形就是从 shell 启动
+wbox —— shell 留在同一个 cgroup 里。这一点是被门禁抓出来的：探针里 shell
+`exec` 成了 wbox，只剩一个进程，能过；门禁里测试脚本的 shell 还在，就过不了。
+策略 A 正是为覆盖这种（更常见的）情形而加的。
 
 任一步失败（挪不动自己、下发不了控制器、写不了 `*.max`）都退回 rlimit 并清理
 已创建的目录，而不是硬报错。

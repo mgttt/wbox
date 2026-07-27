@@ -663,6 +663,73 @@ fn build_limit_plan_with_cgroup(
 ///
 /// 部分写成功后又失败时会把刚建的 cgroup 目录删掉：此时还没有任何进程加入，
 /// 留着只是垃圾，且会让下次同 pid 的探测误判。
+/// 策略 A：把限额 target 建成 `own` 的**兄弟**（挂在 `own` 的父级下）。
+///
+/// 这是最省事的形态——**谁都不用挪进程**，因此不受"own 里还有别的进程"影响
+/// （从 shell 启动 wbox 时，shell 就留在 own 里，策略 B 会因此失败）。
+/// 代价是需要对 `own` 的父级有写权限；委派根把子树交给我们时通常满足，
+/// 不满足就返回 `None` 让调用方退到策略 B。
+fn try_sibling_layout(spec: &RunSpec, own: &std::path::Path) -> Result<Option<LimitPlan>> {
+    let Some(parent) = own.parent() else {
+        return Ok(None);
+    };
+    // 不越过 cgroup v2 挂载点：/sys/fs/cgroup 之上不是我们该碰的地方
+    if !parent.join("cgroup.controllers").is_file() {
+        return Ok(None);
+    }
+    let target = parent.join(format!("wbox-{}", std::process::id()));
+    if std::fs::create_dir_all(&target).is_err() {
+        return Ok(None); // 父级不可写：交给策略 B
+    }
+    let cleanup_on_fail = || {
+        let _ = std::fs::remove_dir(&target);
+        Ok(None)
+    };
+    let want = needed_controllers(&spec.limits);
+    if !want.is_empty()
+        && std::fs::write(parent.join("cgroup.subtree_control"), want.join(" ")).is_err()
+    {
+        return cleanup_on_fail();
+    }
+    match write_limits(spec, &target) {
+        Some(wrote) => {
+            if spec.verbose {
+                verbose_kv("限额（cgroup v2）", wrote.join(" "));
+                verbose_kv("cgroup（guest）", target.display());
+                verbose_kv("cgroup 布局", "兄弟位置（wbox 自身不迁移）");
+            }
+            Ok(Some(LimitPlan::Cgroup {
+                procs: cstr(&target.join("cgroup.procs").to_string_lossy())?,
+                cleanup: vec![target],
+            }))
+        }
+        None => cleanup_on_fail(),
+    }
+}
+
+/// 往 target 写各项限额。全成功返回写了什么（供 -V 打印），任一失败返回 None。
+fn write_limits(spec: &RunSpec, target: &std::path::Path) -> Option<Vec<String>> {
+    let l = &spec.limits;
+    let mut wrote = Vec::new();
+    if l.memory_mb > 0 {
+        let v = (l.memory_mb * 1024 * 1024).to_string();
+        std::fs::write(target.join("memory.max"), &v).ok()?;
+        wrote.push(format!("memory.max={}", v));
+    }
+    if l.max_procs > 0 {
+        std::fs::write(target.join("pids.max"), l.max_procs.to_string()).ok()?;
+        wrote.push(format!("pids.max={}", l.max_procs));
+    }
+    if l.cpu_pct > 0 {
+        // cpu.max 格式："<quota_us> <period_us>"；period 取默认 100ms
+        let period = 100_000u64;
+        let quota = period * u64::from(l.cpu_pct) / 100;
+        std::fs::write(target.join("cpu.max"), format!("{} {}", quota, period)).ok()?;
+        wrote.push(format!("cpu.max={}/{}", quota, period));
+    }
+    Some(wrote)
+}
+
 fn try_cgroup_plan(
     spec: &RunSpec,
     base: Option<std::path::PathBuf>,
@@ -673,13 +740,31 @@ fn try_cgroup_plan(
     };
 
     // ---- 布局（实机取证过，见 docs/architecture.md §3.3）----
-    //   own/                 委派根：**不能有进程**，控制器从这里下发
-    //     ├── supervisor/    wbox 自己挪进来（leaf，不开 subtree_control）
-    //     └── wbox-<pid>/    限额写这里，guest 加入这里（supervisor 的**兄弟**）
+    // 核心约束：写限额的那个 cgroup，其**父级**必须已 enable subtree_control，
+    // 而 enable 的前提是该父级**没有直接进程**。
     //
-    // 旧布局是 own/wbox-<pid> 且 wbox 留在 own —— 那要求对"自己正待着的
-    // cgroup" enable subtree_control，内核直接 EBUSY；反过来先 enable 再进
-    // 进程则是 EIO。两个方向都堵死，所以旧布局在 cgroup v2 下根本不可能工作。
+    // 策略 A（首选）：把 target 建成 own 的**兄弟**（挂在 own 的父级下）。
+    //   parent/
+    //     ├── own/          wbox 和它的调用者都在这儿，不用动
+    //     └── wbox-<pid>/   限额写这里
+    //   好处是**谁都不用挪**。这条能成立的前提是 parent 可写且已下发控制器
+    //   —— 委派根把子树交给我们时通常就是这个形状。
+    //
+    // 策略 B（兜底）：parent 不可写时，退回"在 own 内部自建两个 leaf"：
+    //   own/
+    //     ├── wbox-supervisor/   wbox 把自己挪进来
+    //     └── wbox-<pid>/        限额写这里
+    //   代价是要求 own 里**只有 wbox 自己**——否则挪走 wbox 之后 own 仍有
+    //   别的进程（典型情况：从 shell 里启动 wbox，shell 留在同一个 cgroup），
+    //   enable 依旧 EBUSY。实测正是这么暴露出来的：探针里 shell `exec` 成了
+    //   wbox 故只有一个进程，能过；而门禁里脚本 shell 还在，就过不了。
+    //
+    // 无论如何都不能用旧布局（own/wbox-<pid> 且 wbox 留在 own）：那要求对
+    // "自己正待着的 cgroup" enable subtree_control，内核 EBUSY；反过来先
+    // enable 再塞进程则 EIO。两个方向都堵死。
+    if let Some(plan) = try_sibling_layout(spec, &own)? {
+        return Ok(Some(plan));
+    }
     let supervisor = own.join("wbox-supervisor");
     let target = own.join(format!("wbox-{}", std::process::id()));
     if std::fs::create_dir_all(&supervisor).is_err() || std::fs::create_dir_all(&target).is_err() {
