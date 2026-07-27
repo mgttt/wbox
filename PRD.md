@@ -82,7 +82,8 @@ wbox
 特征能力与 wbox 的实际状态，能力上限受 §2.3 约束时如实标注。
 
 状态记法：`有` = 已实现且有持续门禁；`部分` = 可用但有明确缺口；
-`无` = 未实现；`不做` = 撞天花板或属非目标。
+`进行中` = 已有组件级门禁但尚未对用户开放；`无` = 未实现；
+`不适用` = 这一格的形态下该能力没有意义；`不做` = 撞天花板或属非目标。
 
 #### Q1 Windows 宿主 × Windows 程序 —— 对标 Sandboxie-Plus
 
@@ -95,9 +96,13 @@ wbox
 | 生命周期（ps/stop/kill/top/rm/logs/exec/inspect/wait）| 有 | F8 全套，含 F1.7.9 `kill` 与 F1.7.10 `top` |
 | **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动；wbox 不装驱动（天花板一）。取证见 §4.9 W3 |
 | **注册表虚拟化** | **不做** | 同上 |
-| 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念 |
-| 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子 |
+| 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念；随 §4.9 W3 的结论而定 |
+| 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子，撞天花板一 |
 | GUI 程序沙箱 | 不做 | §2.3 非目标 |
+| `--restart` 重启策略 | 有 | 与 Q3 同一实现（循环在 supervisor 内） |
+| 卷挂载 `-v` | 不做 | 原生程序走宿主文件系统，本就没有"挂载"这一层；隔离靠 ACL 授权 |
+| `--user` / `--cap-*` / seccomp / healthcheck | 不做 | 均为 Linux 原语（uid 映射 / capability / seccomp-bpf / setns 探针），AppContainer 无对应语义，一律明确报错 |
+| compose 多服务 | 不做 | 服务间靠共享 network namespace 互通（F9.11），Windows 无对应原语；单服务 compose 文件可用 |
 
 **这一格是四象限里差距最大的**，且差距的主因不是工作量而是架构前提：
 不装驱动就做不到驱动级别的重定向完整性。
@@ -111,8 +116,11 @@ wbox
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 私有可写层（远端已实现） |
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
-| 卷挂载 `-v` | 无 | 受天花板一牵连：Windows 侧无路径重定向手段，`-v` 明确报错 |
+| 卷挂载 `-v` | 进行中 | **不走 OS 路径重定向**（那撞天花板一），而是 broker 逐项打开对象 HANDLE + Blink VFS 做数据面：`MS_RDONLY` 全局写门禁与挂起期 HANDLE 注入均已有门禁（F9.1、§4.9），CLI 尚未开放 |
 | 端口映射 `-p` | 无 | Linux 侧的用户态转发依赖 `setns`，Windows 无对应原语 |
+| 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
+| `--cap-*` / seccomp / healthcheck | 不做 | 同 Q1：均为 Linux 原语，明确报错 |
+| compose 多服务 | 不做 | 同 Q1：依赖共享 netns |
 | 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED` |
 | restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
 | `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
@@ -158,6 +166,29 @@ wbox
 | `wineprefix` 与宿主隔离 | 有 | 用专用的 `~/.wbox/wineprefix`，不碰用户自己的 `~/.wine` |
 | `wineprefix` **容器之间**隔离 | 有 | 每容器一个 prefix，置于其状态目录内，随容器记录一并清理（§4.9 L2）|
 | GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
+| 隔离/限额/身份/capability/seccomp/健康检查 | 有 | **复用 Q3 同一条 Linux 链路**：wine 目标走宿主程序模式，`--user`/`--cap-*`/`--seccomp-deny`/`--health-cmd`/`--restart`/`-v`/`-p` 一并生效（已实测宿主模式下 `CapEff` 清零、`Seccomp=2`、uid 改写生效）|
+| overlay 可写层 | 不适用 | F9.12 只对镜像模式（换根）有意义；wine 目标不换根 |
+
+### 2.4.1 每格的下一步
+
+上面的表说的是**现在在哪**，这一节说**接下来往哪走**。没有这一节，"对标"就只是
+一张状态表，看不出哪些缺口是打算补的、哪些是永远不补的。
+
+| 象限 | 还差什么 | 打算怎么办 | 归属 |
+|---|---|---|---|
+| Q1 Sandboxie | 文件/注册表写重定向 | **取证而非实现**：用户态能逼近到什么程度，结论允许是"只能拒绝、不能重定向" | §4.9 W3，Windows agent |
+| Q1 Sandboxie | 命名沙箱内容、Forced Programs | 随 W3 结论而定；若 W3 判定用户态只能拒绝，这两项一并转为**不做** | 同上 |
+| Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
+| Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
+| Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
+| Q3 Podman | 镜像**分层**存储 | 要让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push 四条路径 | §4.9 L5 |
+| Q3 Podman | pod（共享 IPC/UTS 的一等抽象） | F9.11 的共享 netns 已覆盖大半用途；是否值得再抽一层待评估 | §4.9 L6 |
+| Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
+| Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
+| Q4 Wine | GUI / DirectX / .NET | **不做**：§2.3 非目标 | — |
+
+一条判断原则：**凡是要装驱动、要常驻服务、要虚拟化的，都不补**（§2.2/§2.5）。
+补的只有那些在"免安装、无服务、无驱动"前提下真能做成的。
 
 ### 2.5 两条硬天花板
 
@@ -1180,7 +1211,9 @@ TODO-PLAN
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
-└── L4 compose 子集                           [任一 agent] 已完成（F9.14）
+├── L4 compose 子集                           [任一 agent] 已完成（F9.14）
+├── L5 镜像分层存储                           [Linux agent] 待认领
+└── L6 pod 抽象是否值得做                     [任一 agent] 待评估
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -1281,6 +1314,34 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 无 C 编译"门槛——它满足）。网络语义：同一 compose 文件里的服务默认
 `--network container:<第一个服务>` 共享 netns（F9.11 已就绪），经 localhost
 互访，这与 docker 的 bridge+DNS 不同但对 sidecar 场景等价，文档要直说。
+
+### L5 镜像分层存储 `[Linux agent]` `[待认领]`
+
+**先分清它和 F9.12 不是一回事。** F9.12 解决的是**运行期**写入污染共享缓存；
+这一条要的是**存储期**保留镜像的层结构，两者的产物、生命周期、失效条件都不同。
+
+要做的核心改动是缓存布局：现在只存解包后的 `rootfs/`，pull 时层 tar 解开就丢。
+分层存储要求额外保存**原始压缩层 blob**（外加解包结果，或改为按需组装）。
+牵动四条路径，每条都要重新想清楚：
+
+- `pull`：多存一份 blob，磁盘占用大致翻倍——要不要做去重/GC 得先定。
+- `build`：`FROM` 现在整份复制 rootfs；有了层就该改成引用基础层 + 新增层。
+- `overlay`（F9.12）：lowerdir 可以从单一 rootfs 变成多层叠加，语义更接近 docker。
+- `push`（F9.13）：现在只能 flatten 成单层，有了原始层才能原样回推、与上游共享层。
+
+**判据**：pull 一个多层镜像后能原样 push 回去且 manifest digest 不变；
+`FROM` 复用基础层时磁盘占用明显低于整份复制。达不到这两条就不算做完。
+
+### L6 pod 抽象是否值得做 `[任一 agent]` `[待评估]`
+
+**先评估再动手，结论允许是"不做"。** podman 的 pod 是共享 IPC/UTS/network 的
+一等抽象。wbox 已有的 F9.11（共享 netns）覆盖了其中最常用的那部分，
+F9.14 的 compose 又提供了成组管理。
+
+要回答的问题只有一个：**去掉网络之后，还剩多少真实需求？** 共享 IPC
+（`CLONE_NEWIPC`）与 UTS（主机名）在容器场景里用得远比网络少。若答案是"不多"，
+就把这一格记为**不做**，并在 §2.4 写明理由——那同样是有价值的结论，
+省得后来人反复问"为什么没有 pod"。
 
 ### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 

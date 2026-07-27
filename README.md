@@ -44,6 +44,8 @@ Portable Windows 发布包包含两个文件：
 | Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（平铺单层）/`compose` 子集；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
 | Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖（wineprefix 已按容器隔离） |
 
+每格的**下一步**（哪些缺口打算补、哪些永远不补）见 `PRD.md` §2.4.1。
+
 **两条硬天花板**（不说破的话"对标"只是口号）：
 
 1. wbox **不装内核驱动**——这是"免安装、不要管理员权限"的直接代价。因此

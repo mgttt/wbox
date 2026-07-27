@@ -119,6 +119,14 @@ fn up(o: &Options) -> Result<u32> {
              起来后用 wbox logs <项目>_<服务> 看输出",
         ));
     }
+    // 多服务依赖 `--network container:` 共享 netns，而那只在 Linux 可用。
+    // **必须在启动任何服务之前**检查：否则第一个服务已经起来了，第二个才炸，
+    // 留下一个半开的项目要用户自己收拾——比一开始就说不行糟得多。
+    WboxError::require_linux(
+        project.services.len() > 1,
+        "compose 多服务编排",
+        "服务之间靠共享 network namespace 互通（F9.11），Windows 侧没有对应原语；         单服务的 compose 文件不受此限",
+    )?;
     // 第一个服务持有网络，其余加入它（见 compose 模块文档的网络语义说明）。
     let owner = project
         .services
@@ -242,6 +250,39 @@ mod tests {
         let m = format!("{}", up(&o).unwrap_err());
         assert!(m.contains("-d"), "{}", m);
         assert!(m.contains("stdio"), "要说清为什么：{}", m);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 多服务在非 Linux 上要**一个都不起**就报错。半开的项目比直接拒绝糟得多：
+    /// 第一个服务已经在跑，用户还得自己去收拾。
+    #[test]
+    fn multi_service_is_rejected_up_front_off_linux() {
+        let dir = std::env::temp_dir().join(format!("wbox-cmulti-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("compose.yaml");
+        std::fs::write(
+            &f,
+            "services:\n  a:\n    image: x\n  b:\n    image: y\n",
+        )
+        .unwrap();
+        let o = Options {
+            file: Some(f.to_string_lossy().to_string()),
+            project: Some("t".into()),
+            detach: true,
+            rest: Vec::new(),
+        };
+        let r = up(&o);
+        if cfg!(target_os = "linux") {
+            // Linux 上这条检查放行；真正启动会因为镜像 'x' 不存在而失败，
+            // 那是另一回事，这里只确认不是被 require_linux 挡下的。
+            if let Err(e) = r {
+                assert!(!format!("{}", e).contains("只在 Linux"), "{}", e);
+            }
+        } else {
+            let m = format!("{}", r.unwrap_err());
+            assert!(m.contains("只在 Linux"), "{}", m);
+            assert!(m.contains("单服务"), "要说清单服务不受限：{}", m);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

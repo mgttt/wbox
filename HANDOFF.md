@@ -51,7 +51,7 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **340 passed / 0 failed**
+- `cargo test --locked` → **342 passed / 0 failed**
 - `scripts/test-linux-backend.sh` → **109 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
@@ -72,8 +72,18 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 - **pod**（多容器共享 IPC/UTS 的一等抽象）。F9.11 的共享 netns 已覆盖大半用途。
 - 四象限里 Q1/Q2 的缺口属 Windows 侧，见 §4.9 W3。
 
-下一轮如果没有明确目标，优先做**巩固**：跑一遍 `PRD.md` §2.4 四象限表逐行核对
-实况，以及在 CI 上确认 `WBOX_LBE_REQUIRE=1` 的门禁是真绿。
+§2.4 的四象限表已逐行核对过实况，并新增 **§2.4.1「每格的下一步」**——那张表
+说明哪些缺口打算补、哪些永远不补（判断原则：要装驱动 / 要常驻服务 / 要虚拟化
+的一律不补）。新立的两个条目：
+
+- **L5 镜像分层存储**（待认领，Linux）：与 F9.12 的运行期可写层**不是一回事**，
+  要改缓存布局保存原始压缩层 blob，牵动 pull/build/overlay/push 四条路径。
+  判据：多层镜像 pull 后能原样 push 回去且 manifest digest 不变。
+- **L6 pod**（待评估）：结论允许是"不做"。F9.11 已覆盖共享网络这个主要用途，
+  要回答的是"去掉网络之后还剩多少真实需求"。
+
+Q2 的 `-v` 由 Windows agent 在推进（broker 打开对象 HANDLE + Blink VFS 数据面，
+**不走** OS 路径重定向），别去碰那块。
 
 ### ~~L3 `wbox push`~~ —— 已完成（F9.13，门禁 PSH.1–PSH.5）
 
