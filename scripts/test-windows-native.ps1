@@ -62,7 +62,7 @@ try {
     Invoke-Wbox "WN.2 Windows PowerShell" 0 "POWERSHELL_NATIVE_OK:42" @(
         "run", "--name", $names.PowerShell, "--workdir", $system32, "--",
         $powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-        "Write-Output ('POWERSHELL_NATIVE_OK:' + (6 * 7))"
+        "[Console]::WriteLine('POWERSHELL_NATIVE_OK:' + (6 * 7))"
     ) | Out-Null
 
     Invoke-Wbox "WN.3 hostname.exe" 0 "" @(

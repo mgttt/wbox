@@ -110,9 +110,13 @@ scripts/test-windows-native.ps1 -Wbox target/debug/wbox.exe
 ```
 
 该矩阵只使用 Windows 自带程序与本地临时目录，不依赖公网。它覆盖 `cmd.exe`、
-Windows PowerShell、`hostname.exe`、`whoami.exe`、子进程、显式可写工作目录、
+Windows PowerShell 解释器/CLR、`hostname.exe`、`whoami.exe`、子进程、显式可写工作目录、
 退出码转发和 `ps --all` 状态清理。网络拒绝/放行属于独立行为门禁，不以该矩阵
 通过替代。
+
+`WN.2` 使用 CLR 输出验证解释器本体。GitHub Server 2025 的默认 AppContainer
+目前不能自动发现 `Write-Output` 所在的宿主 PowerShell 模块；因此该矩阵不代表
+所有标准 cmdlet 已兼容，模块加载需单独建立跨宿主行为门禁。
 
 ## 3. 已知失败基线
 

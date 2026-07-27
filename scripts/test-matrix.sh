@@ -281,10 +281,15 @@ else
   report FAIL "G1  BLINK_PREFIX 执行" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 300)"
 fi
 
-# 新根隔离：prefix 生效时 guest 的 / 应当只见 rootfs 内容，看不到宿主。
-# 这条同时是安全断言——prefix 没生效意味着 guest 能读遍整个宿主盘。
-pbb ls /; rc=$?
-if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -qF busybox && ! printf '%s' "$OUT" | grep -qiE '^(Windows|Program Files|Users)$'; then
+# 新根隔离：直接验证 rootfs 夹具可见、典型宿主根目录不可见。不要用 `ls /`
+# 的退出码做代理；Win32 Blink 会额外探测 `/SystemRoot`，目标不存在时即使换根
+# 正确也会令 ls 返回 1。
+pbb sh -c \
+  "test -f /busybox && test -d /dev && test -d /proc && \
+   test ! -e /Windows && test ! -e '/Program Files' && test ! -e /Users && \
+   echo PREFIX_ROOT_OK"
+rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -qF PREFIX_ROOT_OK; then
   report PASS "G2  BLINK_PREFIX 换根生效（guest / 只见 rootfs）"
 else
   report FAIL "G2  BLINK_PREFIX 换根" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 300)"

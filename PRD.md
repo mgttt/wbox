@@ -158,11 +158,15 @@ S4 在 Linux 上运行 Windows CLI
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
-- `WN.1-WN.4`：`cmd.exe`、Windows PowerShell、`hostname.exe`、`whoami.exe`。
+- `WN.1-WN.4`：`cmd.exe`、Windows PowerShell 解释器/CLR、`hostname.exe`、`whoami.exe`。
 - `WN.5`：AppContainer 内启动并等待子进程。
 - `WN.6`：显式授权的工作目录可写，且宿主能读取结果。
 - `WN.7`：非零 workload 退出码原样返回。
 - `WN.8`：所有前台运行完成后 `ps --all` 无状态残留。
+
+`WN.2` 只证明 Windows PowerShell 解释器与 CLR 可在默认 AppContainer 中运行。
+GitHub Server 2025 runner 上，依赖宿主模块目录自动发现的 `Write-Output` 尚不可用；
+标准 PowerShell 模块的跨宿主兼容性仍是 active 缺口，不得由该项外推为完整支持。
 
 ### F1 CLI 与运行目标分派 `[active]`
 
