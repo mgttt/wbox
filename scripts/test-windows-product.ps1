@@ -142,7 +142,7 @@ try {
     # by openat(), otherwise language runtimes such as Python see empty stdlib
     # directories and fail to import even `encodings`.
     $directoryGuest = & $portableWbox run --name product-dir local.test/wbox-fixture:latest `
-        /busybox sh -c "ls /probe | grep directory-entry-ok" 2>&1 | Out-String
+        /busybox ls /probe 2>&1 | Out-String
     Assert-Exit 0 "WP.3D AppContainer Linux directory enumeration" $directoryGuest
     if ($directoryGuest -notmatch "directory-entry-ok") {
         throw "WP.3D directory enumeration did not return the fixture entry: $directoryGuest"
