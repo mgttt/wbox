@@ -498,7 +498,7 @@ fi
 # 若 container.pid 仍是第一代，top 会拿不到 /proc 子树。
 rm -f "$CACHE/rootfs/restart-ready"
 HOME=$WORK/home "$WBOX_ABS" run -d --name rmanage --restart on-failure:1 \
-  -- /bin/sh -c 'if [ -f /restart-ready ]; then sleep 20; else touch /restart-ready; exit 7; fi' \
+  -- /bin/sh -c 'if [ -f /restart-ready ]; then sleep 20; else : > /restart-ready; exit 7; fi' \
   >/dev/null 2>&1
 sleep 3
 rmtop=$(HOME=$WORK/home "$WBOX_ABS" top rmanage 2>&1); rmrc=$?
