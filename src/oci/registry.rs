@@ -53,23 +53,60 @@ impl RegistryClient {
         }
     }
 
+    /// 本 registry 的 URL scheme。默认 https；仅当 host 精确匹配
+    /// `WBOX_INSECURE_REGISTRY` 时才降级 http（见 [`insecure_host_allowed`]）。
+    pub(crate) fn scheme(&self) -> &'static str {
+        if insecure_host_allowed(&self.registry) {
+            "http"
+        } else {
+            "https"
+        }
+    }
+
+    /// `<scheme>://<registry>/v2/<repo>` 前缀。
+    fn v2(&self, repo: &str) -> String {
+        format!("{}://{}/v2/{}", self.scheme(), self.registry, repo)
+    }
+
     /// 底层 GET；ureq 对 4xx/5xx 返回 Err(Response)，这里统一展开为 HttpResponse。
     fn raw_get(&self, url: &str, accept: Option<&str>) -> crate::error::Result<HttpResponse> {
-        let mut req = self.agent.get(url);
+        self.raw_request("GET", url, accept, None, None)
+    }
+
+    /// 底层请求。GET/HEAD/POST/PUT 共用一条路径——认证头的附加规则（Bearer
+    /// 优先、Basic 只发同 host）**只能有一处实现**，push 另写一份迟早会漂移
+    /// 成"上传时把凭证发去了别处"。
+    fn raw_request(
+        &self,
+        method: &str,
+        url: &str,
+        accept: Option<&str>,
+        content_type: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> crate::error::Result<HttpResponse> {
+        let mut req = self.agent.request(method, url);
         if let Some(a) = accept {
             req = req.set("Accept", a);
+        }
+        if let Some(c) = content_type {
+            req = req.set("Content-Type", c);
         }
         if let Some(t) = self.token.borrow().as_ref() {
             req = req.set("Authorization", &format!("Bearer {}", t));
         } else if url_host_matches(url, &self.registry) {
             // H3：Basic 凭证（WBOX_REGISTRY_USER/PASS）只发给与 registry
             // 同 host 的 URL——跨 host 的 realm/重定向不得携带凭证。
+            // `url_host_matches` 同时要求 https，故明文（insecure 逃生口）
+            // 走不到这里——凭证绝不上明文信道。
             if let Some(basic) = basic_auth_from_env() {
                 // 私有 registry 可选基本认证，base64(user:pass)
                 req = req.set("Authorization", &basic);
             }
         }
-        let resp = match req.call() {
+        let resp = match match body {
+            Some(b) => req.send_bytes(b),
+            None => req.call(),
+        } {
             Ok(r) => r,
             Err(ureq::Error::Status(_, r)) => r, // 非 2xx：照常读取，交由上层判断
             Err(ureq::Error::Transport(t)) => {
@@ -169,14 +206,28 @@ impl RegistryClient {
 
     /// 带自动认证的 GET：401 时走 Bearer 流程后重试一次。
     fn get_authed(&self, url: &str, accept: Option<&str>) -> crate::error::Result<HttpResponse> {
-        let resp = self.raw_get(url, accept)?;
+        self.request_authed("GET", url, accept, None, None)
+    }
+
+    /// 带自动认证的任意方法请求。push 的三步全走这里：401 的
+    /// `WWW-Authenticate` 里 scope 自带 `push,pull`，[`Self::authenticate`]
+    /// 照常解析，不需要为 push 另写一套 token 流程。
+    fn request_authed(
+        &self,
+        method: &str,
+        url: &str,
+        accept: Option<&str>,
+        content_type: Option<&str>,
+        body: Option<&[u8]>,
+    ) -> crate::error::Result<HttpResponse> {
+        let resp = self.raw_request(method, url, accept, content_type, body)?;
         if resp.status == 401 {
             self.authenticate(&resp)?;
-            let resp = self.raw_get(url, accept)?;
+            let resp = self.raw_request(method, url, accept, content_type, body)?;
             if resp.status == 401 {
                 return Err(WboxError::registry(format!(
-                    "认证后仍 401（匿名无权限？）：{}",
-                    url
+                    "认证后仍 401（无权限？）：{} {}",
+                    method, url
                 )));
             }
             return Ok(resp);
@@ -191,10 +242,7 @@ impl RegistryClient {
         repo: &str,
         reference: &str,
     ) -> crate::error::Result<(String, Vec<u8>, Option<String>)> {
-        let url = format!(
-            "https://{}/v2/{}/manifests/{}",
-            self.registry, repo, reference
-        );
+        let url = format!("{}/manifests/{}", self.v2(repo), reference);
         let resp = self.get_authed(&url, Some(ACCEPT_MANIFEST))?;
         if resp.status != 200 {
             return Err(WboxError::registry(format!(
@@ -221,7 +269,7 @@ impl RegistryClient {
     /// 拉取 blob（config 或 layer），返回原始字节。
     /// 对 transport error / 5xx 做 3 次指数退避重试（0.5s/1s/2s，L8）。
     pub fn get_blob(&self, repo: &str, digest: &str) -> crate::error::Result<Vec<u8>> {
-        let url = format!("https://{}/v2/{}/blobs/{}", self.registry, repo, digest);
+        let url = format!("{}/blobs/{}", self.v2(repo), digest);
         let mut delay = std::time::Duration::from_millis(500);
         let mut last_err: Option<WboxError> = None;
         for attempt in 0..3 {
@@ -249,6 +297,131 @@ impl RegistryClient {
             }
         }
         Err(last_err.unwrap_or_else(|| WboxError::registry(format!("拉取 blob 失败：{}", url))))
+    }
+
+    // ---- push（OCI Distribution 上传，PRD F9.13）----
+
+    /// blob 是否已在 registry 上。先问一句能省掉整层的上传，
+    /// 对反复推同一基础镜像是实打实的节省。
+    pub fn blob_exists(&self, repo: &str, digest: &str) -> crate::error::Result<bool> {
+        let url = format!("{}/blobs/{}", self.v2(repo), digest);
+        let resp = self.request_authed("HEAD", &url, None, None, None)?;
+        Ok(resp.status == 200)
+    }
+
+    /// 上传一个 blob（单体方式）：`POST` 拿 upload location → `PUT ?digest=`。
+    ///
+    /// 走单体而非分块：层已经整份在内存里（rootfs 是本地打包出来的），
+    /// 分块只会引入断点续传的状态机而不带来任何好处。
+    pub fn push_blob(&self, repo: &str, digest: &str, data: &[u8]) -> crate::error::Result<()> {
+        if self.blob_exists(repo, digest)? {
+            return Ok(());
+        }
+        let start = format!("{}/blobs/uploads/", self.v2(repo));
+        let resp = self.request_authed("POST", &start, None, None, Some(&[]))?;
+        // 202 Accepted 是常规；个别实现直接 201 完成（少见但合法）
+        if resp.status == 201 {
+            return Ok(());
+        }
+        if resp.status != 202 {
+            return Err(WboxError::registry(format!(
+                "发起 blob 上传失败：HTTP {}（{}）\n{}",
+                resp.status,
+                start,
+                String::from_utf8_lossy(&resp.body)
+            )));
+        }
+        let location = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "location")
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| WboxError::registry("blob 上传响应缺少 Location 头"))?;
+        let url = self.absolutize(&location)?;
+        // Location 可能已带 query（多数实现会带 upload uuid），拼接符要跟着变
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let put = format!("{}{}digest={}", url, sep, url_encode(digest));
+        let resp = self.request_authed(
+            "PUT",
+            &put,
+            None,
+            Some("application/octet-stream"),
+            Some(data),
+        )?;
+        if resp.status != 201 && resp.status != 204 {
+            return Err(WboxError::registry(format!(
+                "上传 blob 失败：HTTP {}（{}）\n{}",
+                resp.status,
+                put,
+                String::from_utf8_lossy(&resp.body)
+            )));
+        }
+        Ok(())
+    }
+
+    /// 推送 manifest，返回 registry 侧记录的 digest（若响应头带）。
+    pub fn put_manifest(
+        &self,
+        repo: &str,
+        reference: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> crate::error::Result<Option<String>> {
+        let url = format!("{}/manifests/{}", self.v2(repo), reference);
+        let resp =
+            self.request_authed("PUT", &url, None, Some(content_type), Some(body))?;
+        if resp.status != 201 && resp.status != 200 {
+            return Err(WboxError::registry(format!(
+                "推送 manifest 失败：HTTP {}（{}）\n{}",
+                resp.status,
+                url,
+                String::from_utf8_lossy(&resp.body)
+            )));
+        }
+        Ok(resp
+            .headers
+            .iter()
+            .find(|(k, _)| k == "docker-content-digest")
+            .map(|(_, v)| v.clone()))
+    }
+
+    /// 把 `Location` 补成绝对 URL，并**校验它没被导去别的 host**。
+    ///
+    /// registry 可以返回相对路径（合法），也可以返回绝对 URL。后者若指向
+    /// 其他主机，就是把待上传内容（可能含私有镜像）导向第三方——必须拒绝，
+    /// 与 realm 的同 host 约束（H3）是同一条规矩。
+    fn absolutize(&self, location: &str) -> crate::error::Result<String> {
+        if !location.contains("://") {
+            let sep = if location.starts_with('/') { "" } else { "/" };
+            return Ok(format!(
+                "{}://{}{}{}",
+                self.scheme(),
+                self.registry,
+                sep,
+                location
+            ));
+        }
+        if url_host(location).as_deref() != Some(&self.registry.to_ascii_lowercase()) {
+            return Err(WboxError::registry(format!(
+                "blob 上传 Location 指向其他主机，拒绝上传：{}",
+                location
+            )));
+        }
+        Ok(location.to_string())
+    }
+}
+
+/// 是否允许对该 host 走明文 http。
+///
+/// 默认永远不允许。只有 `WBOX_INSECURE_REGISTRY` 精确等于该 host 时才降级——
+/// 这是为**本地 registry / 门禁 stub** 留的逃生口（docker 的
+/// `--insecure-registry` 同理）。两条硬约束：必须精确匹配（不做前缀/通配），
+/// 且明文信道上**绝不发送凭证**（`url_host_matches` 要求 https，Basic 分支
+/// 因此走不到）。
+pub(crate) fn insecure_host_allowed(registry: &str) -> bool {
+    match std::env::var("WBOX_INSECURE_REGISTRY") {
+        Ok(v) => !v.is_empty() && v.eq_ignore_ascii_case(registry),
+        Err(_) => false,
     }
 }
 

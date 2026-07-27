@@ -1070,6 +1070,146 @@ fi
 rm -f "$CACHE/rootfs/legacy-way" "$CACHE/rootfs/ov-probe"
 
 echo
+echo "=== PSH 镜像推送（PRD F9.13）==="
+
+# 判据说明：**不打真 registry**。用 python3 起一个最小 registry stub（收
+# POST/PUT、内存存 blob、PUT manifest 时自检引用的 blob 是否都已入库），
+# 再用 wbox pull 从 stub 拉回来比对内容，形成 push→pull 闭环。
+# 只断言"push 返回 0"是不够的——那证明不了推上去的东西能被拉回来用。
+if ! command -v python3 >/dev/null 2>&1; then
+  absent "PSH 镜像推送" "缺 python3（registry stub）"
+else
+PSH_PORT=5599
+PSH_REG=127.0.0.1:$PSH_PORT
+cat > "$WORK/registry_stub.py" <<'PSHEOF'
+import http.server, hashlib, json
+BLOBS = {}
+MANIFESTS = {}
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _empty(self, code, extra=None):
+        self.send_response(code)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_HEAD(self):
+        d = self.path.rsplit("/", 1)[1]
+        self._empty(200 if ("/blobs/" in self.path and d in BLOBS) else 404)
+
+    def do_POST(self):
+        self._empty(202, {"Location": "/v2/upload/session"})
+
+    def do_PUT(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(n)
+        actual = "sha256:" + hashlib.sha256(body).hexdigest()
+        if self.path.startswith("/v2/upload/"):
+            want = self.path.split("digest=")[1].replace("%3A", ":") if "digest=" in self.path else actual
+            if want != actual:
+                self._empty(400)
+                return
+            BLOBS[actual] = body
+            self._empty(201)
+            return
+        MANIFESTS[self.path] = body
+        self._empty(201, {"Docker-Content-Digest": actual})
+        m = json.loads(body)
+        refs = [m["config"]["digest"]] + [l["digest"] for l in m["layers"]]
+        missing = [d for d in refs if d not in BLOBS]
+        print("MANIFEST_BLOBS_MISSING" if missing else "MANIFEST_BLOBS_PRESENT", flush=True)
+
+    def do_GET(self):
+        if self.path in MANIFESTS:
+            b = MANIFESTS[self.path]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        d = self.path.rsplit("/", 1)[1]
+        if "/blobs/" in self.path and d in BLOBS:
+            b = BLOBS[d]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        self._empty(404)
+
+http.server.HTTPServer(("127.0.0.1", PORT_PLACEHOLDER), H).serve_forever()
+PSHEOF
+sed -i "s/PORT_PLACEHOLDER/$PSH_PORT/" "$WORK/registry_stub.py"
+python3 "$WORK/registry_stub.py" > "$WORK/stub.log" 2>&1 &
+PSH_PID=$!
+sleep 1.5
+
+# 造一个"已在本地"的镜像（含符号链接，用来验证打包不把它展开成副本）
+PSHDIR=$WORK/home/.wbox/images/127.0.0.1_$PSH_PORT/library_pushed/v1
+mkdir -p "$PSHDIR/rootfs/bin"
+printf 'PUSHED_CONTENT\n' > "$PSHDIR/rootfs/greet.txt"
+ln -sf greet.txt "$PSHDIR/rootfs/alias"
+printf '{}\n' > "$PSHDIR/manifest.json"
+printf '["sha256:l1"]\n' > "$PSHDIR/layers.json"
+printf '{"config":{"Env":["PUSHED=yes"],"Cmd":["/bin/sh"]}}\n' > "$PSHDIR/config.json"
+
+# PSH.1 不开逃生口时必须走 https —— 明文 registry 不能默认可用。
+pout=$(HOME=$WORK/home "$WBOX_ABS" push "$PSH_REG/library/pushed:v1" 2>&1); prc=$?
+if [ "$prc" -ne 0 ]; then
+  report PASS "PSH.1 未设 WBOX_INSECURE_REGISTRY 时坚持 https（明文不默认可用）"
+else
+  report FAIL "PSH.1 默认 https" "明文 registry 竟然推成功了（rc=$prc）"
+fi
+
+# PSH.2 push 成功，且**stub 侧**确认 manifest 引用的 blob 都已先行入库。
+# 顺序反了的话符合规范的 registry 会拒，这条盯的就是那个顺序。
+pout=$(HOME=$WORK/home WBOX_INSECURE_REGISTRY=$PSH_REG "$WBOX_ABS" push "$PSH_REG/library/pushed:v1" 2>&1); prc=$?
+sleep 0.5
+if [ "$prc" -eq 0 ] && grep -q MANIFEST_BLOBS_PRESENT "$WORK/stub.log"; then
+  report PASS "PSH.2 push 成功且 manifest 引用的 blob 已先行入库"
+else
+  report FAIL "PSH.2 push" "rc=$prc stub=$(head -c 80 "$WORK/stub.log") 输出=$(printf '%s' "$pout"|tail -c 120)"
+fi
+
+# PSH.3 平铺单层要说出来。推上去的与本地"看着一样"但分层没了，
+# 不打印的话用户会以为原样回推。
+if printf '%s' "$pout" | grep -q '单层'; then
+  report PASS "PSH.3 push 明确告知平铺为单层（不让人误以为保留分层）"
+else
+  report FAIL "PSH.3 单层告知" "输出未提及: $(printf '%s' "$pout" | head -c 150)"
+fi
+
+# PSH.4 **闭环**：从 stub 拉回来，内容、符号链接、config 都要还原。
+# 这条才是"推上去的东西真的能用"的证据。
+PSHHOME=$WORK/pullback
+mkdir -p "$PSHHOME"
+pout=$(HOME=$PSHHOME WBOX_INSECURE_REGISTRY=$PSH_REG "$WBOX_ABS" pull "$PSH_REG/library/pushed:v1" 2>&1); prc=$?
+PB=$PSHHOME/.wbox/images/127.0.0.1_$PSH_PORT/library_pushed/v1
+if [ "$prc" -eq 0 ] && [ "$(cat "$PB/rootfs/greet.txt" 2>/dev/null)" = "PUSHED_CONTENT" ] \
+   && [ -L "$PB/rootfs/alias" ] && grep -q 'PUSHED=yes' "$PB/config.json" 2>/dev/null; then
+  report PASS "PSH.4 push→pull 闭环（内容/符号链接/config Env 均还原）"
+else
+  report FAIL "PSH.4 闭环" "rc=$prc 内容=$(cat "$PB/rootfs/greet.txt" 2>/dev/null|head -c 30) 软链=$([ -L "$PB/rootfs/alias" ] && echo 是 || echo 否)"
+fi
+
+# PSH.5 本地没有的镜像要明确报错并给出下一步，不能推一个空目录上去。
+pout=$(HOME=$WORK/home WBOX_INSECURE_REGISTRY=$PSH_REG "$WBOX_ABS" push "$PSH_REG/library/absent:v9" 2>&1); prc=$?
+if [ "$prc" -ne 0 ] && printf '%s' "$pout" | grep -q "本地没有镜像"; then
+  report PASS "PSH.5 本地无此镜像时明确报错"
+else
+  report FAIL "PSH.5 缺镜像" "rc=$prc 输出: $(printf '%s' "$pout" | head -c 150)"
+fi
+
+kill "$PSH_PID" 2>/dev/null
+wait "$PSH_PID" 2>/dev/null
+fi
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

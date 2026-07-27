@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod image;
+pub mod push;
 pub mod registry;
 
 use crate::error::{ErrKind, KindExt, WboxError};

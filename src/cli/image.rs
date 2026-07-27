@@ -8,16 +8,17 @@ use crate::oci;
 pub fn cmd_image(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("pull") => cmd_image_pull(&args[1..]),
+        Some("push") => cmd_image_push(&args[1..]),
         Some("list") | Some("ls") => cmd_image_list(&args[1..]),
         Some("show") => cmd_image_show(&args[1..]),
         Some("inspect") => super::inspect::cmd_image_inspect(&args[1..]),
         Some("rm") => cmd_image_rm(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 image 子命令 '{}'（支持 pull / list / show / inspect / rm）",
+            "未知 image 子命令 '{}'（支持 pull / push / list / show / inspect / rm）",
             other
         ))),
         None => Err(WboxError::args(
-            "image 缺少子命令（pull / list / show / inspect / rm）",
+            "image 缺少子命令（pull / push / list / show / inspect / rm）",
         )),
     }
 }
@@ -166,6 +167,33 @@ pub(super) fn cmd_image_pull(args: &[String]) -> Result<u32> {
     }
     let image_ref = image_ref.ok_or_else(|| WboxError::args("image pull 缺少镜像引用"))?;
     oci::pull(&image_ref, &os, &arch, registry.as_deref(), verbose)?;
+    Ok(0)
+}
+
+/// `wbox push <IMAGE>` / `wbox image push <IMAGE>`（PRD F9.13）。
+pub(super) fn cmd_image_push(args: &[String]) -> Result<u32> {
+    let mut image_ref: Option<String> = None;
+    let mut registry: Option<String> = None;
+    let mut verbose = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--registry" => registry = Some(super::args::take_value(args, &mut i, "--registry")?),
+            "-V" | "--verbose" => verbose = true,
+            other if other.starts_with('-') => {
+                return Err(WboxError::args(format!("未知选项 '{}'", other)));
+            }
+            other => {
+                if image_ref.is_some() {
+                    return Err(WboxError::args(format!("多余的参数 '{}'", other)));
+                }
+                image_ref = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let image_ref = image_ref.ok_or_else(|| WboxError::args("push 缺少镜像引用"))?;
+    oci::push::push(&image_ref, registry.as_deref(), verbose)?;
     Ok(0)
 }
 

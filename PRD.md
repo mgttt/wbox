@@ -135,7 +135,7 @@ wbox
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
 | overlay 镜像分层存储 | 无 | `FROM`/pull 仍整份复制；与 F9.12 的运行期可写层是两件事 |
-| 镜像 push | 无 | |
+| 镜像 push | 部分 | F9.13：`wbox push`，**平铺为单层**（门禁 PSH.1–PSH.5）；不保留原始分层 |
 | compose / pod | 无 | |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
 | healthcheck | 有 | F9.10：`--health-cmd` + interval/retries/start-period（门禁 HC.1–HC.5）|
@@ -768,7 +768,8 @@ F9
 ├── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
 ├── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
 ├── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
-└── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
+├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
+└── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -871,6 +872,39 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.13 `wbox push`** `[partial]`（门禁 PSH.1–PSH.5）。
+
+**推出去的是平铺单层**，这点必须先说清，命令本身也会在开始时打印。本地缓存存
+的是**解包后的 rootfs**，pull 时层 tar 解开就丢了——没有原始 blob 可以原样回推。
+所以做法是把整个 `rootfs/` 重新打成一个 `tar.gz` 层，配单层 manifest + config
+再推，语义等价于 `docker commit` 后 push：内容一致、**分层历史不保留**。
+指望推上去还能与上游共享层的话做不到。要改这一点得让缓存额外保存原始压缩层，
+是存储布局的改动，牵动 pull/build/overlay 三条路径，属"镜像分层存储"那一格。
+
+实现上几处不做就出错的：
+
+- **两个 digest 不能混**：`diff_id` 是未压缩 tar 的（config 的 `rootfs.diff_ids`
+  要它），layer descriptor 要的是压缩后的。混了 registry 校验能过，但拉回来
+  diff_id 对不上。
+- **打包要排序**：`read_dir` 顺序不保证，不排序则内容没变也每次算出新 digest，
+  `HEAD` 判存在的跳过就永远命不中。
+- **符号链接不跟随**：跟随会展开成内容副本，既撑大体积又丢语义（busybox 的
+  applet 链接全废）。
+- **先传 blob 后传 manifest**：顺序反了符合规范的 registry 会以
+  `MANIFEST_BLOB_UNKNOWN` 拒绝。
+- **`history` 清空**：留着旧 history 与"只有一层"自相矛盾。
+- `Location` 补成绝对 URL 时**校验同 host**：registry 可以返回绝对 URL，指向
+  别处就是把待上传内容导给第三方，与 realm 的同 host 约束（H3）同一条规矩。
+
+`WBOX_INSECURE_REGISTRY=<host>` 是明文 http 的逃生口（本地 registry / 门禁
+stub 用；docker 的 `--insecure-registry` 同理）。两条硬约束：必须**精确匹配**
+host（不做前缀/通配），且明文信道上**绝不发送凭证**——Basic 分支要求 https，
+因此走不到。默认永远 https（PSH.1 盯这条）。
+
+门禁不打真 registry：用 python3 起最小 stub，`PUT manifest` 时自检引用的 blob
+是否都已入库（PSH.2），再 `wbox pull` 从 stub 拉回来比对内容、符号链接与
+config（PSH.4）。只断言"push 返回 0"证明不了推上去的东西能被拉回来用。
 
 **F9.12 overlay 运行期可写层** `[done]`（门禁 OV.1–OV.5）。
 
@@ -1074,7 +1108,7 @@ TODO-PLAN
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
-├── L3 `wbox push` 镜像推送                   [Linux agent] 待认领
+├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
 └── L4 compose 子集                           [任一 agent] 待认领
 ```
 
@@ -1143,7 +1177,10 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
 退出，不会被掩盖。
 
-### L3 `wbox push` 镜像推送 `[Linux agent]` `[待认领]`
+### L3 `wbox push` 镜像推送 `[Linux agent]` `[done]`
+
+**已实现，见 F9.13**（门禁 PSH.1–PSH.5）。下面保留当初的设计判断，因为其中
+"缓存里没有原始层 blob 所以只能 flatten"这条结论仍然约束着后续的分层存储那一格。
 
 **先想清楚推什么**。缓存布局是**解包后的 rootfs**（`rootfs/` + 三个 json），
 pull 时层 tar 已解开丢弃，没有原始 blob 可以原样回推。可行路线是 **flatten**：

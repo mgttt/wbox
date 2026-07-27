@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.12 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.13 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -43,14 +43,15 @@ F9.1–F9.12 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.10 `--health-cmd` | HC.1–HC.5 | 探针经 setns 跑在**容器内**（复用 exec 路径），不是宿主 |
 | F9.11 `--network container:` | NC.1–NC.4 | user+net 必须一起加入（netns setns 要在属主 userns 有 CAP_SYS_ADMIN） |
 | F9.12 overlay 可写层 | OV.1–OV.5 | 修了真实缺陷：此前容器写 `/` 会污染共享镜像缓存 |
+| F9.13 `wbox push` | PSH.1–PSH.5 | 缓存无原始层 blob，只能 flatten 成单层；门禁用 python3 stub 闭环，不打真 registry |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **309 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **97 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **316 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **102 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -62,12 +63,11 @@ F9.1–F9.12 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-Q3 还剩两格，都已在 `PRD.md` §4.9 立了条目并写清设计要点。**上一轮只做到"调研 +
-写下设计"，没有动代码**，工作区是干净的，你从零开始即可。
+Q3 还剩 **compose 一格**（L4），以及天花板之外的"镜像分层存储"。
 
-### L3 `wbox push`（推荐先做）
+### ~~L3 `wbox push`~~ —— 已完成（F9.13，门禁 PSH.1–PSH.5）
 
-调研结论（已确认，别重复走一遍）：
+保留下面的结论，因为"缓存里没有原始层 blob"这条仍然约束着**镜像分层存储**那一格：
 
 - **缓存里没有原始层 blob**。布局是解包后的 `rootfs/` + `manifest.json` +
   `layers.json` + `config.json`，pull 时层 tar 解开后就丢了。所以**不能原样回推**。
@@ -97,7 +97,7 @@ Q3 还剩两格，都已在 `PRD.md` §4.9 立了条目并写清设计要点。*
   `WBOX_INSECURE_REGISTRY=<host>`：仅当 registry host 精确匹配时才允许 http，
   且**明文时拒绝发送任何凭证**，并打印告警。这是安全相关改动，实现时把理由写进注释。
 
-### L4 compose 子集
+### L4 compose 子集（下一步做这个）
 
 范围先钉死，否则会滑向"重新实现 docker-compose"。建议第一刀：
 
@@ -212,4 +212,4 @@ git fetch origin main && git rebase origin/main
 
 门禁分组速查：L1/L2 隔离与限额、H 宿主模式、N/N2 网络与转发、C cgroup v2、
 W wine、B 构建、V 卷、R 重启、U `--user`、CAP capability、SEC seccomp、
-HC 健康检查、NC 容器间网络、OV overlay、P 生命周期。
+HC 健康检查、NC 容器间网络、OV overlay、PSH 镜像推送、P 生命周期。

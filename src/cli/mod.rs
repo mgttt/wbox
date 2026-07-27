@@ -32,6 +32,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本机程序（Win: AppContainer+Job；Linux: namespace+cgroup）
   wbox run [OPTIONS] <IMAGE> [CMD] [ARGS...]       运行 OCI 镜像（缺缓存自动 pull）
   wbox pull <REF> [image pull 选项]                 `wbox image pull` 的兼容别名
+  wbox push <REF> [--registry HOST] [-V]            把本地镜像推回 registry（平铺单层，见 PRD F9.13）
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
@@ -200,6 +201,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("start") => start::cmd_start(&args[1..]),
         Some("build") => build::cmd_build(&args[1..]),
         Some("pull") => image::cmd_image_pull(&args[1..]),
+        Some("push") => image::cmd_image_push(&args[1..]),
         Some("images") => image::cmd_image_list(&args[1..]),
         Some("rmi") => image::cmd_image_rm(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
