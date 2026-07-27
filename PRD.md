@@ -159,6 +159,7 @@ wbox
 | `commit` | 有 | F9.20：容器改动固化成新镜像，与基础镜像共享磁盘（门禁 CM.1–CM.4）|
 | `pause` / `unpause` | 部分 | F9.21：用 SIGSTOP/SIGCONT 而非 cgroup freezer（后者要求设了限额才存在），语义不完全等价（门禁 PZ.1–PZ.3）|
 | `save` / `load` | 有 | F9.22：镜像打包成 tar 离线搬运，含原始层故搬过去仍可原样 push（门禁 SL.1–SL.6）|
+| `cp` | 有 | F9.23：宿主与容器双向拷贝，走 overlay 分层视图故不必 `setns`、容器已退出也能取（门禁 CP.1–CP.6）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -875,7 +876,8 @@ F9
 ├── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
 ├── F9.20 `wbox commit` 固化容器改动           —— [done]（仅 Linux，门禁 CM.1–CM.4）
 ├── F9.21 `pause` / `unpause`                  —— [partial] 信号实现，非 freezer
-└── F9.22 `save` / `load` 离线搬运镜像          —— [done]（门禁 SL.1–SL.6）
+├── F9.22 `save` / `load` 离线搬运镜像          —— [done]（门禁 SL.1–SL.6）
+└── F9.23 `wbox cp` 宿主↔容器拷贝             —— [done]（仅 Linux，门禁 CP.1–CP.6）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1007,6 +1009,30 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.23 `wbox cp`** `[done]`（仅 Linux，门禁 CP.1–CP.6）。宿主与容器之间双向拷贝。
+
+**不进容器，走分层视图**。docker 的 `cp` 要求容器存在但可以已停止；wbox 能给出
+同样的性质，而且实现更简单——F9.12 已经把容器的文件系统摊成了两层：上层是该
+容器的 `layer/upper`，下层是共享只读的镜像 rootfs。宿主侧按"读先看 upper 再看
+lower、写只写 upper"就得到与容器内完全一致的视图，**不需要 `setns`**。
+
+由此白捡两个性质：
+
+- **容器不必在运行**。已退出但没 `rm` 的容器照样能取文件——排查失败容器时这恰恰
+  是最需要的场景，而 `setns` 方案在那时已经无从进入。
+- **写进去的对运行中的容器立即可见**（CP.3）。overlay 是活的挂载，不是快照。
+
+**必须认 whiteout**（CP.2）。容器删掉的文件在 upper 里是字符设备 0:0。不认它就会
+把镜像下层那份"早已被删掉的"旧文件拷出去，而用户以为拿到的是容器现状——这是本格
+唯一会**静默给出错误答案**的失败形态，所以判据要求它真的失败且不落盘。
+
+**写只落 upper**（CP.4）。镜像目录被多个容器以硬链接共享（F9.18），写穿到下层会
+污染别的容器。判据是 cp 前后基础镜像缓存的逐字节摘要不变。
+
+**容器端靠"是不是已登记的容器"来认，不是靠含冒号**：`./a:b` 是合法的宿主文件名。
+路径解析复用 build 的 `resolve_rootfs_path`——`..` 逃逸校验一处写、两处用，
+分头写两份迟早有一份漏掉。
 
 **F9.20 `wbox commit`** `[done]`（门禁 CM.1–CM.4）。把容器的改动固化成新镜像。
 
@@ -1413,7 +1439,7 @@ TODO-PLAN
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
 ├── L4 compose 子集                           [任一 agent] 已完成（F9.14）
-├── L5 镜像分层存储                           [Linux agent] 待认领
+├── L5 镜像分层存储                           [Linux agent] 已完成（F9.16–F9.18）
 └── L6 pod 抽象是否值得做                     [任一 agent] 已评估：不做（见下）
 ```
 
@@ -1622,11 +1648,11 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 `--network container:<第一个服务>` 共享 netns（F9.11 已就绪），经 localhost
 互访，这与 docker 的 bridge+DNS 不同但对 sidecar 场景等价，文档要直说。
 
-### L5 镜像分层存储 `[Linux agent]` `[partial]`
+### L5 镜像分层存储 `[Linux agent]` `[done]`
 
-**存储与 push 那半已完成，见 F9.16**（门禁 PSH.6–PSH.7）：pull 保留原始压缩层，
-多层镜像能原样回推且 manifest digest 不变——这正是下面写死的第一条判据。
-剩下 `FROM` 复用基础层未做，拆成 L5b。
+**两半都已完成。** 存储与 push 那半见 F9.16（门禁 PSH.6–PSH.7）：pull 保留原始
+压缩层，多层镜像能原样回推且 manifest digest 不变——这正是下面写死的第一条判据。
+`FROM` 复用基础层那半拆成 L5b，也已完成（F9.18，门禁 OVB.1–OVB.4）。
 
 **先分清它和 F9.12 不是一回事。** F9.12 解决的是**运行期**写入污染共享缓存；
 这一条要的是**存储期**保留镜像的层结构，两者的产物、生命周期、失效条件都不同。
@@ -1641,8 +1667,8 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 - `push`（F9.13）：现在只能 flatten 成单层，有了原始层才能原样回推、与上游共享层。
 
 **判据**：pull 一个多层镜像后能原样 push 回去且 manifest digest 不变
-（`[done]`，PSH.7）；`FROM` 复用基础层时磁盘占用明显低于整份复制（`[todo]`，见
-L5b）。
+（`[done]`，PSH.7）；`FROM` 复用基础层时磁盘占用明显低于整份复制（`[done]`，见
+L5b 与 OVB.1–OVB.4）。
 
 ### L5b `FROM` 复用基础层 `[Linux agent]` `[done]`
 

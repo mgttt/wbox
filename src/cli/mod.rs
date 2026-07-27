@@ -22,6 +22,7 @@ pub mod stop;
 pub mod run;
 pub mod start;
 mod commit;
+mod cp;
 mod pause;
 mod diff;
 pub mod top;
@@ -41,6 +42,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
   wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
   wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
+  wbox cp <NAME>:<路径> <宿主路径>                 容器与宿主间拷贝（反向亦可，见 PRD F9.23）
   wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
   wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
   wbox images                                      `wbox image list` 的兼容别名
@@ -163,6 +165,7 @@ fn cmd_container(args: &[String]) -> Result<u32> {
         Some("top") => top::cmd_top(&args[1..]),
         Some("diff") => diff::cmd_diff(&args[1..]),
         Some("commit") => commit::cmd_commit(&args[1..]),
+        Some("cp") => cp::cmd_cp(&args[1..]),
         Some("pause") => pause::cmd_pause(&args[1..]),
         Some("unpause") => pause::cmd_unpause(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
@@ -237,6 +240,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("top") => top::cmd_top(&args[1..]),
         Some("diff") => diff::cmd_diff(&args[1..]),
         Some("commit") => commit::cmd_commit(&args[1..]),
+        Some("cp") => cp::cmd_cp(&args[1..]),
         Some("pause") => pause::cmd_pause(&args[1..]),
         Some("unpause") => pause::cmd_unpause(&args[1..]),
         #[cfg(target_os = "linux")]

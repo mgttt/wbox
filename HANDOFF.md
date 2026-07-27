@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.22 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.23 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -53,14 +53,15 @@ F9.1–F9.22 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.20 `wbox commit` | CM.1–CM.4 | **纯编排**：复用 F9.18 的硬链接+合并、F9.17 的分层 manifest，没加新机制 |
 | F9.21 `pause`/`unpause` | PZ.1–PZ.3 | 信号而非 freezer（cgroup 只在设了限额时存在）；进程清单复用 `top` 的枚举 |
 | F9.22 `save`/`load` | SL.1–SL.6 | 打整个缓存目录（含 blobs，故搬过去仍可原样 push）；load 按白名单限定顶层条目防穿越 |
+| F9.23 `wbox cp` | CP.1–CP.6 | 走 overlay 分层视图（读 upper→lower、写只写 upper），**不 setns**，故容器已退出也能取文件；必须认 whiteout，否则会把删掉的旧文件当现状拷出去 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **360 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **146 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **364 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **152 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -72,7 +73,7 @@ F9.1–F9.22 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.18）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.23）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

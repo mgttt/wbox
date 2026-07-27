@@ -161,11 +161,15 @@ pub fn resolve_context_path(context: &Path, src: &str) -> Result<PathBuf> {
     Ok(canon)
 }
 
-/// 把 `COPY` 的目标解析到 rootfs 内，并**拒绝逃出 rootfs**。
+/// 把一个容器内绝对路径解析到宿主上的某棵 rootfs 里，并**拒绝逃出 rootfs**。
+///
+/// 两处在用：build 的 `COPY` 目标，以及 `wbox cp` 的容器端路径。两边面对的
+/// 是同一类输入（用户给的容器内路径），所以共用同一份逃逸校验——分头写两份
+/// 迟早会有一份漏掉 `..`。
 pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
     if !dst.starts_with('/') {
         return Err(WboxError::args(format!(
-            "COPY 目标 '{}' 必须是容器内绝对路径",
+            "容器内路径 '{}' 必须以 / 开头（Dockerfile 的 COPY 目标同此要求）",
             dst
         )));
     }
@@ -181,7 +185,7 @@ pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
             std::path::Component::ParentDir => {
                 if depth == 0 {
                     return Err(WboxError::args(format!(
-                        "COPY 目标 '{}' 用 '..' 逃出了 rootfs",
+                        "容器内路径 '{}' 用 '..' 逃出了 rootfs",
                         dst
                     )));
                 }

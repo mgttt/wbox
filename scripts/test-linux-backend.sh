@@ -1844,6 +1844,83 @@ else
 fi
 
 echo
+echo "=== CP wbox cp（PRD F9.23）==="
+
+# 这一组要钉死三件事，每一件都对应一种"看着成功其实错了"的失败：
+#   1. 拷出来的是**容器现状**（upper 优先），不是镜像里那份旧的；
+#   2. 拷进去的对**运行中的容器立即可见**（overlay 是活的，不是快照）；
+#   3. 容器删过的文件**不会从镜像下层复活**（whiteout 要认）。
+mkdir -p "$CACHE/rootfs/cpetc"
+printf 'from-image\n' > "$CACHE/rootfs/cpetc/conf"
+printf 'from-image\n' > "$CACHE/rootfs/cpetc/doomed"
+cpbase=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+
+HOME=$WORK/home "$WBOX_ABS" run -d --name cpc lbetest -- \
+  /bin/sh -c 'echo from-container > /cpetc/conf; rm /cpetc/doomed; sleep 30' >/dev/null 2>&1
+sleep 2
+
+# CP.1 容器 → 宿主：必须拿到容器改过之后的内容
+rm -f "$WORK/out.conf"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp cpc:/cpetc/conf "$WORK/out.conf" 2>&1); crc=$?
+if [ "$crc" -eq 0 ] && [ "$(cat "$WORK/out.conf" 2>/dev/null)" = "from-container" ]; then
+  report PASS "CP.1 cp 出来的是容器现状而非镜像原件"
+else
+  report FAIL "CP.1 容器→宿主" "rc=$crc 内容=$(cat "$WORK/out.conf" 2>/dev/null | head -c 60)"
+fi
+
+# CP.2 容器删掉的文件不能从镜像下层复活。**必须真的失败**：
+# 若这里静默成功，用户会拿着一份早已不存在的文件当成容器现状。
+rm -f "$WORK/out.doomed"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp cpc:/cpetc/doomed "$WORK/out.doomed" 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && [ ! -e "$WORK/out.doomed" ]; then
+  report PASS "CP.2 容器删过的文件不从镜像下层复活"
+else
+  report FAIL "CP.2 whiteout 识别" "rc=$crc 落盘=$([ -e "$WORK/out.doomed" ] && echo 是 || echo 否) 输出: $(printf '%s' "$cout" | head -c 120)"
+fi
+
+# CP.3 宿主 → 容器：对**运行中的**容器立即可见（判据是容器自己读到的内容）
+printf 'injected\n' > "$WORK/in.txt"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/in.txt" cpc:/cpetc/in.txt 2>&1); crc=$?
+seen=$(HOME=$WORK/home "$WBOX_ABS" exec cpc -- /bin/cat /cpetc/in.txt 2>&1)
+if [ "$crc" -eq 0 ] && printf '%s' "$seen" | grep -qx 'injected'; then
+  report PASS "CP.3 拷进去的文件对运行中的容器立即可见"
+else
+  report FAIL "CP.3 宿主→容器" "rc=$crc 容器内读到: $(printf '%s' "$seen" | tr '\n' ' ' | head -c 120)"
+fi
+
+# CP.4 写只写 upper：基础镜像缓存必须逐字节不变。
+# 镜像目录是多个容器共享的（F9.18 硬链接），写穿了会污染别人。
+cpafter=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+if [ "$cpbase" = "$cpafter" ]; then
+  report PASS "CP.4 cp 写入不触碰共享的基础镜像缓存"
+else
+  report FAIL "CP.4 镜像完整性" "cp 前后镜像摘要不一致"
+fi
+
+# CP.5 目录整棵拷进去
+mkdir -p "$WORK/tree/sub"
+printf 'deep\n' > "$WORK/tree/sub/leaf"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/tree" cpc:/cptree 2>&1); crc=$?
+seen=$(HOME=$WORK/home "$WBOX_ABS" exec cpc -- /bin/cat /cptree/sub/leaf 2>&1)
+if [ "$crc" -eq 0 ] && printf '%s' "$seen" | grep -qx 'deep'; then
+  report PASS "CP.5 目录递归拷入并保持层级"
+else
+  report FAIL "CP.5 目录拷贝" "rc=$crc 容器内读到: $(printf '%s' "$seen" | tr '\n' ' ' | head -c 120)"
+fi
+
+# CP.6 两端都不是容器路径时要报错。含冒号的宿主文件名（./a:b）不能被误判成容器。
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/in.txt" "$WORK/plain.txt" 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q '容器'; then
+  report PASS "CP.6 两端都不是容器路径时报错并说清用法"
+else
+  report FAIL "CP.6 参数形态校验" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 120)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill cpc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm cpc >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/cpetc" "$WORK/tree" "$WORK/in.txt" "$WORK/out.conf"
+
+echo
 echo "=== SL save / load（PRD F9.22）==="
 
 SLTAR=$WORK/saved.tar
