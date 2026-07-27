@@ -181,7 +181,7 @@ fork 子 DNS 和 `apt-get update`。仍有限制：
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
 
-### F5 Linux 原生后端 `[active]`
+### F5 Linux 原生后端 `[done]`
 
 ```text
 F5
@@ -195,11 +195,37 @@ F5
 └── F5.8 父进程死亡后清理后代
 ```
 
-namespace、网络默认、两种文件系统模式、生命周期和 rlimit 路径已实现并进入
-CI。实机取证已证明当前“在 wbox 自身所在 cgroup 下建受限子节点”的布局违反
-cgroup v2 no-internal-process 规则；修复需改为委派根下的 supervisor/target
-兄弟 leaf，尚未落地验证，因此 F5 保持 `[active]`。任何回退必须打印原因；
-`--cpu-pct` 等无法等价回退的限制应拒绝，不能忽略。
+每一项都有对应门禁用例，可逐条核对（`scripts/test-linux-backend.sh`）：
+
+| 条目 | 门禁用例 |
+|---|---|
+| F5.1 uid 0 | L1.1 |
+| F5.2 PID 1 | L1.3（镜像）/ H.1（宿主） |
+| F5.3 pivot_root | L1.2（宿主文件系统不可见）|
+| F5.4 宿主模式保留宿主 FS | H.2（与 L1.2 互为反证）/ H.3 / H.5 |
+| F5.5 默认空 netns | N.1 / N.2 / N.3（断网时 loopback 仍可用）|
+| F5.6 cgroup v2 | C.1 / C.2（CI 现造委派子树，`WBOX_LBE_CGROUP=1`）|
+| F5.7 rlimit 回退 | L2.1 / L2.2 / L2.3 |
+| F5.8 清理后代 | L3.1（宿主）/ L3.2（镜像）|
+
+F5 转 `[done]` 的依据是这张表：八项各有一条持续执行的断言，而不是"实现过
+一次"。此前 cgroup v2 一项长期零覆盖，正是因为把"跑通过"当成了"有覆盖"。
+
+namespace、网络默认、两种文件系统模式、生命周期、rlimit 兜底与 **cgroup v2
+首选路径**均已实现并进入 CI 门禁。
+
+cgroup v2 的旧布局（在 wbox 自身所在 cgroup 下建受限子节点）已被实机取证
+证伪（违反 no-internal-process 规则，EBUSY/EIO 双向堵死），现已改为：优先把
+受限 target 建成 wbox 所在 cgroup 的**兄弟**（谁都不用挪，因而不受"调用方
+shell 留在同一 cgroup"影响）；父级不可写时退回 supervisor/target 双 leaf；
+再不行才 rlimit。CI 现造委派子树做门禁（`WBOX_LBE_CGROUP=1`），实测输出
+`memory.max=16777216 memory.swap.max=0`、guest cgroup 为兄弟位置、退出后目录
+已回收。
+
+`--memory` 在 cgroup 路径下必须同时写 `memory.swap.max=0`，否则它只限常驻
+内存、超出部分换出去照跑，与 `RLIMIT_AS` 直接拒绝分配的语义不一致——这一点
+是门禁抓出来的。任何回退必须打印原因；`--cpu-pct` 等无法等价回退的限制应
+拒绝，不能忽略。
 
 ### F6 Linux 上执行 Windows CLI `[done]`
 
@@ -271,7 +297,7 @@ F6
 | Windows Linux guest | active | 20/20 guest 文件；1217 pass、0 fail、9 skip |
 | Windows shell 矩阵 | done | 43 pass、0 fail、1 skip |
 | Rust 主机逻辑 | done | 最近记录 198 pass、0 fail |
-| Linux 原生后端 | active | namespace/rlimit 已门禁；cgroup v2 当前布局已证伪，待改为兄弟 leaf |
+| Linux 原生后端 | done | namespace/rlimit/cgroup v2 三条路径均已门禁；cgroup 改为兄弟 leaf 后实测生效 |
 | Linux Wine 路径 | done | 独立 CI job 覆盖 PE、参数、退出码和网络语义 |
 | 后台生命周期管理 | planned | 尚未设计 |
 
@@ -306,8 +332,8 @@ F6
 
 下一里程碑不使用虚构日期，按验收条件推进：
 
-1. `[active]` 将 Linux cgroup v2 改为 supervisor/target 兄弟 leaf，并取得
-   CI 中的实际限额证据。
+1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
+   双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[planned]` 是否进入 F8 生命周期管理，由新的需求决策单独启动。
