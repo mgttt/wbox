@@ -74,8 +74,17 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc"
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-for a in sh id ls dd sleep echo cat; do
+APPLETS="sh id ls dd sleep echo cat"
+for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
+done
+# 建完就核对一遍这个 busybox 真的带这些 applet。**这是 harness 自检，不是用例**：
+# 缺 applet 时容器里的命令会静默失效，然后某条用例以"容器已退出"之类的样子挂掉——
+# 看上去像产品回归，实际是测试环境不全。这类误判在本门禁上反复出现过（判据本身
+# 出错而产品无恙），宁可在这里直接 die 说清原因，也不要让它伪装成回归。
+for a in $APPLETS; do
+  "$BB_ABS" --list 2>/dev/null | grep -qx "$a" \
+    || die "busybox（$BB_ABS）不含 applet '$a'：用例会以产品故障的样子失败，请换一个功能更全的静态 busybox"
 done
 printf '{}\n' > "$CACHE/manifest.json"
 printf '["sha256:l1"]\n' > "$CACHE/layers.json"
@@ -496,6 +505,12 @@ fi
 
 # R.5 管理面必须跟随第二代 PID。第一代写 marker 后失败，第二代保持运行；
 # 若 container.pid 仍是第一代，top 会拿不到 /proc 子树。
+#
+# marker 必须落在 $WORK 下，**不能放宿主根目录**：这条用例是宿主模式（没给
+# 镜像参数，故不换根），`/restart-ready` 会落在宿主真实的 `/` 上。那个位置在
+# 很多环境里不可写（本仓库的开发容器就是），于是两代都建不出 marker、都
+# exit 7，用例以"容器已退出"的样子挂掉——看着像 restart 或 top 回归，
+# 实际是写不进去。
 rm -f "$WORK/restart-ready"
 HOME=$WORK/home "$WBOX_ABS" run -d --name rmanage --restart on-failure:1 --workdir "$WORK" \
   -- /bin/sh -c 'if [ -f restart-ready ]; then sleep 20; else : > restart-ready; exit 7; fi' \
