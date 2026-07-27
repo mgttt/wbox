@@ -551,16 +551,42 @@ Linux 不同（例如没有 SIGTERM 的优雅阶段），在 F8.d 写明差异�
 
 ### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]`
 
-**前置缺口**（已识别，尚未修）：`meta.json` 目前只记 **supervisor 的 pid**，
-而 supervisor **留在宿主 namespace 里**，真正进了容器 namespace 的是 guest。
-`setns` 需要的是 **guest 的 pid**，因此得先把它记进状态目录。
+**已排除一条死路，先记下来省得再走一遍。**
 
-**路线**：记录 guest pid → 打开 `/proc/<guest>/ns/{user,mnt,pid,net}` →
-`setns`（**user 必须最先**，否则后续 setns 缺权限）→ fork（PID namespace 只对
-之后创建的子进程生效）→ exec。
+`exec` 要 `setns` 附着，就得有一个**在容器 namespace 里**的 pid。
+`meta.json` 里的 `pid` 是 **supervisor（wbox 自己）**的，而 supervisor
+**留在宿主 namespace**——`unshare` 发生在 `pre_exec`（fork 之后），进 namespace
+的是子进程。拿 supervisor 的 pid 去 setns 等于附到宿主上，隔离形同虚设。
+
+自然的想法是在 `linux_ns::spawn_isolated` 里取 `cmd.spawn()` 返回的
+`child.id()` 写进状态目录。**实测不成立**：
+
+> `cmd.spawn()` 在容器退出之前根本不返回。
+
+原因是 PID namespace 的双 fork：`pre_exec` 里 `unshare(CLONE_NEWPID)` 之后再
+fork 一次，中间进程负责等待并转发退出码、**永不 exec**。而 Rust 的
+`Command::spawn()` 要等那根 CLOEXEC 错误管道读到 EOF 才返回——管道写端正握在
+这个不 exec 的中间进程手里，于是 EOF 只会在容器结束时到来。
+
+这个坑很会骗人：短命容器上一切"看起来正常"，因为你总是在它结束之后才去看
+文件。用长命容器（`sleep 30`）并在运行中检查，才会暴露。
+
+**可行方向（未验证，留给接手的人挑）**：
+
+1. 让**中间进程自己**把 pid 写进状态目录——它就在 namespace 里，且知道自己是谁；
+   但要注意 `pre_exec` 闭包必须 async-signal-safe，不能在里面做分配。
+2. 从宿主侧扫 `/proc` 找 supervisor 的后代（`ppid == child`），绕开 `spawn()`
+   的返回时机。
+3. 改用 `posix_spawn`/裸 `fork+exec` 自己管控管道，让父进程拿到 pid 后立刻返回。
+
+**namespace 附着顺序（设计已定，尚未实现）**：`setns(user)` 必须最先，
+否则后续几个因权限不足失败；PID 要用 `/proc/<pid>/ns/pid_for_children`
+而不是 `ns/pid`——`unshare(CLONE_NEWPID)` 对调用者自己不生效，只对其之后的
+子进程生效，所以那个进程的 `ns/pid` 仍是宿主的。附着后还要再 fork 一次，
+新进程才真正落在容器的 PID 视图里。
 
 **判据**：`exec` 进去看到的 PID 视图、挂载视图、网络视角与容器内一致；
-容器已退出时明确报错而不是进到一个空壳。
+容器已退出时明确报错，而不是悄悄跑在宿主上。
 
 ## 5. 非功能需求
 
