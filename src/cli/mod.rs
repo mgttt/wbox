@@ -145,8 +145,8 @@ mod tests {
         // 2. show：打印 config 摘要（含脱敏路径）
         cmd_image_show(&["fake:latest".to_string()]).unwrap();
 
-        // 3. classify：按真实缓存判定（与 cmd_run 相同的闭包）
-        let target = backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap();
+        // 3. classify：Docker 风格位置参数稳定判为镜像，不依赖缓存状态。
+        let target = backend::classify_target(Some("fake")).unwrap();
         let iref = match target {
             backend::RunTarget::Image(r) => r,
             other => panic!("已缓存镜像必须判为 Image，得到 {:?}", other),
@@ -191,15 +191,14 @@ mod tests {
     }
 
     #[test]
-    fn integration_uncached_then_plant_then_classify() {
-        // 未缓存 → Native；构造缓存后 → Image（classify 实时看磁盘）
+    fn integration_image_classification_does_not_depend_on_cache() {
         let home = TempHome::new("promote");
-        assert_eq!(
-            backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap(),
-            backend::RunTarget::Native
-        );
+        assert!(matches!(
+            backend::classify_target(Some("fake")).unwrap(),
+            backend::RunTarget::Image(_)
+        ));
         home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
-        match backend::classify_target(Some("fake"), false, oci::is_pulled).unwrap() {
+        match backend::classify_target(Some("fake")).unwrap() {
             backend::RunTarget::Image(_) => {}
             other => panic!("期望 Image，得到 {:?}", other),
         }

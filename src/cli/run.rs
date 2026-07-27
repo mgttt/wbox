@@ -64,6 +64,17 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             i += 1;
             continue;
         }
+        // Docker/Podman 位置语义：首个位置参数是镜像；其后全部属于
+        // guest command，不能再被 wbox 解析为 --name/-e/-w 等宿主选项。
+        if opts.positional.is_some() {
+            if a == "--" {
+                saw_dashdash = true;
+            } else {
+                opts.cmd.push(a.clone());
+            }
+            i += 1;
+            continue;
+        }
         match a.as_str() {
             "--" => saw_dashdash = true,
             "--name" => {
@@ -152,15 +163,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!("未知选项 '{}'", other)));
             }
-            // 第一个非选项参数 = 位置参数（镜像引用候选 / 本地命令首词）；
-            // 其后未写 "--" 的非选项参数容错并入命令（兼容 v1 写法）。
-            _ => {
-                if opts.positional.is_none() {
-                    opts.positional = Some(a.clone());
-                } else {
-                    opts.cmd.push(a.clone());
-                }
-            }
+            // 第一个非选项参数 = 镜像引用候选 / 本地命令首词。
+            _ => opts.positional = Some(a.clone()),
         }
         i += 1;
     }
@@ -205,8 +209,9 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
         return spawn_detached(&opts, args);
     }
 
-    // 判别目标：镜像引用（已 pull 或 --pull）vs 本地可执行路径。
-    let target = backend::classify_target(opts.positional.as_deref(), opts.pull, oci::is_pulled)?;
+    // 可解析的镜像引用默认按镜像处理并在缺失时拉取；本地程序使用
+    // `run -- PROGRAM` 或明确的路径/可执行文件名。
+    let target = backend::classify_target(opts.positional.as_deref())?;
 
     match target {
         RunTarget::Native => {
@@ -399,8 +404,7 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
 fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     let dir = oci::image_dir(&iref)?;
     if !dir.join("rootfs").is_dir() {
-        // classify 保证要么已缓存、要么带 --pull；走到这里必然是 --pull 未命中
-        oci::pull(&iref.repo_tag(), "linux", "amd64", None, opts.verbose)?;
+        oci::pull(&iref.repo_tag(), "linux", "amd64", Some(&iref.registry), opts.verbose)?;
         if !dir.join("rootfs").is_dir() {
             return Err(WboxError::registry(format!(
                 "pull 后仍未找到镜像缓存 '{}'，无法运行",
@@ -489,6 +493,19 @@ mod tests {
         let o = parse(&["cmd.exe", "/c", "echo"]).unwrap();
         assert_eq!(o.positional.as_deref(), Some("cmd.exe"));
         assert_eq!(o.cmd, vec!["/c", "echo"]);
+    }
+
+    #[test]
+    fn parse_preserves_all_guest_flags_after_image() {
+        let o = parse(&[
+            "ubuntu:24.04", "sh", "-c", "printf '%s' \"$1\"", "--name", "-e", "-w",
+        ])
+        .unwrap();
+        assert_eq!(o.positional.as_deref(), Some("ubuntu:24.04"));
+        assert_eq!(o.cmd, vec!["sh", "-c", "printf '%s' \"$1\"", "--name", "-e", "-w"]);
+        assert!(o.name.is_none());
+        assert!(o.env.is_empty());
+        assert!(o.workdir.is_none());
     }
 
     #[test]
