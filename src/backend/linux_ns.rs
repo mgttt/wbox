@@ -136,6 +136,15 @@ pub(super) fn spawn_isolated(
     };
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
+    // `--user`：rootless 下没有 newuidmap/newgidmap 就**只能映射一个 id**，
+    // 但那一个映射到容器内的哪个号是自由的。所以 `--user 1000` 的实现不是
+    // "先当 root 再 setuid"（那需要额外映射目标 uid），而是直接把宿主这唯一
+    // 的 uid 映射成 1000。副作用要说清：容器内除了它以外的所有 uid 都是
+    // overflow（nobody），chown 到别的号会 EINVAL。
+    let (target_uid, target_gid) = match spec.user {
+        Some(u) => (u.uid, u.gid),
+        None => (0, 0),
+    };
     // 卷挂载目标解析成宿主视角路径：镜像模式挂进 rootfs 内，宿主模式直接用
     // guest 路径（宿主模式不换根，两者本就同一命名空间）。
     let mut vol_binds = Vec::new();
@@ -160,8 +169,8 @@ pub(super) fn spawn_isolated(
         p_setgroups: cstr("/proc/self/setgroups")?,
         p_uid_map: cstr("/proc/self/uid_map")?,
         p_gid_map: cstr("/proc/self/gid_map")?,
-        uid_map: format!("0 {} 1\n", uid).into_bytes(),
-        gid_map: format!("0 {} 1\n", gid).into_bytes(),
+        uid_map: format!("{} {} 1\n", target_uid, uid).into_bytes(),
+        gid_map: format!("{} {} 1\n", target_gid, gid).into_bytes(),
         c_root: cstr("/")?,
         c_empty: cstr("")?,
         unshare_flags,

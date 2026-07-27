@@ -399,16 +399,9 @@ mod tests {
         RunSpec {
             name: "t".to_string(),
             limits,
-            allow_network: false,
-            keep_profile: false,
             workdir: std::env::temp_dir(),
             cmd: vec!["/bin/true".to_string()],
-            env: vec![],
-            volumes: Vec::new(),
-            ports: Vec::new(),
-            restart: Default::default(),
-            verbose: false,
-            env_pass_all: false,
+            ..RunSpec::default()
         }
     }
 

@@ -146,7 +146,7 @@ impl Backend for LinuxNativeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::Limits;
+
     use std::path::{Path, PathBuf};
 
     /// 造一个最小 rootfs 目录，返回路径（调用方负责清理）。
@@ -160,17 +160,10 @@ mod tests {
     fn spec(rootfs: &Path, cmd: &[&str], env: Vec<(String, String)>) -> RunSpec {
         RunSpec {
             name: "t".to_string(),
-            limits: Limits::default(),
-            allow_network: false,
-            keep_profile: false,
             workdir: rootfs.to_path_buf(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env,
-            volumes: Vec::new(),
-            ports: Vec::new(),
-            restart: Default::default(),
-            verbose: false,
-            env_pass_all: false,
+            ..RunSpec::default()
         }
     }
 

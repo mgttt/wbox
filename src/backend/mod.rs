@@ -92,8 +92,12 @@ impl Limits {
 
 /// 一次 `run` 的完整规格（后端无关）。
 // 非 Windows 构建下 name/limits 等仅由 Windows 专属 spawn 读取。
+///
+/// 实现了 [`Default`]：新增字段时调用方只需在**关心它的地方**写出来，
+/// 其余用 `..RunSpec::default()` 补齐。此前每加一个字段都要改七处
+/// 结构体字面量，且每处都在重复同一串"不关心"的默认值。
 #[cfg_attr(not(windows), allow(dead_code))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RunSpec {
     /// 容器名（AppContainer profile 名）
     pub name: String,
@@ -115,6 +119,11 @@ pub struct RunSpec {
     pub ports: Vec<crate::portfwd::PortMap>,
     /// 重启策略（PRD F9.6）。由 supervisor 在 guest 退出后据此决定是否重跑。
     pub restart: crate::restart::RestartPolicy,
+    /// `--user UID[:GID]`（PRD F9.7，仅 Linux 宿主）。`None` = 沿用默认
+    /// （rootless 下映射为容器内 root）。非 Linux 宿主在 CLI 层就已拒绝，
+    /// 故那些构建里没有读者。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub user: Option<UserSpec>,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
@@ -717,6 +726,85 @@ mod volume_support_tests {
             let m = format!("{}", e);
             assert!(m.contains("只在 Linux"), "要说清哪个宿主可用：{}", m);
             assert!(m.contains("驱动"), "要说清为什么做不到：{}", m);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `--user`（PRD F9.7）
+// ---------------------------------------------------------------------------
+
+/// `--user UID[:GID]` 指定 guest 内的身份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserSpec {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// 解析 `--user`。**只接受数字**。
+///
+/// 用户名要查 rootfs 里的 `/etc/passwd` 才能解析，而那时机很尴尬：镜像模式下
+/// 换根尚未发生，宿主模式下压根没有"容器的 passwd"。与其做一个只在部分场景
+/// 正确的名字解析，不如明说只收数字——docker 在无法解析名字时也是直接报错。
+pub fn parse_user(spec: &str) -> Result<UserSpec> {
+    use crate::error::WboxError;
+    let bad = |why: &str| {
+        WboxError::args(format!("--user '{}' 无效：{}（用法 UID[:GID]）", spec, why))
+    };
+    let num = |s: &str| -> Result<u32> {
+        if s.is_empty() {
+            return Err(bad("缺少数值"));
+        }
+        s.parse::<u32>().map_err(|_| {
+            bad("只接受数字 UID/GID；用户名需要查容器内的 /etc/passwd，\
+                 而换根尚未发生时无从解析")
+        })
+    };
+    let (u, g) = match spec.split_once(':') {
+        Some((u, g)) => (num(u)?, num(g)?),
+        None => {
+            let u = num(spec)?;
+            (u, u)
+        }
+    };
+    Ok(UserSpec { uid: u, gid: g })
+}
+
+/// `--user` 在**当前宿主**是否可用。
+pub fn reject_user_if_unsupported(user: Option<UserSpec>) -> Result<()> {
+    if user.is_none() || cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    Err(crate::error::WboxError::args(
+        "--user 目前只在 Linux 宿主可用：它靠 user namespace 的 uid/gid 映射实现，\
+         Windows 侧的 AppContainer 没有对应语义",
+    ))
+}
+
+#[cfg(test)]
+mod user_tests {
+    use super::*;
+
+    #[test]
+    fn parses_uid_and_optional_gid() {
+        assert_eq!(parse_user("1000").unwrap(), UserSpec { uid: 1000, gid: 1000 });
+        assert_eq!(parse_user("1000:2000").unwrap(), UserSpec { uid: 1000, gid: 2000 });
+        assert_eq!(parse_user("0").unwrap(), UserSpec { uid: 0, gid: 0 });
+    }
+
+    /// 用户名要报错并说清为什么——静默当成 0 会让用户以为降权成功了。
+    #[test]
+    fn rejects_names_with_reason() {
+        let e = parse_user("nobody").unwrap_err();
+        let m = format!("{}", e);
+        assert!(m.contains("只接受数字"), "{}", m);
+        assert!(m.contains("/etc/passwd"), "要解释为什么不支持名字：{}", m);
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        for bad in ["", ":", "1:", ":2", "-1", "a:b", "1:2:3"] {
+            assert!(parse_user(bad).is_err(), "'{}' 应被拒绝", bad);
         }
     }
 }

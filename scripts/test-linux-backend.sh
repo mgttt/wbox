@@ -626,6 +626,43 @@ else
 fi
 
 echo
+echo "=== U --user 身份（PRD F9.7）==="
+
+# U.1 默认仍是容器内 root——`--user` 不能悄悄改掉既有默认。
+run lbetest -- /bin/sh -c 'id -u; id -g'
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT" | tr '\n' ' ')" = "0 0" ]; then
+  report PASS "U.1 不带 --user 时默认仍为 uid=0 gid=0"
+else
+  report FAIL "U.1 默认身份" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 150)"
+fi
+
+# U.2 单值形式：gid 跟随 uid（与 docker 一致）。
+run --user 1000 lbetest -- /bin/sh -c 'id -u; id -g'
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT" | tr '\n' ' ')" = "1000 1000" ]; then
+  report PASS "U.2 --user 1000（gid 跟随 uid）"
+else
+  report FAIL "U.2 --user 1000" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 150)"
+fi
+
+# U.3 uid:gid 分别指定。这条同时验证了实现路线：rootless 下没有 newuidmap，
+# 只能映射**一个** id，所以做法是把宿主那唯一的 id 直接映射成目标号，
+# 而不是"先当 root 再 setuid"（后者需要第二条映射，无特权时写不进去）。
+run --user 1000:1001 lbetest -- /bin/sh -c 'id -u; id -g'
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT" | tr '\n' ' ')" = "1000 1001" ]; then
+  report PASS "U.3 --user 1000:1001（uid/gid 分别生效）"
+else
+  report FAIL "U.3 --user 1000:1001" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 150)"
+fi
+
+# U.4 用户名要报错而不是静默当成 0——静默降级会让用户以为已经降权了。
+uout=$(HOME=$WORK/home "$WBOX_ABS" run --user nobody lbetest -- /bin/true 2>&1); urc=$?
+if [ "$urc" -ne 0 ] && printf '%s' "$uout" | grep -q '/etc/passwd'; then
+  report PASS "U.4 拒绝用户名并解释原因"
+else
+  report FAIL "U.4 拒绝用户名" "rc=$urc 输出: $(printf '%s' "$uout" | head -c 150)"
+fi
+
+echo
 echo "=== N2 端口转发（PRD F9.2）==="
 
 # 判据说明：容器内起一个 TCP 监听，宿主侧连 -p 指定的端口。用 python3 起监听

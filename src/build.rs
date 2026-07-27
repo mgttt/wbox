@@ -628,17 +628,11 @@ fn run_step(rootfs: &Path, cmd: &str, cfg: &ConfigAccum) -> Result<()> {
     use crate::backend::{Backend, RunSpec};
     let spec = RunSpec {
         name: format!("wbox-build-{}", std::process::id()),
-        limits: Default::default(),
         allow_network: true, // RUN 常要装包；与 docker build 默认一致
-        keep_profile: false,
         workdir: rootfs.to_path_buf(),
         cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
         env: cfg.env.clone(),
-        volumes: Vec::new(),
-        ports: Vec::new(),
-            restart: Default::default(),
-        verbose: false,
-        env_pass_all: false,
+        ..RunSpec::default()
     };
     #[cfg(windows)]
     crate::acl::grant_modify_recursive_for_profile(rootfs, &spec.name)?;

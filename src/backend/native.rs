@@ -197,20 +197,13 @@ mod tests {
     fn spec(workdir: std::path::PathBuf, cmd: &[&str]) -> RunSpec {
         RunSpec {
             name: "t".to_string(),
-            limits: Default::default(),
-            allow_network: false,
-            keep_profile: false,
             workdir,
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env: vec![
                 ("LANG".to_string(), "C".to_string()),
                 ("WBOX_VA_BITS".to_string(), "43".to_string()),
             ],
-            volumes: Vec::new(),
-            ports: Vec::new(),
-            restart: Default::default(),
-            verbose: false,
-            env_pass_all: false,
+            ..RunSpec::default()
         }
     }
 

@@ -37,6 +37,8 @@ pub struct RunOptions {
     pub ports: Vec<crate::portfwd::PortMap>,
     /// `--restart` 重启策略（PRD F9.6）
     pub restart: crate::restart::RestartPolicy,
+    /// `-u/--user UID[:GID]`（PRD F9.7，仅 Linux）
+    pub user: Option<backend::UserSpec>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -61,6 +63,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         volumes: Vec::new(),
         ports: Vec::new(),
         restart: Default::default(),
+        user: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -130,6 +133,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--restart" => {
                 let v = super::args::take_value(args, &mut i, "--restart")?;
                 opts.restart = crate::restart::parse_restart(&v)?;
+            }
+            "--user" | "-u" => {
+                let v = super::args::take_value(args, &mut i, "--user")?;
+                opts.user = Some(backend::parse_user(&v)?);
             }
             "--volume" | "-v" => {
                 let v = super::args::take_value(args, &mut i, "--volume")?;
@@ -215,6 +222,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         volumes: opts.volumes.clone(),
         ports: opts.ports.clone(),
         restart: opts.restart,
+        user: opts.user,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -269,6 +277,7 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
 fn validate_options(opts: &RunOptions) -> Result<()> {
     crate::portfwd::reject_if_unsupported(&opts.ports)?;
     crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
+    backend::reject_user_if_unsupported(opts.user)?;
     crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)
 }
 

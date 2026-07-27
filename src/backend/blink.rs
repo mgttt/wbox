@@ -387,17 +387,10 @@ mod tests {
     fn spec(cmd: &[&str]) -> RunSpec {
         RunSpec {
             name: "t".to_string(),
-            limits: Default::default(),
-            allow_network: false,
-            keep_profile: false,
             workdir: std::env::temp_dir(), // 已存在的目录充当 rootfs
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
-            volumes: Vec::new(),
-            ports: Vec::new(),
-            restart: Default::default(),
-            verbose: false,
-            env_pass_all: false,
+            ..RunSpec::default()
         }
     }
 

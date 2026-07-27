@@ -135,7 +135,8 @@ wbox
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
 | healthcheck | 无 | |
 | 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
-| `--user` / `--cap-add` / seccomp 剖面 | 无 | rootless 下语义与 docker 不同，需先定契约 |
+| `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
+| `--cap-add` / seccomp 剖面 | 无 | rootless 下语义与 docker 不同，需先定契约 |
 | Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
 
 #### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
@@ -830,6 +831,28 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.7 `--user UID[:GID]`** `[done]`（门禁 U.1–U.4）。
+
+实现路线值得写下来，因为它与 docker 的做法不同，而"不同"正是取舍所在。
+rootless 下没有 `newuidmap`/`newgidmap`，`/proc/self/uid_map` **只能写一行、
+只能映射一个 id**。所以 `--user 1000` 不是"先进容器当 root 再 setuid 1000"
+（那需要 0 和 1000 两条映射，无特权时第二条写不进去），而是直接把宿主那唯一的
+uid 映射成 1000：`uid_map = "1000 <hostuid> 1"`。默认行为不变——不带 `--user`
+时映射成 0，与此前完全一致。
+
+由此带来的差异必须说清，不能让用户按 docker 的直觉去用：
+
+- 容器内**只有这一个 uid 有效**，其余全是 overflow（`nobody`）。`chown` 到别的
+  号会 `EINVAL`，`--user` 也因此不能用来"在同一容器里切换多个身份"。
+- 进程在新 userns 里仍持有全部 capability（创建者身份使然），所以 `--user 1000`
+  **不等于 docker 的降权**：它换的是 id 号，不是权限面。真正的降权要靠
+  `--cap-drop`/seccomp，那是尚未做的一格。
+- 只接受数字。用户名要查 rootfs 里的 `/etc/passwd`，而 uid_map 必须在
+  `pivot_root` **之前**写完——那个时刻容器的 passwd 还不可达。与其做一个只在
+  部分场景正确的名字解析，不如直接报错并说明原因。
+- 非 Linux 宿主明确拒绝：AppContainer 没有对应语义，静默忽略会让用户以为
+  身份已经换了。
 
 **F9.6 重启策略** `[done]`（门禁 R.1–R.4）。`no` / `on-failure[:N]` / `always`。
 
