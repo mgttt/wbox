@@ -90,7 +90,7 @@ wbox
 | 默认断网 | 有 | 不授 `INTERNET_CLIENT` capability |
 | 资源限额（内存/CPU/进程数）| 有 | Job Object；Sandboxie 本身反而不强调这块 |
 | 进程树可靠回收 | 有 | Job `KILL_ON_JOB_CLOSE` |
-| 生命周期（ps/stop/rm/logs/exec/inspect/wait）| 有 | F8 全套 |
+| 生命周期（ps/stop/kill/top/rm/logs/exec/inspect/wait）| 有 | F8 全套，含 F1.7.9 `kill` 与 F1.7.10 `top` |
 | **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动；wbox 不装驱动（天花板一）。取证见 §4.9 W3 |
 | **注册表虚拟化** | **不做** | 同上 |
 | 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念 |
@@ -111,7 +111,9 @@ wbox
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
 | 卷挂载 `-v` | 无 | 受天花板一牵连：Windows 侧无路径重定向手段，`-v` 明确报错 |
 | 端口映射 `-p` | 无 | Linux 侧的用户态转发依赖 `setns`，Windows 无对应原语 |
-| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink，WP.18；无分层缓存 |
+| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED` |
+| restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
+| `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
 | systemd / 服务 | 不做 | 非目标 |
 
@@ -123,7 +125,7 @@ wbox
 |---|---|---|
 | rootless 运行 | 有 | user/PID/mount/net namespace |
 | 资源限额 | 有 | cgroup v2 首选，受限时明确回退或拒绝 |
-| `run/exec/ps/logs/stop/rm/inspect/wait` | 有 | F8 全套 + 远端补的 inspect/wait |
+| `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -612,7 +614,7 @@ F6
 
 ### F8 运维型容器生命周期 `[active]`
 
-`create/start`、`--detach`、`wbox ps/stop/rm/logs/exec/wait/inspect`。这是 wbox 离"能当 harness 的长期
+`create/start`、`--detach`、`wbox ps/stop/kill/top/rm/logs/exec/wait/inspect`。这是 wbox 离"能当 harness 的长期
 环境"最近的一组能力；基础链路已经实现，当前重点是持续门禁与平台差异收敛。
 
 四个前置问题的设计答复如下：
