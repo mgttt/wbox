@@ -74,7 +74,7 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/ro
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat grep mount"
+APPLETS="sh id ls dd sleep echo cat grep mount test true false"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -809,6 +809,72 @@ if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "未知 syscall"; then
   report PASS "SEC.6 未知 syscall 名报错而非静默忽略"
 else
   report FAIL "SEC.6 未知名字" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+echo
+echo "=== HC 健康检查（PRD F9.10）==="
+
+# HC.1 探针成功 → ps 的状态列显示 healthy。
+HOME=$WORK/home "$WBOX_ABS" run -d --name hc1 --health-cmd 'true' --health-interval 1 \
+  lbetest -- /bin/sleep 20 >/dev/null 2>&1
+sleep 3
+hout=$(HOME=$WORK/home "$WBOX_ABS" ps 2>&1)
+if printf '%s' "$hout" | grep -q 'hc1.*running (healthy)'; then
+  report PASS "HC.1 探针成功时 ps 显示 healthy"
+else
+  report FAIL "HC.1 healthy" "输出: $(printf '%s' "$hout" | tr '\n' ' ' | head -c 200)"
+fi
+
+# HC.2 连续失败到达 retries → unhealthy。
+HOME=$WORK/home "$WBOX_ABS" run -d --name hc2 --health-cmd 'false' --health-interval 1 \
+  --health-retries 2 lbetest -- /bin/sleep 20 >/dev/null 2>&1
+sleep 4
+hout=$(HOME=$WORK/home "$WBOX_ABS" ps 2>&1)
+if printf '%s' "$hout" | grep -q 'hc2.*running (unhealthy)'; then
+  report PASS "HC.2 连续失败到达 --health-retries 后判 unhealthy"
+else
+  report FAIL "HC.2 unhealthy" "输出: $(printf '%s' "$hout" | tr '\n' ' ' | head -c 200)"
+fi
+
+# HC.3 **这条是整个功能的成立前提**：探针必须跑在容器里，不是宿主上。
+# 判据要能区分两者，否则测了等于没测：/home 在宿主存在、在测试 rootfs 里不存在。
+# 探针若跑在宿主上会 healthy；跑在容器里必须 unhealthy。
+if [ -d /home ]; then
+  HOME=$WORK/home "$WBOX_ABS" run -d --name hc3 --health-cmd 'test -d /home' \
+    --health-interval 1 --health-retries 1 lbetest -- /bin/sleep 20 >/dev/null 2>&1
+  sleep 3
+  hout=$(HOME=$WORK/home "$WBOX_ABS" ps 2>&1)
+  if printf '%s' "$hout" | grep -q 'hc3.*running (unhealthy)'; then
+    report PASS "HC.3 探针跑在容器内而非宿主（宿主有 /home，rootfs 没有）"
+  else
+    report FAIL "HC.3 探针执行位置" "探到了宿主的 /home？输出: $(printf '%s' "$hout" | tr '\n' ' ' | head -c 200)"
+  fi
+  HOME=$WORK/home "$WBOX_ABS" kill hc3 >/dev/null 2>&1
+  HOME=$WORK/home "$WBOX_ABS" rm hc3 >/dev/null 2>&1
+else
+  report SKIP "HC.3 探针执行位置" "宿主没有 /home，这个判据区分不了容器与宿主"
+fi
+
+for c in hc1 hc2; do
+  HOME=$WORK/home "$WBOX_ABS" kill "$c" >/dev/null 2>&1
+  HOME=$WORK/home "$WBOX_ABS" rm "$c" >/dev/null 2>&1
+done
+
+# HC.4 调参选项单独出现时必须报错：没有 --health-cmd 就没有探针可跑，
+# 静默接受会让用户以为配好了。
+hout=$(HOME=$WORK/home "$WBOX_ABS" run --health-interval 5 lbetest -- /bin/true 2>&1); hrc=$?
+if [ "$hrc" -ne 0 ] && printf '%s' "$hout" | grep -q "需要与 --health-cmd 同用"; then
+  report PASS "HC.4 --health-interval 单独出现时报错"
+else
+  report FAIL "HC.4 缺 --health-cmd" "rc=$hrc 输出: $(printf '%s' "$hout" | head -c 150)"
+fi
+
+# HC.5 interval=0 会把探针变成忙循环，必须挡下并说清原因。
+hout=$(HOME=$WORK/home "$WBOX_ABS" run --health-cmd true --health-interval 0 lbetest -- /bin/true 2>&1); hrc=$?
+if [ "$hrc" -ne 0 ] && printf '%s' "$hout" | grep -q "忙循环"; then
+  report PASS "HC.5 --health-interval 0 被挡下（否则探针空转占满 CPU）"
+else
+  report FAIL "HC.5 interval=0" "rc=$hrc 输出: $(printf '%s' "$hout" | head -c 150)"
 fi
 
 echo

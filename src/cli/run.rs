@@ -44,6 +44,8 @@ pub struct RunOptions {
     pub cap_add: Vec<crate::caps::CapSelector>,
     /// `--seccomp-deny`（PRD F9.9，仅 Linux）。可重复，每项可逗号分隔。
     pub seccomp_deny: Vec<String>,
+    /// `--health-*`（PRD F9.10，仅 Linux）。`None` = 没开健康检查。
+    pub health: Option<crate::health::HealthSpec>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -72,6 +74,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         cap_drop: Vec::new(),
         cap_add: Vec::new(),
         seccomp_deny: Vec::new(),
+        health: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -141,6 +144,26 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--restart" => {
                 let v = super::args::take_value(args, &mut i, "--restart")?;
                 opts.restart = crate::restart::parse_restart(&v)?;
+            }
+            "--health-cmd" => {
+                let v = super::args::take_value(args, &mut i, "--health-cmd")?;
+                opts.health = Some(crate::health::HealthSpec::new(v));
+            }
+            // 下面三个都只调参，不单独开启健康检查——没有 --health-cmd 就没有
+            // 探针可跑，此时静默接受它们会让用户以为配好了。
+            "--health-interval" | "--health-retries" | "--health-start-period" => {
+                let flag = a.clone();
+                let v = super::args::take_value(args, &mut i, &flag)?;
+                let h = opts.health.as_mut().ok_or_else(|| {
+                    WboxError::args(format!("{} 需要与 --health-cmd 同用", flag))
+                })?;
+                match flag.as_str() {
+                    "--health-interval" => h.interval = crate::health::parse_secs(&flag, &v)?,
+                    "--health-start-period" => {
+                        h.start_period = crate::health::parse_secs(&flag, &v)?
+                    }
+                    _ => h.retries = super::args::parse_u32(&flag, &v)?,
+                }
             }
             "--seccomp-deny" => {
                 let v = super::args::take_value(args, &mut i, "--seccomp-deny")?;
@@ -247,6 +270,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         // 解析已在 cmd_run 的前置校验里做过一次并报过错，这里不会失败；
         // 真失败也只会退化成"不装过滤器"，故用 unwrap_or_default 而非 expect。
         seccomp: crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny).unwrap_or_default(),
+        health: opts.health.clone(),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -312,6 +336,10 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
     crate::seccomp::reject_if_unsupported(&seccomp)?;
     crate::seccomp::reject_unsupported_arch(&seccomp)?;
     crate::seccomp::reject_self_defeating(&seccomp)?;
+    crate::health::reject_if_unsupported(opts.health.as_ref())?;
+    if let Some(h) = opts.health.as_ref() {
+        crate::health::validate(h)?;
+    }
     crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)
 }
 
@@ -579,6 +607,10 @@ fn spawn_registered(
         spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
     }
     crate::portfwd::spawn_forwarders(spec.name.clone(), spec.ports.clone());
+    #[cfg(target_os = "linux")]
+    if let Some(h) = spec.health.clone() {
+        crate::health::spawn_monitor(spec.name.clone(), h);
+    }
     let rc = spawn_with_restart(b, spec, prepared);
     if supervised {
         if let Ok(code) = rc.as_ref() {

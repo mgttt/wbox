@@ -52,12 +52,21 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    println!("{:<20} {:<10} {:<8} {:<10} 命令", "名称", "状态", "PID", "已运行");
+    println!("{:<20} {:<20} {:<8} {:<10} 命令", "名称", "状态", "PID", "已运行");
     for (e, l) in rows {
-        let state = match l {
+        let base = match l {
             Liveness::Created => "created",
             Liveness::Running => "running",
             Liveness::Exited => "exited",
+        };
+        // 健康状态并进"状态"列而不是新增一列（docker 也是这么显示的）：
+        // 没开健康检查的容器占多数，为它们凭空加一列空白不划算。
+        let state = match crate::runstate::dir_for(&e.name)
+            .ok()
+            .and_then(|d| crate::health::read_status(&d))
+        {
+            Some(h) if *l == Liveness::Running => format!("{} ({})", base, h),
+            _ => base.to_string(),
         };
         // 已退出的条目算"存活时长"没有意义，且时钟回拨会得到负数——一律显示 "-"
         let age = if *l == Liveness::Running && now >= e.created_unix {
@@ -66,7 +75,7 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
             "-".to_string()
         };
         println!(
-            "{:<20} {:<10} {:<8} {:<10} {}",
+            "{:<20} {:<20} {:<8} {:<10} {}",
             truncate(&e.name, 20),
             state,
             e.pid,

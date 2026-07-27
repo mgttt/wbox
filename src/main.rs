@@ -21,6 +21,8 @@ mod build;
 // capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；
 // 落地在 backend/linux_ns.rs。
 mod caps;
+// 健康检查（PRD F9.10）：探针经 setns 跑在容器内，循环挂在 supervisor 上。
+mod health;
 mod portfwd;
 mod restart;
 // seccomp-bpf 按 syscall 拦截（PRD F9.9）。解析与 BPF 构造可单测；落地在 linux_ns。

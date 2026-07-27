@@ -77,6 +77,10 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --cap-drop <CAP|ALL>  丢弃 capability（仅 Linux；可重复，见 PRD F9.8）
   --cap-add <CAP|ALL>   保留/加回 capability（仅 Linux；先 drop 后 add）
   --seccomp-deny <SYSCALL,...>  按 syscall 拒绝（仅 Linux；返回 EPERM，见 PRD F9.9）
+  --health-cmd <CMD>    容器内健康探针（仅 Linux；经 /bin/sh -c 执行，见 PRD F9.10）
+  --health-interval <秒>      探测间隔（默认 30）
+  --health-retries <次>       连续失败几次判 unhealthy（默认 3）
+  --health-start-period <秒>  起始宽限期，期内失败不计数（默认 0）
   -d, --detach      后台运行：立即返回容器名，输出落盘到日志（wbox logs 读取）
   --pull            显式声明拉取语义（缺缓存本就会自动 pull）
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）

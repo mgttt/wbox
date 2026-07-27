@@ -154,8 +154,23 @@ fn exec_existing(_name: &str, _cmd: &[&str]) -> Result<u32> {
     ))
 }
 
+/// 健康检查用的静默变体：同一条 setns 路径，只是把探针的 stdio 丢掉。
+///
+/// 探针每 interval 跑一次，输出直接混进 supervisor 的日志会把真正的容器输出
+/// 淹掉；而"探针跑在容器里"这件事必须与 `exec` 走同一条路径，否则两处会各自
+/// 漂移——所以是复用而不是另写一份。
+#[cfg(target_os = "linux")]
+pub(crate) fn exec_in_namespaces_quiet(pid: u32, cmd: &[&str]) -> Result<u32> {
+    exec_in_namespaces_with(pid, cmd, true)
+}
+
 #[cfg(target_os = "linux")]
 fn exec_in_namespaces(pid: u32, cmd: &[&str]) -> Result<u32> {
+    exec_in_namespaces_with(pid, cmd, false)
+}
+
+#[cfg(target_os = "linux")]
+fn exec_in_namespaces_with(pid: u32, cmd: &[&str], quiet: bool) -> Result<u32> {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::process::CommandExt;
 
@@ -184,6 +199,10 @@ fn exec_in_namespaces(pid: u32, cmd: &[&str]) -> Result<u32> {
 
     let mut c = std::process::Command::new(cmd[0]);
     c.args(&cmd[1..]);
+    if quiet {
+        c.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
     // SAFETY: 闭包运行在 fork 之后、exec 之前的单线程子进程里，只调用
     // async-signal-safe 的 setns；fd 由闭包按值捕获，内部不做任何分配。
     unsafe {

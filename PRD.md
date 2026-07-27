@@ -135,7 +135,7 @@ wbox
 | 镜像 push | 无 | |
 | compose / pod | 无 | |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
-| healthcheck | 无 | |
+| healthcheck | 有 | F9.10：`--health-cmd` + interval/retries/start-period（门禁 HC.1–HC.5）|
 | 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
 | `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
 | `--cap-add` / `--cap-drop` | 有 | F9.8：先 drop 后 add，含 `ALL`（门禁 CAP.1–CAP.5）|
@@ -744,7 +744,8 @@ F9
 ├── F9.6 重启策略 `--restart`                 —— [done]（门禁 R.1–R.5）
 ├── F9.7 `--user UID[:GID]`                   —— [partial] 仅 Linux，只映射一个 id
 ├── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
-└── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
+├── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
+└── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -839,6 +840,36 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.10 健康检查** `[done]`（门禁 HC.1–HC.5）。`--health-cmd` 开启，
+`--health-interval` / `--health-retries` / `--health-start-period` 调参，
+默认值与 docker 一致（30 秒 / 3 次 / 0）。
+
+**探针跑在容器里，不是宿主上。** 这条是整个功能的成立前提：探针经 `setns`
+进容器的 user/mount/pid/net namespace，**复用 `wbox exec` 的同一条路径**
+（`exec_in_namespaces_quiet`，只是把 stdio 丢掉）。图省事在宿主上跑的话，
+探到的是宿主状态而用户以为探的是容器，比没有健康检查更危险。门禁 HC.3 专盯
+这条，且判据能区分两者：`/home` 在宿主存在、在测试 rootfs 里不存在，探针若
+跑在宿主上会报 healthy，跑在容器里必须报 unhealthy。
+
+循环与 F9.6 同一取舍：挂在 **supervisor 自己**身上，不另起守护进程。
+supervisor 一死健康检查随之停止，不会出现"容器早没了、探针还在报 healthy"
+的僵尸状态；代价同样是 supervisor 崩溃时健康检查失效。
+
+其余取舍：
+
+- 状态写**单独的 `health` 文件**，不塞进 `meta.json`。理由是写入频率——
+  meta.json 每次写都要取状态操作锁，让一个按 interval 触发的后台循环去争那把
+  锁，是拿正确性换存储上的整洁。
+- `ps` 把健康状态**并进"状态"列**（`running (healthy)`），不新增一列：
+  没开健康检查的容器占多数，为它们凭空加一列空白不划算。
+- 探针命令整条交给容器内的 `/bin/sh -c`，与 docker 的 `CMD-SHELL` 一致——
+  健康检查十有八九要用管道或 `&&`，拆成 argv 是给用户添麻烦。
+- `--health-interval 0` 与 `--health-retries 0` 明确拒绝：前者让探针变忙循环，
+  后者让第一次失败就判死（docker 最小为 1）。调参选项**单独出现也报错**——
+  没有 `--health-cmd` 就没有探针可跑，静默接受会让用户以为配好了。
+- `--restart` 期间容器会短暂消失又回来，监控**以状态目录为准**而不是以某一代
+  的 pid 为准；`container.pid` 还没写回来时跳过该轮，不当作探测失败。
 
 **F9.9 `--seccomp-deny`** `[partial]`（门禁 SEC.1–SEC.6）。
 
