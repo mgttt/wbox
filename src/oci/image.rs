@@ -305,50 +305,46 @@ fn resolve_in_scope(root: &Path, rel: &Path) -> anyhow::Result<PathBuf> {
     Ok(root.join(cur))
 }
 
-/// 校验 symlink 条目的目标在 symlink 所在目录下解析后不越出 rootfs。
-/// 绝对目标直接拒绝；`..` 弹出越过根也拒绝。
-fn symlink_target_in_scope(parent_rel: &Path, target: &Path) -> bool {
+/// 把 symlink 目标归一化为 rootfs 相对路径。
+///
+/// Linux 绝对目标（如 Alpine 的 `/bin/sh -> /bin/busybox`）以容器根为锚点，
+/// 不能按 Windows 宿主绝对路径解释。相对目标则从链接所在目录开始解析。
+/// Windows drive/UNC prefix 与越过 rootfs 的 `..` 均拒绝。
+fn normalize_symlink_target(parent_rel: &Path, target: &Path) -> Option<PathBuf> {
     use std::path::Component;
-    let mut depth: Vec<&std::ffi::OsStr> = parent_rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(n) => Some(n),
-            _ => None,
-        })
-        .collect();
+    let mut normalized = if target.has_root() {
+        PathBuf::new()
+    } else {
+        parent_rel.to_path_buf()
+    };
     for c in target.components() {
         match c {
-            Component::RootDir | Component::Prefix(_) => return false,
+            Component::Prefix(_) => return None,
+            Component::RootDir => normalized.clear(),
             Component::CurDir => {}
             Component::ParentDir => {
-                if depth.pop().is_none() {
-                    return false;
+                if !normalized.pop() {
+                    return None;
                 }
             }
-            Component::Normal(n) => depth.push(n),
+            Component::Normal(n) => normalized.push(n),
         }
     }
-    true
+    Some(normalized)
+}
+
+/// 校验 symlink 条目的目标按容器路径语义解析后不越出 rootfs。
+fn symlink_target_in_scope(parent_rel: &Path, target: &Path) -> bool {
+    normalize_symlink_target(parent_rel, target).is_some()
 }
 
 /// symlink 降级：把符号链接物化为目标内容的副本（Windows 无
 /// SeCreateSymbolicLinkPrivilege 时 symlink 创建必败，层末统一复制）。
 /// `target_rel_raw` 为条目里写的目标（相对 symlink 所在目录）。
 fn materialize_symlink_as_copy(root: &Path, link_rel: &Path, target_raw: &Path) -> anyhow::Result<()> {
-    // 目标相对 symlink 父目录归一化
-    let mut norm = PathBuf::new();
-    if let Some(p) = link_rel.parent() {
-        norm.push(p);
-    }
-    for c in target_raw.components() {
-        match c {
-            std::path::Component::Normal(n) => norm.push(n),
-            std::path::Component::ParentDir => {
-                norm.pop();
-            }
-            _ => {}
-        }
-    }
+    let parent_rel = link_rel.parent().unwrap_or_else(|| Path::new(""));
+    let norm = normalize_symlink_target(parent_rel, target_raw)
+        .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target_raw))?;
     let src = resolve_in_scope(root, &norm)?;
     let dst = root.join(link_rel);
     std::fs::remove_file(&dst).ok();
@@ -528,8 +524,9 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
             continue;
         }
 
-        // 符号链接：先校验目标解析后不越出 rootfs，再创建；
-        // 创建失败（Windows 无特权）时延迟记录，层末复制目标内容（H3）。
+        // 符号链接：先校验目标按容器路径语义解析后不越出 rootfs，再创建。
+        // Linux 绝对链接不能交给 Windows 原生 symlink，否则会指向宿主根；
+        // 它们与创建失败的相对链接都在层末物化为 rootfs 内目标副本（H3）。
         if entry_type == tar::EntryType::Symlink {
             let target = match entry.link_name() {
                 Ok(Some(t)) => t.into_owned(),
@@ -543,7 +540,7 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
                 std::fs::create_dir_all(p)?;
             }
             std::fs::remove_file(&out).ok();
-            if entry.unpack(&out).is_err() {
+            if (cfg!(windows) && target.has_root()) || entry.unpack(&out).is_err() {
                 deferred_symlinks.push((path.to_path_buf(), target));
             }
             continue;
@@ -776,17 +773,25 @@ mod tests {
     }
 
     #[test]
-    fn unpack_rejects_symlink_to_absolute_path_target_entry() {
+    fn unpack_absolute_symlink_uses_container_root() {
         let dir = tmpdir("symtgt");
         let rootfs = dir.join("rootfs");
-        std::fs::create_dir_all(&rootfs).unwrap();
-        // symlink 条目目标本身为绝对路径：直接拒绝创建
-        let l = make_tar_with_symlinks(&[], &[("evil", "/etc")]);
+        std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+        std::fs::write(rootfs.join("etc/value"), b"container").unwrap();
+        let l = make_tar_with_symlinks(&[], &[("alias", "/etc")]);
         unpack_layer(&l, &rootfs, "").unwrap();
-        assert!(
-            !rootfs.join("evil").exists() && std::fs::read_link(rootfs.join("evil")).is_err(),
-            "绝对目标 symlink 条目不应被创建"
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                std::fs::read(rootfs.join("alias/value")).unwrap(),
+                b"container"
+            );
+            assert!(rootfs.join("alias").is_dir());
+        } else {
+            assert_eq!(
+                std::fs::read_link(rootfs.join("alias")).unwrap(),
+                Path::new("/etc")
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -835,15 +840,82 @@ mod tests {
 
     #[test]
     fn unpack_symlink_after_target_in_later_entry() {
-        // symlink 目标在同层后续条目才出现：正常平台创建 symlink 成功；
-        // 降级路径（materialize）也能在层末解析到目标。
+        // symlink 目标确实排在同层后续条目；层末降级仍应解析到目标。
         let dir = tmpdir("symorder");
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        let l = make_tar_with_symlinks(&[("target.txt", b"t" as &[u8])], &[("link", "target.txt")]);
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_cksum();
+        b.append_link(&mut h, "link", "/target.txt").unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(1);
+        h.set_mode(0o755);
+        h.set_cksum();
+        b.append_data(&mut h, "target.txt", &b"t"[..]).unwrap();
+        let l = b.into_inner().unwrap();
         unpack_layer(&l, &rootfs, "").unwrap();
-        // 无论是真 symlink 还是降级复制，读取链接路径都应得到目标内容
-        assert_eq!(std::fs::read(rootfs.join("link")).unwrap(), b"t");
+        if cfg!(windows) {
+            assert_eq!(std::fs::read(rootfs.join("link")).unwrap(), b"t");
+        } else {
+            assert_eq!(
+                std::fs::read_link(rootfs.join("link")).unwrap(),
+                Path::new("/target.txt")
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpack_alpine_busybox_absolute_applets() {
+        let dir = tmpdir("alpine-busybox");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        // Alpine 3.20 的层以绝对 symlink 安装 applet；ash 在 busybox
+        // 本体之前，cat/sh 在其后。Windows 上都必须解析到容器根。
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_cksum();
+        b.append_link(&mut h, "bin/ash", "/bin/busybox")
+            .unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(7);
+        h.set_mode(0o755);
+        h.set_cksum();
+        b.append_data(&mut h, "bin/busybox", &b"busybox"[..])
+            .unwrap();
+        for applet in ["bin/cat", "bin/sh"] {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_cksum();
+            b.append_link(&mut h, applet, "/bin/busybox").unwrap();
+        }
+        let l = b.into_inner().unwrap();
+
+        unpack_layer(&l, &rootfs, "").unwrap();
+        for applet in ["bin/ash", "bin/cat", "bin/sh"] {
+            if cfg!(windows) {
+                assert_eq!(
+                    std::fs::read(rootfs.join(applet)).unwrap(),
+                    b"busybox",
+                    "{applet} 应物化为容器内 /bin/busybox"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read_link(rootfs.join(applet)).unwrap(),
+                    Path::new("/bin/busybox")
+                );
+            }
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1029,19 +1101,19 @@ mod tests {
         let dir = tmpdir("hardlink");
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        // 手工构造含硬链接条目的 tar（目标先于链接出现；延迟创建也覆盖反序）
+        // 硬链接排在目标之前，验证延迟创建与不支持 hardlink 时的复制 fallback。
         let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_size(5);
-        h.set_mode(0o644);
-        h.set_cksum();
-        b.append_data(&mut h, "bin/real", &b"hello"[..]).unwrap();
         let mut h = tar::Header::new_gnu();
         h.set_entry_type(tar::EntryType::Link);
         h.set_size(0);
         h.set_mode(0o644);
         h.set_cksum();
         b.append_link(&mut h, "bin/alias", "bin/real").unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_size(5);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append_data(&mut h, "bin/real", &b"hello"[..]).unwrap();
         let l = b.into_inner().unwrap();
         unpack_layer(&l, &rootfs, "").unwrap();
         assert_eq!(std::fs::read(rootfs.join("bin/alias")).unwrap(), b"hello");
@@ -1100,8 +1172,12 @@ mod tests {
         assert!(!symlink_target_in_scope(Path::new(""), Path::new("../x")));
         // 越出 rootfs 的 ..：拒绝
         assert!(!symlink_target_in_scope(Path::new("a"), Path::new("../../x")));
-        // 绝对目标：拒绝
-        assert!(!symlink_target_in_scope(Path::new("a"), Path::new("/etc/passwd")));
+        // Linux 绝对目标以容器根解析，而不是宿主根。
+        assert!(symlink_target_in_scope(Path::new("a"), Path::new("/etc/passwd")));
+        assert_eq!(
+            normalize_symlink_target(Path::new("a"), Path::new("/etc/passwd")).unwrap(),
+            Path::new("etc/passwd")
+        );
         // CurDir 组件无影响
         assert!(symlink_target_in_scope(Path::new("a"), Path::new("./b")));
     }
