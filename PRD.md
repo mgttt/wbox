@@ -157,6 +157,7 @@ wbox
 | `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
 | `diff` | 有 | F9.19：A/C/D 与 docker 对齐；直接读 overlay upper，不扫全树（门禁 DF.1–DF.3）|
 | `commit` | 有 | F9.20：容器改动固化成新镜像，与基础镜像共享磁盘（门禁 CM.1–CM.4）|
+| `pause` / `unpause` | 部分 | F9.21：用 SIGSTOP/SIGCONT 而非 cgroup freezer（后者要求设了限额才存在），语义不完全等价（门禁 PZ.1–PZ.3）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -846,7 +847,8 @@ F9
 ├── F9.17 构建产物分层（基础层 + 增量层）      —— [done]（门禁 PSH.8a–PSH.8c）
 ├── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
 ├── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
-└── F9.20 `wbox commit` 固化容器改动           —— [done]（仅 Linux，门禁 CM.1–CM.4）
+├── F9.20 `wbox commit` 固化容器改动           —— [done]（仅 Linux，门禁 CM.1–CM.4）
+└── F9.21 `pause` / `unpause`                  —— [partial] 信号实现，非 freezer
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -935,6 +937,29 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.21 `pause` / `unpause`** `[partial]`（门禁 PZ.1–PZ.3）。
+
+**用信号而不是 cgroup freezer，理由是可用性**：容器的 cgroup 只在设了
+`--memory`/`--cpu-pct`/`--max-procs` 时才存在（见 `linux_limits.rs`），
+没设限额就没有可冻的组。让 `pause` 时灵时不灵，比换一种实现更糟。
+所以对容器内**每个**进程发 `SIGSTOP`，`unpause` 发 `SIGCONT`；进程清单
+复用 `top` 的同一份枚举（`container_pids`）——一处另写一份的话，迟早出现
+"top 看得见的进程 pause 漏了"这种最难查的偏差。
+
+**代价直说，不假装等价**：
+
+- `SIGSTOP` 进程**能观察到**（`SIGCONT` 后 `wait` 会返回，有些程序会重试或
+  报错），freezer 则对进程透明；
+- 停的是发信号那一刻已存在的进程；其后新 fork 的不受影响——不过父进程已停，
+  正常情况下不会再有新进程。
+
+对"临时腾出 CPU / 挂起长任务容器"这类主要用途，这些差异无关紧要；
+依赖信号语义的 guest 则可能受影响，故标为 `部分` 而不是 `有`。
+
+判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
+冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
+——信号发出去了不等于进程真停了。
 
 **F9.20 `wbox commit`** `[done]`（门禁 CM.1–CM.4）。把容器的改动固化成新镜像。
 

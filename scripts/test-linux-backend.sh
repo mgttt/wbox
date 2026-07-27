@@ -1799,6 +1799,46 @@ HOME=$WORK/home "$WBOX_ABS" rmi cmmine:v1 >/dev/null 2>&1
 rm -rf "$CACHE/rootfs/cmetc"
 
 echo
+echo "=== PZ pause / unpause（PRD F9.21）==="
+
+# **行为判据**：让容器不停往宿主可见的文件里写计数，pause 后计数必须不再增长。
+# 只断言"pause 返回 0"证明不了任何事——信号发出去了不等于进程真停了。
+PZFILE=$WORK/pzcount
+rm -f "$PZFILE"
+HOME=$WORK/home "$WBOX_ABS" run -d --name pzc -v "$WORK:/pz" lbetest -- \
+  /bin/sh -c 'i=0; while :; do i=$((i+1)); echo $i > /pz/pzcount; sleep 0.05; done' >/dev/null 2>&1
+sleep 2
+before=$(cat "$PZFILE" 2>/dev/null)
+pout=$(HOME=$WORK/home "$WBOX_ABS" pause pzc 2>&1); prc=$?
+sleep 1
+during=$(cat "$PZFILE" 2>/dev/null)
+if [ "$prc" -eq 0 ] && [ -n "$before" ] && [ "$before" = "$during" ]; then
+  report PASS "PZ.1 pause 后容器真的停止工作（计数冻结在 $during）"
+else
+  report FAIL "PZ.1 pause 冻结" "rc=$prc 之前=$before 暂停 1 秒后=$during（应相同）"
+fi
+
+pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
+sleep 1
+after=$(cat "$PZFILE" 2>/dev/null)
+if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$during" ]; then
+  report PASS "PZ.2 unpause 后容器恢复工作（计数 $during → $after）"
+else
+  report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$during 恢复 1 秒后=$after（应不同）"
+fi
+HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
+rm -f "$PZFILE"
+
+# 已退出的容器要报错。静默成功会让脚本以为它还在、还能 unpause 回来。
+pout=$(HOME=$WORK/home "$WBOX_ABS" pause nosuchpz 2>&1); prc=$?
+if [ "$prc" -ne 0 ]; then
+  report PASS "PZ.3 pause 不存在的容器时报错"
+else
+  report FAIL "PZ.3 未知容器" "rc=$prc 输出: $(printf '%s' "$pout" | head -c 120)"
+fi
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。
