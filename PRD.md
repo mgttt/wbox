@@ -142,7 +142,7 @@ wbox
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
-| 镜像分层存储 | 部分 | F9.16：pull 保留原始压缩层（push 已能原样回推）；`FROM` 仍整份复制，未做层复用 |
+| 镜像分层存储 | 部分 | F9.16/F9.17：pull 保留原始层、可原样回推；build 产物写成基础层+增量层，push 时基础层被跳过（PSH.8）。**磁盘**仍是整份复制（需 CoW 文件系统，见 L5b）|
 | 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
 | compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
 | pod | 不做 | F9.15 之后 net/IPC/UTS 三种共享都能单独取得，再抽一层 pod 只是换个说法；理由见 §4.9 L6 |
@@ -187,7 +187,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | `FROM` 复用基础层 | 存储侧已就绪（F9.16 保留原始层）；剩下的是 build 改成引用基础层而非整份复制 | §4.9 L5b |
+| Q3 Podman | `FROM` 的**磁盘**复用 | 网络侧已成（F9.17：push 复用基础层）；磁盘侧需 reflink/overlay，本机 ext4 不支持 reflink，取证见 §4.9 L5b | §4.9 L5b |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
@@ -810,7 +810,8 @@ F9
 ├── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
 ├── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
 ├── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
-└── F9.16 原始层留存与原样回推                 —— [partial] 存储与 push 已成；FROM 复用未做
+├── F9.16 原始层留存与原样回推                 —— [done]（门禁 PSH.6–PSH.7）
+└── F9.17 构建产物分层（基础层 + 增量层）      —— [partial] 网络侧已成；磁盘侧受文件系统限制
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -987,7 +988,31 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
 
-**F9.16 原始层留存与原样回推** `[partial]`（门禁 PSH.6–PSH.7）。
+**F9.17 构建产物分层** `[partial]`（门禁 PSH.8a–PSH.8c）。
+
+`build` 的产物不再写空 manifest，而是写成**基础镜像的层 + 一个增量层**。
+于是 push 一个派生镜像时，基础层被 registry 的 `HEAD` 判定已存在而**跳过上传**，
+只传增量——这正是 §4.9 L5b 判据的后半条（PSH.8b）。
+
+增量层按**内容**比对基础 rootfs 与构建产物得出，不看 mtime：构建过程会刷新
+mtime，看 mtime 会把整棵树都判成改过，增量层就退化成全量。删除写成 `.wh.<name>`
+whiteout，与解包侧已有的约定一致，故拉回来能正确叠加（PSH.8c 三层内容逐个核对
+——分层推对了但内容错了，比不分层更糟）。
+
+做不到分层时（基础镜像是旧缓存、或它本身就是 build 产物）**退回写空 manifest**，
+push 据此走 flatten（F9.13）。分层失败一律不致命：构建本身已经成功，分层只是让
+后续 push 更省，不该因为它出问题就让整个 build 失败。
+
+`push` 的输出相应改成如实报告：`-V` 下逐个说"上传"还是"跳过（registry 已有）"，
+并默认打印跳过/实传的层数。此前一律说"上传"——那把分层复用省下的流量说没了。
+
+**磁盘那半没做，原因是文件系统**：`FROM` 仍整份复制 rootfs。要省磁盘只有两条路，
+本机都走不通或不可验证——reflink（`cp --reflink`）在 ext4 上不支持（已实测
+`Operation not supported`）；hardlink 则会让 `RUN` 就地写坏共享的基础镜像缓存，
+除非把 build 的写入模型改成 overlay + 合并（含 whiteout 处理），那是另一档改动。
+详见 §4.9 L5b。
+
+**F9.16 原始层留存与原样回推** `[done]`（门禁 PSH.6–PSH.7）。
 
 pull 时**除了解包，还原样留一份压缩层**（`blobs/<digest>`）。多花一份磁盘换来
 解包结果给不了的两件事：`push` 能原样回推、将来 `FROM` 能复用基础层。
@@ -1426,21 +1451,26 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 （`[done]`，PSH.7）；`FROM` 复用基础层时磁盘占用明显低于整份复制（`[todo]`，见
 L5b）。
 
-### L5b `FROM` 复用基础层 `[Linux agent]` `[待认领]`
+### L5b `FROM` 复用基础层 `[Linux agent]` `[partial]`
 
-存储侧已由 F9.16 就绪：`blobs/<digest>` 里躺着每个基础层的原始压缩字节，
-`manifest.json` 记着它们的顺序。剩下的是 build 侧：
+**网络侧已完成**（F9.17，门禁 PSH.8）：产物 manifest 引用基础层 + 增量层，
+push 第二个派生镜像时基础层被 `HEAD` 跳过。判据后半条达成。
 
-- 现在 `FROM` 把基础镜像的 `rootfs/` **整份复制**到 staging。要改成引用——
-  最自然的落点是复用 F9.12 的 overlay：把基础镜像的 rootfs 当 lowerdir，
-  构建产物落在 upper，`COPY`/`RUN` 只写 upper。
-- 产物的 manifest 要能引用基础层 digest + 新增层，push 时就不必重传基础层
-  （`push_blob` 已经先 `HEAD` 判存在，天然省流量）。
-- **判据**：同一基础镜像上构建两个不同镜像，磁盘占用明显低于两份整份复制；
-  push 第二个镜像时基础层被 `HEAD` 判定已存在而跳过上传。
+**磁盘侧未完成，且已取证清楚为什么**——这部分是给接手的人省时间的：
 
-难点在 overlay 不可用时（内核 <5.11）的退路：那时只能退回整份复制，而**退回
-必须出声**，与 F9.12 的处理一致。
+- **reflink 走不通**：`cp --reflink=always` 在 ext4 上直接
+  `Operation not supported`（本机实测，`df -T` 为 ext4）。只有 btrfs/XFS 有。
+  可以实现并在支持的文件系统上生效，但**在 ext4 机器上既无收益也无法验证**，
+  按项目规矩（无法在本机验证的不写进产品代码）没有落地。
+- **纯 hardlink 不安全**：`RUN` 的写入会就地修改共享 inode，直接**写坏基础镜像
+  缓存**——这是最不该引入的一类缺陷（破坏的是别的镜像，且很晚才会被发现）。
+- **可行但是大改**：让 build 的 `RUN` 走 overlay（lower=hardlink 出来的 staging，
+  upper=每步一个），步骤结束后把 upper 以"先 unlink 再落盘"的方式合并回 staging，
+  只对改动过的文件断开硬链接。需要正确处理 overlay 的 whiteout（字符设备 0:0，
+  与 tar 层的 `.wh.` 前缀**不是**一套）与 opaque 目录。overlay 不可用时（内核
+  <5.11）退回整份复制，**退回必须出声**，与 F9.12 一致。
+
+**剩余判据**：同一基础镜像上构建两个镜像时，磁盘占用明显低于两份整份复制。
 
 ### L6 pod 抽象是否值得做 `[任一 agent]` `[done：结论是不做]`
 

@@ -518,6 +518,8 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         }
     }
 
+    // 记住基础镜像目录：构建结束后要按它算增量层（PRD L5b）。
+    let mut base_image_dir: Option<std::path::PathBuf> = None;
     let mut cfg = ConfigAccum::default();
     for (idx, ins) in instructions.iter().enumerate() {
         let step = idx + 1;
@@ -549,6 +551,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 // 若后面有缓存命中，这份基础 rootfs 会被命中层整体覆盖；
                 // 仍然先铺一份，保证"无命中"与"部分命中"两条路径起点一致。
                 copy_build_tree(&base_dir.join("rootfs"), &rootfs)?;
+                base_image_dir = Some(base_dir.clone());
                 // 继承基础镜像的 config，再让后续指令覆盖
                 if let Some(base_cfg) = crate::oci::config::ImageConfig::load(&base_dir)? {
                     cfg.env.extend(base_cfg.env.iter().cloned());
@@ -608,16 +611,150 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         crate::backend::copy_rootfs_tree(&rootfs, &out_dir.join("rootfs"))?;
     }
 
-    // 元数据补齐：manifest/layers 供 `image list` 显示，内容为空是诚实的
-    // ——本地构建没有 registry 层信息，编一个假 digest 只会误导。
-    std::fs::write(out_dir.join("manifest.json"), "{}")
-        .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
-    std::fs::write(out_dir.join("layers.json"), "[]")
-        .map_err(|e| WboxError::args(format!("写 layers.json 失败：{}", e)))?;
     std::fs::write(out_dir.join("config.json"), cfg.to_json())
         .map_err(|e| WboxError::args(format!("写 config.json 失败：{}", e)))?;
+
+    // 分层元数据（PRD L5b）：基础镜像留着原始压缩层时，把构建产物写成
+    // **基础层 + 一个增量层**。这样 push 时基础层会被 registry 的 HEAD 判定
+    // 已存在而跳过上传，只传增量。
+    //
+    // 做不到时（基础镜像是旧缓存 / 本身就是 build 产物 / 算增量失败）退回写
+    // 空 manifest——那是诚实的：本地构建没有 registry 层信息，编一个假 digest
+    // 只会误导，而 push 会据此走 flatten 路径（F9.13）。
+    let layered = base_image_dir
+        .as_ref()
+        .and_then(|b| write_layered_manifest(b, &out_dir, &rootfs, &cfg).ok().flatten());
+    if layered.is_none() {
+        std::fs::write(out_dir.join("manifest.json"), "{}")
+            .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
+        std::fs::write(out_dir.join("layers.json"), "[]")
+            .map_err(|e| WboxError::args(format!("写 layers.json 失败：{}", e)))?;
+    }
     println!("构建完成：{}", opts.tag);
     Ok(0)
+}
+
+/// 把构建产物写成"基础层 + 增量层"的 manifest，并把基础层 blob 带过来。
+///
+/// 返回 `Ok(None)` 表示做不到（基础镜像没有原始层等），调用方退回空 manifest。
+/// **失败一律不致命**：构建本身已经成功，分层只是让后续 push 更省，
+/// 不该因为它出问题就让整个 build 失败。
+fn write_layered_manifest(
+    base_dir: &Path,
+    out_dir: &Path,
+    rootfs: &Path,
+    cfg: &ConfigAccum,
+) -> Result<Option<()>> {
+    let Ok(base_manifest) = std::fs::read(base_dir.join("manifest.json")) else {
+        return Ok(None);
+    };
+    let Ok(bm) = serde_json::from_slice::<serde_json::Value>(&base_manifest) else {
+        return Ok(None);
+    };
+    let Some(base_layers) = bm.get("layers").and_then(|l| l.as_array()) else {
+        return Ok(None);
+    };
+    if base_layers.is_empty() {
+        return Ok(None);
+    }
+    // 基础层的原始 blob 必须都还在，否则 push 时无从上传
+    for l in base_layers {
+        let Some(d) = l.get("digest").and_then(|d| d.as_str()) else {
+            return Ok(None);
+        };
+        if !crate::oci::blob_path(base_dir, d).is_file() {
+            return Ok(None);
+        }
+    }
+
+    let delta = crate::oci::push::diff_rootfs(&base_dir.join("rootfs"), rootfs)?;
+    let blobs_dir = out_dir.join(crate::oci::BLOBS_DIR);
+    std::fs::create_dir_all(&blobs_dir)
+        .map_err(|e| WboxError::args(format!("创建 blobs 目录失败：{}", e)))?;
+    // 基础层原样带过来：push 时要能上传它们（registry 多半已有，HEAD 会跳过，
+    // 但本地必须备着，否则遇到空 registry 就推不上去）。
+    let mut layers = Vec::new();
+    for l in base_layers {
+        let d = l.get("digest").and_then(|d| d.as_str()).unwrap_or_default();
+        std::fs::copy(
+            crate::oci::blob_path(base_dir, d),
+            crate::oci::blob_path(out_dir, d),
+        )
+        .map_err(|e| WboxError::args(format!("复制基础层 {} 失败：{}", d, e)))?;
+        layers.push(l.clone());
+    }
+    std::fs::write(crate::oci::blob_path(out_dir, &delta.digest), &delta.gzipped)
+        .map_err(|e| WboxError::args(format!("写增量层失败：{}", e)))?;
+    layers.push(serde_json::json!({
+        "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "digest": delta.digest,
+        "size": delta.gzipped.len(),
+    }));
+
+    // config 要把增量层的 diff_id 追加进去，否则拉取方按 diff_ids 复原会对不上
+    let base_diff_ids: Vec<serde_json::Value> = bm
+        .get("config")
+        .and_then(|_| {
+            std::fs::read(base_dir.join("config.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        })
+        .and_then(|c| {
+            c.get("rootfs")
+                .and_then(|r| r.get("diff_ids"))
+                .and_then(|d| d.as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+    let mut diff_ids = base_diff_ids;
+    diff_ids.push(serde_json::json!(delta.diff_id));
+    let mut config: serde_json::Value = serde_json::from_str(&cfg.to_json())
+        .unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(o) = config.as_object_mut() {
+        o.insert("architecture".into(), serde_json::json!("amd64"));
+        o.insert("os".into(), serde_json::json!("linux"));
+        o.insert(
+            "rootfs".into(),
+            serde_json::json!({"type": "layers", "diff_ids": diff_ids}),
+        );
+        o.insert("history".into(), serde_json::json!([]));
+    }
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|e| WboxError::args(format!("序列化 config 失败：{}", e)))?;
+    let config_digest = crate::oci::push::sha256_hex(&config_bytes);
+    std::fs::write(out_dir.join("config.json"), &config_bytes)
+        .map_err(|e| WboxError::args(format!("写 config.json 失败：{}", e)))?;
+
+    let manifest = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "digest": config_digest,
+            "size": config_bytes.len(),
+        },
+        "layers": layers,
+    });
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|e| WboxError::args(format!("序列化 manifest 失败：{}", e)))?;
+    std::fs::write(out_dir.join("manifest.json"), &manifest_bytes)
+        .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
+    let digests: Vec<String> = manifest["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["digest"].as_str().unwrap_or_default().to_string())
+        .collect();
+    std::fs::write(
+        out_dir.join("layers.json"),
+        serde_json::to_string_pretty(&digests).unwrap_or_else(|_| "[]".into()),
+    )
+    .map_err(|e| WboxError::args(format!("写 layers.json 失败：{}", e)))?;
+    println!(
+        "wbox: 构建产物已分层：基础 {} 层 + 增量 1 层（push 时基础层可被跳过）",
+        base_layers.len()
+    );
+    Ok(Some(()))
 }
 
 /// 执行一条 `RUN`。

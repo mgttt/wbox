@@ -40,6 +40,11 @@ pub struct FlatLayer {
     pub diff_id: String,
 }
 
+/// 计算 `sha256:<hex>`。供 build 侧写分层 manifest 时复用。
+pub fn sha256_hex(data: &[u8]) -> String {
+    sha256_of(data)
+}
+
 /// 计算 `sha256:<hex>`。
 fn sha256_of(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -86,6 +91,128 @@ pub fn flatten_rootfs(rootfs: &Path) -> Result<FlatLayer> {
         digest,
         diff_id,
     })
+}
+
+/// 把 `built` 相对 `base` 的**差异**打成一层 tar.gz（PRD L5b）。
+///
+/// 这是"构建产物 = 基础层 + 增量层"的关键：有了它，push 一个 build 出来的镜像
+/// 时基础层会被 registry 的 `HEAD` 判定已存在而跳过上传，只传增量。
+///
+/// 三类差异，与 OCI 层规范一致：
+/// - 新增/修改：原样入 tar（按内容比对，不看 mtime——构建每次都会刷新 mtime，
+///   看 mtime 会把整棵树都判成"改过"，增量层就退化成全量）；
+/// - 删除：写 `.wh.<name>` 空文件（`unpack_layer_with_state` 已认这个约定）；
+/// - 未变：不入 tar。
+pub fn diff_rootfs(base: &Path, built: &Path) -> Result<FlatLayer> {
+    let mut tar_bytes = Vec::new();
+    {
+        let mut b = tar::Builder::new(&mut tar_bytes);
+        b.follow_symlinks(false);
+        diff_dir(&mut b, base, built, Path::new(""))?;
+        b.finish().context("打包增量层失败").ctx(ErrKind::Registry)?;
+    }
+    let diff_id = sha256_of(&tar_bytes);
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(&tar_bytes)
+        .and_then(|_| enc.try_finish())
+        .context("压缩增量层失败")
+        .ctx(ErrKind::Registry)?;
+    let gzipped = enc.finish().context("压缩增量层失败").ctx(ErrKind::Registry)?;
+    let digest = sha256_of(&gzipped);
+    Ok(FlatLayer {
+        gzipped,
+        digest,
+        diff_id,
+    })
+}
+
+/// 两棵树的同一相对目录做比对。
+fn diff_dir<W: Write>(
+    b: &mut tar::Builder<W>,
+    base: &Path,
+    built: &Path,
+    rel: &Path,
+) -> Result<()> {
+    let fail = |what: &str, p: &Path, e: std::io::Error| {
+        WboxError::registry(format!("{} '{}' 失败：{}", what, p.display(), e))
+    };
+    let built_dir = built.join(rel);
+    let base_dir = base.join(rel);
+
+    let mut built_names: Vec<std::ffi::OsString> = Vec::new();
+    if built_dir.is_dir() {
+        let rd = std::fs::read_dir(&built_dir).map_err(|e| fail("读取目录", &built_dir, e))?;
+        for e in rd {
+            built_names.push(e.map_err(|e| fail("枚举目录项", &built_dir, e))?.file_name());
+        }
+    }
+    built_names.sort();
+
+    for name in &built_names {
+        let r = rel.join(name);
+        // wbox 自己的产物不属于镜像内容
+        if name == ".wbox_oldroot" {
+            continue;
+        }
+        let bp = built.join(&r);
+        let sp = base.join(&r);
+        let meta = std::fs::symlink_metadata(&bp).map_err(|e| fail("读取元数据", &bp, e))?;
+        if meta.is_dir() {
+            // 目录本身在基础镜像里没有才需要入 tar；有的话只递归比内容
+            if !sp.is_dir() {
+                b.append_dir(&r, &bp)
+                    .map_err(|e| fail("打包目录", &bp, e))?;
+            }
+            diff_dir(b, base, built, &r)?;
+        } else if same_file(&sp, &bp) {
+            continue;
+        } else {
+            b.append_path_with_name(&bp, &r)
+                .map_err(|e| fail("打包", &bp, e))?;
+        }
+    }
+
+    // 基础镜像里有、构建产物里没有的 → 删除，写 whiteout
+    if base_dir.is_dir() {
+        let rd = std::fs::read_dir(&base_dir).map_err(|e| fail("读取目录", &base_dir, e))?;
+        for e in rd {
+            let name = e.map_err(|e| fail("枚举目录项", &base_dir, e))?.file_name();
+            if built_names.contains(&name) {
+                continue;
+            }
+            let mut wh = std::ffi::OsString::from(".wh.");
+            wh.push(&name);
+            let mut hdr = tar::Header::new_gnu();
+            hdr.set_size(0);
+            hdr.set_mode(0o644);
+            hdr.set_entry_type(tar::EntryType::Regular);
+            hdr.set_cksum();
+            b.append_data(&mut hdr, rel.join(&wh), std::io::empty())
+                .map_err(|e| fail("写 whiteout", &base_dir.join(&name), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// 两个路径是否"内容相同"。**按内容比而不是 mtime**：构建过程会刷新 mtime，
+/// 看 mtime 会把整棵树都判成改过，增量层就退化成全量。
+fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (
+        std::fs::symlink_metadata(a),
+        std::fs::symlink_metadata(b),
+    ) else {
+        return false;
+    };
+    if ma.file_type() != mb.file_type() {
+        return false;
+    }
+    if ma.is_symlink() {
+        return std::fs::read_link(a).ok() == std::fs::read_link(b).ok();
+    }
+    if ma.len() != mb.len() {
+        return false;
+    }
+    std::fs::read(a).ok() == std::fs::read(b).ok()
 }
 
 /// 递归把目录内容加进 tar，路径相对 `base`。
@@ -247,11 +374,27 @@ pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> 
             iref.qualified_ref()
         );
         // 顺序不能反：manifest 引用的 blob 必须先在 registry 上存在。
+        let mut uploaded = 0usize;
+        let mut skipped = 0usize;
         for (digest, bytes) in &v.blobs {
-            if verbose {
-                println!("wbox: 上传 blob {}（{} 字节）", digest, bytes.len());
+            let sent = client.push_blob(&iref.repo, digest, bytes)?;
+            if sent {
+                uploaded += 1;
+            } else {
+                skipped += 1;
             }
-            client.push_blob(&iref.repo, digest, bytes)?;
+            if verbose {
+                println!(
+                    "wbox: {} {}（{} 字节）",
+                    if sent { "上传" } else { "跳过（registry 已有）" },
+                    digest,
+                    bytes.len()
+                );
+            }
+        }
+        if skipped > 0 {
+            // 这句是分层复用的收益体现，值得默认打印
+            println!("wbox: {} 层已在 registry 上，跳过上传；实传 {} 层", skipped, uploaded);
         }
         let reported =
             client.put_manifest(&iref.repo, &iref.reference, &v.media_type, &v.manifest)?;

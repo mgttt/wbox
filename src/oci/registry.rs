@@ -313,15 +313,19 @@ impl RegistryClient {
     ///
     /// 走单体而非分块：层已经整份在内存里（rootfs 是本地打包出来的），
     /// 分块只会引入断点续传的状态机而不带来任何好处。
-    pub fn push_blob(&self, repo: &str, digest: &str, data: &[u8]) -> crate::error::Result<()> {
+    ///
+    /// 返回 `false` 表示 registry 已有该 blob、这次**没有上传**。调用方据此
+    /// 如实告诉用户跳过了哪些层——分层复用省下的流量正体现在这里，
+    /// 一律打印"上传"会把这个收益说没了。
+    pub fn push_blob(&self, repo: &str, digest: &str, data: &[u8]) -> crate::error::Result<bool> {
         if self.blob_exists(repo, digest)? {
-            return Ok(());
+            return Ok(false);
         }
         let start = format!("{}/blobs/uploads/", self.v2(repo));
         let resp = self.request_authed("POST", &start, None, None, Some(&[]))?;
         // 202 Accepted 是常规；个别实现直接 201 完成（少见但合法）
         if resp.status == 201 {
-            return Ok(());
+            return Ok(true);
         }
         if resp.status != 202 {
             return Err(WboxError::registry(format!(
@@ -356,7 +360,7 @@ impl RegistryClient {
                 String::from_utf8_lossy(&resp.body)
             )));
         }
-        Ok(())
+        Ok(true)
     }
 
     /// 推送 manifest，返回 registry 侧记录的 digest（若响应头带）。

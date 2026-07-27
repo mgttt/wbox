@@ -1194,6 +1194,14 @@ sed -i "s/PORT_PLACEHOLDER/$PSH_PORT/" "$WORK/registry_stub.py"
 python3 "$WORK/registry_stub.py" > "$WORK/stub.log" 2>&1 &
 PSH_PID=$!
 sleep 1.5
+# 确认 stub **自己**起来了。端口被别的进程占着时 bind 会失败，而用例照样能
+# 连上"那一个"服务器并得到看似合理的结果——判据就此失去意义。实测遇到过：
+# 一个遗留的手工 stub 占着端口，门禁的 stub 绑定失败，用例去跟它说话，
+# 于是断言查不到本次运行的记录而报假失败。
+if ! kill -0 "$PSH_PID" 2>/dev/null; then
+  report FAIL "PSH registry stub" "stub 未能启动（端口 $PSH_PORT 被占用？）：$(head -c 200 "$WORK/stub.log")"
+  PSH_PID=""
+fi
 
 # 造一个"已在本地"的镜像（含符号链接，用来验证打包不把它展开成副本）
 PSHDIR=$WORK/home/.wbox/images/127.0.0.1_$PSH_PORT/library_pushed/v1
@@ -1355,6 +1363,10 @@ sed -i "s/PORT2_PLACEHOLDER/$PSH2_PORT/" "$WORK/multi_stub.py"
 python3 "$WORK/multi_stub.py" > "$WORK/multi.log" 2>&1 &
 PSH2_PID=$!
 sleep 1.5
+if ! kill -0 "$PSH2_PID" 2>/dev/null; then
+  report FAIL "PSH 多层 registry stub" "stub 未能启动（端口 $PSH2_PORT 被占用？）：$(head -c 200 "$WORK/multi.log")"
+  PSH2_PID=""
+fi
 PSH2HOME=$WORK/multihome
 mkdir -p "$PSH2HOME"
 pout=$(HOME=$PSH2HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" pull "$PSH2_REG/library/multi:v1" 2>&1); prc=$?
@@ -1377,6 +1389,50 @@ if [ "$prc" -eq 0 ] && [ -n "$orig" ] && [ "$orig" = "$pushed" ] && [ "$nlayers"
   report PASS "PSH.7 多层镜像原样回推：manifest digest 不变且未被压平（2 层）"
 else
   report FAIL "PSH.7 原样回推" "rc=$prc 原始=$orig 推上去=$pushed 层数=$nlayers"
+fi
+
+# ---- PSH.8：构建产物的分层复用（PRD L5b 的判据）----
+#
+# 判据：以同一基础镜像构建的第二个镜像 push 时，**基础层被 registry 的 HEAD
+# 判定已存在而跳过上传**，只实传增量。只看"push 成功"证明不了这一点——
+# 压平成单层同样能推成功，但每次都要重传全部内容。
+PSHCTX=$WORK/derivectx
+mkdir -p "$PSHCTX"
+printf 'DERIVED\n' > "$PSHCTX/added.txt"
+printf 'FROM %s/library/multi:v1\nCOPY added.txt /added.txt\n' "$PSH2_REG" > "$PSHCTX/Dockerfile"
+bout=$(HOME=$PSH2HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" build \
+  -t "$PSH2_REG/library/derived:v1" "$PSHCTX" 2>&1); brc=$?
+DM=$PSH2HOME/.wbox/images/127.0.0.1_$PSH2_PORT/library_derived/v1/manifest.json
+nl=$(python3 -c "import json,sys;print(len(json.load(open(sys.argv[1])).get('layers',[])))" "$DM" 2>/dev/null)
+if [ "$brc" -eq 0 ] && [ "$nl" = "3" ]; then
+  report PASS "PSH.8a 构建产物写成基础层+增量层（共 3 层，非压平）"
+else
+  report FAIL "PSH.8a 分层构建" "rc=$brc 层数=$nl（期望 3）"
+fi
+
+# 先把派生镜像推一次（此时基础层已在 registry，因为它们就是从这里拉的），
+# 再看跳过计数。基础层必须被跳过，增量层必须实传。
+pout=$(HOME=$PSH2HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" push \
+  "$PSH2_REG/library/derived:v1" 2>&1); prc=$?
+if [ "$prc" -eq 0 ] && printf '%s' "$pout" | grep -q "层已在 registry 上，跳过上传"; then
+  report PASS "PSH.8b push 派生镜像时基础层被跳过（分层复用生效）"
+else
+  report FAIL "PSH.8b 基础层复用" "rc=$prc 输出: $(printf '%s' "$pout" | tr '\n' ' ' | head -c 180)"
+fi
+
+# PSH.8c 闭环：派生镜像拉回来必须三层叠加正确——基础两层的内容加上增量层的。
+# 分层推对了但内容错了，比不分层更糟。
+PSH3HOME=$WORK/derivedhome
+mkdir -p "$PSH3HOME"
+HOME=$PSH3HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" pull \
+  "$PSH2_REG/library/derived:v1" >/dev/null 2>&1
+DR=$PSH3HOME/.wbox/images/127.0.0.1_$PSH2_PORT/library_derived/v1/rootfs
+if [ "$(cat "$DR/base.txt" 2>/dev/null)" = "from-layer-1" ] \
+   && [ "$(cat "$DR/extra.txt" 2>/dev/null)" = "from-layer-2" ] \
+   && [ "$(cat "$DR/added.txt" 2>/dev/null)" = "DERIVED" ]; then
+  report PASS "PSH.8c 派生镜像拉回后三层叠加内容正确"
+else
+  report FAIL "PSH.8c 叠加内容" "base=$(cat "$DR/base.txt" 2>/dev/null) extra=$(cat "$DR/extra.txt" 2>/dev/null) added=$(cat "$DR/added.txt" 2>/dev/null)"
 fi
 
 kill "$PSH2_PID" 2>/dev/null

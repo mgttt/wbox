@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.16 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -46,7 +46,8 @@ F9.1–F9.16 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.13 `wbox push` | PSH.1–PSH.5 | 缓存无原始层 blob，只能 flatten 成单层；门禁用 python3 stub 闭环，不打真 registry |
 | F9.14 compose 子集 | CMP.1–CMP.7 | 手写有界 YAML 子集（不引已归档的 serde_yaml）；up 复用 cmd_run 而非另写启动逻辑 |
 | F9.15 IPC/UTS 隔离与共享 | IU.1–IU.7 | 修的是**隔离缺口**：此前容器直接用宿主的 IPC/UTS；顺带发现 exec 没进这两个 ns |
-| F9.16 原始层留存 + 原样回推 | PSH.6–PSH.7 | pull 留一份压缩层，多层镜像 push 回去 digest 不变；`FROM` 复用未做（L5b）|
+| F9.16 原始层留存 + 原样回推 | PSH.6–PSH.7 | pull 留一份压缩层，多层镜像 push 回去 digest 不变 |
+| F9.17 构建产物分层 | PSH.8a–PSH.8c | build 产物 = 基础层 + 增量层，push 时基础层被跳过；**磁盘**仍整份复制（ext4 无 reflink，见 L5b）|
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -54,7 +55,7 @@ F9.1–F9.16 全部落地并有持续门禁。近期这一串是本轮做的：
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **344 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **122 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **125 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -78,10 +79,13 @@ F9.1–F9.16 全部落地并有持续门禁。近期这一串是本轮做的：
 说明哪些缺口打算补、哪些永远不补（判断原则：要装驱动 / 要常驻服务 / 要虚拟化
 的一律不补）。新立的两个条目：
 
-- ~~**L5 镜像分层存储**~~：存储与 push 那半**已完成**（F9.16）——pull 保留原始
-  压缩层，多层镜像原样回推且 digest 不变。剩 **L5b `FROM` 复用基础层**（待认领）：
-  存储侧已就绪，落点建议是复用 F9.12 的 overlay 把基础 rootfs 当 lowerdir；
-  判据是同基础镜像构建两个镜像时磁盘占用明显低于两份整份复制。
+- ~~**L5 镜像分层存储**~~：**已完成**（F9.16/F9.17）——pull 保留原始压缩层、
+  多层镜像原样回推 digest 不变、build 产物写成基础层+增量层且 push 时基础层被
+  跳过。
+- **L5b 的磁盘那半**（`partial`）：`FROM` 仍整份复制。**已取证清楚为什么**，
+  别重走：reflink 在 ext4 上 `Operation not supported`（本机实测）；纯 hardlink
+  会让 `RUN` 就地写坏基础镜像缓存；可行方案是 build 的 RUN 走 overlay + 合并
+  （含 overlay whiteout 是字符设备 0:0，与 tar 层的 `.wh.` **不是**一套）。
 - ~~**L6 pod**~~：**已评估，结论是不做**。评估过程发现 IPC/UTS 根本没隔离，
   于是先补了 F9.15；补齐后 pod 的三样共享都能单独取得，再抽一层只是换个说法。
 
@@ -147,7 +151,9 @@ Dockerfile 子集解析器一致。
 本项目已至少四次因为**测试自身的错误**误判产品：
 
 - `pgrep -c -f 'sleep 300'` 匹配到了 wbox 自己的 argv 和 pgrep 那个 shell
-  → 假的"2 个残留"。改成匹配 `comm`。
+  → 假的"2 个残留"。改成匹配 `comm`。**这条踩了不止一次**：后来
+  `pkill -9 -f stub2.py` 又匹配到自己那条命令，把整个 shell 杀掉，
+  编辑没执行还看不出错。要按 PID/端口定位，别按 argv 关键字。
 - 日志上限"没生效"：watchdog 每 500ms 一 tick，而暴写容器活不到第一次 tick。
   产品没错，判据的时间假设错了。
 - `COPY ../../etc/hostname` 那个文件不存在，`canonicalize` 先失败，
@@ -181,7 +187,17 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
   （upper 的属主在未映射 ns 里是 overflow uid，过不了 overlayfs 属主校验）。
   手工 `unshare -Umr` 能过而进程内探测不过，差的就是 `-r` 那份映射。
 
-### 4.5 CI 与跨宿主
+### 4.5 起了服务当夹具时，必须确认**是你自己**绑上了端口
+
+门禁里用 python3 起 registry stub 时踩过：先前手工测试遗留的进程还占着端口，
+门禁自己的 stub **bind 失败**，用例照样连上了"那一个"服务器并得到看似合理的
+结果，于是断言查不到本次运行的记录，报了一个与产品无关的假失败。
+
+现在两个 stub 起完都会 `kill -0` 复核自己还活着，不活就直接 FAIL 并说明端口
+可能被占。**另外：`ss -ltnp` 在这台机器上看不到监听项**，判断端口是否空闲要
+用"真去 bind 一下"，别信 `ss` 的输出。
+
+### 4.6 CI 与跨宿主
 
 - **推之前等 CI**：曾因为 Windows 侧 `Drop` 顺序（删了还开着句柄的锁文件）
   在 CI 才暴露。
@@ -191,7 +207,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - msys 会改写命令行里的 guest 路径（`/busybox` → `D:/a/_temp/msys64/busybox`），
   造出纯自伤的假失败。Windows 侧脚本注意 `MSYS2_ARG_CONV_EXCL='*'` + `cygpath`。
 
-### 4.6 内核/平台细节（踩过的）
+### 4.7 内核/平台细节（踩过的）
 
 - `unshare`/`setns` 带 `CLONE_NEWPID` **只影响之后创建的子进程** → 必须再 fork 一次。
   用 `/proc/<pid>/ns/pid_for_children`，不是 `ns/pid`。
@@ -201,7 +217,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - netns 是**每线程**的；线程共享 fd 表，不需要 SCM_RIGHTS。
 - 判活**以锁为准不以 pid 为准**：pid 会复用，`stop` 据此发信号就是杀错进程。
 
-### 4.7 Python 生成 shell 脚本时
+### 4.8 Python 生成 shell 脚本时
 
 替换串以 `"` 结尾又紧挨 `"""` 时会多吐一个引号进脚本，`bash -n` 检查不出来，
 只有运行时才炸。生成后**看一眼实际写进去的内容**。
