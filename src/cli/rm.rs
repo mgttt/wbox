@@ -1,18 +1,35 @@
-//! `wbox rm`：删除已退出的容器记录（`PRD.md` F8.3）。
+//! `wbox rm`：删除容器记录（`PRD.md` F8.3、F9.29）。
 //!
-//! 语义刻意收窄：**只删记录，不碰进程**。运行中的容器一律拒绝——`rm` 停不掉
-//! 容器，真删了只会让它从 `ps` 里消失、变成没人管得到的孤儿。停容器是 F8.3
-//! `stop` 的事。
+//! 默认语义刻意收窄：**只删记录，不碰进程**。运行中的容器一律拒绝——不带 `-f`
+//! 的 `rm` 停不掉容器，真删了只会让它从 `ps` 里消失、变成没人管得到的孤儿。
+//!
+//! `-f/--force` 才是"先停再删"（F9.29，与 docker 一致）。这个能力必须**显式
+//! 要求**：删记录和杀进程是两件危险程度差很多的事，默认把后者也做了，
+//! 一次手误就是把还在干活的容器打断。停的那一步直接复用 `stop` 那条路
+//! （先礼后兵、Windows 的 Job 处理都在里面），不另写一份。
 
 use crate::error::Result;
 use crate::runstate;
 
 pub fn cmd_rm(args: &[String]) -> Result<u32> {
-    let names = super::args::take_container_names(args, "rm")?;
+    let mut force = false;
+    let mut rest: Vec<String> = Vec::new();
+    for a in args {
+        match a.as_str() {
+            "-f" | "--force" => force = true,
+            other => rest.push(other.to_string()),
+        }
+    }
+    let names = super::args::take_container_names(&rest, "rm")?;
     let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
     // "一个失败不中断后面的"这条取舍在 rm/prune/restart/compose down 各有一份，
     // 已收敛到 args::each_named（含逐条报错与末尾汇总）。
     super::args::each_named(&owned, "删除", super::args::Echo::Name, |name| {
+        if force {
+            // 已经停了的容器 stop 是幂等的，所以不必先判活再决定要不要停；
+            // 少一次判活也就少一个"判完到停之间容器状态变了"的窗口。
+            super::stop::stop_quiet(name, super::stop::DEFAULT_TIMEOUT_SECS)?;
+        }
         runstate::remove(name)
     })
 }
@@ -60,6 +77,30 @@ mod tests {
             "运行中的容器记录不该被删掉"
         );
         drop(reg);
+    }
+
+    /// 不带 `-f` 时拒绝运行中的容器——那是"rm 不会替你停容器"这条约定的全部意义。
+    /// `-f` 会被认出来且不影响正常删除。
+    ///
+    /// **`-f` 真的把运行中的容器停掉**这一条不在这里验：那需要一个真的
+    /// supervisor 进程，单测里的 `Registration` 一 drop 记录就没了，
+    /// 摆不出"还在跑"的现场。由门禁 RMF.1 在真容器上取证——与其在这里
+    /// 摆一个假的现场自欺，不如把它交给能造出真现场的那一层。
+    #[test]
+    fn force_flag_is_accepted_and_does_not_break_normal_removal() {
+        let _home = TempHome::new("rmforce");
+        let reg = runstate::register("live2", &["/bin/true".into()], "(native)").unwrap();
+        assert!(cmd_rm(&["live2".to_string()]).is_err(), "不带 -f 要拒绝");
+        assert!(runstate::dir_for("live2").unwrap().exists());
+        drop(reg);
+
+        let dir = plant_stale("stale");
+        assert_eq!(cmd_rm(&["-f".to_string(), "stale".to_string()]).unwrap(), 0);
+        assert!(!dir.exists());
+        // 选项可以写在名字后面
+        let dir = plant_stale("stale2");
+        assert_eq!(cmd_rm(&["stale2".to_string(), "--force".to_string()]).unwrap(), 0);
+        assert!(!dir.exists());
     }
 
     #[test]

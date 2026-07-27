@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.28 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.29 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -59,6 +59,7 @@ F9.1–F9.28 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.26 `wbox restart` | RT.1–RT.7 | 顺带补了真实缺口：`run -d` 的容器此前不记启动配置，退出后连 `start` 都不行；`run-args.json` 与 `create.json` 必须分开，后者的存在本身是「该走 start」的标记 |
 | F9.27 `rename`/`prune` | RN.1–RN.6 | rename 只对未运行容器开放（名字被用在可写层路径、默认主机名、Windows Job object 上，改名改不到这些）；prune 默认只列清单，`created` 不在清理范围 |
 | F9.28 `logs -f`/`--tail` | LG.1–LG.4 | 跟随必须认日志截断（超上限会清零重写），否则之后静默哑掉；循环里先判活再读，反了会丢容器退出前的最后一段输出 |
+| F9.29 `ps -q`/`rm -f` | RMF.1–RMF.5 | 一起补才凑齐 `rm -f $(ps -aq)` 清场惯用法；`-q` 只出名字（说明行会被当成容器名传下去）；`-f` 复用 stop 那条路 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -98,14 +99,18 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
   而 `cargo test` 只构建测试二进制、不更新它。改完代码只跑 test 就跑门禁，
   测的是上一版程序——实测因此整组红过一次，报的是「未知参数」这种一看就知道
   跑错了版本的错。
+- **判活别用 `kill -0`**。僵尸进程（已死、尚未被回收）照样返回成功。本机 PID 1
+  不回收孤儿，`run -d` 的 supervisor 被 setsid 脱离后死掉就停在 `Z` 状态，
+  于是 `kill -0` 把一个已经死了的进程报成活着——RMF.4 第一版就是这么假红的
+  （产品没问题，判据错了）。改看 `/proc/<pid>/stat` 的状态字段，`Z` 视为已死。
 - **判据要能排除「碰巧成立」**。LG.2 起初只数行数，可万一容器早已跑完，
   一次性读全也能凑够行数——那证明不了跟随。改成同时断言命令自身耗时 > 0，
   才是真的在验「它等到了后来才产生的输出」。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **395 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **184 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **396 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **189 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -117,7 +122,7 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.28）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.29）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

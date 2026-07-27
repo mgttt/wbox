@@ -2030,6 +2030,76 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== RMF ps -q / rm -f（PRD F9.29）==="
+
+# 这一组只碰状态记录，不需要镜像；用独立 HOME + 宿主程序模式，与别的组无关。
+RFH=$WORK/rfhome
+rm -rf "$RFH" && mkdir -p "$RFH"
+HOME=$RFH "$WBOX_ABS" run -d --name rf1 -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$RFH "$WBOX_ABS" run -d --name rf2 -- /bin/echo done >/dev/null 2>&1
+sleep 2
+
+# -q 是给脚本用的：**只能出名字**。空表说明、表头混进去都会被当成容器名传下去。
+fout=$(HOME=$RFH "$WBOX_ABS" ps -aq 2>&1); frc=$?
+fbad=$(printf '%s\n' "$fout" | grep -vcE '^(rf1|rf2)$')
+if [ "$frc" -eq 0 ] && [ "$(printf '%s\n' "$fout" | wc -l)" -eq 2 ] && [ "$fbad" -eq 0 ]; then
+  report PASS "RMF.1 ps -aq 只出名字（无表头、无说明行）"
+else
+  report FAIL "RMF.1 ps -aq" "rc=$frc 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 默认视图（不带 -a）的 -q 只列运行中的
+fout=$(HOME=$RFH "$WBOX_ABS" ps -q 2>&1)
+if [ "$(printf '%s\n' "$fout" | grep -c .)" -eq 1 ] && printf '%s' "$fout" | grep -qx rf1; then
+  report PASS "RMF.2 ps -q 只列运行中的容器"
+else
+  report FAIL "RMF.2 ps -q" "输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 120)"
+fi
+
+# 不带 -f 时必须拒绝运行中的容器，且**记录还在**——这是 rm 的核心约定
+fout=$(HOME=$RFH "$WBOX_ABS" rm rf1 2>&1); frc=$?
+if [ "$frc" -ne 0 ] && HOME=$RFH "$WBOX_ABS" ps | awk '$1=="rf1"{f=1} END{exit !f}'; then
+  report PASS "RMF.3 不带 -f 时拒绝删运行中的容器（记录与进程都还在）"
+else
+  report FAIL "RMF.3 默认拒绝" "rc=$frc 输出: $(printf '%s' "$fout" | head -c 150)"
+fi
+
+# -f 要**先停再删**：判据不只是记录没了，还要求那棵进程树真的没了——
+# 只删记录不停进程会留下没人管得到的孤儿，而 ps 从此看不见它。
+# 判活**不能用 `kill -0`**：僵尸进程（已死、尚未被回收）照样返回成功。
+# 本机 PID 1 不回收孤儿，supervisor 被 setsid 脱离后死掉就会停在 Z 状态，
+# 于是 `kill -0` 会把一个已经死了的进程报成活着——第一版判据就是这么假红的。
+# 改看 /proc/<pid>/stat 的状态字段：Z 视为已死，取不到（进程没了）同样视为已死。
+alive() {
+  [ -r "/proc/$1/stat" ] || return 1
+  # comm 字段可能含空格和括号，从最后一个 ')' 之后切
+  st=$(sed -e 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$st" ] && [ "$st" != "Z" ]
+}
+rfpid=$(HOME=$RFH "$WBOX_ABS" ps | awk '$1=="rf1"{print $3}')
+fout=$(HOME=$RFH "$WBOX_ABS" rm -f rf1 2>&1); frc=$?
+sleep 1
+if [ "$frc" -eq 0 ] \
+   && ! HOME=$RFH "$WBOX_ABS" ps -a | awk '$1=="rf1"{f=1} END{exit !f}' \
+   && ! alive "$rfpid"; then
+  report PASS "RMF.4 rm -f 先停再删（supervisor pid $rfpid 已终止，记录也没了）"
+else
+  report FAIL "RMF.4 rm -f" "rc=$frc pid $rfpid 仍在运行=$(alive "$rfpid" && echo 是 || echo 否) 输出: $(printf '%s' "$fout" | head -c 120)"
+fi
+
+# 组合起来就是 docker 用户的清场惯用法
+HOME=$RFH "$WBOX_ABS" run -d --name rf3 -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+HOME=$RFH "$WBOX_ABS" rm -f $(HOME=$RFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+fout=$(HOME=$RFH "$WBOX_ABS" ps -aq 2>&1)
+if [ -z "$(printf '%s' "$fout" | tr -d '[:space:]')" ]; then
+  report PASS "RMF.5 wbox rm -f \$(wbox ps -aq) 清场干净"
+else
+  report FAIL "RMF.5 清场惯用法" "残留: $(printf '%s' "$fout" | tr '\n' '|' | head -c 120)"
+fi
+rm -rf "$RFH"
+
+echo
 echo "=== LG wbox logs -f / --tail（PRD F9.28）==="
 
 # 这一组不需要镜像（只读状态目录里的日志文件），用独立 HOME + 宿主程序模式，

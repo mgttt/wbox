@@ -6,21 +6,34 @@
 use crate::error::Result;
 use crate::runstate::{self, Liveness};
 
-/// 解析 `wbox ps` 的参数。目前只有 `-a/--all`。
+/// 解析 `wbox ps` 的参数。
 #[derive(Debug)]
 struct PsOptions {
     /// 默认只列运行中的；`-a` 连已退出的残留一并列出
     all: bool,
+    /// 只输出名字，一行一个（`PRD.md` F9.29）
+    quiet: bool,
 }
 
 fn parse(args: &[String]) -> Result<PsOptions> {
-    let mut o = PsOptions { all: false };
+    let mut o = PsOptions {
+        all: false,
+        quiet: false,
+    };
     for a in args {
         match a.as_str() {
             "-a" | "--all" => o.all = true,
+            "-q" | "--quiet" => o.quiet = true,
+            // `-aq` 是 docker 用户的肌肉记忆，不认它会让人以为命令坏了。
+            // 只支持这一个组合而不是通用的短选项合并：其余组合目前没有意义，
+            // 装作支持会在以后加新短选项时留下模糊语义。
+            "-aq" | "-qa" => {
+                o.all = true;
+                o.quiet = true;
+            }
             other => {
                 return Err(crate::error::WboxError::args(format!(
-                    "ps: 未知参数 '{}'（支持 -a/--all）",
+                    "ps: 未知参数 '{}'（支持 -a/--all、-q/--quiet，及组合 -aq）",
                     other
                 )))
             }
@@ -36,6 +49,16 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         .iter()
         .filter(|(_, l)| opts.all || *l == Liveness::Running)
         .collect();
+
+    // `-q` 是给脚本用的：`wbox rm -f $(wbox ps -aq)`。所以**只出名字、别的一律不出**
+    // ——空表时那句人类友好的说明在这里会被当成一个容器名传下去，是真会出事的。
+    // 同理表头也不打。
+    if opts.quiet {
+        for (e, _) in rows {
+            println!("{}", e.name);
+        }
+        return Ok(0);
+    }
 
     // 空表也要给一行说明，而不是什么都不打印——"没输出"分不清是"没有容器"
     // 还是"命令没跑起来"。
@@ -114,6 +137,13 @@ mod tests {
         assert!(!parse(&[]).unwrap().all);
         assert!(parse(&["-a".to_string()]).unwrap().all);
         assert!(parse(&["--all".to_string()]).unwrap().all);
+        assert!(parse(&["-q".to_string()]).unwrap().quiet);
+        assert!(parse(&["--quiet".to_string()]).unwrap().quiet);
+        // docker 用户的肌肉记忆：`ps -aq`
+        let o = parse(&["-aq".to_string()]).unwrap();
+        assert!(o.all && o.quiet);
+        let o = parse(&["-qa".to_string()]).unwrap();
+        assert!(o.all && o.quiet);
         let e = parse(&["--bogus".to_string()]).unwrap_err();
         assert!(format!("{}", e).contains("未知参数"));
     }
