@@ -103,6 +103,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
   --no-network      显式声明断网（默认行为，预留）
   -e, --env <K=V>   注入显式环境变量；可重复；不支持仅写 K 继承宿主值
+  --env-file <FILE> 从文件读入环境变量（一行一个 KEY=VALUE，# 注释）；避免密钥进命令行
+  --entrypoint <CMD>  覆盖镜像声明的 Entrypoint（空串 = 清空；仅镜像模式，见 PRD F9.36）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              退出即清理；与 -d 同用时也自动删除状态和日志
   --interactive     连接 stdio（默认）
@@ -457,7 +459,7 @@ mod tests {
         // 4. run-prepare：config 合并 + BlinkBackend 执行计划（不 spawn）
         let dir = oci::image_dir(&iref).unwrap();
         let cfg = oci::config::ImageConfig::load(&dir).unwrap().unwrap();
-        let merged = cfg.merged_command(&[]); // 无显式 cmd：Entrypoint + Cmd
+        let merged = cfg.merged_command(&[], None); // 无显式 cmd：Entrypoint + Cmd
         assert_eq!(merged, vec!["/bin/sh", "-l"]);
         assert_eq!(cfg.working_dir.as_deref(), Some("/root"));
 

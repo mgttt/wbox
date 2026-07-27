@@ -1,8 +1,14 @@
 //! `wbox build`：Dockerfile 子集构建（`PRD.md` F9.3）。
 //!
 //! 只实现自用场景够用的子集：`FROM` / `RUN` / `COPY` / `ENV` / `WORKDIR` /
-//! `CMD` / `ENTRYPOINT`。**未实现的指令一律明确报错**，不静默跳过——静默跳过
-//! 会产出一个"看着构建成功、其实少做了事"的镜像，比构建失败难查得多。
+//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG`。
+//! **未实现的指令一律明确报错**，不静默跳过——静默跳过会产出一个"看着构建成功、
+//! 其实少做了事"的镜像，比构建失败难查得多。
+//!
+//! 后四条里有两条是**纯声明**，必须说清它们不做什么：`EXPOSE` 只写进镜像 config，
+//! 不会真的发布端口（发布要 `-p`）；`USER` 同样只是镜像声明的默认身份，
+//! 运行时是否生效取决于 `--user` 与那一格支持不支持（F9.7）。
+//! 把声明当成生效，是这两条指令最常见的误解。
 //!
 //! `RUN` 复用现成的容器执行路径（`wbox run` 的镜像模式），所以构建期的隔离
 //! 与运行期完全一致，不另起一套。
@@ -21,6 +27,14 @@ pub enum Instruction {
     Workdir(String),
     Cmd(Vec<String>),
     Entrypoint(Vec<String>),
+    /// `LABEL k=v`：写进镜像 config 的 `Labels`。
+    Label { key: String, value: String },
+    /// `EXPOSE 80` / `EXPOSE 80/tcp`：**纯声明**，不会真的发布端口。
+    Expose(String),
+    /// `USER 1000[:1000]`：镜像声明的默认身份。
+    User(String),
+    /// `ARG k[=默认值]`：构建期变量。
+    Arg { key: String, default: Option<String> },
 }
 
 /// 解析 Dockerfile 文本。
@@ -102,6 +116,43 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
                 need("命令")?;
                 out.push(Instruction::Cmd(parse_exec_form(rest)));
             }
+            "LABEL" => {
+                need("KEY=VALUE")?;
+                let (k, v) = rest
+                    .split_once('=')
+                    .ok_or_else(|| WboxError::args("LABEL 需要 KEY=VALUE 形式"))?;
+                if k.trim().is_empty() {
+                    return Err(WboxError::args("LABEL 的键不能为空"));
+                }
+                // 值两侧的引号是 Dockerfile 的写法惯例（LABEL a="b c"），剥掉；
+                // 中间的引号原样保留——那是值的一部分。
+                out.push(Instruction::Label {
+                    key: k.trim().to_string(),
+                    value: strip_quotes(v.trim()).to_string(),
+                });
+            }
+            "EXPOSE" => {
+                need("端口")?;
+                out.push(Instruction::Expose(rest.to_string()));
+            }
+            "USER" => {
+                need("身份")?;
+                out.push(Instruction::User(rest.to_string()));
+            }
+            "ARG" => {
+                need("变量名")?;
+                let (k, default) = match rest.split_once('=') {
+                    Some((k, v)) => (k.trim(), Some(strip_quotes(v.trim()).to_string())),
+                    None => (rest, None),
+                };
+                if k.is_empty() {
+                    return Err(WboxError::args("ARG 的变量名不能为空"));
+                }
+                out.push(Instruction::Arg {
+                    key: k.to_string(),
+                    default,
+                });
+            }
             "ENTRYPOINT" => {
                 need("命令")?;
                 out.push(Instruction::Entrypoint(parse_exec_form(rest)));
@@ -109,7 +160,8 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
             other => {
                 return Err(WboxError::args(format!(
                     "Dockerfile 指令 '{}' 未实现（本子集支持 FROM/RUN/COPY/ENV/WORKDIR/\
-                     CMD/ENTRYPOINT）；静默跳过会产出一个看似构建成功、实则少做了事的镜像",
+                     CMD/ENTRYPOINT/LABEL/EXPOSE/USER/ARG）；\
+                     静默跳过会产出一个看似构建成功、实则少做了事的镜像",
                     other
                 )));
             }
@@ -120,6 +172,20 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
         Some(_) => Err(WboxError::args("Dockerfile 的第一条指令必须是 FROM")),
         None => Err(WboxError::args("Dockerfile 为空")),
     }
+}
+
+/// 剥掉值两侧成对的引号（`LABEL a="b c"` 的写法惯例）。
+///
+/// 只剥**两侧成对**的那一层，中间的引号原样保留——它们是值的一部分。
+/// 不做转义处理：处理了就得把一整套 shell 引用规则搬进来，而 Dockerfile 的
+/// 这几条指令用不到，半套规则比没有更难预料。
+fn strip_quotes(v: &str) -> &str {
+    for q in ['"', '\''] {
+        if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
+            return &v[1..v.len() - 1];
+        }
+    }
+    v
 }
 
 /// `CMD ["a","b"]`（exec 形式）或 `CMD a b`（shell 形式）。
@@ -201,6 +267,76 @@ pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 新增的四条指令：LABEL/EXPOSE/USER 进镜像 config，ARG **不进**
+    /// （构建参数常带凭证，落进镜像等于随镜像发出去）。
+    #[test]
+    fn parses_label_expose_user_arg() {
+        let df = "FROM alpine:3.20\n\
+                  LABEL org.opencontainers.image.title=\"my app\"\n\
+                  EXPOSE 80\n\
+                  EXPOSE 8443/tcp\n\
+                  USER 1000:1000\n\
+                  ARG BUILD_ID=42\n\
+                  ARG NO_DEFAULT\n";
+        let got = parse_dockerfile(df).unwrap();
+        assert_eq!(
+            got[1],
+            Instruction::Label {
+                key: "org.opencontainers.image.title".into(),
+                // 两侧成对的引号剥掉，中间的原样留（这里没有中间的）
+                value: "my app".into()
+            }
+        );
+        assert_eq!(got[2], Instruction::Expose("80".into()));
+        assert_eq!(got[3], Instruction::Expose("8443/tcp".into()));
+        assert_eq!(got[4], Instruction::User("1000:1000".into()));
+        assert_eq!(
+            got[5],
+            Instruction::Arg { key: "BUILD_ID".into(), default: Some("42".into()) }
+        );
+        assert_eq!(
+            got[6],
+            Instruction::Arg { key: "NO_DEFAULT".into(), default: None }
+        );
+
+        // 缺参数一律报错，不静默跳过
+        assert!(parse_dockerfile("FROM a\nLABEL\n").is_err());
+        assert!(parse_dockerfile("FROM a\nLABEL nokey\n").is_err());
+        assert!(parse_dockerfile("FROM a\nEXPOSE\n").is_err());
+        assert!(parse_dockerfile("FROM a\nUSER\n").is_err());
+        assert!(parse_dockerfile("FROM a\nARG\n").is_err());
+    }
+
+    /// 这四条落进 config 的形状要与 docker/OCI 一致，否则 `run` 读不回来。
+    #[test]
+    fn config_json_shape_for_the_new_instructions() {
+        let mut cfg = ConfigAccum::default();
+        cfg.labels.push(("a".into(), "1".into()));
+        cfg.exposed.push("80/tcp".into());
+        cfg.user = Some("1000".into());
+        cfg.args.push(("SECRET".into(), "shh".into()));
+        let v: serde_json::Value = serde_json::from_str(&cfg.to_json()).unwrap();
+        assert_eq!(v["config"]["Labels"]["a"], "1");
+        // ExposedPorts 的值是空对象，与 OCI 一致
+        assert!(v["config"]["ExposedPorts"]["80/tcp"].is_object());
+        assert_eq!(v["config"]["User"], "1000");
+        // ARG 绝不能出现在镜像 config 里
+        assert!(
+            !cfg.to_json().contains("SECRET"),
+            "构建参数不该落进镜像 config：它常带凭证"
+        );
+    }
+
+    /// 只剥两侧成对的那一层，中间的引号是值的一部分。
+    #[test]
+    fn strip_quotes_only_removes_a_matched_outer_pair() {
+        assert_eq!(strip_quotes("\"a b\""), "a b");
+        assert_eq!(strip_quotes("'a b'"), "a b");
+        assert_eq!(strip_quotes("a\"b"), "a\"b");
+        assert_eq!(strip_quotes("\"unbalanced"), "\"unbalanced");
+        assert_eq!(strip_quotes("plain"), "plain");
+    }
 
     #[test]
     fn parses_supported_subset() {
@@ -314,6 +450,15 @@ struct ConfigAccum {
     workdir: Option<String>,
     cmd: Option<Vec<String>>,
     entrypoint: Option<Vec<String>>,
+    /// `LABEL` 累积（同键后写覆盖先写，与 `ENV` 一致）。
+    labels: Vec<(String, String)>,
+    /// `EXPOSE` 声明的端口，形如 `80/tcp`。
+    exposed: Vec<String>,
+    /// `USER` 声明的默认身份。
+    user: Option<String>,
+    /// `ARG` 的构建期变量（含默认值）。**不进镜像 config**——
+    /// 构建参数常带凭证，落进镜像等于把它发出去。
+    args: Vec<(String, String)>,
 }
 
 impl ConfigAccum {
@@ -337,6 +482,28 @@ impl ConfigAccum {
         if let Some(e) = &self.entrypoint {
             cfg.insert("Entrypoint".into(), serde_json::json!(e));
         }
+        if !self.labels.is_empty() {
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .labels
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                .collect();
+            cfg.insert("Labels".into(), serde_json::Value::Object(map));
+        }
+        if !self.exposed.is_empty() {
+            // OCI/docker 的形状是 {"80/tcp": {}}，值是个空对象
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .exposed
+                .iter()
+                .map(|p| (p.clone(), serde_json::json!({})))
+                .collect();
+            cfg.insert("ExposedPorts".into(), serde_json::Value::Object(map));
+        }
+        if let Some(u) = &self.user {
+            cfg.insert("User".into(), serde_json::json!(u));
+        }
+        // ARG 刻意不写进 config：构建参数常带凭证（token、密码），
+        // 落进镜像等于随镜像一起发出去。docker 也不把 ARG 写进 config。
         serde_json::json!({ "config": cfg }).to_string()
     }
 }
@@ -722,6 +889,28 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 cfg.env.push((key.clone(), value.clone()));
             }
             Instruction::Workdir(w) => cfg.workdir = Some(w.clone()),
+            Instruction::Label { key, value } => {
+                cfg.labels.retain(|(k, _)| k != key);
+                cfg.labels.push((key.clone(), value.clone()));
+            }
+            Instruction::Expose(port) => {
+                // 补默认协议，与 docker 一致：`EXPOSE 80` → `80/tcp`
+                let norm = if port.contains('/') {
+                    port.clone()
+                } else {
+                    format!("{}/tcp", port)
+                };
+                if !cfg.exposed.contains(&norm) {
+                    cfg.exposed.push(norm);
+                }
+            }
+            Instruction::User(u) => cfg.user = Some(u.clone()),
+            Instruction::Arg { key, default } => {
+                // 构建期变量：进 RUN 的环境，但不进镜像 config（见 to_json 的说明）
+                cfg.args.retain(|(k, _)| k != key);
+                cfg.args
+                    .push((key.clone(), default.clone().unwrap_or_default()));
+            }
             Instruction::Cmd(c) => cfg.cmd = Some(c.clone()),
             Instruction::Entrypoint(e) => cfg.entrypoint = Some(e.clone()),
             Instruction::Run(cmd) if linked_base => {

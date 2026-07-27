@@ -2061,6 +2061,94 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== EP --entrypoint / --env-file / Dockerfile 新指令（PRD F9.36）==="
+
+# 造一个带 Entrypoint+Cmd 的镜像，才能验"覆盖"确实换掉了东西
+EPD=$WORK/home/.wbox/images/registry-1.docker.io/library_eptest/latest
+mkdir -p "$EPD/rootfs/bin"
+cp "$BUSYBOX" "$EPD/rootfs/bin/busybox"
+for a in sh echo cat env; do ln -sf busybox "$EPD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":["IMG_CMD"],"Entrypoint":["/bin/echo","IMG_EP"],"WorkingDir":""}}' > "$EPD/config.json"
+echo '[]' > "$EPD/layers.json"; echo '{}' > "$EPD/manifest.json"
+
+# 基线：不给 --entrypoint 时是镜像的 Entrypoint + Cmd
+eout=$(HOME=$WORK/home "$WBOX_ABS" run --rm eptest 2>&1 | tail -1)
+# 覆盖：换掉 entrypoint，且**不再回落镜像 Cmd**（那串参数是给原 entrypoint 的）
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint /bin/echo eptest OVERRIDDEN 2>&1 | tail -1)
+if [ "$eout" = "IMG_EP IMG_CMD" ] && [ "$eov" = "OVERRIDDEN" ]; then
+  report PASS "EP.1 --entrypoint 覆盖镜像 Entrypoint 且不回落镜像 Cmd"
+else
+  report FAIL "EP.1 entrypoint 覆盖" "默认='$eout'（期望 IMG_EP IMG_CMD） 覆盖后='$eov'（期望 OVERRIDDEN）"
+fi
+
+# 空串是**清空**而不是"没给"——docker 里甩掉 entrypoint 的标准写法
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint "" eptest /bin/echo CLEARED 2>&1 | tail -1)
+if [ "$eov" = "CLEARED" ]; then
+  report PASS "EP.2 --entrypoint \"\" 清空镜像 Entrypoint"
+else
+  report FAIL "EP.2 清空 entrypoint" "得到 '$eov'（期望 CLEARED）"
+fi
+
+# 宿主程序模式没有镜像，也就没有可覆盖的东西：要明确拒绝而不是静默忽略
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint /bin/sh -- /bin/true 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eov" | grep -q '只对镜像模式'; then
+  report PASS "EP.3 宿主程序模式下 --entrypoint 明确拒绝（不静默忽略）"
+else
+  report FAIL "EP.3 宿主模式拒绝" "rc=$erc 输出: $(printf '%s' "$eov" | head -c 140)"
+fi
+
+# --env-file：注释与空行跳过；值里可以有 '='；空值合法
+printf '# comment\nFOO=bar\nURL=k=v\n\nEMPTY=\n' > "$WORK/epenv"
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint "" --env-file "$WORK/epenv" eptest \
+  /bin/sh -c 'echo "$FOO|$URL|$EMPTY|"' 2>&1 | tail -1)
+if [ "$eov" = "bar|k=v||" ]; then
+  report PASS "EP.4 --env-file 读入变量（跳过注释/空行，值里的 '=' 不被切）"
+else
+  report FAIL "EP.4 env-file" "得到 '$eov'（期望 bar|k=v||）"
+fi
+
+# 格式不对要指出**第几行**，否则几十行的文件无从查起
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --env-file /definitely/not/here eptest 2>&1); erc=$?
+printf 'GOOD=1\nbadline\n' > "$WORK/epbad"
+eov2=$(HOME=$WORK/home "$WBOX_ABS" run --rm --env-file "$WORK/epbad" eptest 2>&1); erc2=$?
+if [ "$erc" -ne 0 ] && [ "$erc2" -ne 0 ] && printf '%s' "$eov2" | grep -q '第 2 行'; then
+  report PASS "EP.5 env-file 不存在/格式错误都报错，并指出第几行"
+else
+  report FAIL "EP.5 env-file 错误信息" "缺文件 rc=$erc 坏行 rc=$erc2 输出: $(printf '%s' "$eov2" | head -c 140)"
+fi
+
+# Dockerfile 新指令：LABEL/EXPOSE/USER 进镜像 config，ARG 不进（它常带凭证）
+EPCTX=$WORK/epctx
+rm -rf "$EPCTX" && mkdir -p "$EPCTX"
+cat > "$EPCTX/Dockerfile" <<'DF'
+FROM eptest
+ARG BUILD_SECRET=shh
+LABEL org.opencontainers.image.title="my app"
+EXPOSE 8080
+USER 1000:1000
+DF
+eov=$(HOME=$WORK/home "$WBOX_ABS" build -t eplabel:v1 -f "$EPCTX/Dockerfile" "$EPCTX" 2>&1); erc=$?
+EPCFG=$WORK/home/.wbox/images/registry-1.docker.io/library_eplabel/v1/config.json
+if [ "$erc" -eq 0 ] \
+   && grep -q 'my app' "$EPCFG" 2>/dev/null \
+   && grep -q '8080/tcp' "$EPCFG" 2>/dev/null \
+   && grep -q '"User"' "$EPCFG" 2>/dev/null; then
+  report PASS "EP.6 LABEL/EXPOSE/USER 落进镜像 config（EXPOSE 补 /tcp）"
+else
+  report FAIL "EP.6 新指令落盘" "rc=$erc config: $(cat "$EPCFG" 2>/dev/null | head -c 200)"
+fi
+
+# ARG 绝不能落进镜像 config——构建参数常带凭证，落进去等于随镜像发出去
+if [ -f "$EPCFG" ] && ! grep -q 'BUILD_SECRET\|shh' "$EPCFG"; then
+  report PASS "EP.7 ARG 不落进镜像 config（构建参数常带凭证）"
+else
+  report FAIL "EP.7 ARG 泄漏" "config 里出现了构建参数: $(grep -o 'BUILD_SECRET[^,]*\|shh' "$EPCFG" 2>/dev/null | head -1)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" rmi eplabel:v1 >/dev/null 2>&1
+rm -rf "$EPCTX" "$EPD" "$WORK/epenv" "$WORK/epbad"
+
+echo
 echo "=== VOL 命名卷（PRD F9.35）==="
 
 # 命名卷的**全部意义**是数据活得比容器久。所以判据不是"命令返回 0"，

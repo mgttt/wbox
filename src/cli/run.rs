@@ -54,10 +54,50 @@ pub struct RunOptions {
     pub uts_container: Option<String>,
     /// `--hostname NAME`（仅 Linux；UTS namespace 已默认隔离）
     pub hostname: Option<String>,
+    /// `--entrypoint`：覆盖镜像声明的 Entrypoint（F9.36）。
+    /// `Some("")` 表示显式清空，与 `None`（没写这个选项）不是一回事。
+    pub entrypoint: Option<String>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
     pub cmd: Vec<String>,
+}
+
+/// 读 `--env-file`：一行一个 `KEY=VALUE`，`#` 开头与空行跳过。
+///
+/// **不做变量展开、不去引号**：docker 的 env-file 也不做。做了的话，
+/// 文件里的 `PASS=a"b` 会被悄悄改写，而用户无从知道自己拿到的值和写下的不一样。
+///
+/// 值里可以有 `=`（`URL=k=v` 合法），所以只切第一个 `=`。
+fn parse_env_file(path: &str) -> Result<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        WboxError::args(format!("--env-file '{}' 读取失败：{}", path, e))
+    })?;
+    let mut out = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (k, v) = line.split_once('=').ok_or_else(|| {
+            WboxError::args(format!(
+                "--env-file '{}' 第 {} 行不是 KEY=VALUE：'{}'（不支持只写 KEY 从宿主继承）",
+                path,
+                n + 1,
+                line
+            ))
+        })?;
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(WboxError::args(format!(
+                "--env-file '{}' 第 {} 行的键为空",
+                path,
+                n + 1
+            )));
+        }
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
 }
 
 /// 手写参数解析：支持 `--opt value`、`--flag`、至多一个位置参数（镜像引用
@@ -87,6 +127,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         ipc_container: None,
         uts_container: None,
         hostname: None,
+        entrypoint: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -235,6 +276,17 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             }
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
+            "--entrypoint" => {
+                opts.entrypoint = Some(super::args::take_value(args, &mut i, "--entrypoint")?);
+            }
+            // `--env-file`：一行一个 KEY=VALUE。存在的理由是**别把密钥写进命令行**
+            // ——`-e TOKEN=...` 会进 shell 历史，也会被同机别的用户从 /proc 看到。
+            "--env-file" => {
+                let path = super::args::take_value(args, &mut i, "--env-file")?;
+                for (k, v) in parse_env_file(&path)? {
+                    opts.env.push((k, v));
+                }
+            }
             "-e" | "--env" => {
                 let raw = super::args::take_value(args, &mut i, a)?;
                 let (key, value) = raw.split_once('=').ok_or_else(|| {
@@ -397,6 +449,15 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
         opts.user,
     )?;
     crate::health::reject_if_unsupported(opts.health.as_ref())?;
+    // `--entrypoint` 覆盖的是**镜像**声明的 Entrypoint；宿主程序模式没有镜像，
+    // 也就没有可覆盖的东西。明确拒绝而不是静默忽略——静默忽略会让用户以为
+    // 自己换掉了要跑的程序，实际跑的还是原来那个。
+    if opts.entrypoint.is_some() && opts.positional.is_none() {
+        return Err(WboxError::args(
+            "--entrypoint 只对镜像模式有意义（它覆盖的是镜像声明的 Entrypoint）；\
+             宿主程序模式请直接写要跑的程序",
+        ));
+    }
     if let Some(h) = opts.health.as_ref() {
         crate::health::validate(h)?;
     }
@@ -465,7 +526,7 @@ pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
             let config = oci::config::ImageConfig::load(&dir)?;
             let cmd = config
                 .as_ref()
-                .map(|value| value.merged_command(&opts.cmd))
+                .map(|value| value.merged_command(&opts.cmd, opts.entrypoint.as_deref()))
                 .unwrap_or_else(|| opts.cmd.clone());
             if cmd.is_empty() {
                 return Err(WboxError::args(format!(
@@ -887,7 +948,10 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     // WorkingDir 记录（guest 路径映射由 wbox-linux 侧落地，当前仅展示）。
     let img_cfg = oci::config::ImageConfig::load(&dir)?;
     let (merged, mut env) = match &img_cfg {
-        Some(c) => (c.merged_command(&opts.cmd), c.env.clone()),
+        Some(c) => (
+            c.merged_command(&opts.cmd, opts.entrypoint.as_deref()),
+            c.env.clone(),
+        ),
         None => (opts.cmd.clone(), Vec::new()),
     };
     env.extend(opts.env.iter().cloned());

@@ -149,7 +149,7 @@ wbox
 | 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | `--cap-*` / seccomp / healthcheck | 不做 | 同 Q1：均为 Linux 原语，明确报错 |
 | compose 多服务 | 不做 | 同 Q1：依赖共享 netns |
-| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED` |
+| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED`；F9.36 的四条新指令是纯解析与 config 写入，两平台一致 |
 | restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
 | `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
@@ -191,9 +191,10 @@ wbox
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | **命名卷** `volume create/ls/rm/inspect` | 有 | F9.35：`-v NAME:/path` 数据活得比容器久；卷就是 `~/.wbox/volumes/<名字>`，rootless 可用（门禁 VOL.1–VOL.6）|
+| `--entrypoint` / `--env-file` | 有 | F9.36：覆盖镜像 Entrypoint（空串=清空）；env-file 让密钥不必进命令行（门禁 EP.1–EP.5）|
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
-| 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
+| 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`（门禁 EP.6–EP.7）；仍不做多阶段构建与 `ADD` 的远程取回 |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
 | 镜像分层存储 | 有 | F9.16–F9.18：pull 保留原始层、可原样回推；build 产物 = 基础层+增量层（push 跳过基础层，PSH.8）；`FROM` 硬链接共享数据块（OVB.1–OVB.4）|
 | 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
@@ -292,7 +293,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.35 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.36 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -972,7 +973,8 @@ F9
 ├── F9.32 暂停状态可见（ps / inspect）      —— [done]（仅 Linux，门禁 PZ.4–PZ.5）
 ├── F9.33 inspect 如实反映挂载与端口       —— [done]（门禁 INS.1–INS.3）
 ├── F9.34 状态口径收敛与网络模式三态      —— [done]（门禁 INS.4–INS.5）
-└── F9.35 命名卷（`wbox volume`）           —— [done]（门禁 VOL.1–VOL.6）
+├── F9.35 命名卷（`wbox volume`）           —— [done]（门禁 VOL.1–VOL.6）
+└── F9.36 `--entrypoint`/`--env-file`/四条 Dockerfile 指令 —— [done]（门禁 EP.1–EP.7）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1111,6 +1113,35 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.36 `--entrypoint` / `--env-file` / 四条 Dockerfile 指令** `[done]`（门禁 EP.1–EP.7）。
+
+**`--entrypoint`**。`Some("")` 与 `None` 必须分开：docker 用 `--entrypoint ""` 来
+彻底甩掉镜像的 entrypoint（`--entrypoint "" IMAGE sh` 是标准写法），用空串当
+「没给」会让那个用法失效。覆盖之后**不再回落镜像 `Cmd`**——镜像的 Cmd 是给它自己
+那个 entrypoint 当参数的，换了 entrypoint 还塞那串参数多半是错的（docker 同此语义）。
+宿主程序模式没有镜像、也就没有可覆盖的东西，**明确拒绝**而不是静默忽略：
+静默忽略会让用户以为自己换掉了要跑的程序，实际跑的还是原来那个（EP.3）。
+
+**`--env-file`** 存在的理由是**别把密钥写进命令行**——`-e TOKEN=...` 会进 shell
+历史，也会被同机别的用户从 `/proc` 看到。**不做变量展开、不去引号**（docker 也不做）：
+做了的话文件里的 `PASS=a"b` 会被悄悄改写，而用户无从知道自己拿到的值和写下的不一样。
+值里可以有 `=`（`URL=k=v` 合法），所以只切第一个。格式错要指出**第几行**——
+几十行的文件不说行号无从查起（EP.5）。
+
+**四条 Dockerfile 指令**：`LABEL`/`EXPOSE`/`USER` 写进镜像 config（形状与 OCI 一致：
+`ExposedPorts` 的值是空对象，`EXPOSE 80` 补成 `80/tcp`）；**`ARG` 刻意不写进 config**
+——构建参数常带凭证（token、密码），落进镜像等于随镜像一起发出去，EP.7 直接在
+产出的 config 里搜构建参数来盯这条。
+
+其中两条是**纯声明，必须说清它们不做什么**：`EXPOSE` 不会真的发布端口（发布要
+`-p`）；`USER` 只是镜像声明的默认身份，运行时是否生效取决于 `--user` 与那一格
+支不支持（F9.7）。把声明当成生效，是这两条指令最常见的误解。
+
+**顺带消掉一处刚制造的重复**：`--entrypoint` 最初写成 `merged_command_with`，
+与原 `merged_command` 构成「一个是另一个的特例」的两份东西。补的时候正是漏改了
+其中一个调用点（`create` 改了、`run` 没改），实测才发现——于是合并成一个函数，
+覆盖参数作为必填的 `Option`。
 
 **F9.35 命名卷** `[done]`（门禁 VOL.1–VOL.6）。docker/podman 的 named volume。
 
