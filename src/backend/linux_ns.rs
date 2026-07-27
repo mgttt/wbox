@@ -98,8 +98,12 @@ struct NewRoot {
 /// 最接近：内存/CPU/进程数都是"整组"上限）；不可用时退化为 setrlimit，
 /// 但**只有部分语义能对上**，差异见各字段注释。
 enum LimitPlan {
-    /// cgroup v2：已创建的 cgroup 目录内 `cgroup.procs` 的路径。
-    Cgroup { procs: CString },
+    /// cgroup v2：guest 要加入的 `cgroup.procs` 路径，外加收尾时要删除的
+    /// 目录清单（guest target 与 wbox 自己的 supervisor leaf）。
+    Cgroup {
+        procs: CString,
+        cleanup: Vec<std::path::PathBuf>,
+    },
     /// 无 cgroup v2：用 setrlimit 兜底。
     /// - `as_bytes`：RLIMIT_AS ≈ `--memory`。**语义差异**：Job Object 与
     ///   cgroup 限的是实际占用（RSS/page charge），RLIMIT_AS 限的是虚拟地址
@@ -164,6 +168,12 @@ pub(super) fn spawn_isolated(
     // rootless 映射：把宿主当前 uid/gid 映射成容器内的 root。
     // 写 gid_map 之前必须先写 setgroups=deny，否则内核拒绝（CVE-2014-8989 之后的加固）。
     let limits = build_limit_plan(spec)?;
+    // cgroup 目录要在 guest 退出后删掉。plan 稍后会被 pre_exec 闭包 move 走，
+    // 故先把清单复制出来。cgroup v2 不会自动回收空目录，不删就是每跑一次漏一个。
+    let cgroup_cleanup: Vec<std::path::PathBuf> = match &limits {
+        LimitPlan::Cgroup { cleanup, .. } => cleanup.clone(),
+        _ => Vec::new(),
+    };
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
     let plan = NsPlan {
@@ -235,6 +245,13 @@ pub(super) fn spawn_isolated(
     let status = child
         .wait()
         .map_err(|e| WboxError::spawn(format!("等待容器进程失败：{}", e)))?;
+    // guest 已退出 → 它的 cgroup 现在是空的，可以删。顺序要紧：先删 guest
+    // target，再删 wbox 自己的 supervisor（wbox 此刻还在 supervisor 里，
+    // rmdir 一个非空 cgroup 会失败，这属正常，忽略即可——进程退出后由宿主
+    // 或下一次运行回收）。
+    for d in &cgroup_cleanup {
+        let _ = std::fs::remove_dir(d);
+    }
     // 退出码语义与 Windows 侧一致：子进程码原样转发；被信号杀死时用 128+sig
     // （shell 惯例），避免"信号终止"被误报成正常退出。
     Ok(match status.code() {
@@ -651,28 +668,57 @@ fn try_cgroup_plan(
     base: Option<std::path::PathBuf>,
 ) -> Result<Option<LimitPlan>> {
     let l = &spec.limits;
-    let Some(base) = base else {
+    let Some(own) = base else {
         return Ok(None);
     };
-    let dir = base.join(format!("wbox-{}", std::process::id()));
-    if std::fs::create_dir_all(&dir).is_err() {
+
+    // ---- 布局（实机取证过，见 docs/architecture.md §3.3）----
+    //   own/                 委派根：**不能有进程**，控制器从这里下发
+    //     ├── supervisor/    wbox 自己挪进来（leaf，不开 subtree_control）
+    //     └── wbox-<pid>/    限额写这里，guest 加入这里（supervisor 的**兄弟**）
+    //
+    // 旧布局是 own/wbox-<pid> 且 wbox 留在 own —— 那要求对"自己正待着的
+    // cgroup" enable subtree_control，内核直接 EBUSY；反过来先 enable 再进
+    // 进程则是 EIO。两个方向都堵死，所以旧布局在 cgroup v2 下根本不可能工作。
+    let supervisor = own.join("wbox-supervisor");
+    let target = own.join(format!("wbox-{}", std::process::id()));
+    if std::fs::create_dir_all(&supervisor).is_err() || std::fs::create_dir_all(&target).is_err() {
         return Ok(None); // 委派未开
     }
+    // 清理助手：放弃时把自己建的目录删掉。**成功路径也要清**（见函数尾部
+    // 说明），否则每跑一次就在宿主留一个空 cgroup。
+    let cleanup = || {
+        let _ = std::fs::remove_dir(&target);
+        let _ = std::fs::remove_dir(&supervisor);
+    };
     let abandon = || {
-        let _ = std::fs::remove_dir(&dir);
+        cleanup();
         Ok(None)
     };
+
+    // 把**自己**挪进 supervisor：这一步之后 own 才没有直接进程，
+    // 才可能给子级下发控制器。挪不动就说明这里不是我们能支配的委派根。
+    if std::fs::write(supervisor.join("cgroup.procs"), std::process::id().to_string()).is_err() {
+        return abandon();
+    }
+    // 下发控制器。已经开好了也无妨（重复写 "+memory" 是幂等的）。
+    let want = needed_controllers(l);
+    if !want.is_empty()
+        && std::fs::write(own.join("cgroup.subtree_control"), want.join(" ")).is_err()
+    {
+        return abandon();
+    }
 
     let mut wrote = Vec::new();
     if l.memory_mb > 0 {
         let v = (l.memory_mb * 1024 * 1024).to_string();
-        if std::fs::write(dir.join("memory.max"), &v).is_err() {
+        if std::fs::write(target.join("memory.max"), &v).is_err() {
             return abandon();
         }
         wrote.push(format!("memory.max={}", v));
     }
     if l.max_procs > 0 {
-        if std::fs::write(dir.join("pids.max"), l.max_procs.to_string()).is_err() {
+        if std::fs::write(target.join("pids.max"), l.max_procs.to_string()).is_err() {
             return abandon();
         }
         wrote.push(format!("pids.max={}", l.max_procs));
@@ -681,18 +727,38 @@ fn try_cgroup_plan(
         // cpu.max 格式："<quota_us> <period_us>"；period 取默认 100ms
         let period = 100_000u64;
         let quota = period * u64::from(l.cpu_pct) / 100;
-        if std::fs::write(dir.join("cpu.max"), format!("{} {}", quota, period)).is_err() {
+        if std::fs::write(target.join("cpu.max"), format!("{} {}", quota, period)).is_err() {
             return abandon();
         }
         wrote.push(format!("cpu.max={}/{}", quota, period));
     }
     if spec.verbose {
         verbose_kv("限额（cgroup v2）", wrote.join(" "));
-        verbose_kv("cgroup", dir.display());
+        verbose_kv("cgroup（guest）", target.display());
+        verbose_kv("cgroup（wbox 自身）", supervisor.display());
     }
     Ok(Some(LimitPlan::Cgroup {
-        procs: cstr(&dir.join("cgroup.procs").to_string_lossy())?,
+        procs: cstr(&target.join("cgroup.procs").to_string_lossy())?,
+        // 收尾时要删的两个目录。旧实现只在失败路径删，成功路径从不清理——
+        // 每成功跑一次就在宿主留一个空的 wbox-<pid>，而 cgroup v2 不会自动回收。
+        // 这个泄漏一直没被发现，因为成功路径在任何环境都没执行过。
+        cleanup: vec![target, supervisor],
     }))
+}
+
+/// 本次请求需要下发哪些控制器。只开用得上的，少动宿主状态。
+fn needed_controllers(l: &crate::backend::Limits) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if l.memory_mb > 0 {
+        v.push("+memory");
+    }
+    if l.max_procs > 0 {
+        v.push("+pids");
+    }
+    if l.cpu_pct > 0 {
+        v.push("+cpu");
+    }
+    v
 }
 
 /// 把无符号整数写进栈上缓冲区，返回有效切片。pre_exec 内不能分配内存，
@@ -723,7 +789,7 @@ fn itoa(mut v: u64, buf: &mut [u8; 24]) -> usize {
 unsafe fn apply_limits(p: &NsPlan) -> std::io::Result<()> {
     match &p.limits {
         LimitPlan::None => Ok(()),
-        LimitPlan::Cgroup { procs } => {
+        LimitPlan::Cgroup { procs, .. } => {
             // 把自己加入 cgroup。此刻 guest 还没 exec，故不存在"先跑一会儿
             // 再被限制"的窗口（与 Windows 侧 CREATE_SUSPENDED→入 Job→Resume
             // 消除逃逸窗口是同一思路）。

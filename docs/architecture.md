@@ -102,13 +102,27 @@ cgroup 的写权限、控制器下发和 no-internal-process 规则，不能仅�
   `cpu.max` 均存在且可写。
 
 因此受限 target 必须是 wbox 所在 supervisor leaf 的兄弟，而不能是其子节点。
-当前代码尚未完成这一布局改造，cgroup v2 首选路径仍无产品级覆盖。
+取证已确认该布局成立：委派根下发控制器后，兄弟位置的 target 可写 `memory.max`；
+且 wbox 被放进 supervisor leaf 后仍退化到 rlimit，证明剩余问题确实出在 wbox
+自身布局，而非环境。
 
-改造时必须一并修掉一个既有缺陷：`try_cgroup_plan` 只在失败路径
-（`abandon()`）删除刚创建的 cgroup 目录，成功路径从不清理。即每成功执行一次
-`wbox run` 就在宿主留下一个空的 `wbox-<pid>` 目录，而 cgroup v2 不会自动回收。
-该泄漏至今未被观察到，只是因为成功路径在任何环境都没有执行过；布局改对之后
-会立即显现。这是通读代码发现的，测试不会报——零覆盖的路径不能默认其正确。
+代码已按此改造（`try_cgroup_plan`）：
+
+```
+own/                 委派根：不放进程，控制器由此下发
+  ├── wbox-supervisor/   wbox 把自己挪进来
+  └── wbox-<pid>/        限额写这里，guest 加入这里
+```
+
+任一步失败（挪不动自己、下发不了控制器、写不了 `*.max`）都退回 rlimit 并清理
+已创建的目录，而不是硬报错。**产品级覆盖仍缺**：runner 上没有可委派的
+cgroup，改造后的路径目前只有 `scripts/probe-cgroup2.sh` 的取证环境走过。
+
+改造同时修掉了一个既有缺陷：旧实现只在失败路径删除创建的 cgroup 目录，
+成功路径从不清理，即每成功执行一次 `wbox run` 就在宿主留下一个空的
+`wbox-<pid>`（cgroup v2 不会自动回收）。该泄漏一直没被观察到，只因成功路径
+在任何环境都没执行过——通读代码才发现，测试不会报。现在 guest 退出后按清单
+删除。零覆盖的路径不能默认其正确。
 
 取证还要区分权限与规则错误：迁移进程要求对源和目标的共同祖先有写权限，
 `cgroup.procs` 的 `EACCES` 本身不能证明 no-internal-process 规则。
