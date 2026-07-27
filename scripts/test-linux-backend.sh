@@ -266,6 +266,48 @@ else
   report FAIL "H.9 宿主模式 capability 行为判据" "丢掉 SYS_ADMIN 后仍挂载成功"
 fi
 
+# ---- H.10–H.12：PRD §2.4 Q4 表里"宿主模式下也能用"的三条声称 ----
+#
+# stats / pause 只需要进程树，不换根也不需要 cgroup，所以在 wine 那一格照样能用；
+# diff / commit / cp 都读 overlay 可写层，宿主模式没有那层，属**不适用**。
+# 三条都写进了 PRD 的 Q4 表——写了就要有门禁，否则只是听着合理的话。
+HH=$WORK/hostq4
+rm -rf "$HH" && mkdir -p "$HH/home"
+HOME=$HH/home "$WBOX_ABS" run -d --name hq4 -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+
+hout=$(HOME=$HH/home "$WBOX_ABS" stats hq4 2>&1); hrc=$?
+hmem=$(printf '%s\n' "$hout" | awk '$1=="hq4"{print $3}')
+if [ "$hrc" -eq 0 ] && printf '%s' "$hmem" | grep -qE '^[0-9.]+(B|KiB|MiB|GiB|TiB)$'; then
+  report PASS "H.10 宿主模式下 stats 可用（Q4 表的声称，内存 $hmem）"
+else
+  report FAIL "H.10 宿主模式 stats" "rc=$hrc 输出: $(printf '%s' "$hout" | tr '\n' '|' | head -c 160)"
+fi
+
+hout=$(HOME=$HH/home "$WBOX_ABS" pause hq4 2>&1); hrc=$?
+hout2=$(HOME=$HH/home "$WBOX_ABS" unpause hq4 2>&1); hrc2=$?
+if [ "$hrc" -eq 0 ] && [ "$hrc2" -eq 0 ]; then
+  report PASS "H.11 宿主模式下 pause/unpause 可用（Q4 表的声称）"
+else
+  report FAIL "H.11 宿主模式 pause/unpause" "pause rc=$hrc unpause rc=$hrc2"
+fi
+
+# 不适用的三个要**说清为什么**。静默给空结果会被读成"没有改动"，
+# 那是把"这个问题在这条路径上不存在"说成了"答案是空"。
+hd=$(HOME=$HH/home "$WBOX_ABS" diff hq4 2>&1); hdrc=$?
+hc=$(HOME=$HH/home "$WBOX_ABS" cp hq4:/etc/hostname "$HH/x" 2>&1); hcrc=$?
+if [ "$hdrc" -ne 0 ] && [ "$hcrc" -ne 0 ] \
+   && printf '%s' "$hd" | grep -q '宿主程序模式' \
+   && printf '%s' "$hc" | grep -q '宿主程序模式'; then
+  report PASS "H.12 宿主模式下 diff/cp 明确报'不换根'而非静默给空结果"
+else
+  report FAIL "H.12 宿主模式 diff/cp 的不适用说明" "diff rc=$hdrc cp rc=$hcrc 输出: $(printf '%s|%s' "$hd" "$hc" | head -c 200)"
+fi
+
+HOME=$HH/home "$WBOX_ABS" kill hq4 >/dev/null 2>&1
+HOME=$HH/home "$WBOX_ABS" rm hq4 >/dev/null 2>&1
+rm -rf "$HH"
+
 if command -v python3 >/dev/null 2>&1; then
   probe="import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
@@ -1739,6 +1781,400 @@ fi
 HOME=$WORK/home "$WBOX_ABS" kill dfhost >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm dfhost >/dev/null 2>&1
 rm -rf "$CACHE/rootfs/dfetc"
+
+echo
+echo "=== CM wbox commit（PRD F9.20）==="
+
+# 判据分两半，缺一不可：改动真的固化进新镜像；基础镜像**未被动过**。
+# 后半条是这条链路（硬链接 + overlay 合并）最危险的失败形态。
+mkdir -p "$CACHE/rootfs/cmetc"
+printf 'orig\n' > "$CACHE/rootfs/cmetc/conf"
+printf 'gone\n' > "$CACHE/rootfs/cmetc/todelete"
+cmbase=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+HOME=$WORK/home "$WBOX_ABS" run -d --name cmc lbetest -- \
+  /bin/sh -c 'echo new > /cmetc/conf; rm /cmetc/todelete; echo x > /cmadded.txt; sleep 30' >/dev/null 2>&1
+sleep 2
+cout=$(HOME=$WORK/home "$WBOX_ABS" commit cmc cmmine:v1 2>&1); crc=$?
+
+# 新镜像跑起来：新增在、改动生效、删除也固化了
+vout=$(HOME=$WORK/home "$WBOX_ABS" run --rm --name cmv cmmine:v1 -- \
+  /bin/sh -c 'cat /cmetc/conf; cat /cmadded.txt; test -e /cmetc/todelete && echo STILL || echo DELETED' 2>&1)
+if [ "$crc" -eq 0 ] \
+   && printf '%s' "$vout" | grep -qx 'new' \
+   && printf '%s' "$vout" | grep -qx 'x' \
+   && printf '%s' "$vout" | grep -qx 'DELETED'; then
+  report PASS "CM.1 commit 固化新增/改动/删除三类改动"
+else
+  report FAIL "CM.1 改动固化" "rc=$crc 输出: $(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+cmafter=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+if [ "$cmbase" = "$cmafter" ] && [ "$(cat "$CACHE/rootfs/cmetc/conf")" = "orig" ] \
+   && [ -f "$CACHE/rootfs/cmetc/todelete" ]; then
+  report PASS "CM.2 commit 后基础镜像缓存逐字节不变"
+else
+  report FAIL "CM.2 基础镜像完整性" "摘要变了=$([ "$cmbase" = "$cmafter" ] && echo 否 || echo 是) conf=$(cat "$CACHE/rootfs/cmetc/conf" 2>/dev/null)"
+fi
+
+# 磁盘共享：commit 出来的镜像与基础镜像共享数据块
+CMD1=$WORK/home/.wbox/images/registry-1.docker.io/library_cmmine/v1/rootfs
+cb1=$(du -s "$CACHE/rootfs" | cut -f1)
+cb2=$(du -s "$CMD1" | cut -f1)
+cboth=$(du -sc "$CACHE/rootfs" "$CMD1" | tail -1 | cut -f1)
+if [ "$cboth" -lt $(( (cb1 + cb2) * 3 / 4 )) ]; then
+  report PASS "CM.3 commit 产物与基础镜像共享磁盘（合计 ${cboth}KB，两份之和 $((cb1+cb2))KB）"
+else
+  report FAIL "CM.3 磁盘共享" "合计=${cboth}KB 两份之和=$((cb1+cb2))KB"
+fi
+
+# 覆盖基础镜像会在铺硬链接中途把 lower 抽掉，必须拒绝
+cout=$(HOME=$WORK/home "$WBOX_ABS" commit cmc lbetest:latest 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "拒绝原地覆盖"; then
+  report PASS "CM.4 拒绝 commit 覆盖容器自己的基础镜像"
+else
+  report FAIL "CM.4 原地覆盖守卫" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill cmc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm cmc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rmi cmmine:v1 >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/cmetc"
+
+echo
+echo "=== PZ pause / unpause（PRD F9.21）==="
+
+# **行为判据**：让容器不停往宿主可见的文件里写计数，pause 后计数必须不再增长。
+# 只断言"pause 返回 0"证明不了任何事——信号发出去了不等于进程真停了。
+PZFILE=$WORK/pzcount
+rm -f "$PZFILE"
+HOME=$WORK/home "$WBOX_ABS" run -d --name pzc -v "$WORK:/pz" lbetest -- \
+  /bin/sh -c 'i=0; while :; do i=$((i+1)); echo $i > /pz/pzcount; sleep 0.05; done' >/dev/null 2>&1
+sleep 2
+pout=$(HOME=$WORK/home "$WBOX_ABS" pause pzc 2>&1); prc=$?
+# 两次采样都在 pause **之后**。先前拿 pause 之前的读数当基线是错的：
+# 从采样到 pause 真正生效之间有几十毫秒，容器照跑，计数会 +1，
+# 于是判据偶发红而产品无恙（实测撞到过一次）。要断言的本来就是
+# "停下来之后不再变"，那就该只看停下来之后的两个点。
+sleep 0.3
+during=$(cat "$PZFILE" 2>/dev/null)
+sleep 1
+still=$(cat "$PZFILE" 2>/dev/null)
+if [ "$prc" -eq 0 ] && [ -n "$during" ] && [ "$during" = "$still" ]; then
+  report PASS "PZ.1 pause 后容器真的停止工作（计数冻结在 $during）"
+else
+  report FAIL "PZ.1 pause 冻结" "rc=$prc 停后立即=$during 再过 1 秒=$still（应相同）"
+fi
+
+pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
+sleep 1
+after=$(cat "$PZFILE" 2>/dev/null)
+if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$still" ]; then
+  report PASS "PZ.2 unpause 后容器恢复工作（计数 $still → $after）"
+else
+  report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$still 恢复 1 秒后=$after（应不同）"
+fi
+HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
+rm -f "$PZFILE"
+
+# 已退出的容器要报错。静默成功会让脚本以为它还在、还能 unpause 回来。
+pout=$(HOME=$WORK/home "$WBOX_ABS" pause nosuchpz 2>&1); prc=$?
+if [ "$prc" -ne 0 ]; then
+  report PASS "PZ.3 pause 不存在的容器时报错"
+else
+  report FAIL "PZ.3 未知容器" "rc=$prc 输出: $(printf '%s' "$pout" | head -c 120)"
+fi
+
+echo
+echo "=== CP wbox cp（PRD F9.23）==="
+
+# 这一组要钉死三件事，每一件都对应一种"看着成功其实错了"的失败：
+#   1. 拷出来的是**容器现状**（upper 优先），不是镜像里那份旧的；
+#   2. 拷进去的对**运行中的容器立即可见**（overlay 是活的，不是快照）；
+#   3. 容器删过的文件**不会从镜像下层复活**（whiteout 要认）。
+mkdir -p "$CACHE/rootfs/cpetc"
+printf 'from-image\n' > "$CACHE/rootfs/cpetc/conf"
+printf 'from-image\n' > "$CACHE/rootfs/cpetc/doomed"
+cpbase=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+
+HOME=$WORK/home "$WBOX_ABS" run -d --name cpc lbetest -- \
+  /bin/sh -c 'echo from-container > /cpetc/conf; rm /cpetc/doomed; sleep 30' >/dev/null 2>&1
+sleep 2
+
+# CP.1 容器 → 宿主：必须拿到容器改过之后的内容
+rm -f "$WORK/out.conf"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp cpc:/cpetc/conf "$WORK/out.conf" 2>&1); crc=$?
+if [ "$crc" -eq 0 ] && [ "$(cat "$WORK/out.conf" 2>/dev/null)" = "from-container" ]; then
+  report PASS "CP.1 cp 出来的是容器现状而非镜像原件"
+else
+  report FAIL "CP.1 容器→宿主" "rc=$crc 内容=$(cat "$WORK/out.conf" 2>/dev/null | head -c 60)"
+fi
+
+# CP.2 容器删掉的文件不能从镜像下层复活。**必须真的失败**：
+# 若这里静默成功，用户会拿着一份早已不存在的文件当成容器现状。
+rm -f "$WORK/out.doomed"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp cpc:/cpetc/doomed "$WORK/out.doomed" 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && [ ! -e "$WORK/out.doomed" ]; then
+  report PASS "CP.2 容器删过的文件不从镜像下层复活"
+else
+  report FAIL "CP.2 whiteout 识别" "rc=$crc 落盘=$([ -e "$WORK/out.doomed" ] && echo 是 || echo 否) 输出: $(printf '%s' "$cout" | head -c 120)"
+fi
+
+# CP.3 宿主 → 容器：对**运行中的**容器立即可见（判据是容器自己读到的内容）
+printf 'injected\n' > "$WORK/in.txt"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/in.txt" cpc:/cpetc/in.txt 2>&1); crc=$?
+seen=$(HOME=$WORK/home "$WBOX_ABS" exec cpc -- /bin/cat /cpetc/in.txt 2>&1)
+if [ "$crc" -eq 0 ] && printf '%s' "$seen" | grep -qx 'injected'; then
+  report PASS "CP.3 拷进去的文件对运行中的容器立即可见"
+else
+  report FAIL "CP.3 宿主→容器" "rc=$crc 容器内读到: $(printf '%s' "$seen" | tr '\n' ' ' | head -c 120)"
+fi
+
+# CP.4 写只写 upper：基础镜像缓存必须逐字节不变。
+# 镜像目录是多个容器共享的（F9.18 硬链接），写穿了会污染别人。
+cpafter=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+if [ "$cpbase" = "$cpafter" ]; then
+  report PASS "CP.4 cp 写入不触碰共享的基础镜像缓存"
+else
+  report FAIL "CP.4 镜像完整性" "cp 前后镜像摘要不一致"
+fi
+
+# CP.5 目录整棵拷进去
+mkdir -p "$WORK/tree/sub"
+printf 'deep\n' > "$WORK/tree/sub/leaf"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/tree" cpc:/cptree 2>&1); crc=$?
+seen=$(HOME=$WORK/home "$WBOX_ABS" exec cpc -- /bin/cat /cptree/sub/leaf 2>&1)
+if [ "$crc" -eq 0 ] && printf '%s' "$seen" | grep -qx 'deep'; then
+  report PASS "CP.5 目录递归拷入并保持层级"
+else
+  report FAIL "CP.5 目录拷贝" "rc=$crc 容器内读到: $(printf '%s' "$seen" | tr '\n' ' ' | head -c 120)"
+fi
+
+# CP.6 两端都不是容器路径时要报错。含冒号的宿主文件名（./a:b）不能被误判成容器。
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/in.txt" "$WORK/plain.txt" 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q '容器'; then
+  report PASS "CP.6 两端都不是容器路径时报错并说清用法"
+else
+  report FAIL "CP.6 参数形态校验" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 120)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill cpc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm cpc >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/cpetc" "$WORK/tree" "$WORK/in.txt" "$WORK/out.conf"
+
+echo
+echo "=== ST wbox stats（PRD F9.24）==="
+
+# 判据是**区分能力**，不是"命令跑通了"。一个死循环烧 CPU、一个纯 sleep，
+# stats 必须把这两个区分开——只断言 rc=0 的话，一个恒返回 0.00% 的实现也能过。
+HOME=$WORK/home "$WBOX_ABS" run -d --name stbusy lbetest -- \
+  /bin/sh -c 'while :; do :; done' >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" run -d --name stidle lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats stbusy stidle 2>&1); strc=$?
+
+stb=$(printf '%s\n' "$stout" | awk '$1=="stbusy"{print $2}' | tr -d '%')
+sti=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $2}' | tr -d '%')
+# busy 至少要有明显占用；idle 必须接近 0。阈值取得宽松，判的是"分得开"。
+if [ "$strc" -eq 0 ] \
+   && [ -n "$stb" ] && [ -n "$sti" ] \
+   && awk "BEGIN{exit !($stb > 20)}" \
+   && awk "BEGIN{exit !($sti < 5)}"; then
+  report PASS "ST.1 stats 区分得开忙闲容器（busy ${stb}% vs idle ${sti}%）"
+else
+  report FAIL "ST.1 CPU% 区分度" "rc=$strc busy=$stb idle=$sti 输出: $(printf '%s' "$stout" | tr '\n' '|' | head -c 200)"
+fi
+
+# 内存与进程数要是真数字。0 内存意味着采样根本没落到容器上。
+stmem=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $3}')
+stpid=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $4}')
+if printf '%s' "$stmem" | grep -qE '^[0-9.]+(B|KiB|MiB|GiB|TiB)$' \
+   && [ -n "$stpid" ] && [ "$stpid" -ge 1 ] 2>/dev/null; then
+  report PASS "ST.2 内存与进程数取到真实数值（$stmem / $stpid 个进程）"
+else
+  report FAIL "ST.2 内存与进程数" "内存=$stmem 进程=$stpid"
+fi
+
+# 两种数据来源精度不同，必须标注；落到 /proc 那条路时还要打出重复计入的脚注。
+# 印成一个样子会让人把 RSS 合计当成 cgroup 那种精确值。
+stsrc=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $5}')
+if [ "$stsrc" = "cgroup" ]; then
+  report PASS "ST.3 标注数据来源（本机走 cgroup 精确记账）"
+elif [ "$stsrc" = "proc*" ] && printf '%s' "$stout" | grep -q '重复计入'; then
+  report PASS "ST.3 标注数据来源，并说明 RSS 合计会重复计入共享页"
+else
+  report FAIL "ST.3 来源标注" "来源列=$stsrc 有脚注=$(printf '%s' "$stout" | grep -qc 重复计入 && echo 是 || echo 否)"
+fi
+
+# 不带名字时列出全部运行中的容器（与 ps 默认视图一致）
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats 2>&1); strc=$?
+if [ "$strc" -eq 0 ] && printf '%s' "$stout" | grep -q stbusy && printf '%s' "$stout" | grep -q stidle; then
+  report PASS "ST.4 不带名字时列出全部运行中的容器"
+else
+  report FAIL "ST.4 全量列出" "rc=$strc 输出: $(printf '%s' "$stout" | tr '\n' '|' | head -c 200)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill stbusy >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" kill stidle >/dev/null 2>&1
+sleep 1
+
+# 已退出的容器要报错。打印一行 0 会被读成"这个容器很闲"，而不是"它已经没了"。
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats stidle 2>&1); strc=$?
+if [ "$strc" -ne 0 ] && printf '%s' "$stout" | grep -q '已退出'; then
+  report PASS "ST.5 已退出的容器报错而非打印一行 0"
+else
+  report FAIL "ST.5 已退出容器" "rc=$strc 输出: $(printf '%s' "$stout" | head -c 150)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
+
+echo
+echo "=== EX wbox export / import（PRD F9.25）==="
+
+# export 导出的必须是**合并后的容器现状**：改过的以容器为准、删掉的不能复活、
+# 新增的要在。只断言"tar 非空"证明不了任何事——把镜像原样打一份也非空。
+mkdir -p "$CACHE/rootfs/exetc"
+printf 'from-image\n' > "$CACHE/rootfs/exetc/conf"
+printf 'from-image\n' > "$CACHE/rootfs/exetc/doomed"
+HOME=$WORK/home "$WBOX_ABS" run -d --name exc lbetest -- \
+  /bin/sh -c 'echo from-container > /exetc/conf; rm /exetc/doomed; echo x > /exadded.txt; sleep 30' >/dev/null 2>&1
+sleep 2
+
+EXTAR=$WORK/exported.tar
+eout=$(HOME=$WORK/home "$WBOX_ABS" export -o "$EXTAR" exc 2>&1); erc=$?
+if [ "$erc" -eq 0 ] && [ -s "$EXTAR" ]; then
+  report PASS "EX.1 export 产出非空归档"
+else
+  report FAIL "EX.1 export" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 150)"
+fi
+
+# 判据落在归档内容上：三类改动都要正确体现
+EXD=$WORK/exdump
+rm -rf "$EXD" && mkdir -p "$EXD"
+tar -xf "$EXTAR" -C "$EXD" 2>/dev/null
+if [ "$(cat "$EXD/exetc/conf" 2>/dev/null)" = "from-container" ] \
+   && [ -f "$EXD/exadded.txt" ] \
+   && [ ! -e "$EXD/exetc/doomed" ]; then
+  report PASS "EX.2 导出的是合并后的容器现状（改动生效、新增在、删除未复活）"
+else
+  report FAIL "EX.2 分层合并" "conf=$(cat "$EXD/exetc/conf" 2>/dev/null) 新增=$([ -f "$EXD/exadded.txt" ] && echo 有 || echo 无) 删除的还在=$([ -e "$EXD/exetc/doomed" ] && echo 是 || echo 否)"
+fi
+
+# 导出的是**裸 rootfs**，不该带 wbox 自己的结构（那是 save 的事）
+if [ ! -e "$EXD/wbox-image.json" ] && [ ! -d "$EXD/rootfs" ] && [ -d "$EXD/exetc" ]; then
+  report PASS "EX.3 导出的是裸 rootfs（顶层直接是 /bin、/etc，无 wbox 特有结构）"
+else
+  report FAIL "EX.3 裸 rootfs 形态" "顶层: $(ls "$EXD" 2>/dev/null | tr '\n' ' ' | head -c 120)"
+fi
+
+# 暂存目录必须收拾干净：留着会在容器状态目录里悄悄多吃一份完整 rootfs
+EXSTATE=$WORK/home/.wbox/run/exc/export-staging
+if [ ! -e "$EXSTATE" ]; then
+  report PASS "EX.4 export 后不留物化暂存目录"
+else
+  report FAIL "EX.4 暂存清理" "$EXSTATE 仍在（会悄悄吃掉一份磁盘）"
+fi
+
+# 往返：import 回来的镜像要**真能跑**，且带着容器当时的改动。
+# 落到干净 HOME 才证明归档自带全部内容，而不是靠原机器的缓存。
+EXHOME=$WORK/exhome
+mkdir -p "$EXHOME"
+eout=$(HOME=$EXHOME "$WBOX_ABS" import -t exmine:v1 "$EXTAR" 2>&1); erc=$?
+vout=$(HOME=$EXHOME "$WBOX_ABS" run --rm --name exrun exmine:v1 -- \
+  /bin/sh -c 'cat /exetc/conf; test -e /exetc/doomed && echo STILL || echo DELETED' 2>&1)
+if [ "$erc" -eq 0 ] \
+   && printf '%s' "$vout" | grep -qx 'from-container' \
+   && printf '%s' "$vout" | grep -qx 'DELETED'; then
+  report PASS "EX.5 export→import 往返后镜像可运行且保留容器当时的改动"
+else
+  report FAIL "EX.5 往返" "import rc=$erc 运行输出: $(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+# import 缺 -t 要报错并指出带身份的归档该用 load——这两条命令最容易被搞混
+eout=$(HOME=$EXHOME "$WBOX_ABS" import "$EXTAR" 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eout" | grep -q 'wbox load'; then
+  report PASS "EX.6 import 缺 -t 时报错并指出 save 归档该用 load"
+else
+  report FAIL "EX.6 缺 -t" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 150)"
+fi
+
+# 路径穿越：裸 tar 是任意来源的外部输入，这是这条链路唯一真正危险的东西
+EVIL=$WORK/evil.tar
+( cd "$WORK" && printf 'pwned\n' > evilfile && tar -cf "$EVIL" --transform 's|^evilfile|../../../../tmp/wbox-pwned|' evilfile 2>/dev/null )
+if [ -s "$EVIL" ]; then
+  rm -f /tmp/wbox-pwned
+  eout=$(HOME=$EXHOME "$WBOX_ABS" import -t evil:v1 "$EVIL" 2>&1); erc=$?
+  if [ "$erc" -ne 0 ] && [ ! -e /tmp/wbox-pwned ]; then
+    report PASS "EX.7 import 拒绝路径穿越归档且未落盘到 rootfs 之外"
+  else
+    report FAIL "EX.7 路径穿越" "rc=$erc 穿越文件落盘=$([ -e /tmp/wbox-pwned ] && echo 是 || echo 否)"
+  fi
+  rm -f /tmp/wbox-pwned
+else
+  report SKIP "EX.7 路径穿越" "本机 tar 不支持 --transform，造不出穿越归档"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill exc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm exc >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/exetc" "$EXD" "$EXTAR" "$EVIL"
+
+echo
+echo "=== SL save / load（PRD F9.22）==="
+
+SLTAR=$WORK/saved.tar
+sout=$(HOME=$WORK/home "$WBOX_ABS" save -o "$SLTAR" lbetest 2>&1); src=$?
+if [ "$src" -eq 0 ] && [ -s "$SLTAR" ]; then
+  report PASS "SL.1 save 产出非空归档"
+else
+  report FAIL "SL.1 save" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# 载入到**干净的 HOME**：这才证明归档自带全部内容，而不是靠原机器的缓存
+SLHOME=$WORK/loadhome
+mkdir -p "$SLHOME"
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$SLTAR" 2>&1); src=$?
+SLD=$SLHOME/.wbox/images/registry-1.docker.io/library_lbetest/latest
+if [ "$src" -eq 0 ] && [ -x "$SLD/rootfs/bin/busybox" ] && [ -L "$SLD/rootfs/bin/sh" ] \
+   && [ -f "$SLD/config.json" ]; then
+  report PASS "SL.2 load 到干净 HOME 后内容与符号链接均还原"
+else
+  report FAIL "SL.2 load 还原" "rc=$src busybox=$([ -x "$SLD/rootfs/bin/busybox" ] && echo 有 || echo 无) sh软链=$([ -L "$SLD/rootfs/bin/sh" ] && echo 有 || echo 无)"
+fi
+
+# 还原出来的镜像必须**真能跑**——文件都在不等于镜像可用
+sout=$(HOME=$SLHOME "$WBOX_ABS" run --rm --name slrun lbetest -- /bin/echo LOADED_OK 2>&1); src=$?
+if [ "$src" -eq 0 ] && printf '%s' "$sout" | grep -q LOADED_OK; then
+  report PASS "SL.3 载入的镜像可直接运行"
+else
+  report FAIL "SL.3 载入后可运行" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# -t 改名落地
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$SLTAR" -t slrenamed:v9 2>&1); src=$?
+if [ "$src" -eq 0 ] && [ -d "$SLHOME/.wbox/images/registry-1.docker.io/library_slrenamed/v9/rootfs" ]; then
+  report PASS "SL.4 load -t 改名落地"
+else
+  report FAIL "SL.4 -t 改名" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# 不是 wbox 产的归档要明确报错，并指出逃生口
+tar cf "$WORK/bogus.tar" -C "$WORK" saved.tar 2>/dev/null
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$WORK/bogus.tar" 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "wbox save"; then
+  report PASS "SL.5 拒绝非 wbox save 产出的归档"
+else
+  report FAIL "SL.5 非法归档" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# save 不写 stdout：镜像很大，误写进终端代价太高，要明确要求 -o
+sout=$(HOME=$WORK/home "$WBOX_ABS" save lbetest 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "\-o"; then
+  report PASS "SL.6 save 缺 -o 时报错（不默认写 stdout）"
+else
+  report FAIL "SL.6 缺 -o" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+rm -f "$SLTAR" "$WORK/bogus.tar"
 
 echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="

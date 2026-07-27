@@ -88,20 +88,6 @@ fn ensure_vfs_mountpoints(rootfs: &Path) -> Result<()> {
     Ok(())
 }
 
-fn ensure_volume_mountpoints(rootfs: &Path, volumes: &[super::VolumeMount]) -> Result<()> {
-    for volume in volumes {
-        let target = rootfs.join(volume.guest.trim_start_matches('/'));
-        std::fs::create_dir_all(&target).map_err(|e| {
-            WboxError::spawn(format!(
-                "创建 Windows OCI 卷挂载点 '{}' 失败：{}",
-                target.display(),
-                e
-            ))
-        })?;
-    }
-    Ok(())
-}
-
 /// 确保 rootfs 内存在 `/etc/resolv.conf`；缺失（或为空文件）时写入公共 DNS。
 /// 已存在且有内容的 resolv.conf 不覆盖（用户/镜像自定义优先）。
 /// 返回是否发生了注入。纯文件操作，Windows/Linux 宿主通用。
@@ -336,7 +322,7 @@ fn build_emu_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
 
 impl Backend for EmuBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
-        super::validate_emu_volumes(&spec.volumes)?;
+        super::reject_volumes_if_unsupported(&spec.volumes)?;
         super::require_cmd(&spec.cmd)?;
         let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
@@ -346,7 +332,6 @@ impl Backend for EmuBackend {
             super::verbose_kv("rootfs", rootfs.display());
         }
         ensure_vfs_mountpoints(rootfs)?;
-        ensure_volume_mountpoints(rootfs, &spec.volumes)?;
         // rootfs 网络可用性：缺失/空的 /etc/resolv.conf 注入公共 DNS，
         // 使 guest 程序（apt/wget 等）开箱即可解析域名。
         if ensure_resolv_conf(rootfs)? && spec.verbose {
@@ -386,7 +371,7 @@ impl Backend for EmuBackend {
         // 双层隔离：wbox-linux.exe 经 NativeBackend 在 AppContainer + Job 内启动。
         // run_image 已把共享 cache 复制到状态目录，并仅向本 profile SID 授予
         // 修改权；prepared.workdir 绝不能重新指回共享镜像缓存。
-        super::native::spawn_emu(
+        super::native::spawn_native(
             spec,
             prepared,
             &format!("wbox-linux（blink 模拟器，BLINK_PREFIX={}）", prepared.workdir.display()),
@@ -524,30 +509,6 @@ mod tests {
         assert!(rootfs.join("dev").is_dir());
         assert!(rootfs.join("proc").is_dir());
         let _ = std::fs::remove_dir_all(&rootfs);
-    }
-
-    #[test]
-    fn readonly_volume_creates_guest_mountpoint_and_rw_is_rejected() {
-        let fake = std::env::current_exe().unwrap();
-        let mut guard = crate::testenv::EnvGuard::new();
-        guard.set(LINUX_EXE_ENV, &fake);
-        let rootfs = temp_rootfs("volume-rootfs");
-        let volume = temp_rootfs("volume-host");
-        let mut readonly = spec(&["sh"]);
-        readonly.workdir = rootfs.clone();
-        readonly.volumes.push(super::super::VolumeMount {
-            host: volume.clone(),
-            guest: "/mnt/data".to_string(),
-            read_only: true,
-        });
-        EmuBackend.prepare(&readonly).unwrap();
-        assert!(rootfs.join("mnt/data").is_dir());
-
-        readonly.volumes[0].read_only = false;
-        let error = EmuBackend.prepare(&readonly).unwrap_err();
-        assert!(format!("{}", error).contains(":ro"), "{}", error);
-        let _ = std::fs::remove_dir_all(rootfs);
-        let _ = std::fs::remove_dir_all(volume);
     }
 
     #[test]

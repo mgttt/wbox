@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.19 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.25 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -50,14 +50,34 @@ F9.1–F9.19 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.17 构建产物分层 | PSH.8a–PSH.8c | build 产物 = 基础层 + 增量层，push 时基础层被跳过 |
 | F9.18 FROM 硬链接共享 | OVB.1–OVB.4 | 磁盘共享数据块；靠 COPY unlink-first + RUN 走 overlay 保证基础镜像不被就地改写 |
 | F9.19 `wbox diff` | DF.1–DF.3 | 直接读 overlay upper 得出 A/C/D，不扫全树；无 overlay 层时报错而非打印空清单 |
+| F9.20 `wbox commit` | CM.1–CM.4 | **纯编排**：复用 F9.18 的硬链接+合并、F9.17 的分层 manifest，没加新机制 |
+| F9.21 `pause`/`unpause` | PZ.1–PZ.3 | 信号而非 freezer（cgroup 只在设了限额时存在）；进程清单复用 `top` 的枚举 |
+| F9.22 `save`/`load` | SL.1–SL.6 | 打整个缓存目录（含 blobs，故搬过去仍可原样 push）；load 按白名单限定顶层条目防穿越 |
+| F9.23 `wbox cp` | CP.1–CP.6 | 走 overlay 分层视图（读 upper→lower、写只写 upper），**不 setns**，故容器已退出也能取文件；必须认 whiteout，否则会把删掉的旧文件当现状拷出去 |
+| F9.24 `wbox stats` | ST.1–ST.5 | cgroup 只在设了限额时存在，故两条路（cgroup / `/proc`）并**标注来源**；CPU% 采两次差值，分母用真实经过时间 |
+| F9.25 `export`/`import` | EX.1–EX.7 | 与 `save`/`load` 搬的东西不同（裸 rootfs vs 镜像）；import 收任意来源归档，顶层无从白名单化，只能挡穿越 + 全落 `rootfs/` 下 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
+另一次收敛在 CLI 分发层：顶层分发、`container` 分发、`wbox help` 的主题判定、
+给用户看的动词清单，四份清单原本各写各的，**已经漂开了**——`diff`/`commit`/
+`cp`/`stats`/`pause` 能跑却不是"已知帮助主题"，`wbox help diff` 报错。收敛成
+一张 `VERBS` 表（名字 + 作用域 + handler），另外三份全部由它派生；
+`verb_table_is_the_only_source_of_truth` 把派生关系钉死。
+**教训**：需要"每加一处要记得同步改 N 个地方"的设计，漂移只是时间问题，
+而且不会有任何东西提醒你——发现时它已经错了很久了。
+
+第三次收敛在分层视图：`diff`/`commit`/`cp`/`export` 问的是同一个问题——
+"这个容器的文件系统由哪两层构成"——此前各解析一遍，连"没有 overlay 可写层"
+那句错误说明都各抄了一份三处。收敛到 `src/layers.rs` 的 `ContainerLayers`：
+`resolve`（一处措辞，调用方只说"我要干什么"）、`lookup`（读先 upper 后 lower，
+认 whiteout）、`materialize`（硬链接铺下层 + 合并 upper，commit 与 export 共用）。
+
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **350 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **133 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **381 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **167 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -69,7 +89,7 @@ F9.1–F9.19 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.18）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.25）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push
@@ -90,8 +110,8 @@ F9.1–F9.19 全部落地并有持续门禁。近期这一串是本轮做的：
 - ~~**L6 pod**~~：**已评估，结论是不做**。评估过程发现 IPC/UTS 根本没隔离，
   于是先补了 F9.15；补齐后 pod 的三样共享都能单独取得，再抽一层只是换个说法。
 
-Q2 的 `-v` 由 Windows agent 在推进（broker 打开对象 HANDLE + Blink VFS 数据面，
-**不走** OS 路径重定向），别去碰那块。
+Q2 当前最高优先级是 PRD §2.2.1/F4 的 Rust-only runtime 替换。不得继续修改
+Blink/C 层，也不得恢复已撤回的 brokerfs 实验；卷数据面等待纯 Rust guest VFS。
 
 **Q2 的 `-p` 已结案（§4.9 W5），别再当待办**：读 vendored 的 blink 源码就能定
 ——`HostfsSocket/Bind/Listen` 全部直落宿主 socket，仓库里没有自建网络栈，
@@ -181,12 +201,21 @@ Dockerfile 子集解析器一致。
 选**能区分两种世界**的探针（例如 HC.3 用"宿主有 `/home`、rootfs 没有"来证明探针跑在
 容器里；NC.1 三方比对 ns inode 而不是只比两方）。
 
-### 4.2 定长 `sleep` 不能当判据
+### 4.2 基线要在**动作之后**采，别在动作之前
+
+PZ.1 第一版拿 `pause` **之前**的计数当基线，结果偶发红：从采样到 pause 真正
+生效之间有几十毫秒，容器照跑、计数 +1。要断言的本来就是"停下来之后不再变"，
+那就该只看停下来之后的两个点。
+
+同一形状的错误在本项目出现过多次——**判据里混进了动作生效之前的状态**。
+写断言时先问一句：我采的这个数，是在我要验证的那件事发生之后吗？
+
+### 4.3 定长 `sleep` 不能当判据
 
 L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。改成**轮询到条件成立，
 带上限**（判据没放松，到期仍失败照样 FAIL）。
 
-### 4.3 静默降级是最坏的失败形态
+### 4.4 静默降级是最坏的失败形态
 
 凡是"做不到"的路径，一律**明确报错或出声告警**，绝不静默忽略：
 
@@ -195,7 +224,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - 内核不支持 rootless overlay → **打印**回退说明，不静默共享写入。
 - 拼错的 capability / syscall 名 → 报错。静默忽略会让用户**以为已经收紧了**。
 
-### 4.4 探测要"真做一次"，别看特征文件
+### 4.5 探测要"真做一次"，别看特征文件
 
 - cgroup v2 那次：用 `[ -f /sys/fs/cgroup/cgroup.controllers ]` 判断"能用"，
   结果 runner 上委派没开，实际走的是兜底路径 —— 探测说有、实际不能用。
@@ -206,7 +235,17 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
   `EIO`。只测文件的话这个缺陷完全看不出来——它在 F9.12 里潜伏了好几轮，
   是做 L5b 可行性实验时才撞出来的。判据要覆盖"删目录"。
 
-### 4.5 起了服务当夹具时，必须确认**是你自己**绑上了端口
+### 4.6 断言要数**对的对象**：源码 ≠ 磁盘上的文件
+
+`runtime` 的"原生代码欠债"棘轮走文件系统统计 C/H 文件，于是把构建产物也算了
+进去——`vendor/blink/config.h`（被 .gitignore 忽略）与 `build-win32/version.h`
+都是生成的，**在任何编译过 blink 的机器上这条断言都会红**，而欠债一点没变。
+改成数 `git ls-files` 的输出。
+
+同一个道理：要断言"仓库里有多少源码"，就去问版本库，别去问磁盘——
+磁盘上还有别人（编译器、configure）放的东西。
+
+### 4.7 起了服务当夹具时，必须确认**是你自己**绑上了端口
 
 门禁里用 python3 起 registry stub 时踩过：先前手工测试遗留的进程还占着端口，
 门禁自己的 stub **bind 失败**，用例照样连上了"那一个"服务器并得到看似合理的
@@ -216,7 +255,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 可能被占。**另外：`ss -ltnp` 在这台机器上看不到监听项**，判断端口是否空闲要
 用"真去 bind 一下"，别信 `ss` 的输出。
 
-### 4.6 CI 与跨宿主
+### 4.8 CI 与跨宿主
 
 - **推之前等 CI**：曾因为 Windows 侧 `Drop` 顺序（删了还开着句柄的锁文件）
   在 CI 才暴露。
@@ -226,7 +265,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - msys 会改写命令行里的 guest 路径（`/busybox` → `D:/a/_temp/msys64/busybox`），
   造出纯自伤的假失败。Windows 侧脚本注意 `MSYS2_ARG_CONV_EXCL='*'` + `cygpath`。
 
-### 4.7 内核/平台细节（踩过的）
+### 4.9 内核/平台细节（踩过的）
 
 - `unshare`/`setns` 带 `CLONE_NEWPID` **只影响之后创建的子进程** → 必须再 fork 一次。
   用 `/proc/<pid>/ns/pid_for_children`，不是 `ns/pid`。
@@ -236,7 +275,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - netns 是**每线程**的；线程共享 fd 表，不需要 SCM_RIGHTS。
 - 判活**以锁为准不以 pid 为准**：pid 会复用，`stop` 据此发信号就是杀错进程。
 
-### 4.8 Python 生成 shell 脚本时
+### 4.10 Python 生成 shell 脚本时
 
 替换串以 `"` 结尾又紧挨 `"""` 时会多吐一个引号进脚本，`bash -n` 检查不出来，
 只有运行时才炸。生成后**看一眼实际写进去的内容**。

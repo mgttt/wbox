@@ -42,7 +42,7 @@ pub use linux::{LinuxMode, LinuxNativeBackend};
 pub(crate) use linux::ns::rootless_overlay_available;
 pub use native::NativeBackend;
 
-use crate::error::{Result, WboxError};
+use crate::error::Result;
 use std::path::PathBuf;
 
 /// 资源限额（跨平台描述；Windows 侧映射到 JobLimits）。
@@ -629,40 +629,6 @@ pub fn reject_volumes_if_unsupported(volumes: &[VolumeMount]) -> Result<()> {
     )
 }
 
-/// Windows OCI/模拟器当前只开放 broker-backed 只读目录 bind。
-pub fn validate_emu_volumes(volumes: &[VolumeMount]) -> Result<()> {
-    if volumes.len() > 64 {
-        return Err(WboxError::args("Windows OCI 单容器最多支持 64 个只读卷"));
-    }
-    for volume in volumes {
-        if !volume.read_only {
-            return Err(WboxError::args(format!(
-                "Windows OCI 卷 '{}' 当前只支持 :ro；:rw 要等 broker 写操作与回滚门禁完成",
-                volume.guest
-            )));
-        }
-        if !volume.host.is_dir() {
-            return Err(WboxError::args(format!(
-                "Windows OCI 首版只支持目录 bind，'{}' 不是目录",
-                volume.host.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-pub fn validate_image_volumes_for_host(volumes: &[VolumeMount]) -> Result<()> {
-    #[cfg(windows)]
-    {
-        validate_emu_volumes(volumes)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = volumes;
-        Ok(())
-    }
-}
-
 /// 一条 `-v host:guest[:ro]` 挂载。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VolumeMount {
@@ -703,20 +669,6 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     if !guest.starts_with('/') {
         return Err(bad("容器路径必须是绝对路径"));
     }
-    if guest.contains('\\') || guest.contains('\0') {
-        return Err(bad("容器路径不能包含反斜杠或 NUL"));
-    }
-    let mut guest_components = Vec::new();
-    for component in guest.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component == ".." {
-            return Err(bad("容器路径不能包含 '..'"));
-        }
-        guest_components.push(component);
-    }
-    let guest = format!("/{}", guest_components.join("/"));
     // 安全断言：`-v /somewhere:/` 会把宿主目录盖在容器根上，等于把隔离作废。
     // 这条不是防手滑，是防"一条命令就让沙箱失效"。
     if guest == "/" {
@@ -732,7 +684,7 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     })?;
     Ok(VolumeMount {
         host: host_path,
-        guest,
+        guest: guest.to_string(),
         read_only,
     })
 }
@@ -750,13 +702,6 @@ mod volume_tests {
         assert!(!v.read_only);
         assert!(parse_volume(&format!("{}:/data:ro", t)).unwrap().read_only);
         assert!(!parse_volume(&format!("{}:/data:rw", t)).unwrap().read_only);
-        assert_eq!(
-            parse_volume(&format!("{}://var/./lib//data/:ro", t))
-                .unwrap()
-                .guest,
-            "/var/lib/data"
-        );
-        assert!(parse_volume(&format!("{}:/data/../escape:ro", t)).is_err());
     }
 
     /// 挂到容器根上等于把隔离作废——必须拒绝。

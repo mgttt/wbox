@@ -21,6 +21,11 @@ pub mod rm;
 pub mod stop;
 pub mod run;
 pub mod start;
+mod commit;
+mod cp;
+mod export;
+mod stats;
+mod pause;
 mod diff;
 pub mod top;
 pub mod wait;
@@ -37,6 +42,14 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox push <REF> [--registry HOST] [-V]            把本地镜像推回 registry（平铺单层，见 PRD F9.13）
   wbox compose [-f FILE] [-p NAME] up -d|down|ps    多容器编排子集（仅 Linux，见 PRD F9.14）
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
+  wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
+  wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
+  wbox cp <NAME>:<路径> <宿主路径>                 容器与宿主间拷贝（反向亦可，见 PRD F9.23）
+  wbox stats [NAME...]                             容器实时资源占用（仅 Linux，见 PRD F9.24）
+  wbox export -o <FILE> <NAME>                     把容器当前文件系统打成裸 tar（见 PRD F9.25）
+  wbox import -t <IMAGE[:TAG]> <FILE>              从裸 rootfs tar 造一个镜像
+  wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
+  wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
@@ -118,51 +131,100 @@ fn is_help_arg(arg: Option<&String>) -> bool {
     matches!(arg.map(String::as_str), Some("--help") | Some("-h"))
 }
 
+/// 一个动词的作用域：能不能写成 `wbox container <动词>`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// 容器域：`wbox <动词>` 与 `wbox container <动词>` 都收。
+    Container,
+    /// 只在顶层：镜像相关、构建、编排等。
+    Top,
+}
+
+type Handler = fn(&[String]) -> Result<u32>;
+
+/// **动词表：一处登记，四处使用**——顶层分发、`container` 分发、`wbox help`
+/// 的主题判定、以及给用户看的动词清单。
+///
+/// 这张表是补出来的，补之前那四处各写各的，已经漂开了：`diff`/`commit`/`cp`/
+/// `stats`/`pause` 都能跑，却没登记进帮助主题，于是 `wbox help diff` 反而报
+/// "未知帮助主题"；`container` 的报错文案也还停在没有这些动词的年代。
+/// 分头维护的清单**必然**会漂——每加一个动词就要记得改四个地方，漏一个没有
+/// 任何东西会提醒你。下面的 `verb_table_is_the_only_source_of_truth` 把这条
+/// 钉住了。
+const VERBS: &[(&str, Scope, Handler)] = &[
+    ("run", Scope::Container, run::cmd_run),
+    ("create", Scope::Container, create::cmd_create),
+    ("start", Scope::Container, start::cmd_start),
+    ("ps", Scope::Container, ps::cmd_ps),
+    ("inspect", Scope::Container, inspect::cmd_inspect),
+    ("wait", Scope::Container, wait::cmd_wait),
+    ("logs", Scope::Container, logs::cmd_logs),
+    ("exec", Scope::Container, exec::cmd_exec),
+    ("rm", Scope::Container, rm::cmd_rm),
+    ("stop", Scope::Container, stop::cmd_stop),
+    ("kill", Scope::Container, kill::cmd_kill),
+    ("top", Scope::Container, top::cmd_top),
+    ("diff", Scope::Container, diff::cmd_diff),
+    ("commit", Scope::Container, commit::cmd_commit),
+    ("cp", Scope::Container, cp::cmd_cp),
+    ("stats", Scope::Container, stats::cmd_stats),
+    ("pause", Scope::Container, pause::cmd_pause),
+    ("unpause", Scope::Container, pause::cmd_unpause),
+    ("export", Scope::Container, export::cmd_export),
+    ("import", Scope::Top, export::cmd_import),
+    ("build", Scope::Top, build::cmd_build),
+    ("compose", Scope::Top, compose::cmd_compose),
+    ("pull", Scope::Top, image::cmd_image_pull),
+    ("push", Scope::Top, image::cmd_image_push),
+    ("save", Scope::Top, image::cmd_image_save),
+    ("load", Scope::Top, image::cmd_image_load),
+    ("images", Scope::Top, image::cmd_image_list),
+    ("rmi", Scope::Top, image::cmd_image_rm),
+];
+
+/// 两个**分组**动词（`image` / `container`）不在表里：它们自己带子命令，
+/// 形状与表里的一元动词不同。列在这里是为了帮助主题判定不漏掉它们。
+const GROUPS: &[&str] = &["image", "container"];
+
+fn lookup(command: &str, scope: Option<Scope>) -> Option<Handler> {
+    VERBS
+        .iter()
+        .find(|(n, s, _)| *n == command && scope.is_none_or(|want| *s == want))
+        .map(|(_, _, f)| *f)
+}
+
+/// 给用户看的动词清单。从表生成，不手写——手写的那份就是上面说的漂移源头。
+fn verb_list(scope: Option<Scope>) -> String {
+    VERBS
+        .iter()
+        .filter(|(_, s, _)| scope.is_none_or(|want| *s == want))
+        .map(|(n, _, _)| *n)
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 fn is_known_command(command: &str) -> bool {
-    matches!(
-        command,
-        "run"
-            | "build"
-            | "create"
-            | "start"
-            | "pull"
-            | "images"
-            | "rmi"
-            | "image"
-            | "container"
-            | "ps"
-            | "inspect"
-            | "wait"
-            | "logs"
-            | "exec"
-            | "rm"
-            | "stop"
-            | "kill"
-            | "top"
-    )
+    lookup(command, None).is_some() || GROUPS.contains(&command)
 }
 
 fn cmd_container(args: &[String]) -> Result<u32> {
     match args.first().map(String::as_str) {
-        Some("create") => create::cmd_create(&args[1..]),
-        Some("start") => start::cmd_start(&args[1..]),
+        // `container ls` 是 docker 的写法；顶层同一件事叫 `ps`。
         Some("list") | Some("ls") => ps::cmd_ps(&args[1..]),
+        // `container inspect` 只认容器，顶层的 `inspect` 则镜像容器都认。
         Some("inspect") => inspect::cmd_container_inspect(&args[1..]),
-        Some("wait") => wait::cmd_wait(&args[1..]),
-        Some("logs") => logs::cmd_logs(&args[1..]),
-        Some("exec") => exec::cmd_exec(&args[1..]),
-        Some("rm") => rm::cmd_rm(&args[1..]),
-        Some("stop") => stop::cmd_stop(&args[1..]),
-        Some("kill") => kill::cmd_kill(&args[1..]),
-        Some("top") => top::cmd_top(&args[1..]),
-        Some("diff") => diff::cmd_diff(&args[1..]),
-        Some(other) => Err(WboxError::args(format!(
-            "未知 container 子命令 '{}'（支持 create / start / ls / inspect / wait / logs / exec / rm / stop / kill / top）",
-            other
+        Some(other) => match lookup(other, Some(Scope::Container)) {
+            Some(f) => f(&args[1..]),
+            None => Err(WboxError::args(format!(
+                "未知 container 子命令 '{}'（支持 ls / {}）",
+                other,
+                verb_list(Some(Scope::Container))
+            ))),
+        },
+        None => Err(WboxError::args(format!(
+            "container 缺少子命令（支持 ls / {}）",
+            verb_list(Some(Scope::Container))
         ))),
-        None => Err(WboxError::args(
-            "container 缺少子命令（create / start / ls / inspect / wait / logs / exec / rm / stop / kill / top）",
-        )),
     }
 }
 
@@ -204,27 +266,10 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         return result;
     }
     match args.first().map(|s| s.as_str()) {
-        Some("run") => run::cmd_run(&args[1..]),
-        Some("create") => create::cmd_create(&args[1..]),
-        Some("start") => start::cmd_start(&args[1..]),
-        Some("build") => build::cmd_build(&args[1..]),
-        Some("compose") => compose::cmd_compose(&args[1..]),
-        Some("pull") => image::cmd_image_pull(&args[1..]),
-        Some("push") => image::cmd_image_push(&args[1..]),
-        Some("images") => image::cmd_image_list(&args[1..]),
-        Some("rmi") => image::cmd_image_rm(&args[1..]),
+        // 两个分组动词自带子命令，形状与表里的一元动词不同，单独走。
         Some("image") => image::cmd_image(&args[1..]),
         Some("container") => cmd_container(&args[1..]),
-        Some("ps") => ps::cmd_ps(&args[1..]),
-        Some("inspect") => inspect::cmd_inspect(&args[1..]),
-        Some("wait") => wait::cmd_wait(&args[1..]),
-        Some("logs") => logs::cmd_logs(&args[1..]),
-        Some("exec") => exec::cmd_exec(&args[1..]),
-        Some("rm") => rm::cmd_rm(&args[1..]),
-        Some("stop") => stop::cmd_stop(&args[1..]),
-        Some("kill") => kill::cmd_kill(&args[1..]),
-        Some("top") => top::cmd_top(&args[1..]),
-        Some("diff") => diff::cmd_diff(&args[1..]),
+        // 内部动词：端口转发的中继子进程，不进动词表也不进帮助。
         #[cfg(target_os = "linux")]
         Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),
         Some("--help") | Some("-h") => {
@@ -235,15 +280,19 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
             println!("wbox {}", env!("CARGO_PKG_VERSION"));
             Ok(0)
         }
-        Some(other) => Err(WboxError::args(format!(
-            "未知子命令 '{}'。用法见 wbox --help",
-            other
-        ))),
+        Some(other) => match lookup(other, None) {
+            Some(f) => f(&args[1..]),
+            None => Err(WboxError::args(format!(
+                "未知子命令 '{}'。用法见 wbox --help",
+                other
+            ))),
+        },
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args(
-                "缺少子命令（run / create / start / image / container / ps / inspect / wait / rm / stop / kill / top / logs / exec）",
-            ))
+            Err(WboxError::args(format!(
+                "缺少子命令（image / container / {}）",
+                verb_list(None)
+            )))
         }
     }
 }
@@ -255,6 +304,68 @@ mod tests {
     use crate::{backend, oci};
     use backend::Backend;
     use image::cmd_image_show;
+
+    /// 动词表是**唯一事实来源**：能分发的必然是已知的帮助主题，也必然出现在
+    /// 给用户看的清单里。
+    ///
+    /// 补这条之前四份清单各写各的，已经漂开了——`diff`/`commit`/`cp`/`stats`/
+    /// `pause` 能跑却不是"已知帮助主题"，`wbox help diff` 报错。这类漂移不会有
+    /// 任何东西提醒你，只能靠一条断言把三份派生物钉回同一个源。
+    #[test]
+    fn verb_table_is_the_only_source_of_truth() {
+        let all = verb_list(None);
+        for (name, scope, _) in VERBS {
+            assert!(
+                is_known_command(name),
+                "'{}' 能分发却不是已知帮助主题",
+                name
+            );
+            assert!(all.contains(name), "'{}' 不在用户可见的动词清单里", name);
+            if *scope == Scope::Container {
+                assert!(
+                    lookup(name, Some(Scope::Container)).is_some(),
+                    "'{}' 标了容器域却查不到",
+                    name
+                );
+                assert!(
+                    verb_list(Some(Scope::Container)).contains(name),
+                    "'{}' 不在 container 子命令清单里",
+                    name
+                );
+            } else {
+                assert!(
+                    lookup(name, Some(Scope::Container)).is_none(),
+                    "'{}' 不是容器域动词，不该被 `wbox container` 接受",
+                    name
+                );
+            }
+        }
+        for g in GROUPS {
+            assert!(is_known_command(g), "分组动词 '{}' 应是已知帮助主题", g);
+        }
+        // 表里不许有重名——重名时 lookup 只会命中第一条，另一条静默失效。
+        let mut names: Vec<&str> = VERBS.iter().map(|(n, _, _)| *n).collect();
+        let before = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(before, names.len(), "动词表里有重名");
+    }
+
+    /// 每个动词都要能被 `wbox help <动词>` 认出来。这条是上面那个真实缺陷的
+    /// 直接回归：`wbox help diff` 曾经报"未知帮助主题"。
+    #[test]
+    fn help_accepts_every_dispatchable_verb() {
+        for (name, _, _) in VERBS {
+            let args = vec!["help".to_string(), name.to_string()];
+            assert_eq!(
+                dispatch(&args).unwrap(),
+                0,
+                "wbox help {} 应给出帮助而不是报错",
+                name
+            );
+        }
+        assert!(dispatch(&["help".to_string(), "nosuchverb".to_string()]).is_err());
+    }
 
     #[test]
     fn dispatch_unknown_and_missing_subcommand() {

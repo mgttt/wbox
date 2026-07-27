@@ -22,7 +22,7 @@
 //! 输出里塞满没意义的行。docker 的行为也是这样。
 
 use crate::error::{Result, WboxError};
-use crate::runstate;
+use crate::layers::{is_whiteout, ContainerLayers};
 use std::path::Path;
 
 struct Options<'a> {
@@ -115,39 +115,13 @@ fn walk(upper: &Path, image_root: Option<&Path>, rel: &Path, out: &mut Vec<Chang
     }
 }
 
-/// overlay 用字符设备 0:0 表示"下层的这个条目被删了"。
-/// 与 tar 层的 `.wh.` 前缀**不是**一套（见 `build.rs` 的同名说明）。
-fn is_whiteout(meta: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        use std::os::unix::fs::MetadataExt;
-        meta.file_type().is_char_device() && meta.rdev() == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        false
-    }
-}
-
 pub fn cmd_diff(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::resolve_existing(opts.name)?;
-    let upper = dir.join("layer").join("upper");
-    if !upper.is_dir() {
-        // 没有 overlay 层的容器（宿主程序模式、或内核不支持时回退了共享写入）
-        // 拿不出这个答案。明说而不是打印空清单——空清单会被读成"没改过"。
-        return Err(WboxError::args(format!(
-            "容器 '{}' 没有 overlay 可写层，无法列出改动：\
-             宿主程序模式不换根，或本机内核不支持 rootless overlay 而回退了共享写入（PRD F9.12）",
-            opts.name
-        )));
-    }
+    // 分层解析与"没有 overlay 层"的措辞都在 layers 模块（一处措辞，四处复用）；
+    // 明说而不是打印空清单——空清单会被读成"没改过"。
+    let layers = ContainerLayers::resolve(opts.name, "无法列出改动")?;
     // 镜像 rootfs 作为基线，用来区分新增与改动。取不到就只报新增。
-    let image_root = runstate::read_meta(&dir)
-        .and_then(|m| m.exec_context.map(|c| std::path::PathBuf::from(c.workdir)));
-    for c in scan(&upper, image_root.as_deref()) {
+    for c in scan(&layers.upper, layers.lower.as_deref()) {
         println!("{} {}", c.kind, c.path);
     }
     Ok(0)
@@ -156,6 +130,7 @@ pub fn cmd_diff(args: &[String]) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runstate;
     use crate::testenv::TempHome;
 
     #[test]

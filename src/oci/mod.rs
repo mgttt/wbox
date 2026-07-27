@@ -19,6 +19,7 @@
 
 pub mod config;
 pub mod image;
+pub mod archive;
 pub mod push;
 pub mod registry;
 

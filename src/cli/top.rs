@@ -89,6 +89,46 @@ fn platform_rows(_name: &str, dir: &std::path::Path) -> Result<Vec<ProcessRow>> 
     Ok(linux_process_tree(root))
 }
 
+/// 容器内进程的宿主 PID 清单（含 root 本身）。
+///
+/// `top` 与 `pause`/`unpause` 共用同一份枚举：一处按 PPID 闭包展开、
+/// 一处另写一份的话，迟早出现"top 看得见的进程 pause 漏了"这种最难查的偏差。
+#[cfg(target_os = "linux")]
+pub(super) fn container_pids(root: u32) -> Vec<u32> {
+    use std::collections::HashSet;
+    let mut processes = Vec::<(u32, u32)>::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return vec![root];
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if let Some((ppid, _)) = linux_process(pid) {
+            processes.push((pid, ppid));
+        }
+    }
+    let mut members = HashSet::from([root]);
+    loop {
+        let before = members.len();
+        for &(pid, ppid) in &processes {
+            if members.contains(&ppid) {
+                members.insert(pid);
+            }
+        }
+        if members.len() == before {
+            break;
+        }
+    }
+    let mut out: Vec<u32> = members.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
 #[cfg(target_os = "linux")]
 fn linux_process_tree(root: u32) -> Vec<ProcessRow> {
     use std::collections::{HashMap, HashSet};
