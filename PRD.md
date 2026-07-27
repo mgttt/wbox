@@ -168,6 +168,13 @@ S4 在 Linux 上运行 Windows CLI
 GitHub Server 2025 runner 上，依赖宿主模块目录自动发现的 `Write-Output` 尚不可用；
 标准 PowerShell 模块的跨宿主兼容性仍是 active 缺口，不得由该项外推为完整支持。
 
+`WNET.*` 是 `scripts/test-windows-network.ps1` 的 Windows 网络行为门禁：
+
+- `WNET.1`：宿主可访问同一个公网数值 IP 端点，排除端点或 runner 网络故障。
+- `WNET.2`：默认 AppContainer 必须无法访问该端点。
+- `WNET.3`：`--allow-network` 必须访问成功并收到非 `000` HTTP 状态。
+- `WNET.4`：两次前台运行结束后 `ps --all` 无状态残留。
+
 ### F1 CLI 与运行目标分派 `[active]`
 
 ```text
@@ -434,10 +441,10 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | 原生启动 G3 通过；网络放行、资源超限和进程树回收缺行为门禁 |
-| OCI pull/cache/config | active | Rust 单测与 Windows pull 通过；真实 rootfs 链接和原子缓存存在缺口 |
-| Windows Linux guest | active | CI 30235107088：WP.1/WP.2 通过；WP.3 在 AppContainer 内执行 BusyBox 时 0xC0000005/rc139，同一静态 artifact 直跑为 rc0 |
-| Windows shell 矩阵 | component-only | 43 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
+| Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
+| OCI pull/cache/config | active | Alpine 3.20 绝对 applet 链接与真实重拉通过；dangling symlink 和原子缓存仍有缺口 |
+| Windows Linux guest | active | CI 30237600882：WP.1/WP.2/WP.5 通过；WP.3 在 AppContainer 内执行 BusyBox 时 0xC0000005/rc139，同一静态 artifact 直跑为 rc0 |
+| Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 209 pass、0 fail；不能外推产品状态 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
@@ -451,8 +458,8 @@ AppContainer 无写权限时 VFS 初始化失败；`BlinkBackend` 已改为降�
 越过该点后，CI 构建的静态 `wbox-linux.exe` 在 AppContainer 内加载 BusyBox
 仍于 guest 入口 `0x4038b1` 崩溃（host `0xC0000005`，fault address `-1`）。
 同一 exe、同一 BusyBox、同一 `BLINK_PREFIX` 在 Windows 宿主直接运行 rc=0；
-`-j` 禁用 JIT、`--env-pass-all` 和额外 `codeGeneration` capability 均未改变
-崩溃，因此后三者不是已证实的修复方向。
+`-j` 禁用 JIT、`--env-pass-all`、额外 `codeGeneration` capability，以及
+`--memory 0` 取消 Job 内存上限均未改变崩溃，因此这些不是已证实的修复方向。
 
 ## 7. 里程碑与时间线
 

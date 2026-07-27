@@ -118,6 +118,17 @@ Windows PowerShell 解释器/CLR、`hostname.exe`、`whoami.exe`、子进程、�
 目前不能自动发现 `Write-Output` 所在的宿主 PowerShell 模块；因此该矩阵不代表
 所有标准 cmdlet 已兼容，模块加载需单独建立跨宿主行为门禁。
 
+### 2.7 Windows 网络行为门禁
+
+```powershell
+scripts/test-windows-network.ps1 -Wbox target/debug/wbox.exe
+```
+
+该门禁先证明宿主可访问一个公网数值 IP 端点，再用同一端点断言默认
+AppContainer 被拒绝、`--allow-network` 成功，并检查两次运行的状态清理。
+数值 IP 用于隔离 capability 行为与系统 `curl.exe` 域名 resolver 辅助线程问题；
+DNS 放行已由 `nslookup` 实机验证，但尚未纳入此门禁。
+
 ## 3. 已知失败基线
 
 机器可读基线是 `tests/known-failures.txt`，说明与修复历史在
