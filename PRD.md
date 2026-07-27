@@ -510,38 +510,27 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 
 ```text
 TODO-PLAN
-├── W1 F8 后台生命周期的 Windows 端到端门禁   [Windows agent]
+├── W1 Windows 侧 stop 的持续门禁              [Windows agent]
 ├── W2 F8.4 exec 的 Windows 可行性取证        [Windows agent]
 └── L1 F8.4 exec 的 Linux 侧实现              [Linux agent，进行中]
 ```
 
-### W1 F8 后台生命周期的 Windows 端到端门禁 `[Windows agent]`
+### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]`
 
-**背景**。F8.1–F8.3（`ps` / `--detach`+`logs` / `stop`+`rm`）已实现，端到端
-门禁 P.1–P.18 **只在 Linux 跑**。Windows 侧只有两处平台相关实现有单测在
-windows runner 上真跑：锁语义（`lock_reflects_owner_liveness`）与进程终止
-（`terminate_actually_kills`）。完整的 `--detach → ps → logs → stop` 链路在
-Windows 上没有逐条验证过。
+**已解决的部分**。`--detach → ps → logs → rm` 这条链路的 Windows 门禁
+（`WP.6/WP.7`）已随 `f821e05` 落地并在 CI 真实通过。顺带证实了两件此前只是
+推理的事：非 Linux 上 `detach_from_terminal` 的空实现是成立的（父进程退出
+不会带走 supervisor），且 supervisor 持有的 Job 在父进程退出后仍绑着容器树。
 
-**现状**。`scripts/test-windows-product.ps1` 里已加了 WP.6/WP.7 草稿
-（detach → ps → logs → rm）。**那段 PowerShell 是在没有 pwsh 的 Linux 机器上
-写的，只做过括号/引号平衡与逐行对照，未经真实执行。** 若它在 CI 里报错，
-优先怀疑脚本本身而不是产品代码。
+**剩下的缺口**：`stop` 在 Windows 上只有人工实测证据，**没有持续门禁**。
 
-**要判定的真问题**（脚本对不对是次要的，这几条才是）：
+**要判定的真问题**：`stop` 走 `OpenProcess + TerminateProcess` 终止 supervisor
+后，Job 的 `KILL_ON_JOB_CLOSE` 是否如期收走**整棵树**——包括孙进程。Linux 侧
+由 P.15 用"3 个孙进程 → 0"验证，Windows 需要一条等价断言（例如 guest 起几个
+`ping -t` 之类的长命子孙，`stop` 后按映像名计数必须归零）。
 
-1. `--detach` 在 Windows 上到底成不成立。父进程 `spawn` 后立即退出，
-   supervisor 靠什么活下来？Linux 用 `setsid` 脱离会话，
-   `detach_from_terminal` 在非 Linux 上是**空实现**——理由是"stdio 已重定向到
-   文件、父进程不等待，控制台关闭不波及子进程"。这条推理**没有在真机上验证过**。
-   若控制台关闭会带走 supervisor，需要 `DETACHED_PROCESS` 或
-   `CREATE_NEW_PROCESS_GROUP`。
-2. supervisor 持有的 Job（`KILL_ON_JOB_CLOSE`）在父进程退出后是否仍绑着容器树。
-3. `stop` 走 `OpenProcess + TerminateProcess` 终止 supervisor 后，Job 是否
-   如期收走整棵树（Linux 侧由 P.15 用"3 个孙进程 → 0"验证，Windows 需等价断言）。
-
-**做完的标准**：Windows 上有等价于 P.9–P.18 的断言且真实通过；若某条在
-Windows 上语义不同，在 F8.d 里写明差异而不是让门禁将就。
+**做完的标准**：Windows 上有等价于 P.15–P.18 的断言且真实通过；若语义与
+Linux 不同（例如没有 SIGTERM 的优雅阶段），在 F8.d 写明差异而不是让门禁将就。
 
 ### W2 F8.4 `exec` 的 Windows 可行性取证 `[Windows agent]`
 
