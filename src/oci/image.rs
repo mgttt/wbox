@@ -530,6 +530,7 @@ fn resolve_with_symlinks(
 /// symlink 降级：把符号链接物化为目标内容的副本（Windows 无
 /// SeCreateSymbolicLinkPrivilege 时 symlink 创建必败，全部层结束后统一复制）。
 /// `target_rel_raw` 为条目里写的目标（相对 symlink 所在目录）。
+#[cfg(any(windows, test))]
 fn materialize_symlink_as_copy(
     root: &Path,
     link_rel: &Path,
@@ -565,6 +566,7 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
