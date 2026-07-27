@@ -59,7 +59,7 @@ echo "  根 cgroup.subtree_control= $(cat /sys/fs/cgroup/cgroup.subtree_control)
 echo "  自身 cgroup              = $(sed -n 's/^0:://p' /proc/self/cgroup)"
 
 cleanup() {
-  sudo rmdir "$BASE"/*/*/ "$BASE"/*/ 2>/dev/null
+  sudo rmdir "$BASE"/*/*/*/ "$BASE"/*/*/ "$BASE"/*/ 2>/dev/null
   sudo rmdir "$BASE" 2>/dev/null
 }
 trap cleanup EXIT
@@ -179,30 +179,31 @@ if [ ! -x "$WBOX" ]; then
   echo "  找不到 $WBOX，跳过"
   exit 0
 fi
-mkdir -p "$BASE/run" 2>/dev/null
+# 按**布局 B 的形状**搭：委派根 run/ 不放进程、只下发控制器；
+# wbox 待在 run/supervisor 这个 leaf 里。这正是拟议中的修复形态 ——
+# 先用探针验它成不成立，再决定要不要照这个改代码。
+mkdir -p "$BASE/run/supervisor" 2>/dev/null
 sudo chown -R "$(id -u):$(id -g)" "$BASE/run" 2>/dev/null
-# wbox 会在**自己所在的 cgroup**（这里是 run/）下建子目录写限额，
-# 故 run 自己必须能把控制器下发给子级。它此刻还没有进程，应当能开。
 if echo "+memory +pids +cpu" > "$BASE/run/cgroup.subtree_control" 2>/tmp/probe.err; then
-  echo "  [ok]   run/ 下发控制器成功（wbox 进去之前）"
+  echo "  [ok]   委派根 run/ 下发控制器（自身不放进程）"
 else
   echo "  [FAIL] run/ 下发控制器失败 —— $(tr -d '\n' </tmp/probe.err)"
 fi
-# 在子 shell 里把自己挪进 $BASE/run 再 exec wbox —— 这样 wbox 的
-# /proc/self/cgroup 指向一个它有写权限的目录，正是 cgroup2_self_dir 要找的。
-#
-# **这一步的错误绝不能吞**（上一版用 2>/dev/null 吞了，结果只看到"wbox 退化
-# 到 rlimit"却不知道是它自己的问题还是根本没挪进去）。这里恰恰是问题的核心：
-# run/ 已经 enable 了 subtree_control，而 cgroup v2 的 "no internal process"
-# 规则**同时**禁止往这样的 cgroup 里塞进程 —— 若如此，wbox「在自己所在 cgroup
-# 下建子目录写限额」的做法就是死路，必须改成 supervisor/target 两个 leaf。
+# 关键问题：wbox 待在 supervisor 这个 leaf 里时，能不能在**兄弟**位置
+# （run/ 之下）建一个 target 并写限额？能，则拟议的修复方向成立。
+if mkdir -p "$BASE/run/target" 2>/dev/null && \
+   echo $((16*1024*1024)) > "$BASE/run/target/memory.max" 2>/tmp/probe.err; then
+  echo "  [ok]   **兄弟位置**的 target 可写 memory.max —— 拟议修复方向成立"
+else
+  echo "  [FAIL] 兄弟位置也写不了 memory.max —— $(tr -d '\n' </tmp/probe.err)"
+fi
 # 注意 `mypid=$$` 必须先在**外层 bash** 里取好：直接写
 # `sudo sh -c "echo $$ > ..."` 取到的是那个临时 sh 的 pid，挪错进程。
 out=$(bash -c "mypid=\$\$
-               if sudo sh -c \"echo \$mypid > '$BASE/run/cgroup.procs'\"; then
-                 echo 'MOVED-IN ok（经 sudo）'
+               if sudo sh -c \"echo \$mypid > '$BASE/run/supervisor/cgroup.procs'\"; then
+                 echo 'MOVED-IN ok（进了 supervisor leaf）'
                else
-                 echo 'MOVED-IN FAILED —— 连 sudo 都挪不进去，本次无法验证 wbox 的 cgroup 路径'
+                 echo 'MOVED-IN FAILED —— 连 leaf 都进不去，本次无法验证 wbox'
                fi
                echo \"wbox 实际所在 cgroup: \$(sed -n 's/^0:://p' /proc/self/cgroup)\"
                exec '$PWD/$WBOX' run -V --memory 16 -- /bin/true" 2>&1)
@@ -221,6 +222,7 @@ elif echo "$out" | grep -q "rlimit 兜底"; then
 else
   echo "  ==> 无法判断走了哪条路径"
 fi
-echo "  残留 cgroup：$(ls "$BASE/run" 2>/dev/null | grep -c '^wbox-' || echo 0) 个 wbox-* 目录"
+echo "  run/ 下现有：$(ls "$BASE/run" 2>/dev/null | tr '\n' ' ')"
+echo "  supervisor 下现有：$(ls "$BASE/run/supervisor" 2>/dev/null | grep '^wbox-' | tr '\n' ' ')"
 
 exit 0

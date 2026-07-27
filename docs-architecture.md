@@ -401,11 +401,30 @@ Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不�
 并以 `WBOX_LBE_REQUIRE=1` 把"能力缺失"从 SKIP 提为 FAIL——**这条门禁不允许
 静默零覆盖**。
 
-**取证进展（截至目前，只写已被日志证实的部分）**：
+**取证结论（已由 CI 日志三向证实）**：wbox 现在的 cgroup 布局在 cgroup v2 下
+**不可能工作**，与委派开没开无关。证据是同一次运行里三条互相印证的观测：
+
+| 试验 | 结果 | errno |
+|---|---|---|
+| cgroup 内**有进程**时 enable `subtree_control` | 拒绝 | `EBUSY`（且子 cgroup 里确实没有 `memory.max`） |
+| **空** cgroup 先 enable，再塞进程（即便用 root） | 拒绝 | `EIO` |
+| 布局 B：空父级下发控制器给叶子 | **成功** | 叶子里 `*.max` 齐全，且 `cgroup.procs` 真的收进了进程 |
+
+两个方向都被堵死，且这次报的是**规则性错误**（EBUSY/EIO）而不是上一轮那个
+把我带偏的 `EACCES`。而 wbox 干的恰恰是被堵死的那件事：**在自己所在的
+cgroup 下建子目录并往里写限额** —— 这要求对"自己正待着的那个 cgroup"
+enable subtree_control，第一行直接否掉。
+
+**修复方向**（runc/systemd 的既有做法）：限额目标必须是 wbox **自身所在
+cgroup 的兄弟**，而不是子级；wbox 要么把自己挪进一个 leaf，要么在委派根下
+另建 target。这是一次真正的布局改动，不是补丁，且**目前没有任何环境能验证
+它**（见下），故先记录方向，不盲改。
+
+**其余取证进展**：
 1. **布局 B 的文件机制可用** —— 控制器逐级下发之后，无进程的父级能 enable
    `subtree_control`，叶子 cgroup 里 `memory.max`/`pids.max`/`cpu.max` 齐全
    且三个写入全部成功。这是 runc/systemd 采用的形状。
-2. **"布局 A 不可能" 目前证据不足，先前的结论已撤回。** 探针一度打印
+2. **（已解决）"布局 A 不可能"曾一度证据不足，结论撤回过一次。** 探针最初打印
    "布局 A 在 cgroup v2 下不可能成立"，但它自己的日志显示：**所有**
    `cgroup.procs` 写入都是 `Permission denied`，包括在任何 `subtree_control`
    被 enable **之前**的那次。那是纯权限问题（cgroup v2 迁移进程要求对源与目的的
@@ -413,7 +432,7 @@ Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不�
    根 cgroup），与 no-internal-process 规则无关。据此还连带产生两个假结论
    （"含进程的 cgroup 仍可 enable" —— 其实那个 cgroup 是空的）。
    探针已改为用 sudo 迁移进程以排除该干扰项，并且只在"确实挪进去了"时才对
-   规则下判断。
+   规则下判断 —— 改完之后才拿到上表那组干净的 EBUSY/EIO 证据。
 3. wbox 至今**没有真正在一个可写的委派 cgroup 里跑过**（日志显示它始终留在
    `/system.slice/hosted-compute-agent.service`），故"它会不会用 cgroup v2"
    这个问题目前**无解**，不能归咎于 wbox 的实现。
