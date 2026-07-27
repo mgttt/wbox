@@ -256,6 +256,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 | F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
 | F8.8 detached 管道 EOF | `src/cli/run.rs` | G4 Windows | WP.22：重定向输出及时 EOF且 workload 继续运行；提交 `55761da`、CI 30272887266 |
+| F9.1 bind volume | `linux_ns.rs`、Blink `vfs.c` | G3 Linux / G2 Blink | Linux V.1-V.4；Blink `t_mount_ro` 覆盖 `MS_RDONLY` 全局写门禁，Windows HANDLE 数据面仍 active |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -796,9 +797,13 @@ F9
    宿主路径。
 3. Win32 hostfs 必须以继承根 HANDLE 为锚做相对打开，逐组件拒绝 reparse
    越界；不能把 volume 加进单一文本 `WBOX_ROOT` allowlist。
-4. `VfsDevice.flags` 的 `MS_RDONLY` 要在 open/create、write/pwrite/writev、
+4. `[done: component gate]` `VfsDevice.flags` 的 `MS_RDONLY` 已在
+   open/create、write/pwrite/writev、
    truncate、共享可写 mmap、unlink/rename/link、mkdir、chmod/chown/utime 等
-   **所有**修改入口统一返回 `EROFS`；跨 volume rename/link 返回 `EXDEV`。
+   修改入口统一返回 `EROFS`；跨 device rename/link 返回 `EXDEV`。
+   `tests/guest/t_mount_ro.c` 在同一 guest 进程内创建 hostfs 只读挂载并验证读、
+   open-write、create、truncate、unlink、mkdir、chmod、rename 与 link。该门禁
+   只证明 VFS 语义，不代表 Windows `-v` 已开放。
 5. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
    文件 bind 在真正实现前必须明确拒绝，不能把文件悄悄当目录。
 
@@ -1314,7 +1319,9 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
-2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
+2. `[active]` 完成 Windows OCI bind volume 的目录根 HANDLE 精确继承、
+   root-relative Win32 打开与 reparse 逃逸门禁；VFS `MS_RDONLY` 组件门禁已落地，
+   CLI 在数据面完成前继续明确拒绝。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。

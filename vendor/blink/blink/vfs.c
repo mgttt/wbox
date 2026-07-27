@@ -96,6 +96,15 @@ struct Vfs g_vfs = {
     .mapslock = PTHREAD_MUTEX_INITIALIZER_,
 };
 
+static bool VfsIsReadonly(const struct VfsInfo *info) {
+  return info && info->device && (info->device->flags & MS_RDONLY);
+}
+
+static int VfsReadonly(void) {
+  errno = EROFS;
+  return -1;
+}
+
 int VfsInit(const char *prefix) {
   struct stat st;
   char *cwd, hostcwd[PATH_MAX], *bprefix = NULL;
@@ -303,11 +312,12 @@ int VfsMount(const char *source, const char *target, const char *fstype,
   if (flags & MS_SILENT_LINUX) {
     flags &= ~MS_SILENT_LINUX;
   }
-  if (flags) {
+  if (flags & ~MS_RDONLY) {
     // Theoretically, we can support a lot of the Linux flags without
     // changing the current design. However, as the major intended
     // usecase is to simply mount hostfs, this is currently not supported.
-    LOGF("Unsupported mount flags: 0x%llx", (unsigned long long)flags);
+    LOGF("Unsupported mount flags: 0x%llx",
+         (unsigned long long)(flags & ~MS_RDONLY));
   }
   if (VfsTraverse(target, &targetinfo, true) == -1) {
     if (getenv("WBOX_DEBUG_VFS"))
@@ -1141,7 +1151,9 @@ int VfsUnlink(int dirfd, const char *name, int flags) {
     return -1;
   }
   unassert(!VfsTraverseMount(&dir, newname));
-  if (dir->device->ops->Unlink) {
+  if (VfsIsReadonly(dir)) {
+    ret = VfsReadonly();
+  } else if (dir->device->ops->Unlink) {
     ret = dir->device->ops->Unlink(dir, newname, flags);
   } else {
     ret = eperm();
@@ -1165,7 +1177,9 @@ int VfsMkdir(int dirfd, const char *name, mode_t mode) {
     return -1;
   }
   unassert(!VfsTraverseMount(&dir, newname));
-  if (dir->device->ops->Mkdir) {
+  if (VfsIsReadonly(dir)) {
+    ret = VfsReadonly();
+  } else if (dir->device->ops->Mkdir) {
     ret = dir->device->ops->Mkdir(dir, newname, mode);
   } else {
     ret = eperm();
@@ -1189,7 +1203,9 @@ int VfsMkfifo(int dirfd, const char *name, mode_t mode) {
     return -1;
   }
   unassert(!VfsTraverseMount(&dir, newname));
-  if (dir->device->ops->Mkfifo) {
+  if (VfsIsReadonly(dir)) {
+    ret = VfsReadonly();
+  } else if (dir->device->ops->Mkfifo) {
     ret = dir->device->ops->Mkfifo(dir, newname, mode);
   } else {
     ret = eperm();
@@ -1217,7 +1233,11 @@ int VfsOpen(int dirfd, const char *name, int flags, int mode) {
   }
   unassert(!VfsTraverseMount(&dir, newname));
   if (ret != -1) {
-    if (dir->device->ops->Open) {
+    if (VfsIsReadonly(dir) &&
+        ((flags & O_ACCMODE) != O_RDONLY ||
+         (flags & (O_CREAT | O_TRUNC)))) {
+      ret = VfsReadonly();
+    } else if (dir->device->ops->Open) {
 #if defined(_WIN32) && !defined(__CYGWIN__)
       if (getenv("WBOX_DEBUG_FORK"))
         fprintf(stderr, "[vfs] open dir=%s newname=%s ops=%p Open=%p\n",
@@ -1256,7 +1276,9 @@ int VfsChmod(int dirfd, const char *name, mode_t mode, int flags) {
   }
   unassert(!VfsTraverseMount(&dir, newname));
   if (ret != -1) {
-    if (dir->device->ops->Chmod) {
+    if (VfsIsReadonly(dir)) {
+      ret = VfsReadonly();
+    } else if (dir->device->ops->Chmod) {
       ret = dir->device->ops->Chmod(dir, newname, mode, flags);
     } else {
       ret = eperm();
@@ -1273,7 +1295,9 @@ int VfsFchmod(int fd, mode_t mode) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Fchmod) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Fchmod) {
     ret = info->device->ops->Fchmod(info, mode);
   } else {
     ret = eperm();
@@ -1326,7 +1350,9 @@ int VfsSymlink(const char *target, int dirfd, const char *name) {
     return -1;
   }
   unassert(!VfsTraverseMount(&dir, newname));
-  if (dir->device->ops->Symlink) {
+  if (VfsIsReadonly(dir)) {
+    ret = VfsReadonly();
+  } else if (dir->device->ops->Symlink) {
     ret = dir->device->ops->Symlink(target, dir, newname);
   } else {
     ret = eperm();
@@ -1377,7 +1403,9 @@ int VfsChown(int dirfd, const char *name, uid_t uid, gid_t gid, int flags) {
   }
   unassert(!VfsTraverseMount(&dir, newname));
   if (ret != -1) {
-    if (dir->device->ops->Chown) {
+    if (VfsIsReadonly(dir)) {
+      ret = VfsReadonly();
+    } else if (dir->device->ops->Chown) {
       ret = dir->device->ops->Chown(dir, newname, uid, gid, flags);
     } else {
       ret = eperm();
@@ -1394,7 +1422,9 @@ int VfsFchown(int fd, uid_t uid, gid_t gid) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Fchown) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Fchown) {
     ret = info->device->ops->Fchown(info, uid, gid);
   } else {
     ret = eperm();
@@ -1425,7 +1455,11 @@ int VfsRename(int olddirfd, const char *oldname, int newdirfd,
   }
   unassert(!VfsTraverseMount(&olddir, newoldname));
   unassert(!VfsTraverseMount(&newdir, newnewname));
-  if (olddir->device->ops->Rename) {
+  if (olddir->device != newdir->device) {
+    ret = exdev();
+  } else if (VfsIsReadonly(olddir)) {
+    ret = VfsReadonly();
+  } else if (olddir->device->ops->Rename) {
     ret = olddir->device->ops->Rename(olddir, newoldname, newdir, newnewname);
   } else {
     ret = eperm();
@@ -1505,6 +1539,8 @@ int VfsLink(int olddirfd, const char *oldname, int newdirfd,
   unassert(!VfsTraverseMount(&newdir, newnewname));
   if (olddir->device != newdir->device) {
     ret = exdev();
+  } else if (VfsIsReadonly(newdir)) {
+    ret = VfsReadonly();
   } else if (olddir->device->ops->Link) {
     ret = olddir->device->ops->Link(olddir, newoldname, newdir, newnewname,
                                     flags);
@@ -1536,7 +1572,9 @@ int VfsUtime(int dirfd, const char *name, const struct timespec times[2],
   }
   unassert(!VfsTraverseMount(&dir, newname));
   if (ret != -1) {
-    if (dir->device->ops->Utime) {
+    if (VfsIsReadonly(dir)) {
+      ret = VfsReadonly();
+    } else if (dir->device->ops->Utime) {
       ret = dir->device->ops->Utime(dir, newname, times, flags);
     } else {
       ret = eperm();
@@ -1553,7 +1591,9 @@ int VfsFutime(int fd, const struct timespec times[2]) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Futime) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Futime) {
     ret = info->device->ops->Futime(info, times);
   } else {
     unassert(!VfsFreeInfo(info));
@@ -1590,7 +1630,9 @@ int VfsFtruncate(int fd, off_t length) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Ftruncate) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Ftruncate) {
     ret = info->device->ops->Ftruncate(info, length);
   } else {
     unassert(!VfsFreeInfo(info));
@@ -1645,7 +1687,9 @@ ssize_t VfsWrite(int fd, const void *buf, size_t nbyte) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Write) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Write) {
     ret = info->device->ops->Write(info, buf, nbyte);
   } else {
     ret = eperm();
@@ -1667,6 +1711,25 @@ int VfsHostFileFd(int fd) {
     return -1;
   }
   if (info->device->ops->Pread != HostfsPread || info->data == NULL) {
+    unassert(!VfsFreeInfo(info));
+    return eoverflow();
+  }
+  filefd = ((struct HostfsInfo *)info->data)->filefd;
+  unassert(!VfsFreeInfo(info));
+  return filefd;
+}
+
+int VfsHostFileFdForWrite(int fd) {
+  struct VfsInfo *info;
+  int filefd;
+  if (VfsGetFd(fd, &info) == -1) {
+    return -1;
+  }
+  if (VfsIsReadonly(info)) {
+    unassert(!VfsFreeInfo(info));
+    return VfsReadonly();
+  }
+  if (info->device->ops->Pwrite != HostfsPwrite || info->data == NULL) {
     unassert(!VfsFreeInfo(info));
     return eoverflow();
   }
@@ -1705,7 +1768,9 @@ ssize_t VfsPwrite(int fd, const void *buf, size_t nbyte, off_t offset) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Pwrite) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Pwrite) {
     ret = info->device->ops->Pwrite(info, buf, nbyte, offset);
   } else {
     ret = eperm();
@@ -1737,7 +1802,9 @@ ssize_t VfsWritev(int fd, const struct iovec *iov, int iovcnt) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Writev) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Writev) {
     ret = info->device->ops->Writev(info, iov, iovcnt);
   } else {
     ret = eperm();
@@ -1769,7 +1836,9 @@ ssize_t VfsPwritev(int fd, const struct iovec *iov, int iovcnt, off_t offset) {
   if (VfsGetFd(fd, &info) == -1) {
     return -1;
   }
-  if (info->device->ops->Pwritev) {
+  if (VfsIsReadonly(info)) {
+    ret = VfsReadonly();
+  } else if (info->device->ops->Pwritev) {
     ret = info->device->ops->Pwritev(info, iov, iovcnt, offset);
   } else {
     ret = eperm();
@@ -2112,6 +2181,9 @@ int VfsBind(int fd, const struct sockaddr *addr, socklen_t addrlen) {
   } else {
     if (VfsHandleDirfdName(AT_FDCWD, addr->sa_data, &dir, newname) == -1) {
       ret = -1;
+    } else if (VfsIsReadonly(dir)) {
+      ret = VfsReadonly();
+      unassert(!VfsFreeInfo(dir));
     } else {
       oldparent = info->parent;
       unassert(!VfsAcquireInfo(dir, &info->parent));
@@ -2751,6 +2823,11 @@ void *VfsMmap(void *addr, size_t len, int prot, int flags, int fd,
     if (VfsGetFd(fd, &info) == -1) {
       goto cleananddie;
     }
+    if (VfsIsReadonly(info) && (flags & MAP_SHARED) &&
+        (prot & PROT_WRITE)) {
+      VfsReadonly();
+      goto cleananddie;
+    }
     newmap = (struct VfsMap *)malloc(sizeof(*newmap));
     if (!newmap) {
       goto cleananddie;
@@ -2882,6 +2959,11 @@ int VfsMprotect(void *addr, size_t len, int prot) {
     if (!VfsMemoryRangeContains(addr, len, map->addr, map->len)) {
       unassert(!VfsMemoryRangeOverlap(addr, len, map->addr, map->len));
       continue;
+    }
+    if (map->data && VfsIsReadonly(map->data) &&
+        (map->flags & MAP_SHARED) && (prot & PROT_WRITE)) {
+      VfsReadonly();
+      goto cleananddie;
     }
     if (map->data->device->ops->Mprotect) {
       if (map->data->device->ops->Mprotect(map->data, map->addr, map->len,

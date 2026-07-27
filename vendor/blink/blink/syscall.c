@@ -3521,7 +3521,7 @@ static i64 SysPwrite(struct Machine *m, i32 fildes, i64 addr, u64 size,
       if ((i64)offset < 0) {
         rc = einval();
       } else if (offset > 0x7fffffffu) {
-        int hfd = VfsHostFileFd(fildes);
+        int hfd = VfsHostFileFdForWrite(fildes);
         RESTARTABLE(rc = hfd == -1 ? -1
                                    : W32Pwritev64(hfd, iv.p, iv.i, offset));
       } else
@@ -3654,7 +3654,7 @@ static i64 SysPwritev2(struct Machine *m, i32 fildes, i64 iovaddr, u32 iovlen,
 #if defined(_WIN32) && !defined(__CYGWIN__)
         // F3: see SysPreadv2 — 64-bit-offset path for the 32-bit off_t host.
         } else if (offset > 0x7fffffff) {
-          int hfd = VfsHostFileFd(fd->hostfd);
+          int hfd = VfsHostFileFdForWrite(fd->hostfd);
           RESTARTABLE(rc = hfd == -1 ? -1
                                      : W32Pwritev64(hfd, iv.p, iv.i, offset));
         } else {
@@ -3942,7 +3942,7 @@ static i64 SysFtruncate(struct Machine *m, i32 fildes, i64 length) {
   if (CheckFdAccess(m, fildes, true, EINVAL) == -1) return -1;
 #if defined(_WIN32) && !defined(__CYGWIN__)
   if ((fildes = W32ResolveFd(m->system, fildes, 0)) == -1 ||
-      (fildes = VfsHostFileFd(fildes)) == -1) {
+      (fildes = VfsHostFileFdForWrite(fildes)) == -1) {
     return -1;
   }
   RESTARTABLE(rc = W32Ftruncate64(fildes, length));
@@ -4571,7 +4571,7 @@ static int SysTruncate(struct Machine *m, i64 pathaddr, i64 length) {
   if (fd == -1) return -1;
 #if defined(_WIN32) && !defined(__CYGWIN__)
   {
-    int crtfd = VfsHostFileFd(fd);
+    int crtfd = VfsHostFileFdForWrite(fd);
     rc = crtfd == -1 ? -1 : W32Ftruncate64(crtfd, length);
   }
 #else
