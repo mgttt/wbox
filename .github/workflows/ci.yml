@@ -337,9 +337,34 @@ jobs:
         env:
           WBOX_LBE_REQUIRE: '1'
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
-      # 取证步骤，**不判定成败**（continue-on-error）：cgroup v2 首选路径至今
-      # 无任何环境覆盖，先拿证据再决定怎么改，不靠猜。runner 有 v2 但委派未开，
-      # 这里用 sudo 造一个已委派子树，比较两种层级布局。详见 §10.5「覆盖缺口」。
+      # 门禁：把 cgroup v2 首选路径也纳入回归保护。
+      # runner 自身没有可委派的 cgroup，所以这里用 sudo 现造一个：根 cgroup
+      # 不受 no-internal-process 约束，可直接下发控制器；委派根本身不放进程，
+      # 我们把跑脚本的那个子 shell 放进 leaf，wbox 就会在一个可写 cgroup 里
+      # 启动，从而真正走到首选路径。
+      #
+      # 为什么必须做成门禁而不是"取证一次就算数"：这条路径此前在任何环境都
+      # 没执行过，代码里因此藏着一个成功路径的目录泄漏，谁都没发现。
+      # 只有持续跑，才谈得上有覆盖。
+      - name: cgroup v2 首选路径门禁（现造委派子树）
+        env:
+          WBOX_LBE_REQUIRE: '1'
+          WBOX_LBE_CGROUP: '1'
+        run: |
+          BASE=/sys/fs/cgroup/wbox-gate
+          sudo mkdir -p "$BASE/leaf"
+          sudo sh -c 'echo "+memory +pids +cpu" > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo chown -R "$(id -u):$(id -g)" "$BASE"
+          # 委派根下发控制器给 leaf（此刻它自己没有进程，允许）
+          echo "+memory +pids +cpu" > "$BASE/cgroup.subtree_control"
+          echo "leaf 内可见：$(ls "$BASE/leaf" | tr '\n' ' ')"
+          # 只把**子 shell**放进 leaf，不动本 step 的 shell（免得影响 runner 收尾）
+          bash -c 'mypid=$$
+                   sudo sh -c "echo $mypid > '"$BASE"'/leaf/cgroup.procs"
+                   echo "脚本所在 cgroup: $(sed -n "s/^0:://p" /proc/self/cgroup)"
+                   exec scripts/test-linux-backend.sh target/debug/wbox ./busybox'
+      # 取证步骤（不判定成败）：并排比较两种层级布局，出问题时用来分辨
+      # "环境变了"还是"代码回归了"。门禁那步只回答"能不能走首选路径"。
       - name: 取证 —— cgroup v2 委派下的层级布局（不判定成败）
         continue-on-error: true
         run: scripts/probe-cgroup2.sh target/debug/wbox

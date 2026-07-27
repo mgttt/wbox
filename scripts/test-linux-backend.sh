@@ -9,6 +9,7 @@
 #   N   网络默认断开（与 Windows 侧默认无 INTERNET_CLIENT 对齐）
 #   L3  进程树收割（SIGKILL wbox 后无残留，对齐 KILL_ON_JOB_CLOSE）
 #   W   台阶③经 wine 跑 Windows 程序（需 wine + mingw，缺则 SKIP）
+#   C   cgroup v2 首选路径（需 WBOX_LBE_CGROUP=1 + 已委派子树，缺则 SKIP）
 #
 # 用法：
 #   scripts/test-linux-backend.sh [wbox 二进制] [静态 busybox]
@@ -245,6 +246,39 @@ c=socket.socket(); c.connect(s.getsockname()); print('LO-OK')"
   fi
 else
   report SKIP "N.1/N.2/N.3 网络默认" "宿主无 python3，无法做 socket 探测"
+fi
+
+echo
+echo "=== C cgroup v2 首选路径（仅在已委派环境）==="
+
+# WBOX_LBE_CGROUP=1 表示"调用方已经把我们放进一个可委派的 cgroup v2 子树"。
+# 那时 wbox **必须**走 cgroup 首选路径，退化到 rlimit 就是回归 —— 而不像
+# 别处那样两种结局都接受。没设这个变量就 SKIP：绝大多数机器没有可委派 cgroup。
+#
+# 这一段是为了给首选路径**真正的回归保护**：它一度在任何环境都没执行过，
+# 靠"跑通过一次"当作有覆盖，正是本门禁早先踩过的坑。
+if [ "${WBOX_LBE_CGROUP:-0}" != 1 ]; then
+  report SKIP "C.1-C.2 cgroup v2 首选路径" "未设 WBOX_LBE_CGROUP=1（本环境无可委派 cgroup）"
+else
+  self_cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
+  hrun -V --memory 16 -- /bin/true
+  if printf '%s' "$OUT" | grep -q '限额（cgroup v2）'; then
+    report PASS "C.1 已委派环境下走 cgroup v2 首选路径（自身 cgroup: ${self_cg:-?}）"
+  else
+    report FAIL "C.1 cgroup v2 首选路径" \
+      "本应走 cgroup 却没走：$(printf '%s' "$OUT" | grep -E '限额' | head -c 200)"
+  fi
+
+  # 清理语义：guest 退出后 wbox-<pid> 必须被删掉。旧实现只在失败路径删，
+  # 成功路径从不清理，每跑一次漏一个空 cgroup（cgroup v2 不自动回收）。
+  guest_cg=$(printf '%s' "$OUT" | sed -n 's/^wbox: cgroup（guest） = //p')
+  if [ -z "$guest_cg" ]; then
+    report SKIP "C.2 cgroup 目录清理" "没能从 -V 输出里取到 guest cgroup 路径"
+  elif [ ! -d "$guest_cg" ]; then
+    report PASS "C.2 guest 退出后 cgroup 目录已清理（无泄漏）"
+  else
+    report FAIL "C.2 cgroup 目录清理" "$guest_cg 仍存在——每跑一次漏一个"
+  fi
 fi
 
 echo
