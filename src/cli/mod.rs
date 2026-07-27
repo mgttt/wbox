@@ -78,8 +78,54 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox run --pull alpine:3.20 sh -c "echo hi"
 "#;
 
+fn is_help_arg(arg: Option<&String>) -> bool {
+    matches!(arg.map(String::as_str), Some("--help") | Some("-h"))
+}
+
+fn is_known_command(command: &str) -> bool {
+    matches!(
+        command,
+        "run" | "pull" | "images" | "rmi" | "image" | "ps" | "logs" | "exec" | "rm" | "stop"
+    )
+}
+
+/// Docker/Podman-style command help. Keep a single authoritative text until
+/// individual commands have enough options to justify separate help pages.
+fn dispatch_command_help(args: &[String]) -> Option<Result<u32>> {
+    if args.first().map(String::as_str) == Some("help") {
+        return match args.get(1) {
+            None => {
+                print!("{}", USAGE);
+                Some(Ok(0))
+            }
+            Some(command) if is_known_command(command) => {
+                print!("{}", USAGE);
+                Some(Ok(0))
+            }
+            Some(command) => Some(Err(WboxError::args(format!(
+                "未知帮助主题 '{}'。用法见 wbox --help",
+                command
+            )))),
+        };
+    }
+
+    let command = args.first()?.as_str();
+    if is_known_command(command) && is_help_arg(args.get(1)) {
+        print!("{}", USAGE);
+        return Some(Ok(0));
+    }
+    if command == "image" && is_help_arg(args.get(2)) {
+        print!("{}", USAGE);
+        return Some(Ok(0));
+    }
+    None
+}
+
 /// 顶层子命令分发：返回进程退出码（wbox 自身错误经 ErrKind 映射，见 error.rs）。
 pub fn dispatch(args: &[String]) -> Result<u32> {
+    if let Some(result) = dispatch_command_help(args) {
+        return result;
+    }
     match args.first().map(|s| s.as_str()) {
         Some("run") => run::cmd_run(&args[1..]),
         Some("pull") => image::cmd_image_pull(&args[1..]),
@@ -91,7 +137,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
         Some("stop") => stop::cmd_stop(&args[1..]),
-        Some("--help") | Some("-h") | Some("help") => {
+        Some("--help") | Some("-h") => {
             print!("{}", USAGE);
             Ok(0)
         }
@@ -124,6 +170,20 @@ mod tests {
         assert!(dispatch(&[]).is_err());
         assert_eq!(dispatch(&["--version".to_string()]).unwrap(), 0);
         assert_eq!(dispatch(&["--help".to_string()]).unwrap(), 0);
+    }
+
+    #[test]
+    fn dispatch_accepts_docker_style_command_help() {
+        for args in [
+            vec!["run", "--help"],
+            vec!["pull", "-h"],
+            vec!["image", "pull", "--help"],
+            vec!["help", "run"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert_eq!(dispatch(&args).unwrap(), 0, "{args:?}");
+        }
+        assert!(dispatch(&["help".to_string(), "bogus".to_string()]).is_err());
     }
 
     #[test]

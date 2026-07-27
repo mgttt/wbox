@@ -12,6 +12,12 @@
 #define LOG_ENABLED 0
 #endif
 
+#if !defined(DISABLE_STRACE) && !defined(TINY)
+#define SYSCALL_LOG_ENABLED 1
+#else
+#define SYSCALL_LOG_ENABLED 0
+#endif
+
 #define LOG_SIG 0  // log signal handling behaviors
 #define LOG_ASM 0  // log executed assembly opcodes
 #define LOG_JIT 0  // just-in-time compilation logs
@@ -33,7 +39,7 @@
 #define LOGF(...) (void)0
 #endif
 
-#if LOG_ENABLED
+#if SYSCALL_LOG_ENABLED
 #define SYS_LOGF(...)                                   \
   do {                                                  \
     if (__builtin_expect(FLAG_strace, 0)) {             \

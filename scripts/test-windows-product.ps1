@@ -156,6 +156,29 @@ try {
         throw "WP.4 wbox-linux help did not identify the container CLI: $runtimeHelp"
     }
 
+    $traceInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $traceInfo.FileName = Join-Path $bundle "wbox-linux.exe"
+    $traceInfo.WorkingDirectory = $rootfs
+    $traceInfo.UseShellExecute = $false
+    $traceInfo.RedirectStandardOutput = $true
+    $traceInfo.RedirectStandardError = $true
+    $traceInfo.Environment["BLINK_PREFIX"] = $rootfs
+    @("-s", "-e", "/busybox", "true") | ForEach-Object {
+        [void]$traceInfo.ArgumentList.Add($_)
+    }
+    $traceProcess = [System.Diagnostics.Process]::Start($traceInfo)
+    $traceStdout = $traceProcess.StandardOutput.ReadToEndAsync()
+    $traceStderr = $traceProcess.StandardError.ReadToEndAsync()
+    if (-not $traceProcess.WaitForExit(10000)) {
+        $traceProcess.Kill($true)
+        throw "WP.4S wbox-linux syscall trace timed out"
+    }
+    $trace = $traceStdout.Result + $traceStderr.Result
+    if ($traceProcess.ExitCode -ne 0 -or $trace -notmatch "\(sys\)") {
+        throw "WP.4S release syscall trace produced no syscall records: $trace"
+    }
+    Write-Host "PASS WP.4S release syscall trace"
+
     $ps = & $portableWbox ps --all 2>&1 | Out-String
     Assert-Exit 0 "post-run state inspection" $ps
     if ($ps -match "product-(native|env|guest)") {

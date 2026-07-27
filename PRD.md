@@ -296,6 +296,8 @@ wbox
    写出 wbox 的行为；不以“参数已接受”冒充功能兼容。
 4. 每个新增兼容项至少具备 G0 解析测试；涉及隔离、网络、缓存或生命周期的项
    还必须进入对应 G3/G4 产品门禁后才能标记完成。
+5. 顶层与基础子命令接受 `--help/-h`，并支持 `wbox help <COMMAND>`；镜像后的
+   `--help` 仍属于 guest argv，不得被宿主帮助入口截获。
 
 ### F2 Windows 原生进程容器 `[active]`
 
@@ -417,7 +419,11 @@ dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部
 `-e HOME=...` 仍优先。补齐 `HOME` 后 `dnf5 --version` 在 AppContainer 内外
 均超过 10 秒无输出，排除 AppContainer 权限层后仍可复现；该项是独立的
 Blink/Linux ABI、线程或同步原语兼容缺口，必须以有界超时门禁继续定位，当前
-不得标记为通过。
+不得标记为通过。5 秒 `LD_DEBUG`/内存诊断证明动态链接已完成，进程进入 RPM
+SQLite 初始化后反复打开 `rpmdb.sqlite-shm`，CPU 时间约 1.1 秒；下一步优先
+核对 Win32 SQLite 共享内存、文件锁与 mmap 语义。此前 Win32 release 的
+`-s/-sss` 会被 `NDEBUG` 连带编译为空操作，现将 syscall trace 与普通 debug
+日志解耦，并由 `WP.4S` 保证 release artifact 能输出 syscall 记录。
 
 Python 四层镜像暴露两个独立问题：
 
