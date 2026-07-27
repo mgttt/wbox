@@ -70,7 +70,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         // Docker/Podman 位置语义：首个位置参数是镜像；其后全部属于
         // guest command，不能再被 wbox 解析为 --name/-e/-w 等宿主选项。
         if opts.positional.is_some() {
-            if a == "--" {
+            // 只把紧跟 IMAGE 的 `--` 当兼容分隔符；command 已开始后，
+            // `sh -c SCRIPT -- ARG` 里的 `--` 是 guest 的真实 argv[0]。
+            if a == "--" && opts.cmd.is_empty() {
                 saw_dashdash = true;
             } else {
                 opts.cmd.push(a.clone());
@@ -524,6 +526,9 @@ mod tests {
         assert!(o.name.is_none());
         assert!(o.env.is_empty());
         assert!(o.workdir.is_none());
+
+        let o = parse(&["alpine", "sh", "-c", "echo \"$1\"", "--", "--name"]).unwrap();
+        assert_eq!(o.cmd, vec!["sh", "-c", "echo \"$1\"", "--", "--name"]);
     }
 
     #[test]
