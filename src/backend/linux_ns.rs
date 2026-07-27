@@ -212,6 +212,18 @@ unsafe fn apply_caps(p: &CapPlan) -> std::io::Result<()> {
     Ok(())
 }
 
+/// overlay 可写层（PRD F9.12）：挂在 rootfs 路径**自身**之上。
+///
+/// 挂在 lowerdir 自己头上是 overlayfs 的既定用法（挂载时即持有底层 dentry
+/// 引用），好处是**所有既有路径都不用改**——卷挂载目标、设备 bind、pivot_root
+/// 全都照旧指向 rootfs 路径，挂上之后看到的自动是合并视图。
+struct OverlayPlan {
+    /// "overlay"（fstype 与 source 同一个串）
+    c_overlay: CString,
+    /// `lowerdir=...,upperdir=...,workdir=...`
+    opts: CString,
+}
+
 /// 镜像模式的换根参数（[`LinuxMode::Image`] 才有）。
 struct NewRoot {
     /// rootfs 的宿主绝对路径
@@ -226,6 +238,9 @@ struct NewRoot {
     /// 完成**：切根后旧根已被 detach，宿主的 /dev/* 再也取不到。
     /// user namespace 里 mknod 不被允许，故只能 bind 宿主已有的设备节点。
     dev_binds: Vec<(CString, CString)>,
+    /// `Some` = 把容器写入引到 per-container 的 upper 层（镜像缓存保持只读）。
+    /// `None` = 共享写入（内核不支持 rootless overlay 时的回退，parent 已告警）。
+    overlay: Option<OverlayPlan>,
 }
 
 
@@ -245,7 +260,25 @@ pub(super) fn spawn_isolated(
 ) -> Result<u32> {
     let new_root = match mode {
         LinuxMode::Host => None,
-        LinuxMode::Image => Some(build_new_root(prepared)?),
+        LinuxMode::Image => {
+            // overlay 可写层（F9.12）：把容器写入引到 per-container 的 upper，
+            // 镜像缓存保持只读。upper/work 放在容器状态目录里，随 `rm` 一并
+            // 清理；detached 容器退出后还能翻 upper 看它改了什么。
+            // WBOX_NO_OVERLAY=1 是逃生口（例如想沿用旧的共享写入语义）。
+            let overlay = if spec.direct_rootfs_writes {
+                // build 的 RUN 步骤：写入就是产物，直落 rootfs（见 RunSpec 字段说明）。
+                None
+            } else if std::env::var_os("WBOX_NO_OVERLAY").is_some() {
+                if spec.verbose {
+                    super::super::verbose_kv("rootfs 写入层", "共享写入（WBOX_NO_OVERLAY=1）");
+                }
+                None
+            } else {
+                let layer_dir = crate::runstate::dir_for(&spec.name)?.join("layer");
+                build_overlay(&prepared.workdir.to_string_lossy(), &layer_dir, spec.verbose)
+            };
+            Some(build_new_root(prepared, overlay)?)
+        }
     };
 
     // 网络：默认**不给**（新建空 network namespace），与 Windows 侧不授
@@ -450,7 +483,126 @@ fn unshare_flags(allow_network: bool) -> libc::c_int {
 }
 
 /// 备好镜像模式的换根参数（在 fork **之前**做完所有分配与目录准备）。
-fn build_new_root(prepared: &Prepared) -> Result<NewRoot> {
+/// 探测本内核是否允许 userns 内挂 overlayfs（5.11 起）。
+///
+/// 在**父进程侧**探明，而不是让容器启动失败后靠 errno 猜：mount 的 EINVAL
+/// 什么都说明不了。探测就是真做一次最小 overlay 挂载（独立 userns+mountns，
+/// 对外零副作用），结果按实际发生的事判定——这类"探测说有、实际不能用"的坑
+/// 这个项目已经踩过（cgroup v2 那次）。
+fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
+    let base = scratch.join(".ovprobe");
+    for d in ["lower", "upper", "work", "merged"] {
+        if std::fs::create_dir_all(base.join(d)).is_err() {
+            return false;
+        }
+    }
+    let (Ok(opts), Ok(merged), Ok(ov), Ok(root), Ok(empty), Ok(p_sg), Ok(p_uid), Ok(p_gid)) = (
+        cstr(&format!(
+            "lowerdir={0}/lower,upperdir={0}/upper,workdir={0}/work",
+            base.to_string_lossy()
+        )),
+        cstr(&base.join("merged").to_string_lossy()),
+        cstr("overlay"),
+        cstr("/"),
+        cstr(""),
+        cstr("/proc/self/setgroups"),
+        cstr("/proc/self/uid_map"),
+        cstr("/proc/self/gid_map"),
+    ) else {
+        return false;
+    };
+    // 必须写 uid/gid 映射：光有 capability 不够——upper/work 目录的属主在
+    // 未映射的 userns 里是 overflow uid，过不了 overlayfs 的属主校验。
+    // 首次实测正是这么失败的（手工 `unshare -Umr` 探测通过、进程内探测不过，
+    // 差的就是 -r 那份映射）。
+    let uid_map = format!("0 {} 1\n", unsafe { libc::getuid() }).into_bytes();
+    let gid_map = format!("0 {} 1\n", unsafe { libc::getgid() }).into_bytes();
+    let ok = unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            return false;
+        }
+        if pid == 0 {
+            // 子进程：进独立 userns+mountns 试挂一次。不写 uid_map——
+            // unshare(NEWUSER) 后立即就有本 ns 的全部 capability，
+            // 而 overlay 挂载只看 capable(CAP_SYS_ADMIN)。
+            if libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) != 0 {
+                libc::_exit(1);
+            }
+            if write_proc_self(p_sg.as_ptr(), b"deny") != 0
+                || write_proc_self(p_uid.as_ptr(), &uid_map) != 0
+                || write_proc_self(p_gid.as_ptr(), &gid_map) != 0
+            {
+                libc::_exit(1);
+            }
+            // 根置 private，防止试挂传播回宿主
+            libc::mount(
+                empty.as_ptr(),
+                root.as_ptr(),
+                std::ptr::null(),
+                libc::MS_REC | libc::MS_PRIVATE,
+                std::ptr::null(),
+            );
+            let rc = libc::mount(
+                ov.as_ptr(),
+                merged.as_ptr(),
+                ov.as_ptr(),
+                0,
+                opts.as_ptr() as *const libc::c_void,
+            );
+            libc::_exit(if rc == 0 { 0 } else { 1 });
+        }
+        let mut st: libc::c_int = 0;
+        while libc::waitpid(pid, &mut st, 0) < 0 {
+            if *libc::__errno_location() != libc::EINTR {
+                return false;
+            }
+        }
+        libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0
+    };
+    let _ = std::fs::remove_dir_all(&base);
+    ok
+}
+
+/// 备好 overlay 可写层计划。返回 `None` 表示走共享写入回退（原因已打印）。
+fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Option<OverlayPlan> {
+    // overlayfs 的选项串用 ',' 分隔、':' 分隔多个 lower，路径里含这两个字符
+    // 就没法表达。宁可回退也不要错挂——挂错 lower 的表现是"容器看到错的根"。
+    let layer = layer_dir.to_string_lossy().into_owned();
+    if rootfs.contains([',', ':']) || layer.contains([',', ':']) {
+        eprintln!(
+            "wbox: 路径含 ',' 或 ':'，overlayfs 选项无法表达，回退共享写入（容器写入会落在镜像缓存里）"
+        );
+        return None;
+    }
+    for d in ["upper", "work"] {
+        if std::fs::create_dir_all(layer_dir.join(d)).is_err() {
+            eprintln!("wbox: 无法创建 overlay 层目录，回退共享写入");
+            return None;
+        }
+    }
+    if !probe_rootless_overlay(layer_dir) {
+        // 回退必须**出声**：静默降级会让用户以为镜像缓存是只读的。
+        eprintln!(
+            "wbox: 本内核不支持 rootless overlay（需 5.11+），回退共享写入：容器对 / 的写入会留在镜像缓存中"
+        );
+        return None;
+    }
+    let opts = cstr(&format!(
+        "lowerdir={},upperdir={}/upper,workdir={}/work",
+        rootfs, layer, layer
+    ))
+    .ok()?;
+    if verbose {
+        super::super::verbose_kv("rootfs 写入层", format!("overlay（upper 在 {}/upper）", layer));
+    }
+    Some(OverlayPlan {
+        c_overlay: cstr("overlay").ok()?,
+        opts,
+    })
+}
+
+fn build_new_root(prepared: &Prepared, overlay: Option<OverlayPlan>) -> Result<NewRoot> {
     let rootfs = prepared.workdir.to_string_lossy().into_owned();
     // put_old 必须位于新根之内（pivot_root 的硬性要求）。用固定名字，
     // 每次启动前确保存在；pivot_root 后立刻 umount 并删除。
@@ -489,6 +641,7 @@ fn build_new_root(prepared: &Prepared) -> Result<NewRoot> {
         c_put_old_in_new: cstr("/.wbox_oldroot")?,
         c_proc_fstype: cstr("proc")?,
         dev_binds,
+        overlay,
     })
 }
 
@@ -738,6 +891,25 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Err(err());
     }
 
+    // 5a. overlay 可写层（F9.12）：挂在 rootfs 路径自身之上，之后所有针对
+    //     rootfs 的路径（卷挂载目标、设备 bind、pivot_root）看到的都是合并
+    //     视图。必须在卷挂载**之前**——反过来卷会被 overlay 盖住。
+    //     探测已在父进程做过，这里失败就是真失败，不再回退。
+    if let Some(r) = p.new_root.as_ref() {
+        if let Some(ov) = r.overlay.as_ref() {
+            if libc::mount(
+                ov.c_overlay.as_ptr(),
+                r.rootfs.as_ptr(),
+                ov.c_overlay.as_ptr(),
+                0,
+                ov.opts.as_ptr() as *const libc::c_void,
+            ) != 0
+            {
+                return Err(err());
+            }
+        }
+    }
+
     // 5b. 卷挂载（PRD F9.1）。必须在 pivot_root **之前**：切根后旧根被 detach，
     //     宿主源路径就没了。目标已在 fork 前解析成宿主视角路径，这里只做 mount。
     //     两种模式都执行——宿主模式虽不换根，但已在独立 mount namespace 里，
@@ -775,14 +947,16 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Ok(());
     };
 
-    // 6. pivot_root 要求新根是一个挂载点，故把 rootfs bind 到自身。
-    if libc::mount(
-        r.rootfs.as_ptr(),
-        r.rootfs.as_ptr(),
-        std::ptr::null(),
-        libc::MS_BIND | libc::MS_REC,
-        std::ptr::null(),
-    ) != 0
+    // 6. pivot_root 要求新根是一个挂载点。挂了 overlay 时它已经是；
+    //    否则把 rootfs bind 到自身。
+    if r.overlay.is_none()
+        && libc::mount(
+            r.rootfs.as_ptr(),
+            r.rootfs.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        ) != 0
     {
         return Err(err());
     }

@@ -629,6 +629,9 @@ fn run_step(rootfs: &Path, cmd: &str, cfg: &ConfigAccum) -> Result<()> {
     let spec = RunSpec {
         name: format!("wbox-build-{}", std::process::id()),
         allow_network: true, // RUN 常要装包；与 docker build 默认一致
+        // RUN 的写入就是构建产物，必须直落 staging rootfs；套 overlay 会把
+        // 效果引到别处（F9.12 的可写层只保护**运行期**的共享缓存）。
+        direct_rootfs_writes: true,
         workdir: rootfs.to_path_buf(),
         cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
         env: cfg.env.clone(),

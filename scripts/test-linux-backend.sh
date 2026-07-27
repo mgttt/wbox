@@ -1022,6 +1022,54 @@ fi
 HOME=$WORK/home "$WBOX_ABS" rm ncpeer >/dev/null 2>&1
 
 echo
+echo "=== OV overlay 可写层（PRD F9.12）==="
+
+# OV.1 核心断言：容器对 / 的写入自己可见，但**不落进共享镜像缓存**。
+# 这是 docker 语义（写入永不碰镜像）；改造前 wbox 是共享写入，R.5 调试时
+# 亲眼见过 guest 写 / 落进 $CACHE/rootfs。
+run lbetest -- /bin/sh -c 'echo dirty > /ov-probe && cat /ov-probe'
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q dirty && [ ! -e "$CACHE/rootfs/ov-probe" ]; then
+  report PASS "OV.1 容器写 / 自己可见且不污染镜像缓存"
+else
+  report FAIL "OV.1 写入隔离" "rc=$rc 输出:$(printf '%s' "$OUT"|head -c 80) 缓存被污染=$([ -e "$CACHE/rootfs/ov-probe" ] && echo 是 || echo 否)"
+fi
+
+# OV.2 lower（镜像原有内容）必须透过合并视图可见——只测"写不进去"不够，
+# 挂错 lower 的表现恰恰是"读不到镜像内容"。
+run lbetest -- /bin/ls /bin
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q '^busybox$'; then
+  report PASS "OV.2 镜像原有内容透过 overlay 可见"
+else
+  report FAIL "OV.2 lower 可见性" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 120)"
+fi
+
+# OV.3 detached 容器退出后 upper 保留——能翻"它到底改了什么"，这是 overlay
+# 相对共享写入白得的排障能力；rm 后随状态目录一并清掉。
+HOME=$WORK/home "$WBOX_ABS" run -d --name ovd lbetest -- /bin/sh -c 'echo trace > /left-behind' >/dev/null 2>&1
+sleep 2
+if [ -f "$WORK/home/.wbox/run/ovd/layer/upper/left-behind" ]; then
+  report PASS "OV.3 detached 退出后 upper 保留可查（rm 前）"
+else
+  report FAIL "OV.3 upper 保留" "$(ls "$WORK/home/.wbox/run/ovd/layer/upper" 2>&1 | head -c 120)"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm ovd >/dev/null 2>&1
+if [ ! -e "$WORK/home/.wbox/run/ovd" ]; then
+  report PASS "OV.4 rm 连同 overlay 层一并清理"
+else
+  report FAIL "OV.4 层清理" "状态目录仍在"
+fi
+
+# OV.5 WBOX_NO_OVERLAY=1 逃生口回退共享写入（并留下可见的行为差异）。
+# 写进缓存后立即清掉，别让残留影响后续用例。
+OUT=$(HOME=$WORK/home WBOX_NO_OVERLAY=1 "$WBOX_ABS" run --rm --name ovl lbetest -- /bin/sh -c 'echo old > /legacy-way' 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$CACHE/rootfs/legacy-way" ]; then
+  report PASS "OV.5 WBOX_NO_OVERLAY=1 回退共享写入（逃生口可用）"
+else
+  report FAIL "OV.5 逃生口" "rc=$rc 缓存内=$([ -f "$CACHE/rootfs/legacy-way" ] && echo 有 || echo 无)"
+fi
+rm -f "$CACHE/rootfs/legacy-way" "$CACHE/rootfs/ov-probe"
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

@@ -285,6 +285,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         seccomp: crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny).unwrap_or_default(),
         health: opts.health.clone(),
         network_container: opts.network_container.clone(),
+        direct_rootfs_writes: false,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }

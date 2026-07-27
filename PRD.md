@@ -131,7 +131,8 @@ wbox
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
-| overlay 分层存储 | 无 | rootless 下 overlayfs 未必可用 |
+| overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
+| overlay 镜像分层存储 | 无 | `FROM`/pull 仍整份复制；与 F9.12 的运行期可写层是两件事 |
 | 镜像 push | 无 | |
 | compose / pod | 无 | |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
@@ -763,7 +764,8 @@ F9
 ├── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
 ├── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
 ├── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
-└── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
+├── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
+└── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -858,6 +860,31 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.12 overlay 运行期可写层** `[done]`（门禁 OV.1–OV.5）。
+
+**修的是一个真实缺陷**：此前 Linux 镜像模式直接把共享镜像缓存当根，容器对 `/`
+的写入落在 `~/.wbox/images/.../rootfs` 里，一个容器的垃圾会被之后所有同镜像
+容器看到（R.5 调试时亲眼所见）。docker 语义是写入永不碰镜像。
+
+做法：把 overlay 挂在 rootfs 路径**自身**之上（挂载时即持有底层 dentry 引用，
+这是 overlayfs 的既定用法）。好处是所有既有路径——卷挂载目标、设备 bind、
+`pivot_root`——一概不用改，挂上之后看到的自动是合并视图。挂载顺序在卷绑定
+**之前**，否则卷会被 overlay 盖住。upper/work 放在容器状态目录 `layer/` 下：
+随 `rm` 一并清理，而 detached 容器退出后还能翻 upper 看"它到底改了什么"——
+白得的排障能力（OV.3）。
+
+三处边界如实记：
+
+- **内核 <5.11** 不允许 userns 内挂 overlayfs。父进程先用独立 userns 真挂一次
+  探测（探测必须写 uid_map——光有 capability 不够，upper 的属主在未映射 ns 里
+  是 overflow uid，过不了 overlayfs 属主校验；首次实现正是这么失败的）。不支持
+  时**出声**回退共享写入，绝不静默——静默降级会让用户以为镜像缓存是只读的。
+  `WBOX_NO_OVERLAY=1` 是显式逃生口。
+- **build 的 `RUN` 步骤豁免**（`direct_rootfs_writes`）：它的写入就是构建产物，
+  引到 upper 等于把 RUN 效果全丢掉。F9.12 保护的是**运行期**的共享缓存。
+- 路径含 `,` 或 `:` 时 overlayfs 选项串无法表达，出声回退。
+- 这与"镜像分层存储"是两件事：`FROM`/pull 仍整份复制 rootfs，那是另一格。
 
 **F9.11 `--network container:<NAME>`** `[done]`（门禁 NC.1–NC.4）。加入既有
 容器的网络，两容器经 localhost 互通——docker 同名模式的核心用途（sidecar）。

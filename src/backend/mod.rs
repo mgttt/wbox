@@ -138,6 +138,11 @@ pub struct RunSpec {
     /// 而是加入该容器的 user+net namespace。
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub network_container: Option<String>,
+    /// **直写 rootfs**（不套 overlay 可写层）。`build` 的 `RUN` 步骤必须置真：
+    /// 它的写入就是产物，引到 upper 层等于把 RUN 的效果全丢掉。
+    /// 普通 `run` 保持默认 false——容器写入不该污染共享镜像缓存（F9.12）。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub direct_rootfs_writes: bool,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
