@@ -23,14 +23,14 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
 
 用法:
   wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本机程序（Win: AppContainer+Job；Linux: namespace+cgroup）
-  wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Win: 经模拟器；Linux: 原生 namespace）
+  wbox run [OPTIONS] <IMAGE> [CMD] [ARGS...]       运行 OCI 镜像（缺缓存自动 pull）
   wbox pull <REF> [image pull 选项]                 `wbox image pull` 的兼容别名
   wbox images                                      `wbox image list` 的兼容别名
-  wbox rmi <REF> [--yes]                           `wbox image rm` 的兼容别名
+  wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
-  wbox image rm <REF> [--yes]                      删除已 pull 镜像的本地缓存（默认交互确认）
+  wbox image rm [-f] <REF>                         删除已 pull 镜像的本地缓存
   wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
   wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
@@ -46,33 +46,36 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --max-procs <N>   最大进程数，默认 0 = 不限
   -w, --workdir <DIR>
                      容器工作目录（"镜像根"），默认当前目录（仅原生模式）
+  -v, --volume <HOST:GUEST[:ro|:rw]>
+                     Linux 宿主 bind volume；宿主路径必须存在，禁止覆盖容器根
   --network <MODE>  兼容模式：none = 默认断网；host = 等价 --allow-network
   --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
   --no-network      显式声明断网（默认行为，预留）
   -e, --env <K=V>   注入显式环境变量；可重复；不支持仅写 K 继承宿主值
   --keep-profile    退出后保留 AppContainer profile（默认删除）
-  --rm              显式声明退出即清理（默认行为，docker 习惯写法；仅 run）
+  --rm              退出即清理；与 -d 同用时也自动删除状态和日志
   --interactive     连接 stdio（默认）
   -d, --detach      后台运行：立即返回容器名，输出落盘到日志（wbox logs 读取）
-  --pull            run 目标为镜像时，本地无缓存则先 pull
+  --pull            显式声明拉取语义（缺缓存本就会自动 pull）
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
   -V, --verbose     打印隔离配置摘要
 
 镜像模式说明:
-  位置参数能解析为镜像引用（如 ubuntu:24.04）且已在本地缓存（或带 --pull）时，
-  视为镜像目标：自动按 docker 规则合并 config.json 的 Entrypoint/Cmd，
+  首个位置参数默认是镜像引用（如 ubuntu:24.04），其后参数全部原样属于 guest。
+  明确的本机可执行路径仍按本机程序处理；无歧义写法是 `run -- PROGRAM`。
+  镜像自动按 docker 规则合并 config.json 的 Entrypoint/Cmd，
   注入 Env，rootfs 作为工作目录。镜像经 wbox-linux（blink 移植，开发中）
   模拟执行，未就绪时会得到明确错误。
 
 兼容范围:
-  仅兼容上述可兑现的运行习惯；不支持端口发布、volume/bind、daemon API、
-  Compose、pod 或远程上下文，传入未实现选项会明确报错。
+  仅兼容上述可兑现的运行习惯；不支持端口发布、Windows volume/bind、
+  --mount、daemon API、Compose、pod 或远程上下文，传入未实现选项会明确报错。
 
 示例:
   wbox run --memory 256 --cpu-pct 50 -- cmd.exe /c echo hello
   wbox run --name test1 --workdir C:\img\app --allow-network -- myapp.exe
-  wbox run ubuntu:24.04 -- bash
-  wbox run --pull alpine:3.20 -- sh -c "echo hi"
+  wbox run ubuntu:24.04 bash
+  wbox run --pull alpine:3.20 sh -c "echo hi"
 "#;
 
 /// 顶层子命令分发：返回进程退出码（wbox 自身错误经 ErrKind 映射，见 error.rs）。

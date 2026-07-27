@@ -76,25 +76,28 @@ wbox
 
 ### 2.4 对标基线
 
-四个象限各有明确的参照物。**列出参照物不等于承诺功能对等**——每格都写明
-当前能力与差距，能力上限受 §2.3 约束时也如实标注。
+四个象限各有明确参照物，并共同构成长期产品目标。**参照物不是当前完成度**：
+每格同时写明现状、近期差距与可演进后端；默认的免安装/无管理员模式不能限制
+未来增加用户明确选择的增强模式。
 
 | 象限 | 参照物 | 现状 | 主要差距 |
 |---|---|---|---|
 | Windows 宿主 × Windows 程序 | Sandboxie-Plus | AppContainer + Job：能力/完整性级别隔离、默认断网、进程树回收、`exec` | **无文件系统写重定向、无注册表虚拟化**；无命名沙箱的持久化存储 |
-| Windows 宿主 × Linux 镜像 | WSL2 / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离（AppContainer 套模拟器） | 无卷挂载、端口映射、镜像构建；**性能与 WSL2 不可比** |
-| Linux 宿主 × Linux 镜像 | Podman / Docker | rootless user/PID/mount/net namespace + cgroup v2 + OCI pull/run + 完整生命周期 | 无卷挂载、端口映射、镜像构建/push、compose、restart policy |
+| Windows 宿主 × Linux 镜像 | WSL2 / Podman / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离（AppContainer 套模拟器） | 无卷挂载、端口映射、镜像构建；当前纯用户态性能低于虚拟化后端 |
+| Linux 宿主 × Linux 镜像 | Podman / Docker | rootless user/PID/mount/net namespace + cgroup v2 + OCI pull/run + 生命周期；已支持 bind volume | 无端口映射、镜像构建/push、compose、restart policy |
 | Linux 宿主 × Windows 程序 | Wine | 复用 Linux 隔离层调用系统 Wine | 不自带 Wine（依赖宿主安装）；无 wineprefix 管理；GUI 未覆盖 |
 
-**两条必须说破的天花板**，否则"对标"只是口号：
+**两条当前架构边界必须说破**，但不把它们定义成永久产品上限：
 
 1. **Windows 程序沙箱达不到 Sandboxie-Plus 的隔离强度。** Sandboxie 用
-   minifilter 驱动做文件/注册表重定向，而 wbox 明确不装驱动（§2.3，也是
+   minifilter 驱动做文件/注册表重定向，而 wbox 默认模式不装驱动（§2.3，也是
    "免安装、不要管理员权限"这一前提的直接后果）。用户态能做到的是
    AppContainer 的能力裁剪 + 目录 ACL + per-package 存储；**写重定向的完整性
-   弱于驱动方案**。可以缩小差距，不能宣称等价。
+   弱于驱动方案**。近期不宣称等价；长期可评估独立、显式授权的增强后端，
+   但不得让它破坏默认免安装路径。
 2. **Windows 上跑 Linux 镜像的性能与 WSL2 不是一个量级。** 没有虚拟化时靠
-   用户态解释/JIT，定位是"没有 VT-x/WSL2 时仍然能跑"，不是性能对标。
+   用户态解释/JIT，近期定位是"没有 VT-x/WSL2 时仍然能跑"。长期可加入可选
+   WSL2/虚拟化加速后端，共用同一 CLI、镜像缓存协议与测试契约。
 
 对标的推进顺序按**跨象限收益**排：卷挂载与端口映射在三个象限同时有用，
 镜像构建只影响两个，Windows 文件系统重定向只影响一个且受天花板限制。
@@ -183,7 +186,7 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；CI 30250676453 通过 |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
@@ -191,10 +194,13 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.1`：最终 bundle 中的 `wbox.exe` 运行 Windows 原生程序。
 - `WP.2`：公开 CLI 的环境边界及正常退出状态清理。
 - `WP.3`：只用最终两个 exe 和仓库内静态 ELF，从本地缓存执行 Linux guest。
+- `WP.3D`：AppContainer 内的 Linux guest 能枚举非空目录，防止 Python 等运行时
+  因 `fdopendir` 路径恢复失败而把标准库目录看成空目录。
 - `WP.4`：bundle 中不存在运行时 DLL 或仓库路径依赖。
 - `WP.5`：前台正常退出后状态目录无运行记录。
 - `WP.6`：Windows detach 后可由 `ps` 观察，并可通过 `logs` 读取输出。
 - `WP.7`：`rm` 删除已退出的 detached 记录。
+- `WP.7A`：`run -d --rm` 退出后自动删除状态与日志。
 - `WP.8`：detached Windows workload 建立 supervisor、guest、child 三层进程树。
 - `WP.9`：`stop` 后三层专属 PID 全部消失，记录转为 exited。
 - `WP.10`：重复 `stop` 已退出容器保持幂等。
@@ -231,8 +237,8 @@ GitHub Server 2025 runner 上，依赖宿主模块目录自动发现的 `Write-O
 ```text
 F1
 ├── F1.1 `run -- <CMD>` 运行宿主程序
-├── F1.2 `run <IMAGE> [-- CMD]` 运行已缓存镜像
-├── F1.3 `--pull` 在缓存缺失时拉取镜像
+├── F1.2 `run <IMAGE> [CMD [ARG...]]` 运行镜像，缓存缺失时默认 pull
+├── F1.3 `--pull` 作为 Docker/Podman 显式兼容写法
 ├── F1.4 `image pull/list/show/rm`
 ├── F1.5 参数、子进程和内部错误退出码稳定
 ├── F1.6 `src/cli/mod.rs::USAGE` 是帮助文本唯一来源
@@ -241,7 +247,7 @@ F1
     ├── F1.7.2 `images` 与 `image ls` 等价 `image list`
     ├── F1.7.3 `rmi <IMAGE>` 等价 `image rm <IMAGE>`
     ├── F1.7.4 `ps -a`、`rm <NAME>...` 保持常见命令形状
-    ├── F1.7.5 `run --name/-w/--workdir/--rm` 接受常见参数拼法
+    ├── F1.7.5 `run --name/-w/--workdir/--rm/-v` 接受常见参数拼法
     ├── F1.7.6 `run --network none|host` 映射 wbox 的默认断网与网络放行
     ├── F1.7.7 `exec NAME COMMAND [ARG...]` 不强制要求 `--` 分隔
     └── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
@@ -250,10 +256,12 @@ F1
 验收：
 
 - Windows 路径、镜像引用、显式 `--` 和参数转义不会互相误判。
+- 首个镜像参数之后的 `-c`、`--name`、`-e`、`-w` 等全部原样属于 guest；
+  未缓存镜像不得静默退化为宿主程序，明确本地程序使用 `run -- PROGRAM`。
 - 子进程退出码原样返回；参数/profile/job/spawn/image 错误有固定分类。
 - `--memory`、`--cpu-pct`、`--max-procs`、网络和环境参数跨后端语义一致。
-- Docker/Podman 兼容只覆盖 wbox 能兑现的沙箱语义。端口发布、bind volume、
-  守护进程 API、compose/pod 和远程上下文不在当前兼容范围；
+- Docker/Podman 兼容只覆盖 wbox 能兑现的沙箱语义。端口发布、Windows bind
+  volume、`--mount`、守护进程 API、compose/pod 和远程上下文不在当前兼容范围；
   收到这些参数时必须返回参数错误，不得假成功。
 
 #### F1.7 Docker/Podman 兼容命令树
@@ -262,7 +270,7 @@ F1
 wbox
 ├── run [兼容子集] IMAGE|-- PROGRAM [ARG...]
 │   ├── 生命周期：--name、--rm、-d/--detach
-│   ├── 工作目录：-w、--workdir
+│   ├── 工作目录/卷：-w、--workdir、-v host:guest[:ro|:rw]（Linux 宿主）
 │   ├── 网络：--network none|host
 │   └── wbox 扩展：--memory、--cpu-pct、--max-procs、--allow-network
 ├── pull IMAGE              -> image pull IMAGE
@@ -320,7 +328,8 @@ F3
 ├── F3.6 路径穿越与 symlink 越界拒绝
 ├── F3.7 Windows 无 symlink 权限时降级复制
 ├── F3.8 缓存 list/show/rm 与敏感 Env 脱敏
-└── F3.9 Entrypoint/Cmd/Env/WorkingDir 合并
+├── F3.9 Entrypoint/Cmd/Env/WorkingDir 合并
+└── F3.10 跨层目录头保留子 symlink，链式别名最终可物化
 ```
 
 验收：
@@ -400,6 +409,25 @@ digest，并解包约 29.7 MB rootfs。Windows 实机通过 `wbox run` 验证：
 精确断言 `uname -m == x86_64`。CI 30253571295 的真 Windows 矩阵通过；同一
 artifact 回灌本机后，Ubuntu 24.04 的 `uname -m=x86_64`、Bash、APT 2.8.3、
 dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部通过，问题关闭。
+
+**Fedora 42 / Python 3.12 Alpine 扩展取证（2026-07-27）**。两个镜像均由
+`docker.m.daocloud.io` 拉取并通过 manifest/config/layer digest 校验。Fedora
+单层镜像的 shell、os-release、`uname -m=x86_64` 与 RPM 架构通过；首次运行
+`dnf --version` 暴露容器环境缺少 `HOME`，镜像默认环境现补为 `/root`，显式
+`-e HOME=...` 仍优先。
+
+Python 四层镜像暴露两个独立问题：
+
+1. 后层重复的 `usr/local/bin/` 目录头错误清除了前层的逻辑 symlink，
+   令 `python -> python3 -> python3.12` 链只剩首段。目录条目现只替换同路径
+   symlink，不再删除子项；真实重拉后 `python/python3/idle/pydoc/*-config`
+   均已物化，新增跨层目录头回归。
+2. AppContainer 内 `stat/cat` 标准库文件成功，但目录枚举为空；同一
+   `wbox-linux.exe` 脱离 AppContainer 后正常。根因是 Win32 `fdopendir`
+   依赖在 AppContainer 中可能被拒绝的 `GetFinalPathNameByHandleW`。Win32 fd
+   现记录 `openat` 的规范宿主路径，并在 `dup/dup2/close` 同步生命周期；
+   `WP.3D` 用真实 AppContainer 目录枚举裁决。该项须等待 CI 重建
+   `wbox-linux.exe` 后才能把 Python import 标为通过，本机旧 artifact 不作假绿。
 
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
