@@ -325,7 +325,8 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
   GUI/DirectX/COM 明确不做；wine 版本差异导致的行为差异不属 wbox 缺陷。
 - **不做的事**：不 bundle wine（体积与许可）、不替 wine 做兼容层补丁、
   不承诺 GUI 程序可用。用户的 wine 版本差异导致的行为差异不属 wbox 缺陷，
-  但 `wbox run -V` 应打印 wine 版本便于甩锅定位。
+  故 `wbox run -V` **会打印 wine 版本**便于定位（已实现：
+  `执行器 = wine（目标是 PE）：/usr/lib/wine/wine64［wine-9.0 ...］`）。
 
 ### 10.4 排序与前置条件
 

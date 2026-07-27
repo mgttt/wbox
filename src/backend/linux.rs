@@ -85,7 +85,16 @@ impl Backend for LinuxNativeBackend {
                 super::verbose_kv("工作目录", spec.workdir.display());
                 match &via_wine {
                     Some((w, p)) => {
-                        super::verbose_kv("执行器", format!("wine（目标是 PE）：{}", w.display()));
+                        #[cfg(target_os = "linux")]
+                        let ver = super::wine::version(w).unwrap_or_else(|| "版本未知".to_string());
+                        #[cfg(not(target_os = "linux"))]
+                        let ver = String::new();
+                        // 版本要打出来：wine 版本差异是 Windows 程序行为差异的
+                        // 头号来源，而那类差异不属 wbox 缺陷（§10.3）。
+                        super::verbose_kv(
+                            "执行器",
+                            format!("wine（目标是 PE）：{}［{}］", w.display(), ver),
+                        );
                         super::verbose_kv("WINEPREFIX", p.display());
                     }
                     None => super::verbose_kv("执行器", "直接执行（目标是本机 ELF）"),

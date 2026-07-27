@@ -114,6 +114,26 @@ fn is_executable(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// 取 wine 版本号（`wine --version` 的首行，如 `wine-9.0`）。
+///
+/// 只在 `-V` 时调用：wine 版本差异是 Windows 程序行为差异的头号来源，
+/// 而那类差异**不属 wbox 缺陷**（§10.3）。把版本打出来，用户报问题时
+/// 一眼能看出该找谁 —— 这也是 §10.3 明文承诺过的。
+///
+/// 取不到不致命（返回 `None`）：某些打包把 `--version` 交给 wineserver，
+/// 或需要先初始化 prefix。为此不该让整条命令失败。
+pub fn version(wine: &Path) -> Option<String> {
+    let out = std::process::Command::new(wine)
+        .arg("--version")
+        .env("WINEDEBUG", "-all")
+        .output()
+        .ok()?;
+    let text = if out.stdout.is_empty() { out.stderr } else { out.stdout };
+    let s = String::from_utf8_lossy(&text);
+    let first = s.lines().next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
+}
+
 /// wine 需要一个**可写**的 prefix（首次运行会在里面铺一整套假 C: 盘）。
 ///
 /// 放在 `~/.wbox/wineprefix` 而不是默认的 `~/.wine`：
