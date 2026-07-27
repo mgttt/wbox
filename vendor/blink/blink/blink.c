@@ -482,6 +482,7 @@ int main(int argc, char *argv[]) {
   g_blink_path = argc > 0 ? argv[0] : 0;
 #if defined(_WIN32) && !defined(__CYGWIN__)
   WboxMaybePrintMetadata(argc, argv);
+  if (W32BrokerInit()) exit(EXIT_FAILURE);
 #endif
   WriteErrorInit();
   InitMap();

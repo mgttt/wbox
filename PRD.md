@@ -891,6 +891,13 @@ request header
   `HELLO/PING`；`register_rejects_process_outside_target_job` 与
   `register_rejects_different_appcontainer_sid` 分别裁决 rogue Job 与错误 profile。
   codec 同时拒绝错误版本、长度不一致和超过 4096 字节的 payload。
+- `[done: production bootstrap gate]` `BlinkBackend` 的真实启动路径已创建 endpoint，
+  只把预连接 client HANDLE 放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`，并在
+  `on_created` 完成 Job/SID 注册后启动 supervisor 服务线程。`wbox-linux.exe`
+  启动时解析 generation + nonce，完成 `HELLO/PING` 后立即删除三项 bootstrap
+  环境变量；缺失 broker 时仍可独立运行，认证或协议失败则 fail closed。
+  Windows 原生程序后端不创建、不继承该通道。本门禁只证明生产生命周期接线，
+  不代表 volume 数据面已经接入。
 - 当前 transport 已实现 `HELLO`、`PING`；`OPEN` 帧解析组件也已落地，只接受非零
   mount id、Linux flags/mode 与 UTF-8 相对路径，并在任何宿主 open 前拒绝绝对路径、
   空组件、`.`/`..`、反斜杠、冒号、非法 UTF-8 和超过 1024 字节的路径。首个数据面
@@ -909,6 +916,11 @@ request header
   不能另起第二个 broker。
 - `on_created` 只能做快速 session 注册，不能等 guest 发出请求，否则主线程仍挂起
   会死锁。`HELLO/OPEN` 都在恢复后由 broker 线程处理。
+- Blink 文件数据面必须落在独立的 Windows `brokerfs` device，不能把 broker mount
+  根塞进现有 hostfs。最小正规链路是 `remote HANDLE -> _open_osfhandle ->
+  HostfsInfo.filefd -> VfsInfo -> guest fd`；成功转换后 HANDLE 只由 CRT fd 关闭一次。
+  禁止经过 `HostfsGetOptimalDirFdName`、`W32ResolveAt` 或当前 path-based
+  `fdopendir`。目录枚举必须等 broker `LOOKUP/READDIR`，不能从 HANDLE 还原宿主路径。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
