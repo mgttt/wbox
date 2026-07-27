@@ -128,24 +128,24 @@ S4 在 Linux 上运行 Windows CLI
 | 需求 | 实现入口 | 已有最高证据 | 持续门禁 / 缺口 |
 |---|---|---|---|
 | F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`WN.1-WN.8`、L/H；退出码已有行为断言 |
-| F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | pull=G2，run=缺 G3 | 新 `WP.3` 必须覆盖离线缓存到 Linux guest |
+| F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | G3 | `WP.3` 持续覆盖离线缓存到 Linux guest；pull 失败原子性仍缺门禁 |
 | F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
-| F2.3 Windows 网络放行 | `token.rs` | G0 | 只有 SID 构造；缺默认拒绝与 `--allow-network` 实际连接对照 |
+| F2.3 Windows 网络放行 | `token.rs` | G3 | `WNET.1-WNET.4` 对照宿主、默认拒绝和 `--allow-network` |
 | F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
 | F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G2 | 缺杀死 wbox 后后代 PID 消失的 Windows 门禁 |
 | F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
-| F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 测试通过；真实 Alpine `/bin/sh` 缺失，仍缺真实 rootfs 不变量 |
+| F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
 | F4.1 静态 `wbox-linux.exe` | build script | G1 | CI 构建后直跑；G4 两文件 bundle 由 `WP.3` 裁决 |
 | F4.2-F4.7 ELF/syscall/fork/network/fd | `vendor/blink` | G1 | `test-matrix.sh`、guest C 套件均直接跑模拟器 |
-| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | 缺 G3 | `WP.3`：CI artifact 直跑成功；AppContainer 内执行 BusyBox 时 rc=139 |
+| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | G3 | `WP.3`：portable artifact 在 AppContainer 内执行静态 BusyBox |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
 | F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
 | F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
 | F6.1-F6.3/F6.5 PE/Wine 分派 | `wine.rs` | G3 | W.1/W.2/W.4/W.5 |
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
-| F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 Linux | P.1-P.5；Windows Rust 已绿，`WP.5` 检查 `ps --all`，但目前被 WP.3 提前阻断 |
+| F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
 | F8.2-F8.4 detach/logs/stop/rm/exec | 未实现 | 无 | planned |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
@@ -255,34 +255,33 @@ F4
 - glibc pthread/通用 clone 尚未支持。
 - ptrace 未支持。
 
-**F4.3 的覆盖缺口（2026-07-27 发现，未修复）**。`wbox run <镜像>` 走的是
+**F4.3 的覆盖缺口（2026-07-27 发现并修复）**。`wbox run <镜像>` 走的是
 `BLINK_PREFIX=<rootfs>`，而 `scripts/test-matrix.sh` 的 A–F 组**全部不设**
 `BLINK_PREFIX`（guest 的 `/` 直通宿主 `/`）。也就是说产品首页宣传的
 "Windows 上跑 Linux OCI 镜像"这条路径，长期**没有任何自动化覆盖**；
-`test-windows-product.ps1` 的 WP.3 是它第一次被真正执行，一执行即崩：
+`test-windows-product.ps1` 的 WP.3 第一次执行时暴露出崩溃：
 
 ```
 wbox-linux: fatal host exception 0xc0000005 (read) at rip=…
 guest rip=0x4038b1 in /busybox   fault address FFFFFFFFFFFFFFFF
 ```
 
-这不是新引入的回归，是一直存在、直到有门禁才暴露的缺陷。
-
-**定位结论（2026-07-27，矩阵 G 组实测）**：矩阵新增 G 组裸跑
+这不是新引入的回归，是一直存在、直到有门禁才暴露的缺陷。矩阵新增 G 组裸跑
 `wbox-linux.exe` + `BLINK_PREFIX`，与 WP.3 只差一层 AppContainer。真 Windows
 上 **G1/G2/G3 全部通过**——guest 绝对路径执行、换根隔离、退出码转发都正常
 （G2 起初因 `ls` 多收到一个 `/SystemRoot` 参数而假失败，改为直接断言
-rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` 输出）。因此：
+rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` 输出）。
 
-> **模拟器的 prefix 路径本身是好的，WP.3 的崩溃出在 AppContainer 这一层。**
+诊断补丁把 rc139 还原为确定错误：
+`initial AllocatePageTable failed: errno=13 (Permission denied)`。根因是 Win32
+缺少 POSIX `MAP_ANONYMOUS` 时，`PortableMmap` 用当前目录下的 `mkstemp`
+模拟所有匿名映射；而 WP.3 的 OCI rootfs 按设计只有读执行权限。首个页表因此
+无法创建 `blink.dat.XXXXXX`，release 构建又未检查返回值，最终表现为宿主异常。
 
-进一步的线索：崩溃报的 fault address `0xFFFFFFFFFFFFFFFF` 正是
-`INVALID_HANDLE_VALUE`。这强烈提示沙箱内某次 `CreateFileW` 等句柄获取失败
-（降权后不可达），**返回值未经检查**就被当作有效句柄继续用。查 Win32 shim
-里未检查 `INVALID_HANDLE_VALUE` 的调用点是下一步的首选方向。
-
-无论根因为何，这里都该有两层修复：拿不到句柄时**给出明确错误而不是崩**，
-以及让沙箱内真正拿得到它需要的东西。
+修复后，Win32 私有匿名映射直接由 `W32Mmap64` 在 guest 虚拟地址窗口内 commit，
+只有需要 snapshot-fork 文件身份的共享匿名映射保留临时文件路径；页表与映射
+保护失败也会明确报错，不再进入未定义行为。CI `30238223406` 的
+`WP.1-WP.5` 全部通过。
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
 
@@ -443,23 +442,20 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
 | OCI pull/cache/config | active | Alpine 3.20 绝对 applet 链接与真实重拉通过；dangling symlink 和原子缓存仍有缺口 |
-| Windows Linux guest | active | CI 30237600882：WP.1/WP.2/WP.5 通过；WP.3 在 AppContainer 内执行 BusyBox 时 0xC0000005/rc139，同一静态 artifact 直跑为 rc0 |
+| Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；portable 双 exe 在 AppContainer 内执行静态 BusyBox |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
-| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 209 pass、0 fail；不能外推产品状态 |
+| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 210 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | F8.1 已实现但当前 Windows job 未绿；F8.2-F8.4 未实现 |
+| 后台生命周期管理 | active | F8.1 的 Windows/Linux G3 已绿；F8.2-F8.4 未实现 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
 
-Windows Linux guest 当前交接信息：最小 rootfs 原先缺少 `/dev`、`/proc`，导致
-AppContainer 无写权限时 VFS 初始化失败；`BlinkBackend` 已改为降权前预建。
-越过该点后，CI 构建的静态 `wbox-linux.exe` 在 AppContainer 内加载 BusyBox
-仍于 guest 入口 `0x4038b1` 崩溃（host `0xC0000005`，fault address `-1`）。
-同一 exe、同一 BusyBox、同一 `BLINK_PREFIX` 在 Windows 宿主直接运行 rc=0；
-`-j` 禁用 JIT、`--env-pass-all`、额外 `codeGeneration` capability，以及
-`--memory 0` 取消 Job 内存上限均未改变崩溃，因此这些不是已证实的修复方向。
+Windows Linux guest 的两项阻断均已修复：`BlinkBackend` 在降权前预建
+`/dev`、`/proc`；Win32 私有匿名页不再通过只读 rootfs 中的临时文件分配。
+WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink 回归都会
+直接使 Windows 产品 job 失败。
 
 ## 7. 里程碑与时间线
 
