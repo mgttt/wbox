@@ -859,9 +859,9 @@ F9
 
 ```text
 supervisor
-├── 持有 volume 根 HANDLE、命名 Job 与 broker listener
-├── on_created 注册仍挂起的目标 PID/process HANDLE，成功后才恢复 guest
-├── 数据管道 \\.\pipe\LOCAL\wbox.<container-hash>.<generation>.<random>
+├── 持有 volume 根 HANDLE、命名 Job 与 owner-only broker server HANDLE
+├── 启动前在宿主侧预连接 client HANDLE，只把它精确继承给 guest
+├── on_created 校验仍挂起进程的 Job + AppContainer SID，成功后才恢复 guest
 └── guest 断线时 fail closed；禁止回退到绝对宿主路径或临时 ACL
 
 request header
@@ -870,21 +870,32 @@ request header
 └── payload_len、连接数、并发请求数均有固定硬上限
 ```
 
-- 采用 message-mode named pipe，启用 `PIPE_REJECT_REMOTE_CLIENTS`；DACL 只允许
-  当前用户 SID 与该 profile 的精确 AppContainer SID，并设置 Low Integrity
-  mandatory label。不得授予 `Everyone` 或 `ALL APPLICATION PACKAGES`。
-- 连接后以 `GetNamedPipeClientProcessId` 取得真实 PID，验证其仍属于当前命名 Job、
-  token AppContainer SID 与 profile 相同且 generation 未过期；请求体中的 PID
-  一律不可信。`OpenProcess` 只申请 broker 所需的
-  `PROCESS_DUP_HANDLE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION`。
-- 首批 opcode 为 `HELLO`、`PING`、`OPEN`。`OPEN` 只接受 mount id、Linux open
+- `[done: transport component gate]` 采用 message-mode named pipe 并启用
+  `PIPE_REJECT_REMOTE_CLIENTS`，但 **guest 不按名称连接**。Microsoft 文档明确指出
+  AppContainer named pipe 只支持同一 app 内通信；真机探针也得到
+  `CreateFileW -> ERROR_FILE_NOT_FOUND`。因此 supervisor 先以当前用户专属 DACL
+  创建并预连接 server/client pair，再用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只把
+  connected client HANDLE 继承给 guest。不得授予 `Everyone`、
+  `ALL APPLICATION PACKAGES` 或递归 volume ACL。参考：
+  <https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createnamedpipea>
+- `on_created` 在 guest 恢复前用 `IsProcessInJob` 验证目标命名 Job，并读取
+  `TokenAppContainerSid` 与 profile 精确比对；随后复制 broker 自有 process
+  HANDLE。因为 pipe 是 supervisor 预连接的，`GetNamedPipeClientProcessId`
+  只会看到宿主连接者，不能当 guest 身份证据。身份绑定来自精确继承的 connected
+  HANDLE、挂起期 Job/SID 注册和 generation + 随机 nonce，request 中 PID 一律不可信。
+- 真机门禁 `appcontainer_hello_ping_is_pid_sid_and_job_bound` 已完成继承通道上的
+  `HELLO/PING`；`register_rejects_process_outside_target_job` 与
+  `register_rejects_different_appcontainer_sid` 分别裁决 rogue Job 与错误 profile。
+  codec 同时拒绝错误版本、长度不一致和超过 4096 字节的 payload。
+- 当前已实现 opcode 为 `HELLO`、`PING`；下一数据面 opcode `OPEN` 只接受 mount id、Linux open
   flags/mode 与相对路径；Win32 access mask 由 broker allowlist 映射，不接收 guest
   原始 access mask。只读 mount 在 broker 与 VFS 两层都拒绝写/创建/截断。
-- broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有 listener；
+- broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
-  control pipe 把挂起 PID 附着到同一 broker，不能另起第二个 broker。
-- `on_created` 只能做快速 session 注册与 listener-ready 检查，不能等待 guest
-  连接，否则主线程仍挂起会死锁。`HELLO/OPEN/DuplicateHandle` 都在恢复后异步进行。
+  host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，
+  不能另起第二个 broker。
+- `on_created` 只能做快速 session 注册，不能等 guest 发出请求，否则主线程仍挂起
+  会死锁。`HELLO/OPEN` 都在恢复后由 broker 线程处理。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
@@ -1501,7 +1512,9 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 完成 Windows OCI bind volume broker、逐组件 reparse 逃逸门禁与
    fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证、挂起期动态 HANDLE 注入和
-   VFS `MS_RDONLY` 组件门禁已落地，CLI 在 broker 数据面完成前继续明确拒绝。
+   VFS `MS_RDONLY` 组件门禁已落地；owner-only 预连接通道的 `HELLO/PING`、Job 与
+   AppContainer SID 身份门禁也已通过真机测试。CLI 在 `OPEN`/hostfs 数据面完成前
+   继续明确拒绝。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。

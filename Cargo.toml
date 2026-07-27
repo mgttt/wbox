@@ -39,6 +39,7 @@ features = [
     # AppContainer profile API（CreateAppContainerProfile 等）位于 Isolation 命名空间
     "Win32_Security_Isolation",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     # 进程创建、attribute list、等待、退出码
     "Win32_System_Threading",
     # detached supervisor 启动前收紧标准句柄继承
@@ -52,6 +53,8 @@ features = [
     # GetComputerNameExW 用不到；保留最小集合
     "Win32_System_SystemInformation",
     "Win32_System_Memory",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
     "Win32_System_Diagnostics_Debug",
     # Windows OCI volume 根句柄与 AppContainer 继承探针
     "Win32_Storage_FileSystem",

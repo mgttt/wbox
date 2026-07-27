@@ -37,6 +37,10 @@ mod testenv;
 // 以下模块直接调用 Win32 API，仅 Windows 可编译。
 #[cfg(windows)]
 mod acl;
+// Windows OCI filesystem broker transport。CLI 在完整 OPEN/hostfs 门禁前仍拒绝 -v。
+#[cfg(windows)]
+#[allow(dead_code)] // staged component; activated when Blink OPEN/hostfs gates are complete
+mod broker;
 #[cfg(windows)]
 mod job;
 #[cfg(windows)]

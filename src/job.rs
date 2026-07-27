@@ -291,7 +291,7 @@ impl Job {
         drop(self.handle.take());
     }
 
-    fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
+    pub(crate) fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.handle
             .as_ref()
             .expect("Job handle 已关闭后不应再调用 Job API")

@@ -232,7 +232,7 @@ impl CapabilitySid {
 }
 
 /// 把 SID 转成字符串形式（S-1-15-2-...）。
-fn sid_to_string(sid: PSID) -> anyhow::Result<String> {
+pub(crate) fn sid_to_string(sid: PSID) -> anyhow::Result<String> {
     let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
     // # Safety: sid 为有效 SID；buf 为有效输出指针，成功后用 LocalFree 释放。
     let ok = unsafe { ConvertSidToStringSidW(sid, &mut buf) };
@@ -260,6 +260,9 @@ pub fn to_wide(s: &str) -> Vec<u16> {
 
 /// 关闭句柄的通用小工具（RAII）。
 pub struct OwnedHandle(pub windows_sys::Win32::Foundation::HANDLE);
+
+// Win32 kernel handles are process-wide and may be closed from a different thread.
+unsafe impl Send for OwnedHandle {}
 
 impl OwnedHandle {
     pub fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {

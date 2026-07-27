@@ -77,7 +77,7 @@ pub fn run_container_with_handles(
         job,
         env,
         handles,
-        |_| Ok(()),
+        |_, _| Ok(()),
     )
 }
 
@@ -95,7 +95,7 @@ pub fn run_container_with_handles_and_created_hook<F>(
     on_created: F,
 ) -> Result<u32>
 where
-    F: FnOnce(HANDLE) -> Result<()>,
+    F: FnOnce(HANDLE, &mut crate::job::Job) -> Result<()>,
 {
     run_container_with_lifecycle_hooks_and_handles(
         profile,
@@ -133,7 +133,7 @@ where
         job,
         env,
         &[],
-        |_| Ok(()),
+        |_, _| Ok(()),
         on_started,
     )
 }
@@ -151,7 +151,7 @@ fn run_container_with_lifecycle_hooks_and_handles<C, S>(
     on_started: S,
 ) -> Result<u32>
 where
-    C: FnOnce(HANDLE) -> Result<()>,
+    C: FnOnce(HANDLE, &mut crate::job::Job) -> Result<()>,
     S: FnOnce(&mut crate::job::Job),
 {
     let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
@@ -313,7 +313,7 @@ where
         unsafe { TerminateProcess(process.raw(), 1) };
         return Err(e);
     }
-    if let Err(e) = on_created(process.raw()) {
+    if let Err(e) = on_created(process.raw(), job) {
         // 子进程仍挂起；等待终止完成，避免 broker 初始化失败后留下孤儿。
         unsafe { TerminateProcess(process.raw(), 1) };
         unsafe { WaitForSingleObject(process.raw(), u32::MAX) };
@@ -1000,7 +1000,7 @@ mod real_windows_tests {
             &mut job,
             &env,
             &[],
-            |child_process| {
+            |child_process, _| {
                 let current = unsafe { GetCurrentProcess() };
                 let mut child_handle = std::ptr::null_mut();
                 if unsafe {
@@ -1063,7 +1063,7 @@ mod real_windows_tests {
             &mut job,
             &env,
             &[],
-            |_| Err(crate::error::WboxError::spawn("broker setup probe failed")),
+            |_, _| Err(crate::error::WboxError::spawn("broker setup probe failed")),
         )
         .unwrap_err();
         assert!(format!("{}", err).contains("broker setup probe failed"), "{}", err);
