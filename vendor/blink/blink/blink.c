@@ -423,8 +423,10 @@ static void GetOpts(int argc, char *argv[]) {
         PrintUsage(argc, argv, 48, 2);
     }
   }
-#if LOG_ENABLED || SYSCALL_LOG_ENABLED
+#if LOG_ENABLED
   LogInit(FLAG_logpath);
+#elif SYSCALL_LOG_ENABLED
+  if (FLAG_strace) LogInit(FLAG_logpath);
 #endif
 }
 
