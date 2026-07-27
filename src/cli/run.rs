@@ -459,7 +459,7 @@ pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
             })
         }
         RunTarget::Image(iref) => {
-            backend::reject_volumes_if_unsupported(&opts.volumes)?;
+            backend::validate_image_volumes_for_host(&opts.volumes)?;
             let dir = ensure_image_cached(&opts, &iref)?;
             let config = oci::config::ImageConfig::load(&dir)?;
             let cmd = config

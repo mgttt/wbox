@@ -155,8 +155,23 @@ fn spawn_windows(
     // ---- 3. Job Object ----
     let mut job = job::Job::create_for_container(&spec.name, spec.limits)?;
 
+    let broker_mounts = if enable_broker {
+        spec.volumes
+            .iter()
+            .enumerate()
+            .map(|(index, volume)| {
+                crate::broker::BrokerMount::open_readonly((index + 1) as u32, &volume.host)
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    let has_broker_mounts = !broker_mounts.is_empty();
     let endpoint = if enable_broker {
-        Some(crate::broker::BrokerEndpoint::create(&profile.sid_string()?)?)
+        Some(crate::broker::BrokerEndpoint::create_with_mounts(
+            &profile.sid_string()?,
+            broker_mounts,
+        )?)
     } else {
         None
     };
@@ -174,6 +189,24 @@ fn spawn_windows(
             "WBOX_BROKER_NONCE".to_string(),
             endpoint.nonce().iter().map(|byte| format!("{byte:02x}")).collect(),
         ));
+        if has_broker_mounts {
+            let manifest = spec
+                .volumes
+                .iter()
+                .enumerate()
+                .map(|(index, volume)| {
+                    let encoded = volume
+                        .guest
+                        .as_bytes()
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    format!("{}:{}", index + 1, encoded)
+                })
+                .collect::<Vec<_>>()
+                .join(";");
+            child_env.push(("WBOX_BROKER_MOUNTS".to_string(), manifest));
+        }
     }
 
     // ---- 4. verbose 摘要 ----
@@ -228,7 +261,13 @@ fn spawn_windows(
             &handles,
             |process, job| {
                 let session = endpoint.register(process, job)?;
-                broker_thread = Some(std::thread::spawn(move || session.serve_hello_ping()));
+                broker_thread = Some(std::thread::spawn(move || {
+                    if has_broker_mounts {
+                        session.serve_hello_ping_open()
+                    } else {
+                        session.serve_hello_ping()
+                    }
+                }));
                 Ok(())
             },
         )
