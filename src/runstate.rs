@@ -176,7 +176,7 @@ pub fn liveness(dir: &Path) -> Liveness {
     }
 }
 
-/// 一次运行的登记。**RAII**：drop 时删掉整个状态目录。
+/// 一次运行的登记。**RAII**：drop 时释放锁，并按 `persist` 决定是否清目录。
 ///
 /// 崩溃时 drop 不会执行，状态目录会残留——这是刻意接受的：锁已随进程消失，
 /// [`liveness`] 会把它判为 `Exited`，`ps` 如实显示，`rm` 负责清理。
@@ -186,6 +186,13 @@ pub struct Registration {
     dir: PathBuf,
     /// 持有到 drop 为止；这个句柄就是"我还活着"的证据
     lock: Option<File>,
+    /// 退出后**保留**记录与日志（`--detach` 用）。
+    ///
+    /// 前台容器退出即清理：输出已经打在用户终端上了，留个空目录只是垃圾。
+    /// 后台容器相反——用户回头查 `wbox logs` 正是为了看它到底输出了什么，
+    /// 一退出就把日志删掉等于把这个命令的主要用途废掉。因此后台记录保留为
+    /// `exited`，由 `wbox rm` 显式清理（与 docker 的 ps -a / rm 一致）。
+    persist: bool,
 }
 
 impl Registration {
@@ -206,11 +213,19 @@ impl Registration {
 fn purge_dir(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("meta.json"));
     let _ = std::fs::remove_file(dir.join("lock"));
+    // 日志也要删：留着会让 remove_dir 因非空而失败，状态目录就永远清不掉
+    let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
+    let _ = std::fs::remove_file(dir.join(LOG_STDERR));
     let _ = std::fs::remove_dir(dir);
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        if self.persist {
+            // 后台记录必须保留日志，但 owner 锁应立即释放，让 ps/stop 看见 exited。
+            drop(self.lock.take());
+            return;
+        }
         let root = self.dir.parent().map(Path::to_path_buf);
         // 先持有根操作锁、再释放 owner 锁：rm 若先取得根锁会看到 Running 并退出；
         // 本路径若先取得根锁，则没有 register/rm 能插入“释放 → 删除”的窗口。
@@ -227,14 +242,95 @@ impl Drop for Registration {
     }
 }
 
-/// 登记一次运行。同名容器已在运行时**报错**而不是覆盖——覆盖会让用户
-/// "以为还在跑的那个"悄无声息地从列表里消失（PRD F8.c）。
+/// 日志文件名（`--detach` 时 guest 的 stdout/stderr 落盘处）。
+pub const LOG_STDOUT: &str = "stdout.log";
+pub const LOG_STDERR: &str = "stderr.log";
+
+/// 日志体积上限。超过后**丢旧留新**并在截断处留标记——见 [`enforce_log_cap`]。
+/// 默认 8 MiB；`WBOX_LOG_MAX_BYTES` 可覆盖（测试用小值，不必写满 8MB）。
+pub fn log_cap_bytes() -> u64 {
+    std::env::var("WBOX_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(8 * 1024 * 1024)
+}
+
+/// 以**追加**方式打开日志文件。追加是关键：[`enforce_log_cap`] 靠截断控制
+/// 体积，而只有 append 模式的写入才会在截断后从新的文件末尾（0）继续；
+/// 普通写模式下 writer 自带偏移，截断后文件立刻变回原大小的稀疏文件，
+/// 上限就形同虚设。
+pub fn open_log_append(dir: &Path, file: &str) -> Result<File> {
+    File::options()
+        .create(true)
+        .append(true)
+        .open(dir.join(file))
+        .map_err(|e| WboxError::args(format!("打开日志 '{}' 失败：{}", file, e)))
+}
+
+/// 超上限则清空并写入一行截断说明。
+///
+/// 这是**丢旧留新**的粗粒度轮转，不是精细的按行轮转：容器日志的价值绝大多数
+/// 在最近的输出，而实现精确轮转要在 wbox 与 guest 之间插一层转写，代价远大于
+/// 收益。关键是两条：体积有界，且**截断这件事对用户可见**——无声丢日志比
+/// 日志不全更糟。
+pub fn enforce_log_cap(dir: &Path, file: &str) {
+    let path = dir.join(file);
+    let Ok(md) = std::fs::metadata(&path) else {
+        return;
+    };
+    let cap = log_cap_bytes();
+    if md.len() <= cap {
+        return;
+    }
+    // 截断到 0；append 写入方随后从头继续（见 open_log_append 的说明）
+    if let Ok(f) = File::options().write(true).open(&path) {
+        let _ = f.set_len(0);
+        use std::io::Write;
+        let mut f = f;
+        let _ = writeln!(
+            f,
+            "[wbox] 日志超过 {} 字节上限，已丢弃此前内容（保留最新输出）",
+            cap
+        );
+    }
+}
+
+/// [`register_with`] 的简写（不保留日志）。生产路径一律走 `register_with`
+/// ——它要按是否 supervised 决定日志去留——故此处只剩测试在用。
+#[cfg(test)]
 pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration> {
+    register_with(name, cmd, target, false)
+}
+
+/// [`register`] 的完整形式。`keep_logs=true` 时不清除既有日志——
+/// `--detach` 流程里日志文件是**父进程**先建好、再作为子进程 stdio 传下去的，
+/// 子进程随后才登记；此时若按"复用残留"的常规逻辑清目录，就会把父进程刚建好
+/// 的日志一起删掉，容器还没开口就先失声。
+pub fn register_with(
+    name: &str,
+    cmd: &[String],
+    target: &str,
+    keep_logs: bool,
+) -> Result<Registration> {
     let dir = dir_for(name)?;
     let root = dir
         .parent()
         .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
     let _operation_lock = lock_operations(root)?;
+    if dir.exists() && keep_logs {
+        // detach 的子进程：目录是父进程刚建的，锁还没人持有，直接接手即可
+        let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
+            WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
+        })?;
+        write_meta(&dir, name, cmd, target)?;
+        return Ok(Registration {
+            dir,
+            lock: Some(lock),
+            // detach：退出后保留，供 `wbox logs` 事后查看
+            persist: true,
+        });
+    }
     if dir.exists() {
         match liveness(&dir) {
             Liveness::Running => {
@@ -265,12 +361,30 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
         cmd: cmd.to_vec(),
         target: target.to_string(),
     };
-    std::fs::write(dir.join("meta.json"), entry.to_json())
-        .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
+    write_meta_entry(&dir, entry)?;
     Ok(Registration {
         dir,
         lock: Some(lock),
+        persist: false,
     })
+}
+
+fn write_meta(dir: &Path, name: &str, cmd: &[String], target: &str) -> Result<()> {
+    write_meta_entry(
+        dir,
+        Entry {
+            name: name.to_string(),
+            pid: std::process::id(),
+            created_unix: now_unix(),
+            cmd: cmd.to_vec(),
+            target: target.to_string(),
+        },
+    )
+}
+
+fn write_meta_entry(dir: &Path, entry: Entry) -> Result<()> {
+    std::fs::write(dir.join("meta.json"), entry.to_json())
+        .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))
 }
 
 /// 删除一条已退出的容器记录（`wbox rm`）。
@@ -570,5 +684,129 @@ mod tests {
         wait_child(registrar, "register");
         assert!(!stale.exists());
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use crate::testenv::EnvGuard;
+
+    /// 上限逻辑本身：超限即清空并留下可见标记。
+    #[test]
+    fn cap_truncates_and_marks() {
+        let d = std::env::temp_dir().join(format!("wbox-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut g = EnvGuard::new();
+        g.set("WBOX_LOG_MAX_BYTES", "100");
+        std::fs::write(d.join(LOG_STDOUT), vec![b'x'; 5000]).unwrap();
+        enforce_log_cap(&d, LOG_STDOUT);
+        let after = std::fs::read_to_string(d.join(LOG_STDOUT)).unwrap();
+        assert!(after.len() < 500, "应已截断，实际 {} 字节", after.len());
+        assert!(after.contains("已丢弃此前内容"), "截断要可见：{}", after);
+        // 未超限的不动
+        std::fs::write(d.join(LOG_STDERR), b"small").unwrap();
+        enforce_log_cap(&d, LOG_STDERR);
+        assert_eq!(std::fs::read_to_string(d.join(LOG_STDERR)).unwrap(), "small");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 进程终止（`wbox stop`，PRD F8.3）
+// ---------------------------------------------------------------------------
+
+/// 终止方式。Linux 上先礼后兵，Windows 只有"兵"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kill {
+    /// 请求对方自行退出（Linux: SIGTERM）。Windows 无等价物，见 [`terminate_pid`]。
+    Graceful,
+    /// 强制终止（Linux: SIGKILL；Windows: TerminateProcess）
+    Forceful,
+}
+
+/// 终止指定进程。返回是否成功递送（**不代表对方已经退出**，退出要靠轮询锁判定）。
+///
+/// 杀的是 **supervisor（wbox 自己）**，不是 guest：容器整棵进程树的存活绑在
+/// supervisor 上（Linux 的 PDEATHSIG、Windows 的 Job kill-on-close），
+/// supervisor 一死内核就会收走整棵树。直接去杀 guest 反而漏掉它的子孙。
+///
+/// **平台差异如实记录**：Windows 没有 SIGTERM 这类"请你自己退出"的通用机制
+/// （控制台事件对无控制台的后台进程不适用），因此 `Graceful` 在 Windows 上
+/// 等同于 `Forceful`。这不是偷懒，是平台确实没有对齐物；`wbox stop` 的文案
+/// 会说明这一点。
+#[cfg(unix)]
+pub fn terminate_pid(pid: u32, how: Kill) -> bool {
+    let sig = match how {
+        Kill::Graceful => libc::SIGTERM,
+        Kill::Forceful => libc::SIGKILL,
+    };
+    // SAFETY: kill(2) 只按 pid 递送信号，不解引用任何指针。
+    unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
+}
+
+#[cfg(windows)]
+pub fn terminate_pid(pid: u32, _how: Kill) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: OpenProcess 失败返回 null，此时不调用 TerminateProcess；
+    // 句柄无论成败都只关一次。
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(h, 1) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+#[cfg(test)]
+mod kill_tests {
+    use super::*;
+
+    /// 起一个真的会赖着不走的子进程，用来验证终止确实生效。
+    fn spawn_sleeper() -> std::process::Child {
+        #[cfg(unix)]
+        let mut c = std::process::Command::new("/bin/sleep");
+        #[cfg(unix)]
+        c.arg("30");
+        #[cfg(windows)]
+        let mut c = std::process::Command::new("cmd");
+        #[cfg(windows)]
+        c.args(["/c", "ping -n 30 127.0.0.1 >nul"]);
+        c.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// 终止必须真的把进程干掉。**两个平台都跑这条**——Windows 那半
+    /// （OpenProcess + TerminateProcess）我在本机无从验证，靠 CI 的 windows
+    /// runner 真实执行；本轮之前正是这种"写完就算"的平台代码出过 Drop 顺序的错。
+    #[test]
+    fn terminate_actually_kills() {
+        let mut child = spawn_sleeper();
+        assert!(child.try_wait().unwrap().is_none(), "子进程本应还活着");
+        assert!(terminate_pid(child.id(), Kill::Forceful), "递送终止失败");
+        // 给内核一点时间收尸
+        let mut gone = false;
+        for _ in 0..100 {
+            if child.try_wait().unwrap().is_some() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone, "终止后子进程仍未退出");
+    }
+
+    /// 不存在的 pid 应当返回失败而不是 panic，也不该误伤别人。
+    #[test]
+    fn terminate_missing_pid_reports_failure() {
+        // 极大的 pid 在两个平台都几乎不可能被占用
+        assert!(!terminate_pid(4_000_000_000, Kill::Forceful));
     }
 }

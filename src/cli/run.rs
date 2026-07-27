@@ -4,6 +4,10 @@ use crate::backend::{self, Backend, BlinkBackend, Limits, RunSpec, RunTarget};
 
 /// `ps` 里表示"非镜像目标"的占位串。
 const NATIVE_TARGET: &str = "(native)";
+
+/// 父进程用它告诉脱离出来的子进程"你是 supervisor，日志已备好、别再脱离一次"。
+/// 同时也是 [`crate::runstate::register_with`] 保留日志的开关。
+const SUPERVISED_ENV: &str = "WBOX_SUPERVISED";
 use crate::error::{Result, WboxError};
 use crate::oci;
 
@@ -22,6 +26,8 @@ pub struct RunOptions {
     pub env_pass_all: bool,
     /// `-e/--env KEY=VALUE` 显式注入；后出现的同名键覆盖镜像 Env。
     pub env: Vec<(String, String)>,
+    /// 后台运行：立即返回，容器由脱离的 supervisor 进程持有（PRD F8.2）
+    pub detach: bool,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -41,6 +47,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         pull: false,
         env_pass_all: false,
         env: Vec::new(),
+        detach: false,
         positional: None,
         cmd: Vec::new(),
     };
@@ -94,7 +101,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             // docker 风格显式清理：v1 默认即为退出即删（profile RAII 删除 +
             // Job KILL_ON_JOB_CLOSE），接受并等价于默认（与 --no-network 同为显式默认）。
             "--rm" => opts.keep_profile = false,
-            "--interactive" => {} // 连接 stdio（默认）
+            "--interactive" => opts.detach = false, // 显式前台（默认）
+            "--detach" | "-d" => opts.detach = true,
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
             "-e" | "--env" => {
@@ -174,6 +182,13 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
 pub fn cmd_run(args: &[String]) -> Result<u32> {
     let opts = parse_run_args(args)?;
 
+    // --detach：把自己再拉起一份作为 supervisor，父进程立刻返回。
+    // 容器的存活由 supervisor 持有（Job kill-on-close / PDEATHSIG 都绑在它身上），
+    // 所以**不能**让父进程直接退出了事——那样容器会跟着一起没。
+    if opts.detach && std::env::var_os(SUPERVISED_ENV).is_none() {
+        return spawn_detached(&opts, args);
+    }
+
     // 判别目标：镜像引用（已 pull 或 --pull）vs 本地可执行路径。
     let target = backend::classify_target(opts.positional.as_deref(), opts.pull, oci::is_pulled)?;
 
@@ -194,6 +209,100 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     }
 }
 
+/// `--detach` 的父进程：建好状态目录与日志，脱离地拉起 supervisor，然后返回。
+///
+/// 日志文件由**父进程**创建并作为子进程的 stdio 传下去——子进程登记时因此要走
+/// `keep_logs` 分支，否则常规的"复用残留"逻辑会把刚建好的日志删掉。
+fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
+    let name = opts
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
+    let dir = crate::runstate::dir_for(&name)?;
+
+    // 名字被占就地拒绝：等到 supervisor 起来再失败，用户只会看到一个空壳容器名
+    // 和一份空日志，排查成本高得多。
+    if dir.exists() && crate::runstate::liveness(&dir) == crate::runstate::Liveness::Running {
+        return Err(WboxError::args(format!(
+            "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
+            name
+        )));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| WboxError::args(format!("创建状态目录失败：{}", e)))?;
+    let out = crate::runstate::open_log_append(&dir, crate::runstate::LOG_STDOUT)?;
+    let err = crate::runstate::open_log_append(&dir, crate::runstate::LOG_STDERR)?;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| WboxError::args(format!("定位 wbox 自身可执行文件失败：{}", e)))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("run");
+    // 原样透传参数，只摘掉 --detach 自己（否则子进程会再脱离一次，无限套娃）
+    for a in args {
+        if a != "--detach" && a != "-d" {
+            cmd.arg(a);
+        }
+    }
+    // 名字必须固定下来：默认名取自 pid，父子 pid 不同会各自算出不同的名字，
+    // 于是父进程建的日志目录和子进程登记的目录对不上。
+    if opts.name.is_none() {
+        cmd.arg("--name").arg(&name);
+    }
+    cmd.env(SUPERVISED_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err);
+    detach_from_terminal(&mut cmd);
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| WboxError::spawn(format!("启动后台 wbox 失败：{}", e)))?;
+    // 只打名字，方便脚本 `NAME=$(wbox run -d ...)` 直接取用
+    println!("{}", name);
+    // 不 wait：supervisor 要活得比我们久。它被 init 收养，不会成为僵尸。
+    drop(child);
+    Ok(0)
+}
+
+/// 让 supervisor 脱离当前终端/会话，免得终端一关就被 SIGHUP 带走。
+#[cfg(target_os = "linux")]
+fn detach_from_terminal(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid 只改调用者自己的会话，且在 fork 与 exec 之间调用，
+    // 此时进程是单线程的，不涉及 async-signal-unsafe 的操作。
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detach_from_terminal(_cmd: &mut std::process::Command) {
+    // Windows 侧：stdio 已重定向到文件、且父进程不等待，控制台关闭不会波及
+    // 子进程（它没有继承控制台的交互句柄）。此处无需额外处理。
+}
+
+/// supervisor 侧的日志限流：后台跑着的容器可能输出无止境，必须有界。
+///
+/// 用独立线程周期性检查体积、超限即丢旧留新（见 `runstate::enforce_log_cap`），
+/// 而不是在 wbox 与 guest 之间插一层转写——后者要改动全部 Backend 的 stdio
+/// 处理，代价远大于收益。
+///
+/// **诚实说明其边界**：这是周期采样，不是硬实时上限。两次 tick 之间容器可以
+/// 短暂冲过上限，磁盘峰值取决于它 500ms 内能写多少。落盘的**最终**体积由
+/// `spawn_with_state` 里退出后的那次收尾保证有界。要做到任意时刻严格不超，
+/// 只能在 wbox 与 guest 之间插转写层，那是另一个量级的改动。
+fn spawn_log_watchdog(dir: std::path::PathBuf) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDOUT);
+        crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDERR);
+    });
+}
+
 /// 登记状态目录后再 spawn（PRD F8.1）。
 ///
 /// 状态目录只在容器**运行期间**存在：`Registration` 是 RAII，spawn 返回即 drop
@@ -210,8 +319,23 @@ fn spawn_with_state(
 ) -> Result<u32> {
     // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
     // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
-    let _reg = crate::runstate::register(&spec.name, &spec.cmd, target)?;
-    b.spawn(spec, prepared)
+    let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
+    let reg = crate::runstate::register_with(&spec.name, &spec.cmd, target, supervised)?;
+    if supervised {
+        spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
+    }
+    let rc = b.spawn(spec, prepared);
+    if supervised {
+        // 退出后再收一次尾。这条不是冗余：看门狗每 500ms 才看一眼，而一个
+        // 一秒内狂写几百 MB 然后退出的容器**根本活不到第一次 tick**，只靠
+        // 周期检查会让它整份输出原样落盘（实测 300k 行 2.5MB 全须全尾）。
+        // 有了这一下，最终落盘体积无论容器活多久都是有界的。
+        let dir = crate::runstate::dir_for(&spec.name)?;
+        crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDOUT);
+        crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDERR);
+    }
+    drop(reg);
+    rc
 }
 
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），

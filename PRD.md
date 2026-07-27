@@ -147,7 +147,8 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2-F8.4 detach/logs/stop/rm/exec | 未实现 | 无 | planned |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G3 Linux | P.6-P.18；Windows detach/logs/stop 产品路径仍待门禁 |
+| F8.4 exec | 未实现 | 无 | 先完成 Windows 可行性取证 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -201,8 +202,8 @@ F1
 - Windows 路径、镜像引用、显式 `--` 和参数转义不会互相误判。
 - 子进程退出码原样返回；参数/profile/job/spawn/image 错误有固定分类。
 - `--memory`、`--cpu-pct`、`--max-procs`、网络和环境参数跨后端语义一致。
-- Docker/Podman 兼容只覆盖 wbox 能兑现的前台沙箱语义。`-d`、端口发布、
-  bind volume、守护进程 API、compose/pod 和远程上下文不在当前兼容范围；
+- Docker/Podman 兼容只覆盖 wbox 能兑现的沙箱语义。端口发布、bind volume、
+  守护进程 API、compose/pod 和远程上下文不在当前兼容范围；
   收到这些参数时必须返回参数错误，不得假成功。
 
 #### F1.7 Docker/Podman 兼容命令树
@@ -210,7 +211,7 @@ F1
 ```text
 wbox
 ├── run [兼容子集] IMAGE|-- PROGRAM [ARG...]
-│   ├── 生命周期：--name、--rm
+│   ├── 生命周期：--name、--rm、-d/--detach
 │   ├── 工作目录：-w、--workdir
 │   ├── 网络：--network none|host
 │   └── wbox 扩展：--memory、--cpu-pct、--max-procs、--allow-network
@@ -230,7 +231,8 @@ wbox
 
 1. 命令名、常用短选项和参数位置优先贴近 Docker/Podman；同一输入在两者语义
    一致时，wbox 应给出等价结果。
-2. wbox 默认前台运行、默认断网、退出即清理。兼容参数不得削弱这些默认边界。
+2. wbox 默认前台运行、默认断网、退出即清理；`-d/--detach` 是显式后台模式。
+   兼容参数不得暗中削弱这些默认边界。
 3. Docker 与 Podman 语义不一致，或 wbox 后端无法兑现时，帮助和错误必须明确
    写出 wbox 的行为；不以“参数已接受”冒充功能兼容。
 4. 每个新增兼容项至少具备 G0 解析测试；涉及隔离、网络、缓存或生命周期的项
@@ -424,16 +426,47 @@ description，同进程重开也冲突，故单测可在进程内验证；`fcntl
 则不行），Windows 用 `share_mode(0)`。**同一套单测覆盖两侧**，Windows 那半
 由 CI 的 windows runner 真实执行。
 
-**F8.b 日志模型**。`--detach` 时 stdout/stderr 重定向到状态目录下的
-`stdout.log`/`stderr.log`，`wbox logs` 读文件（`-f` 用轮询 tail）。v1
-**不做**轮转与环形缓冲，但必须设上限并在截断处写明——无声增长会把用户磁盘
-吃满，而"日志不全"至少是可见的。stdin 在 detach 模式下不连接。
+**F8.b 日志模型**（已实现）。`--detach` 时 stdout/stderr 落到状态目录下的
+`stdout.log`/`stderr.log`，`wbox logs <NAME> [--stderr]` 读文件。stdin 不连接。
+`-f` 跟随尚未实现。
+
+上限的实现方式与其**边界**如实记录：supervisor 起一个看门狗线程每 500ms 检查
+体积，超限即清空并写入一行截断说明（丢旧留新）。这是**周期采样，不是硬实时
+上限**——两次 tick 之间容器可以短暂冲过。实测踩到过一个真问题：一个 300k 行、
+1 秒内写完 2.5MB 就退出的容器**活不到第一次 tick**，整份输出原样落盘，上限
+形同虚设。因此在容器退出后**再收一次尾**，最终落盘体积由此无论容器活多久都
+有界。要做到任意时刻严格不超，只能在 wbox 与 guest 之间插一层转写，那要改动
+全部 Backend 的 stdio 处理，是另一个量级的改动。
+
+另一处必须写下的实现约束：日志文件以 **append 模式**打开。截断靠 `set_len(0)`，
+而只有 append 写入才会在截断后从新的文件末尾（0）继续；普通写模式下 writer
+自带偏移，截断后文件立刻变回原大小的稀疏文件，上限完全失效。
+
+**退出后保留**：后台容器退出后记录与日志**不删**，`ps -a` 显示为 `exited`，
+由 `wbox rm` 显式清理（与 docker 一致）。前台容器仍是退出即清理——它的输出
+已经打在终端上了，留个空目录只是垃圾。这条差异是刻意的：一退出就删日志，
+等于把 `logs` 最主要的用途（事后查看跑完的后台任务输出）废掉。
 
 **F8.c 崩溃与重名**。wbox 自身崩溃时容器必死（Windows 的 kill-on-job-close
 与 Linux 的 PDEATHSIG 都已保证），故状态目录可能残留而容器已亡——`ps` 据
 F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活则**报错**并提示
 换名或先 `rm`；目标已亡则提示 `rm` 后重来，不自动覆盖（自动覆盖会让"我以为
 在跑的那个"悄悄消失）。
+
+**F8.c 补充：`stop` 的平台差异（已实现，如实记录）**。`stop` 终止的是
+**supervisor（wbox 自己）**而非 guest——容器整棵树的存活绑在 supervisor 上
+（Linux 的 PDEATHSIG、Windows 的 Job kill-on-close），杀 supervisor 内核就会
+收走整棵树；直接杀 guest 反而漏掉它的子孙。
+
+Linux 先 `SIGTERM` 后 `SIGKILL`（默认给 10 秒，`--timeout` 可调）。
+**Windows 没有 SIGTERM 的等价物**——控制台事件对无控制台的后台进程不适用，
+因此 `Graceful` 在 Windows 上等同于强制终止。这不是偷懒，是平台确实缺少对齐物。
+
+退出判定**以锁为准而不是以 pid 为准**：pid 会被复用，而锁被释放才真正等价于
+"持有它的那个 wbox 没了"。
+
+`stop` 对已停止的容器**幂等**（不报错），否则 `wbox stop x` 在脚本里没法用；
+但停一个**不存在**的容器仍然报错——那是"没这个东西"，与"已经停了"是两回事。
 
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
 `exec` 存疑：Linux 可 `setns` 进已有 namespace；Windows 没有"进入已有容器"
@@ -446,8 +479,8 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 | 期 | 范围 | 验收 |
 |---|---|---|
 | F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态已有 G0 回归，待 main CI |
-| F8.2 | `--detach` + `logs` | detach 后前台立即返回且容器仍在跑；`logs` 拿到完整输出；超上限时截断可见 |
-| F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器。**`rm` 已完成**（门禁 P.6/P.7/P.8），`stop` 待做 |
+| F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
+| F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
 
 ## 5. 非功能需求
@@ -469,7 +502,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 - Windows 10/11/Server 和 Linux x86-64 为目标宿主。
 - Linux guest 目标是常见 x86-64 CLI，不承诺完整内核 ABI。
-- CLI 以 Docker/Podman 的常用前台基础命令为迁移入口，精确范围以 F1.7 为准；
+- CLI 以 Docker/Podman 的常用基础命令为迁移入口，精确范围以 F1.7 为准；
   未列出的命令和选项不构成兼容承诺。
 - GUI、驱动、内核模块和依赖硬件特性的程序不在兼容范围。
 
@@ -487,10 +520,10 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
-| OCI pull/cache/config | active | Alpine 3.20 真实重拉通过；BusyBox 1.36 与 Debian bookworm-slim 实机暴露延迟/目录 symlink 降级缺口，原子缓存仍未门禁 |
+| OCI pull/cache/config | active | 延迟/目录 symlink 回归已覆盖，Debian bookworm-slim 实机运行 glibc 2.36 为 rc0；原子缓存失败注入已覆盖 G0，待产品门禁 |
 | Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
-| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 210 pass、0 fail、1 个公网测试 ignored |
+| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 242 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
 | 后台生命周期管理 | active | F8.1 的 Windows/Linux G3 已绿；F8.2-F8.4 未实现 |

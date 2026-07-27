@@ -9,8 +9,10 @@
 
 pub mod args;
 pub mod image;
+pub mod logs;
 pub mod ps;
 pub mod rm;
+pub mod stop;
 pub mod run;
 
 use crate::error::{Result, WboxError};
@@ -29,7 +31,9 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image rm <REF> [--yes]                      删除已 pull 镜像的本地缓存（默认交互确认）
   wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
+  wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
+  wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
   wbox --help | -h
   wbox --version
 
@@ -47,6 +51,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              显式声明退出即清理（默认行为，docker 习惯写法；仅 run）
   --interactive     连接 stdio（默认）
+  -d, --detach      后台运行：立即返回容器名，输出落盘到日志（wbox logs 读取）
   --pull            run 目标为镜像时，本地无缓存则先 pull
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
   -V, --verbose     打印隔离配置摘要
@@ -77,7 +82,9 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("rmi") => image::cmd_image_rm(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
         Some("ps") => ps::cmd_ps(&args[1..]),
+        Some("logs") => logs::cmd_logs(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
+        Some("stop") => stop::cmd_stop(&args[1..]),
         Some("--help") | Some("-h") | Some("help") => {
             print!("{}", USAGE);
             Ok(0)
@@ -92,7 +99,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         ))),
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args("缺少子命令（run / image / ps / rm）"))
+            Err(WboxError::args("缺少子命令（run / image / ps / rm / stop / logs）"))
         }
     }
 }
