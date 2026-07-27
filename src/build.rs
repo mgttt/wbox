@@ -1,7 +1,8 @@
 //! `wbox build`：Dockerfile 子集构建（`PRD.md` F9.3）。
 //!
 //! 只实现自用场景够用的子集：`FROM` / `RUN` / `COPY` / `ENV` / `WORKDIR` /
-//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG`。
+//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG` / `ADD`。
+//! **多阶段构建（`COPY --from`）认得写法但明确拒绝**——见该处说明。
 //! **未实现的指令一律明确报错**，不静默跳过——静默跳过会产出一个"看着构建成功、
 //! 其实少做了事"的镜像，比构建失败难查得多。
 //!
@@ -21,8 +22,18 @@ use std::path::{Path, PathBuf};
 pub enum Instruction {
     From(String),
     Run(String),
-    /// `COPY <src> <dst>`：src 相对构建上下文，dst 是容器内绝对路径
-    Copy { src: String, dst: String },
+    /// `COPY [--from=<阶段>] <src> <dst>`：
+    /// `from_stage` 为 `None` 时 src 相对构建上下文；为 `Some(名字)` 时
+    /// src 是**该阶段产物 rootfs 内**的绝对路径（多阶段构建，F9.38）。
+    /// dst 始终是容器内绝对路径。
+    Copy {
+        src: String,
+        dst: String,
+        from_stage: Option<String>,
+    },
+    /// `ADD <src> <dst>`：与 `COPY` 的差别只有一条——**src 是本地 tar 时自动解开**。
+    /// 远程 URL **不做**（见解析处的说明）。
+    Add { src: String, dst: String },
     Env { key: String, value: String },
     Workdir(String),
     Cmd(Vec<String>),
@@ -83,14 +94,61 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
                 out.push(Instruction::Run(rest.to_string()));
             }
             "COPY" => {
-                let mut it = rest.split_whitespace();
+                let mut it = rest.split_whitespace().peekable();
+                let mut from_stage = None;
+                if let Some(first) = it.peek() {
+                    if let Some(stage) = first.strip_prefix("--from=") {
+                        if stage.is_empty() {
+                            return Err(WboxError::args("COPY --from= 缺少阶段名"));
+                        }
+                        from_stage = Some(stage.to_string());
+                        it.next();
+                    }
+                }
                 let (Some(src), Some(dst)) = (it.next(), it.next()) else {
                     return Err(WboxError::args("COPY 需要 <src> <dst> 两个参数"));
                 };
                 if it.next().is_some() {
                     return Err(WboxError::args("COPY 暂只支持单个 src（多源未实现）"));
                 }
+                if from_stage.is_some() {
+                    // 认得这个写法但**还没实现**，所以明确拒绝而不是当成普通 COPY
+                    // ——当成普通 COPY 会去构建上下文里找同名文件，找不到就报一个
+                    // 与真实原因无关的错，找得到更糟（悄悄打包了错的东西）。
+                    return Err(WboxError::args(
+                        "COPY --from（多阶段构建）尚未实现：它要求把每个 FROM 分成\
+                         独立阶段各建一棵 rootfs，属 run_build 的结构性改造，\
+                         列在 PRD §2.4.3 的下一步里。当前请拆成两次 build + 一次 COPY",
+                    ));
+                }
                 out.push(Instruction::Copy {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                    from_stage,
+                });
+            }
+            // `ADD` 与 `COPY` 只差一条：src 是本地 tar 时自动解开。
+            //
+            // **远程 URL 不做**，而且是明确拒绝而非静默当成路径：docker 自己的文档
+            // 都建议别用（拿不到缓存、拿不到校验、构建期出网还常被审批挡住），
+            // 而 wbox 的目标用户里正有"出网要审批"的那一类（§3.1）。
+            // 要取远程文件，用 RUN + 你信任的下载工具，那样至少校验和重试都在你手里。
+            "ADD" => {
+                let mut it = rest.split_whitespace();
+                let (Some(src), Some(dst)) = (it.next(), it.next()) else {
+                    return Err(WboxError::args("ADD 需要 <src> <dst> 两个参数"));
+                };
+                if it.next().is_some() {
+                    return Err(WboxError::args("ADD 暂只支持单个 src（多源未实现）"));
+                }
+                if src.starts_with("http://") || src.starts_with("https://") {
+                    return Err(WboxError::args(format!(
+                        "ADD 不支持远程 URL '{}'：构建期出网拿不到缓存与校验，\
+                         且常被网络策略挡住。请用 RUN + 你信任的下载工具（校验与重试都在你手里）",
+                        src
+                    )));
+                }
+                out.push(Instruction::Add {
                     src: src.to_string(),
                     dst: dst.to_string(),
                 });
@@ -160,7 +218,7 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
             other => {
                 return Err(WboxError::args(format!(
                     "Dockerfile 指令 '{}' 未实现（本子集支持 FROM/RUN/COPY/ENV/WORKDIR/\
-                     CMD/ENTRYPOINT/LABEL/EXPOSE/USER/ARG）；\
+                     CMD/ENTRYPOINT/LABEL/EXPOSE/USER/ARG/ADD）；\
                      静默跳过会产出一个看似构建成功、实则少做了事的镜像",
                     other
                 )));
@@ -172,6 +230,72 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
         Some(_) => Err(WboxError::args("Dockerfile 的第一条指令必须是 FROM")),
         None => Err(WboxError::args("Dockerfile 为空")),
     }
+}
+
+/// 这个文件是不是 tar 归档。
+///
+/// **看内容不看扩展名**：`ADD payload /x` 里那个没有后缀的文件可能就是 tar，
+/// 而 `notes.tar` 也可能只是个名字里带 tar 的文本。tar 在偏移 257 处有
+/// `ustar` 魔数，读 265 字节就能定。
+fn is_tar_archive(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 265];
+    let Ok(n) = f.read(&mut head) else {
+        return false;
+    };
+    n >= 265 && &head[257..262] == b"ustar"
+}
+
+/// 把 tar 解到 `dst`，返回解出的条目数。
+///
+/// 安全约束与 `wbox import` 同一套（F9.25）：逐条挡绝对路径与 `..`，
+/// 一律拼到 `dst` 之下。Dockerfile 是本仓的输入不假，但 `ADD` 的那个 tar
+/// 常常是第三方下载来的——按不可信输入处理才对。
+fn extract_tar_into(src: &Path, dst: &Path) -> Result<usize> {
+    let bytes = std::fs::read(src)
+        .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", src.display(), e)))?;
+    let mut ar = tar::Archive::new(std::io::Cursor::new(&bytes));
+    let mut count = 0usize;
+    let entries = ar
+        .entries()
+        .map_err(|e| WboxError::args(format!("读取归档失败：{}", e)))?;
+    for entry in entries {
+        let mut e = entry.map_err(|e| WboxError::args(format!("读取归档条目失败：{}", e)))?;
+        let path = e
+            .path()
+            .map_err(|e| WboxError::args(format!("归档条目路径非法：{}", e)))?
+            .into_owned();
+        let mut rel = PathBuf::new();
+        for c in path.components() {
+            match c {
+                std::path::Component::Normal(seg) => rel.push(seg),
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(WboxError::args(format!(
+                        "ADD 的归档里含绝对路径或 '..'（'{}'），拒绝解包",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dst.join(&rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| WboxError::args(format!("创建解包目录失败：{}", e)))?;
+        }
+        // 单条解不出来不中止：归档里常有本机建不出来的条目（设备节点要 root）。
+        // 与 `import` 同一取舍。
+        if e.unpack(&target).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// 剥掉值两侧成对的引号（`LABEL a="b c"` 的写法惯例）。
@@ -690,8 +814,15 @@ fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
     let mut h = Sha256::new();
     h.update(prev.as_bytes());
     h.update(format!("{:?}", ins).as_bytes());
-    if let Instruction::Copy { src, .. } = ins {
-        // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
+    // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
+    //
+    // **`ADD` 必须和 `COPY` 一起列在这里**：只哈希指令文本的话，源文件改了键不变，
+    // 后续步骤会命中旧快照，把**旧内容悄悄烤进镜像**——构建"成功"，内容是错的。
+    let src = match ins {
+        Instruction::Copy { src, .. } | Instruction::Add { src, .. } => Some(src),
+        _ => None,
+    };
+    if let Some(src) = src {
         let from = resolve_context_path(context, src)?;
         hash_path_into(&from, &mut h)?;
     }
@@ -798,7 +929,10 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     // 只有会改动 rootfs 的步骤才值得做快照；纯配置指令（ENV/CMD/...）不动
     // 文件系统，缓存它们只是徒增磁盘占用。
     let mutating = |i: &Instruction| {
-        matches!(i, Instruction::Run(_) | Instruction::Copy { .. })
+        matches!(
+            i,
+            Instruction::Run(_) | Instruction::Copy { .. } | Instruction::Add { .. }
+        )
     };
     let mut resume_from = 0usize;
     for idx in (0..instructions.len()).rev() {
@@ -866,7 +1000,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     cfg.workdir = base_cfg.working_dir.clone();
                 }
             }
-            Instruction::Copy { src, dst } => {
+            Instruction::Copy { src, dst, .. } => {
                 println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst);
                 let from = resolve_context_path(&opts.context, src)?;
                 let to = resolve_rootfs_path(&rootfs, dst)?;
@@ -882,6 +1016,35 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     #[cfg(not(windows))]
                     std::fs::copy(&from, &to)
                         .map_err(|e| WboxError::args(format!("COPY '{}' 失败：{}", src, e)))?;
+                }
+            }
+            Instruction::Add { src, dst } => {
+                println!("[{}/{}] ADD {} {}", step, instructions.len(), src, dst);
+                let from = resolve_context_path(&opts.context, src)?;
+                let to = resolve_rootfs_path(&rootfs, dst)?;
+                if from.is_dir() {
+                    // 目录：与 COPY 完全一致（docker 也不对目录做解包）
+                    std::fs::create_dir_all(&to)
+                        .map_err(|e| WboxError::args(format!("创建 ADD 目标目录失败：{}", e)))?;
+                    copy_build_tree(&from, &to)?;
+                } else if is_tar_archive(&from) {
+                    // **ADD 与 COPY 的唯一区别**：本地 tar 解开到目标目录。
+                    // 目标当成目录（docker 同此语义：ADD x.tar /dst 解到 /dst/）。
+                    std::fs::create_dir_all(&to)
+                        .map_err(|e| WboxError::args(format!("创建 ADD 目标目录失败：{}", e)))?;
+                    let n = extract_tar_into(&from, &to)?;
+                    println!("      （识别为 tar，已解开 {} 个条目）", n);
+                } else {
+                    if let Some(parent) = to.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            WboxError::args(format!("创建 ADD 目标目录失败：{}", e))
+                        })?;
+                    }
+                    #[cfg(windows)]
+                    copy_file_contents(&from, &to)?;
+                    #[cfg(not(windows))]
+                    std::fs::copy(&from, &to)
+                        .map_err(|e| WboxError::args(format!("ADD '{}' 失败：{}", src, e)))?;
                 }
             }
             Instruction::Env { key, value } => {

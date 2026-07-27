@@ -197,9 +197,10 @@ wbox
 | **命名卷** `volume create/ls/rm/inspect` | 有 | F9.35：`-v NAME:/path` 数据活得比容器久；卷就是 `~/.wbox/volumes/<名字>`，rootless 可用（门禁 VOL.1–VOL.6）|
 | `--entrypoint` / `--env-file` | 有 | F9.36：覆盖镜像 Entrypoint（空串=清空）；env-file 让密钥不必进命令行（门禁 EP.1–EP.5）|
 | 容器内工作目录 | 有 | F9.37：**修掉镜像 `WorkingDir` 与 `-w` 双双被静默丢掉的缺陷**；不存在时逐级创建，且建在容器可写层（门禁 WD.1–WD.5）|
+| `ADD` / `ps --filter` | 有 | F9.38：`ADD` 自动解开本地 tar（远程 URL 明确不做）；`ps --filter status=|name=`（门禁 AF.1–AF.7）|
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
-| 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`（门禁 EP.6–EP.7）；仍不做多阶段构建与 `ADD` 的远程取回 |
+| 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`，F9.38 补 `ADD`；**多阶段构建尚未实现**（认得 `COPY --from` 但明确拒绝，见 §2.4.3）；`ADD` 的远程取回**不做** |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
 | 镜像分层存储 | 有 | F9.16–F9.18：pull 保留原始层、可原样回推；build 产物 = 基础层+增量层（push 跳过基础层，PSH.8）；`FROM` 硬链接共享数据块（OVB.1–OVB.4）|
 | 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
@@ -395,8 +396,9 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.37 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.38 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
+| Q3 Podman | **多阶段构建**（`COPY --from`） | **要做**：把每个 `FROM` 分成独立阶段各建一棵 rootfs，非最终阶段建到临时目录，`COPY --from` 从那里取；多阶段时前缀缓存先禁用（跨阶段复用快照会是**错的**缓存，宁可不缓存）。当前认得写法并明确拒绝（F9.38） | Linux agent |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
 | Q3 Podman | `update` 改运行中容器的限额 | **不做**：没设限额就没有 cgroup 可改，做出来会时灵时不灵；与 F9.21 拒绝用 freezer 同一条理由 | — |
@@ -1077,7 +1079,8 @@ F9
 ├── F9.34 状态口径收敛与网络模式三态      —— [done]（门禁 INS.4–INS.5）
 ├── F9.35 命名卷（`wbox volume`）           —— [done]（门禁 VOL.1–VOL.6）
 ├── F9.36 `--entrypoint`/`--env-file`/四条 Dockerfile 指令 —— [done]（门禁 EP.1–EP.7）
-└── F9.37 容器内工作目录（WorkingDir / `-w`）—— [done]（仅 Linux 镜像模式，门禁 WD.1–WD.5）
+├── F9.37 容器内工作目录（WorkingDir / `-w`）—— [done]（仅 Linux 镜像模式，门禁 WD.1–WD.5）
+└── F9.38 `ADD` 与 `ps --filter`              —— [done]（门禁 AF.1–AF.7）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1216,6 +1219,34 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.38 `ADD` 与 `ps --filter`** `[done]`（门禁 AF.1–AF.7）。
+
+**`ADD` 与 `COPY` 只差一条**：源是本地 tar 时自动解开。识别**看内容不看扩展名**
+（偏移 257 处的 `ustar` 魔数）——`ADD payload /x` 里那个没后缀的文件可能就是 tar，
+而 `notes.tar` 也可能只是名字里带 tar 的文本。解包的安全约束与 `wbox import`
+同一套（F9.25）：逐条挡绝对路径与 `..`，一律拼到目标之下——Dockerfile 是本仓输入
+不假，但 `ADD` 的那个 tar 常常是第三方下载来的。
+
+**远程 URL 明确不做**（AF.2），而且是**拒绝**不是静默当路径：构建期出网拿不到缓存
+与校验，且常被网络策略挡住——而 wbox 的目标用户里正有「出网要审批」的那一类
+（§3.1）。要取远程文件用 `RUN` + 自己信任的下载工具，校验与重试都在自己手里。
+
+**`ADD` 必须和 `COPY` 一起进构建缓存键**（AF.4）。只哈希指令文本的话，源文件改了
+键不变，后续步骤会命中旧快照，把**旧内容悄悄烤进镜像**——构建「成功」，内容是错的。
+这条是加 `ADD` 时顺带查出来的：新指令加进枚举很容易，忘记同步 `step_key`
+与 `mutating` 两处判定却不会有任何报错。
+
+**`ps --filter`** 支持 `status=` 与 `name=`（子串，与 docker 一致），多个条件是**与**
+关系。状态判定**复用 `status::label` 同一份口径**——两处各判一次的话，
+`--filter status=paused` 会因为对「什么叫 paused」的理解不同而筛出错的东西。
+**认不得的过滤键当场报错**（AF.7）：静默忽略会让 `--filter stauts=running` 这种手滑
+变成「列出了全部」，而用户以为自己筛过了。
+
+**多阶段构建（`COPY --from`）认得写法但明确拒绝**（AF.3）。当成普通 `COPY` 更糟——
+找不到同名文件时报一个与真实原因无关的错，找得到则**悄悄打包了错的东西**。
+它要求把每个 `FROM` 分成独立阶段各建一棵 rootfs，是 `run_build` 的结构性改造；
+不在同一轮里既动那个函数又赶别的功能，列进 §2.4.3 的下一步。
 
 **F9.37 容器内工作目录** `[done]`（仅 Linux 镜像模式，门禁 WD.1–WD.5）。
 

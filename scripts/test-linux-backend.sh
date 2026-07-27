@@ -2061,6 +2061,96 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== AF ADD 与 ps --filter（PRD F9.38）==="
+
+AFH=$WORK/afhome
+rm -rf "$AFH" && mkdir -p "$AFH" "$WORK/afctx/pack/sub"
+AFD=$AFH/.wbox/images/registry-1.docker.io/library_aftest/latest
+mkdir -p "$AFD/rootfs/bin"
+cp "$BUSYBOX" "$AFD/rootfs/bin/busybox"
+for a in sh echo cat sleep; do ln -sf busybox "$AFD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":""}}' > "$AFD/config.json"
+echo '[]' > "$AFD/layers.json"; echo '{}' > "$AFD/manifest.json"
+
+echo tarred > "$WORK/afctx/pack/sub/f"
+( cd "$WORK/afctx/pack" && tar -cf ../payload.tar sub )
+echo plainfile > "$WORK/afctx/plain.txt"
+printf 'FROM aftest\nADD payload.tar /unpacked\nADD plain.txt /plain.txt\n' > "$WORK/afctx/Dockerfile"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t addtest:1 -f "$WORK/afctx/Dockerfile" "$WORK/afctx" 2>&1); arc=$?
+# ADD 与 COPY 的唯一区别就是"本地 tar 自动解开"，判据落在解出来的文件内容上
+aunp=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /unpacked/sub/f 2>&1 | tail -1)
+aplain=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /plain.txt 2>&1 | tail -1)
+if [ "$arc" -eq 0 ] && [ "$aunp" = "tarred" ] && [ "$aplain" = "plainfile" ]; then
+  report PASS "AF.1 ADD 自动解开本地 tar，非归档文件原样拷贝"
+else
+  report FAIL "AF.1 ADD" "rc=$arc 解包内容='$aunp' 普通文件='$aplain'"
+fi
+
+# 远程 URL 明确拒绝：构建期出网拿不到缓存与校验，且常被网络策略挡住
+printf 'FROM aftest\nADD https://example.com/x /z\n' > "$WORK/afctx/D2"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t afx:1 -f "$WORK/afctx/D2" "$WORK/afctx" 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '远程 URL'; then
+  report PASS "AF.2 ADD 拒绝远程 URL 并说明改用 RUN + 下载工具"
+else
+  report FAIL "AF.2 ADD 远程 URL" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
+fi
+
+# COPY --from 认得写法但尚未实现：必须明确拒绝，不能当成普通 COPY
+# ——当成普通 COPY 找得到同名文件的话，会悄悄打包错的东西。
+printf 'FROM aftest\nCOPY --from=builder /a /b\n' > "$WORK/afctx/D3"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t afx:1 -f "$WORK/afctx/D3" "$WORK/afctx" 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '多阶段构建'; then
+  report PASS "AF.3 COPY --from 明确拒绝（不静默当成普通 COPY）"
+else
+  report FAIL "AF.3 COPY --from" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
+fi
+
+# ADD 的源内容变了，缓存必须失效——只哈希指令文本的话会把旧内容烤进镜像
+echo CHANGED > "$WORK/afctx/plain.txt"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t addtest:1 -f "$WORK/afctx/Dockerfile" "$WORK/afctx" 2>&1)
+aplain=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /plain.txt 2>&1 | tail -1)
+if [ "$aplain" = "CHANGED" ]; then
+  report PASS "AF.4 ADD 源内容变化使构建缓存失效（不把旧内容烤进镜像）"
+else
+  report FAIL "AF.4 ADD 缓存失效" "重建后内容='$aplain'（期望 CHANGED）"
+fi
+
+# ps --filter：status 与 name，多条件是与关系
+HOME=$AFH "$WBOX_ABS" run -d --name affa aftest -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" run -d --name affb aftest -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" run -d --name afgone aftest -- /bin/echo x >/dev/null 2>&1
+sleep 2
+HOME=$AFH "$WBOX_ABS" pause affa >/dev/null 2>&1
+sleep 1
+arun=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=running -q | tr '\n' ' ')
+apau=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=paused -q | tr '\n' ' ')
+aexit=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=exited -q | tr '\n' ' ')
+if [ "$arun" = "affb " ] && [ "$apau" = "affa " ] && [ "$aexit" = "afgone " ]; then
+  report PASS "AF.5 ps --filter status= 区分 running/paused/exited"
+else
+  report FAIL "AF.5 filter status" "running='$arun' paused='$apau' exited='$aexit'"
+fi
+
+aand=$(HOME=$AFH "$WBOX_ABS" ps -a --filter name=aff --filter status=paused -q | tr '\n' ' ')
+if [ "$aand" = "affa " ]; then
+  report PASS "AF.6 多个 --filter 是与关系，name 按子串匹配"
+else
+  report FAIL "AF.6 filter 组合" "得到 '$aand'（期望 affa）"
+fi
+
+# 认不得的过滤键要当场报错：静默忽略会让手滑变成"列出了全部"而用户以为筛过了
+aout=$(HOME=$AFH "$WBOX_ABS" ps --filter stauts=running 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '不支持的过滤键'; then
+  report PASS "AF.7 未知过滤键当场报错（不静默忽略）"
+else
+  report FAIL "AF.7 未知过滤键" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 140)"
+fi
+
+HOME=$AFH "$WBOX_ABS" unpause affa >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" rm -f $(HOME=$AFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+rm -rf "$AFH" "$WORK/afctx"
+
+echo
 echo "=== WD 容器内工作目录（PRD F9.37）==="
 
 # 此前**镜像声明的 WorkingDir 与 -w 都被静默丢掉**：容器一律起在 /。

@@ -13,13 +13,59 @@ struct PsOptions {
     all: bool,
     /// 只输出名字，一行一个（`PRD.md` F9.29）
     quiet: bool,
+    /// `--filter k=v`，可重复（`PRD.md` F9.38）。多个条件是**与**关系。
+    filters: Vec<(String, String)>,
 }
 
 fn parse(args: &[String]) -> Result<PsOptions> {
     let mut o = PsOptions {
         all: false,
         quiet: false,
+        filters: Vec::new(),
     };
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "-f" || a == "--filter" {
+            i += 1;
+            let v = args.get(i).ok_or_else(|| {
+                crate::error::WboxError::args("ps: --filter 缺少取值（形如 status=running）")
+            })?;
+            let (k, val) = v.split_once('=').ok_or_else(|| {
+                crate::error::WboxError::args(format!(
+                    "ps: --filter '{}' 不是 KEY=VALUE 形式（支持 status= / name=）",
+                    v
+                ))
+            })?;
+            // 认不得的键要**当场报错**：静默忽略会让 `--filter stauts=running`
+            // 这种手滑变成"列出了全部"，而用户以为自己筛过了。
+            if !matches!(k, "status" | "name") {
+                return Err(crate::error::WboxError::args(format!(
+                    "ps: 不支持的过滤键 '{}'（支持 status= / name=）",
+                    k
+                )));
+            }
+            o.filters.push((k.to_string(), val.to_string()));
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    let args: Vec<String> = {
+        // 上面已消费掉 --filter 及其取值，剩下的交给下面的开关解析
+        let mut out = Vec::new();
+        let mut j = 0;
+        while j < args.len() {
+            if args[j] == "-f" || args[j] == "--filter" {
+                j += 2;
+                continue;
+            }
+            out.push(args[j].clone());
+            j += 1;
+        }
+        out
+    };
+    let args = &args[..];
     for a in args {
         match a.as_str() {
             "-a" | "--all" => o.all = true,
@@ -33,7 +79,8 @@ fn parse(args: &[String]) -> Result<PsOptions> {
             }
             other => {
                 return Err(crate::error::WboxError::args(format!(
-                    "ps: 未知参数 '{}'（支持 -a/--all、-q/--quiet，及组合 -aq）",
+                    "ps: 未知参数 '{}'（支持 -a/--all、-q/--quiet、组合 -aq、\
+                     以及 --filter status=|name=）",
                     other
                 )))
             }
@@ -45,9 +92,23 @@ fn parse(args: &[String]) -> Result<PsOptions> {
 pub fn cmd_ps(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
     let all = runstate::list()?;
+    // 状态标签走共享口径，过滤也用同一份——否则 `--filter status=paused`
+    // 会因为两处对"什么叫 paused"的判断不同而筛出错的东西。
+    let label_of = |e: &crate::runstate::Entry, l: &Liveness| {
+        super::status::label(&runstate::dir_for(&e.name).unwrap_or_default(), *l)
+    };
     let rows: Vec<_> = all
         .iter()
         .filter(|(_, l)| opts.all || *l == Liveness::Running)
+        .filter(|(e, l)| {
+            // 多个 --filter 是**与**关系（docker 同此语义）
+            opts.filters.iter().all(|(k, v)| match k.as_str() {
+                "status" => label_of(e, l) == v,
+                // name 用**子串**匹配，与 docker 一致
+                "name" => e.name.contains(v.as_str()),
+                _ => true,
+            })
+        })
         .collect();
 
     // `-q` 是给脚本用的：`wbox rm -f $(wbox ps -aq)`。所以**只出名字、别的一律不出**
@@ -63,7 +124,10 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
     // 空表也要给一行说明，而不是什么都不打印——"没输出"分不清是"没有容器"
     // 还是"命令没跑起来"。
     if rows.is_empty() {
-        if all.is_empty() {
+        if !opts.filters.is_empty() {
+            // 与"本来就没有容器"分开说：不然用户不知道是筛没了还是真没有
+            println!("没有符合过滤条件的容器（共 {} 条记录）。", all.len());
+        } else if all.is_empty() {
             println!("没有已登记的容器。");
         } else {
             println!("没有运行中的容器（有 {} 条非运行记录，用 -a 查看）。", all.len());
@@ -136,6 +200,14 @@ mod tests {
         assert!(parse(&["-a".to_string()]).unwrap().all);
         assert!(parse(&["--all".to_string()]).unwrap().all);
         assert!(parse(&["-q".to_string()]).unwrap().quiet);
+        let a: Vec<String> = ["--filter", "status=running", "-a"].iter().map(|s| s.to_string()).collect();
+        let o = parse(&a).unwrap();
+        assert!(o.all);
+        assert_eq!(o.filters, vec![("status".to_string(), "running".to_string())]);
+        // 认不得的键要当场报错：静默忽略会让手滑变成"列出了全部"而用户以为筛过了
+        assert!(parse(&["--filter".to_string(), "stauts=running".to_string()]).is_err());
+        assert!(parse(&["--filter".to_string(), "noequals".to_string()]).is_err());
+        assert!(parse(&["--filter".to_string()]).is_err(), "缺取值应报错");
         assert!(parse(&["--quiet".to_string()]).unwrap().quiet);
         // docker 用户的肌肉记忆：`ps -aq`
         let o = parse(&["-aq".to_string()]).unwrap();
