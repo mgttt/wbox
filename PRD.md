@@ -76,31 +76,88 @@ wbox
 
 ### 2.4 对标基线
 
-四个象限各有明确参照物，并共同构成长期产品目标。**参照物不是当前完成度**：
-每格同时写明现状、近期差距与可演进后端；默认的免安装/无管理员模式不能限制
-未来增加用户明确选择的增强模式。
+四个象限各有明确参照物。**列参照物不等于承诺功能对等**——每格逐条列出参照物的
+特征能力与 wbox 的实际状态，能力上限受 §2.3 约束时如实标注。
 
-| 象限 | 参照物 | 现状 | 主要差距 |
-|---|---|---|---|
-| Windows 宿主 × Windows 程序 | Sandboxie-Plus | AppContainer + Job：能力/完整性级别隔离、默认断网、进程树回收、`exec` | **无文件系统写重定向、无注册表虚拟化**；无命名沙箱的持久化存储 |
-| Windows 宿主 × Linux 镜像 | WSL2 / Podman / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离；每次运行使用私有可写 rootfs | 私有层首版为全量复制；无卷挂载、端口映射、镜像构建；当前纯用户态性能低于虚拟化后端 |
-| Linux 宿主 × Linux 镜像 | Podman / Docker | rootless user/PID/mount/net namespace + cgroup v2 + OCI pull/run + 生命周期；已支持 bind volume | 无端口映射、镜像构建/push、compose、restart policy |
-| Linux 宿主 × Windows 程序 | Wine | 复用 Linux 隔离层调用系统 Wine | 不自带 Wine（依赖宿主安装）；无 wineprefix 管理；GUI 未覆盖 |
+状态记法：`有` = 已实现且有持续门禁；`部分` = 可用但有明确缺口；
+`无` = 未实现；`不做` = 撞天花板或属非目标。
 
-**两条当前架构边界必须说破**，但不把它们定义成永久产品上限：
+#### Q1 Windows 宿主 × Windows 程序 —— 对标 Sandboxie-Plus
 
-1. **Windows 程序沙箱达不到 Sandboxie-Plus 的隔离强度。** Sandboxie 用
-   minifilter 驱动做文件/注册表重定向，而 wbox 默认模式不装驱动（§2.3，也是
-   "免安装、不要管理员权限"这一前提的直接后果）。用户态能做到的是
-   AppContainer 的能力裁剪 + 目录 ACL + per-package 存储；**写重定向的完整性
-   弱于驱动方案**。近期不宣称等价；长期可评估独立、显式授权的增强后端，
-   但不得让它破坏默认免安装路径。
-2. **Windows 上跑 Linux 镜像的性能与 WSL2 不是一个量级。** 没有虚拟化时靠
-   用户态解释/JIT，近期定位是"没有 VT-x/WSL2 时仍然能跑"。长期可加入可选
-   WSL2/虚拟化加速后端，共用同一 CLI、镜像缓存协议与测试契约。
+| 参照物特征能力 | wbox | 说明 |
+|---|---|---|
+| 进程隔离与降权 | 有 | AppContainer SID + 低完整性级别 |
+| 默认断网 | 有 | 不授 `INTERNET_CLIENT` capability |
+| 资源限额（内存/CPU/进程数）| 有 | Job Object；Sandboxie 本身反而不强调这块 |
+| 进程树可靠回收 | 有 | Job `KILL_ON_JOB_CLOSE` |
+| 生命周期（ps/stop/rm/logs/exec/inspect/wait）| 有 | F8 全套 |
+| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动；wbox 不装驱动（天花板一）。取证见 §4.9 W3 |
+| **注册表虚拟化** | **不做** | 同上 |
+| 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念 |
+| 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子 |
+| GUI 程序沙箱 | 不做 | §2.3 非目标 |
 
-对标的推进顺序按**跨象限收益**排：卷挂载与端口映射在三个象限同时有用，
-镜像构建只影响两个，Windows 文件系统重定向只影响一个且受天花板限制。
+**这一格是四象限里差距最大的**，且差距的主因不是工作量而是架构前提：
+不装驱动就做不到驱动级别的重定向完整性。
+
+#### Q2 Windows 宿主 × Linux 镜像 —— 对标 WSL2 / Docker Desktop
+
+| 参照物特征能力 | wbox | 说明 |
+|---|---|---|
+| 运行 Linux OCI 镜像 | 有 | `wbox-linux` 用户态执行；已实机跑通 Alpine/Ubuntu |
+| 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
+| 双层隔离 | 有 | AppContainer 套模拟器 |
+| 可写 rootfs 层 | 有 | 私有可写层（远端已实现） |
+| **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
+| 卷挂载 `-v` | 无 | 受天花板一牵连：Windows 侧无路径重定向手段，`-v` 明确报错 |
+| 端口映射 `-p` | 无 | Linux 侧的用户态转发依赖 `setns`，Windows 无对应原语 |
+| 镜像构建 | 无 | `build` 目前仅 Linux 宿主（`RUN` 依赖 Linux 容器路径）→ §4.9 W4 |
+| 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
+| systemd / 服务 | 不做 | 非目标 |
+
+#### Q3 Linux 宿主 × Linux 镜像 —— 对标 Podman / Docker
+
+**四象限里最接近对标的一格。**
+
+| 参照物特征能力 | wbox | 说明 |
+|---|---|---|
+| rootless 运行 | 有 | user/PID/mount/net namespace |
+| 资源限额 | 有 | cgroup v2 首选，受限时明确回退或拒绝 |
+| `run/exec/ps/logs/stop/rm/inspect/wait` | 有 | F8 全套 + 远端补的 inspect/wait |
+| `--detach` | 有 | |
+| 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
+| 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
+| 镜像 pull/list/show/rm/inspect | 有 | |
+| 镜像构建 | 部分 | F9.3 子集；**无分层缓存**，`FROM` 整份复制 |
+| overlay 分层存储 | 无 | rootless 下 overlayfs 未必可用 |
+| 镜像 push | 无 | |
+| compose / pod | 无 | |
+| restart policy / healthcheck | 无 | |
+| 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
+| `--user` / `--cap-add` / seccomp 剖面 | 无 | rootless 下语义与 docker 不同，需先定契约 |
+| Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
+
+#### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
+
+| 参照物特征能力 | wbox | 说明 |
+|---|---|---|
+| 运行 Windows CLI 程序 | 有 | 复用 Linux 隔离层调用系统 Wine |
+| PE 判定与误判防护 | 有 | 看完整签名而非只看 `MZ`（门禁 W.4/W.5）|
+| 在隔离内运行（Wine 本身不提供）| **有，这是 wbox 的增量** | Wine 只做 ABI 翻译，不做隔离 |
+| 自带 Wine | 无 | 依赖宿主已装；缺失时明确报错 |
+| `wineprefix` 与宿主隔离 | 有 | 用专用的 `~/.wbox/wineprefix`，不碰用户自己的 `~/.wine` |
+| `wineprefix` **容器之间**隔离 | 无 | 所有容器共用**同一个** `~/.wbox/wineprefix`，会互相看到对方的注册表/C 盘改动 → §4.9 L2 |
+| GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
+
+### 2.5 两条硬天花板
+
+不说破这两条，"对标"就只是口号：
+
+1. **不装内核驱动**（§2.3）。直接后果：Q1 的文件/注册表写重定向做不到
+   Sandboxie 级别的完整性，并牵连 Q2 的卷挂载。这是"免安装、不要管理员权限"
+   这一产品前提的代价，不是待办事项。
+2. **无虚拟化时性能不可比**。Q2 靠用户态解释/JIT，定位是"没有 VT-x/WSL2 时
+   仍然能跑"，不是性能对标。
 
 ## 3. 用户与场景
 
@@ -737,7 +794,9 @@ TODO-PLAN
 ├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
-└── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
+├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
+├── W4 build 在 Windows 宿主的可行性          [Windows agent] 待认领
+└── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 待做
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -804,6 +863,48 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 已删除的记录，最后一次 `wbox rm` 的预期非零码残留成整个 PowerShell 脚本的退出
 码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
 退出，不会被掩盖。
+
+### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]`
+
+**背景**。F9.3 的 `wbox build` 目前**只在 Linux 宿主可用**：`RUN` 复用的是
+Linux 容器执行路径。Windows 上要跑 `RUN`，得让 `wbox-linux`（blink）在私有可写
+rootfs 里执行命令——这条路径本身已经通了（Q2 已能跑 OCI 镜像），所以问题不是
+"能不能执行"，而是几处语义：
+
+1. `RUN` 的每一步都要写进 rootfs，而 Windows 侧的可写层刚落地——`build` 能否
+   直接复用它，还是需要每步一个独立层。
+2. `FROM` 走整份 rootfs 复制，Windows 上的符号链接复制已有专门处理
+   （`copy_rootfs_symlink` 带逃逸约束）；构建路径要复用那套，别另写一份。
+3. 构建期是否需要网络。Linux 侧 `RUN` 默认放行网络（与 docker build 一致），
+   Windows 侧要确认 AppContainer 下的等价做法。
+
+**做完的标准**：Windows 上 `wbox build` 能产出可被 `wbox run` 直接运行的镜像，
+且有持续门禁；做不到时在 §2.4 的 Q2 表格里如实标注，别让 `build` 在 Windows
+上静默产出半成品镜像。
+
+### L2 Wine 象限的 `wineprefix` 隔离 `[Linux agent]`
+
+**这是本轮做四象限检视时发现的缺口，之前没人记过。**
+
+先把已经做对的部分说清楚（我第一版把这条写错了，核过代码才改正）：wbox
+**没有**用宿主默认的 `~/.wine`，而是专用的 `~/.wbox/wineprefix`
+（见 `backend::wine::default_prefix`），所以**与宿主的隔离是有的**，
+用户自己装了别的应用的 `~/.wine` 不会被污染。
+
+**真正缺的是容器之间的隔离**：所有 wbox 容器共用**同一个**
+`~/.wbox/wineprefix`。两个容器先后跑 Windows 程序时会互相看到对方对注册表、
+C 盘布局、已装组件的改动——而按容器隔离的默认约束（§2.2），这是不该发生的。
+
+**要定的语义**：
+
+- 每容器一个独立 prefix（放在状态目录下？还是镜像缓存下？）——独立性与
+  "每次都要重建 prefix 很慢"之间要权衡。
+- 是否提供跨运行复用的命名 prefix（类似命名卷），否则每次 `run` 都重建。
+- prefix 初始化失败时的行为：明确报错，不要退回共用宿主 prefix——那正是要
+  消除的问题。
+
+**判据**：两个容器先后修改 prefix，互相不可见；且门禁要能验证这一点
+（现有 W 段可扩展）。
 
 ### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

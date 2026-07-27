@@ -37,16 +37,21 @@ Portable Windows 发布包包含两个文件：
 
 ## 对标基线
 
-| 象限 | 参照物 | 差距 |
+| 象限 | 参照物 | 主要差距 |
 |---|---|---|
-| Windows × Windows 程序 | Sandboxie-Plus | 无文件系统写重定向、无注册表虚拟化 |
-| Windows × Linux 镜像 | WSL2 / Docker Desktop | 无卷挂载（撞驱动天花板）/端口映射/构建；性能不可比 |
-| Linux × Linux 镜像 | Podman / Docker | 已有 `-v` 卷挂载、`-p` 端口转发（**仅 TCP**）、`build` Dockerfile 子集；无分层缓存/compose |
-| Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖 |
+| Windows × Windows 程序 | Sandboxie-Plus | **无文件系统写重定向、无注册表虚拟化**（撞驱动天花板）|
+| Windows × Linux 镜像 | WSL2 / Docker Desktop | 无卷挂载/端口映射/构建；**性能不可比** |
+| Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build` 子集；无分层缓存、compose、push、自定义网络 |
+| Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；wineprefix 容器间未隔离；GUI 未覆盖 |
 
-两条硬天花板：wbox **不装内核驱动**，所以 Windows 程序沙箱达不到 Sandboxie
-（minifilter）级别的写重定向完整性；没有虚拟化时 Windows 上跑 Linux 镜像靠
-用户态执行，**性能与 WSL2 不是一个量级**。详见 [PRD.md](PRD.md) §2.4。
+**两条硬天花板**（不说破的话"对标"只是口号）：
+
+1. wbox **不装内核驱动**——这是"免安装、不要管理员权限"的直接代价。因此
+   Windows 程序沙箱达不到 Sandboxie（minifilter）级别的写重定向完整性。
+2. 没有虚拟化时，Windows 上跑 Linux 镜像靠用户态执行，**性能与 WSL2 不是一个
+   量级**；定位是"没有 VT-x/WSL2 时仍然能跑"。
+
+逐条能力对照见 [PRD.md](PRD.md) §2.4，天花板见 §2.5。
 
 ## 能力边界
 
