@@ -693,7 +693,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 ```text
 F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
-├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
+├── F9.2 端口映射 `-p`                        —— [verify]（Linux 侧，仅 TCP；relay 修复待 CI）
 ├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux 侧）
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
@@ -734,23 +734,27 @@ F9
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
 `--rm`、stop、启动失败与 supervisor 强杀都不能泄漏句柄、状态目录或宿主权限。
 
-**F9.2 端口映射** `[done]`（Linux 宿主，**仅 TCP**；门禁 N2.1–N2.3）。
+**F9.2 端口映射** `[verify]`（Linux 宿主，**仅 TCP**；门禁 N2.1–N2.3）。
 
 选了"wbox 自己做用户态转发"这条路：veth 要 `CAP_NET_ADMIN`（rootless 拿不到），
 slirp4netns/pasta 要用户先装（与 §2.2「免安装」冲突，只能当可选加速路径）。
 
-**关键机制已实测确认，不是推断**：network namespace 按**线程**归属，且父 user
-namespace 里 euid 相同的进程对子 namespace 持有权能——所以多线程进程里的
-**单个线程可以 `setns` 进容器 netns**（实测 `setns` 返回 0，该线程
-`/proc/thread-self/ns/net` 确实变成容器的那个）。这决定了实现形态：线程间
-**共享 fd 表**，容器侧建好的 `TcpStream` 直接经 channel 交给宿主侧线程，
-**不需要 `SCM_RIGHTS` 跨进程传 fd，也不必每条连接 fork**。
+**namespace 权限链必须完整处理**：目标 netns 由容器自己的 user namespace
+管辖，宿主不能只调用 `setns(net)`；必须先进入目标 `user`，取得其中的 capability，
+再进入 `net`。同时 Linux 不允许多线程进程里的单个线程加入 user namespace，
+所以常驻连接器线程方案在 CI 中实际失败为宿主端口 `ConnectionRefused`。
+
+当前实现为每条宿主连接派生一个隐藏 relay 子进程：宿主 listener 接受的 socket
+作为 relay 的 stdin/stdout；`Command::pre_exec` 在 fork 后的单线程阶段按
+`user -> net` 调用 `setns`，relay 随后连接容器的 `127.0.0.1:GUEST` 并双向复制。
+guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试，不把正常启动竞态
+暴露为随机失败。该修复须由 Linux N2.1 门禁确认后才恢复 `[done]`。
 
 几处刻意的取舍：
 
 - 绑 **127.0.0.1** 而非 0.0.0.0：一条 `-p` 不应顺手把容器端口暴露到局域网。
-- 连接器线程**确认进入容器 netns 后才开始监听**。否则首个连接可能连到宿主上
-  ——那等于把宿主端口冒充成容器端口，比转发失败严重得多。
+- listener 始终留在宿主 netns；只有 relay 子进程进入容器 netns，容器连接绝不
+  在宿主 namespace 建立。
 - 与 `--allow-network` **冲突时报错**（N2.3）：后者不建 netns、端口本就在宿主上，
   再转发既无意义又会撞端口；静默二选一会让用户误判实际生效的隔离强度。
 - `-P`（发布镜像声明的全部端口）**仍未实现**：它要读 config 的 ExposedPorts，

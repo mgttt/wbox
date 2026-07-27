@@ -77,8 +77,9 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   模拟执行，未就绪时会得到明确错误。
 
 兼容范围:
-  仅兼容上述可兑现的运行习惯；不支持端口发布、Windows volume/bind、
-  --mount、daemon API、Compose、pod 或远程上下文，传入未实现选项会明确报错。
+  仅兼容上述可兑现的运行习惯；端口发布当前仅支持 Linux 宿主 TCP，
+  不支持 Windows volume/bind、--mount、daemon API、Compose、pod 或远程上下文，
+  传入未实现选项会明确报错。
 
 示例:
   wbox run --memory 256 --cpu-pct 50 -- cmd.exe /c echo hello
@@ -170,6 +171,8 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
         Some("stop") => stop::cmd_stop(&args[1..]),
+        #[cfg(target_os = "linux")]
+        Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),
         Some("--help") | Some("-h") => {
             print!("{}", USAGE);
             Ok(0)

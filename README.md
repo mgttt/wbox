@@ -73,9 +73,9 @@ Portable Windows 发布包包含两个文件：
 两侧代码同一套，Windows 侧的存活判定与进程终止有单测在 windows runner 上真跑；
 但**端到端的后台流程目前只在 Linux 有门禁**，Windows 上尚未逐条验证过。
 
-当前不提供文件系统 overlay、注册表虚拟化、端口映射、GUI 桌面隔离、驱动隔离，
-`exec`（进入运行中的容器）**只在 Linux 宿主可用**：Linux 走 `setns`，
-Windows 没有对应原语，可行性取证见 PRD §4.9 W2。
+当前不提供文件系统 overlay、注册表虚拟化、GUI 桌面隔离、驱动隔离；端口映射
+目前只覆盖 Linux 宿主的 TCP。`exec`（进入运行中的容器）**只在 Linux 宿主可用**：
+Linux 走 `setns`，Windows 没有对应原语，可行性取证见 PRD §4.9 W2。
 
 ## 文档
 

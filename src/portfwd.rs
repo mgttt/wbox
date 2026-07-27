@@ -10,14 +10,13 @@
 //!
 //! # 关键机制（实测确认，不是推断）
 //!
-//! network namespace 是**按线程**归属的，且父 user namespace 里 euid 相同的
-//! 进程对子 namespace 持有权能。因此**多线程进程里的单个线程可以 `setns`
-//! 进容器 netns**——实测 `setns` 返回 0 且该线程 `/proc/thread-self/ns/net`
-//! 确实变成了容器的那个。
-//!
-//! 这一点决定了整个实现的形态：线程之间**共享 fd 表**，所以容器侧建立的
-//! `TcpStream` 可以直接经 channel 交给宿主侧线程使用，**不需要 `SCM_RIGHTS`
-//! 跨进程传 fd**，也不必每条连接 fork 一个助手。
+//! 目标 netns 由容器自己的 user namespace 管辖。宿主进程不能只做
+//! `setns(net)`：必须先进入 `user`，获得该 user namespace 内的 capability，
+//! 再进入 `net`。Linux 又禁止多线程进程中的单个线程加入 user namespace，
+//! 因此每条连接使用一个 wbox relay 子进程：`Command::pre_exec` 在 fork 后的
+//! 单线程阶段按 `user -> net` 附着，已接受的宿主 socket 则作为 relay 的
+//! stdin/stdout 传入。这样 listener 始终留在宿主 netns，guest 连接只会在
+//! 容器 netns 建立。
 //!
 //! # 能力边界
 //!
@@ -91,86 +90,120 @@ pub fn reject_if_unsupported(ports: &[PortMap]) -> Result<()> {
 mod imp {
     use super::PortMap;
     use std::io;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpListener;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::process::CommandExt;
     use std::os::unix::io::AsRawFd;
-    use std::sync::mpsc;
 
-    /// 向容器 netns 内发起连接的请求：附一个回程 channel。
-    type ConnectRequest = mpsc::Sender<io::Result<TcpStream>>;
-
-    /// 起一个常驻**容器 netns** 的连接器线程。
-    ///
-    /// 它是本模块的关键：`setns` 只改**调用线程**的 netns，所以这一个线程
-    /// 进去之后就一直待在容器网络里，专职建立到 guest 端口的连接。建好的
-    /// `TcpStream` 经 channel 回传——同进程线程共享 fd 表，宿主侧线程可以直接用。
-    fn spawn_connector(container_pid: u32, guest_port: u16) -> Option<mpsc::Sender<ConnectRequest>> {
-        let (tx, rx) = mpsc::channel::<ConnectRequest>();
-        let ns_path = format!("/proc/{}/ns/net", container_pid);
-        let f = std::fs::File::open(&ns_path).ok()?;
-        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
-        std::thread::spawn(move || {
-            // SAFETY: setns 只改本线程的 netns 归属，不触碰其它线程的状态。
-            let ok = unsafe { libc::setns(f.as_raw_fd(), libc::CLONE_NEWNET) } == 0;
-            let _ = ready_tx.send(ok);
-            if !ok {
-                return;
-            }
-            // 此后本线程的所有 socket 都建在容器网络里
-            while let Ok(reply) = rx.recv() {
-                let _ = reply.send(TcpStream::connect(("127.0.0.1", guest_port)));
-            }
-        });
-        // 等连接器确认已进入容器 netns 再开始监听，否则首个连接会连到宿主上
-        // ——那等于把宿主端口暴露成"容器端口"，比转发失败严重得多。
-        match ready_rx.recv() {
-            Ok(true) => Some(tx),
-            _ => None,
-        }
+    fn namespace_files(container_pid: u32) -> io::Result<Vec<(std::fs::File, libc::c_int)>> {
+        [("user", libc::CLONE_NEWUSER), ("net", libc::CLONE_NEWNET)]
+            .into_iter()
+            .map(|(name, flag)| {
+                std::fs::File::open(format!("/proc/{container_pid}/ns/{name}"))
+                    .map(|file| (file, flag))
+            })
+            .collect()
     }
 
-    /// 双向对拷。任一方向结束就关掉写端，让对端读到 EOF 后自然收尾。
-    fn relay(host: TcpStream, guest: TcpStream) {
-        let (mut h_r, mut h_w) = (host.try_clone().ok(), host);
-        let (mut g_r, mut g_w) = (guest.try_clone().ok(), guest);
-        let (Some(hr), Some(gr)) = (h_r.take(), g_r.take()) else {
-            return;
-        };
-        let up = std::thread::spawn(move || {
-            let mut hr = hr;
-            let _ = io::copy(&mut hr, &mut g_w);
-            let _ = g_w.shutdown(std::net::Shutdown::Write);
+    fn spawn_relay(
+        container_pid: u32,
+        guest_port: u16,
+        host_stream: std::net::TcpStream,
+    ) -> io::Result<()> {
+        let namespaces = namespace_files(container_pid)?;
+        let input = host_stream.try_clone()?;
+        let executable = std::env::current_exe()?;
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("__port-relay")
+            .arg(guest_port.to_string())
+            .stdin(std::process::Stdio::from(OwnedFd::from(input)))
+            .stdout(std::process::Stdio::from(OwnedFd::from(host_stream)));
+        // SAFETY: pre_exec 在 fork 后、exec 前的单线程子进程里运行；这里只调用
+        // async-signal-safe 的 setns，namespace fd 已在父进程预先打开。
+        unsafe {
+            command.pre_exec(move || {
+                for (file, flag) in &namespaces {
+                    if libc::setns(file.as_raw_fd(), *flag) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn()?;
+        // Child::drop 不会回收进程。每条活动连接单独等待，避免积累 zombie。
+        std::thread::spawn(move || {
+            let _ = child.wait();
         });
-        let mut gr = gr;
-        let _ = io::copy(&mut gr, &mut h_w);
-        let _ = h_w.shutdown(std::net::Shutdown::Write);
-        let _ = up.join();
+        Ok(())
     }
 
     /// 为一条映射起监听。绑定 **127.0.0.1** 而不是 0.0.0.0：
     /// 默认只对本机开放，避免一条 `-p` 就把容器端口暴露到局域网。
     pub fn serve(container_pid: u32, map: PortMap) -> std::io::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", map.host))?;
-        let Some(connector) = spawn_connector(container_pid, map.guest) else {
-            return Err(io::Error::other("无法进入容器 netns 建立连接器线程"));
-        };
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(host_stream) = stream else { continue };
-                let (rtx, rrx) = mpsc::channel();
-                if connector.send(rtx).is_err() {
-                    break; // 连接器已退出（容器没了）
-                }
-                match rrx.recv() {
-                    Ok(Ok(guest_stream)) => {
-                        std::thread::spawn(move || relay(host_stream, guest_stream));
-                    }
-                    // 容器内没人监听是常态（服务还没起来），不该刷屏
-                    _ => continue,
+                if let Err(error) = spawn_relay(container_pid, map.guest, host_stream) {
+                    eprintln!(
+                        "wbox: 端口 {}->{} 连接失败：{}",
+                        map.host, map.guest, error
+                    );
                 }
             }
         });
         Ok(())
     }
+}
+
+/// relay 子进程入口。连接 guest 时短暂重试，消除 listener 已就绪而容器服务仍在
+/// 启动的正常竞态；超过 5 秒仍不可达才让本次宿主连接收到 EOF。
+#[cfg(target_os = "linux")]
+pub fn cmd_internal_relay(args: &[String]) -> Result<u32> {
+    use std::io::{self, Write};
+    use std::net::{Shutdown, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let port = match args {
+        [port] => parse_port(port)?.host,
+        _ => return Err(WboxError::args("__port-relay 需要一个 guest 端口")),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut guest = loop {
+        match TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(WboxError::spawn(format!(
+                    "连接容器端口 {} 失败：{}",
+                    port, error
+                )))
+            }
+        }
+    };
+    let mut guest_writer = guest
+        .try_clone()
+        .map_err(|e| WboxError::spawn(format!("复制 guest socket 失败：{}", e)))?;
+    let upload = std::thread::spawn(move || {
+        let mut input = io::stdin();
+        let _ = io::copy(&mut input, &mut guest_writer);
+        let _ = guest_writer.shutdown(Shutdown::Write);
+    });
+    let mut output = io::stdout();
+    io::copy(&mut guest, &mut output)
+        .map_err(|e| WboxError::spawn(format!("读取容器端口 {} 失败：{}", port, e)))?;
+    let _ = output.flush();
+    let _ = upload.join();
+    Ok(0)
 }
 
 /// 起转发。容器 pid 尚未记录时先等——它由 `runstate` 的记录线程异步写入。
