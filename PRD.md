@@ -164,7 +164,7 @@ wbox
 | `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
 | `diff` | 有 | F9.19：A/C/D 与 docker 对齐；直接读 overlay upper，不扫全树（门禁 DF.1–DF.3）|
 | `commit` | 有 | F9.20：容器改动固化成新镜像，与基础镜像共享磁盘（门禁 CM.1–CM.4）|
-| `pause` / `unpause` | 部分 | F9.21：用 SIGSTOP/SIGCONT 而非 cgroup freezer（后者要求设了限额才存在），语义不完全等价（门禁 PZ.1–PZ.3）|
+| `pause` / `unpause` | 部分 | F9.21：用 SIGSTOP/SIGCONT 而非 cgroup freezer（后者要求设了限额才存在），语义不完全等价（门禁 PZ.1–PZ.3）；暂停状态在 `ps`/`inspect` 可见（F9.32）|
 | `save` / `load` | 有 | F9.22：镜像打包成 tar 离线搬运，含原始层故搬过去仍可原样 push（门禁 SL.1–SL.6）|
 | `cp` | 有 | F9.23：宿主与容器双向拷贝，走 overlay 分层视图故不必 `setns`、容器已退出也能取（门禁 CP.1–CP.6）|
 | `stats` | 有 | F9.24：有专属 cgroup 时读内核记账，没有则按 `/proc` 逐进程累加并**标注来源**（门禁 ST.1–ST.5）|
@@ -175,6 +175,7 @@ wbox
 | `ps -q` / `rm -f` | 有 | F9.29：补齐 `wbox rm -f $(wbox ps -aq)` 这条清场惯用法；`-q` 只出名字，`-f` 先停再删（门禁 RMF.1–RMF.5）|
 | 多容器名一致性 | 有 | F9.30：`stop`/`pause`/`unpause` 也收多个名字（此前只有它们收一个，而 `kill`/`rm`/`start` 早就收多个）（门禁 RMF.6–RMF.7）|
 | `images -q` / `rmi` 多引用 | 有 | F9.31：**并修掉 IMAGE 列印缓存目录名、照抄去 rmi 用不了的缺陷**；补齐 `wbox rmi $(wbox images -q)`（门禁 IMQ.1–IMQ.3）|
+| 暂停状态可见 | 有 | F9.32：**修掉 `Paused` 写死 false、`ps` 把暂停容器显示成 running 的缺陷**；状态从 `/proc` 实测（门禁 PZ.4–PZ.5）|
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
@@ -231,7 +232,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.31 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.32 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -907,7 +908,8 @@ F9
 ├── F9.28 `logs -f` / `--tail`               —— [done]（门禁 LG.1–LG.4）
 ├── F9.29 `ps -q` / `rm -f`                  —— [done]（门禁 RMF.1–RMF.5）
 ├── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
-└── F9.31 `images -q` / `rmi` 多引用        —— [done]（门禁 IMQ.1–IMQ.3）
+├── F9.31 `images -q` / `rmi` 多引用        —— [done]（门禁 IMQ.1–IMQ.3）
+└── F9.32 暂停状态可见（ps / inspect）      —— [done]（仅 Linux，门禁 PZ.4–PZ.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1039,6 +1041,24 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.32 暂停状态可见** `[done]`（仅 Linux，门禁 PZ.4–PZ.5）。
+
+F9.21 的 `pause` 一直是真停住的（PZ.1 用计数冻结证过），**但没有任何地方反映它**：
+`wbox ps` 照旧显示 `running`，`wbox inspect` 的 `State.Paused` 写死 `false`。
+结果是用户没有办法把暂停的容器和正常跑的区分开——而 `Paused` 这个字段比不存在
+更糟：docker 用户会拿 `.State.Paused` 去写脚本，它却结构性地永远为假。
+
+**状态从 `/proc` 实测，不记账**。记一个「我 pause 过」的标记文件更省事，但那份账
+会过期：容器进程可能被别的途径 `SIGCONT` 起来，或者整个退掉又换了 pid。这里直接
+看容器里的进程处于什么状态，`T` 就是被停住了——与 `liveness` 靠锁文件而不是靠 pid
+判活是同一条思路：**能从系统真相直接读出来的，就不要另记一份账**。
+
+判据是「有进程，且**每一个**都处于 `T`」：`pause` 是给整棵进程树发 SIGSTOP 的，
+只有部分停住说明它并非处于 pause 状态（可能是 guest 内部自己停了某个进程）。
+
+门禁两条一起才有意义：PZ.4 验暂停时 `ps` 与 `inspect` 都看得见，PZ.5 验 `unpause`
+后**变得回去**——只会往一个方向变的「状态」等于没有状态。
 
 **F9.31 `wbox images -q` / `rmi` 多引用** `[done]`（门禁 IMQ.1–IMQ.3）。
 

@@ -11,8 +11,12 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         .ok_or_else(|| WboxError::args(format!("容器 '{}' 的 meta.json 缺失或不可读", name)))?;
     let liveness = runstate::liveness(&dir);
     let running = liveness == Liveness::Running;
+    // `Paused` 原本写死 false——那比没有这个字段更糟：docker 用户会拿
+    // `.State.Paused` 去写脚本，而它结构性地永远为假。改成从 /proc 实测。
+    let paused = running && super::pause::is_paused(&dir);
     let status = match liveness {
         Liveness::Created => "created",
+        Liveness::Running if paused => "paused",
         Liveness::Running => "running",
         Liveness::Exited => "exited",
     };
@@ -47,7 +51,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         "State": {
             "Status": status,
             "Running": running,
-            "Paused": false,
+            "Paused": paused,
             "ExitCode": exit_code,
             "Pid": if running { entry.pid } else { 0 },
             "StartedAtUnix": entry.created_unix,

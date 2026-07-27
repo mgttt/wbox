@@ -47,6 +47,42 @@ fn parse<'a>(args: &'a [String], verb: &str) -> Result<Vec<&'a str>> {
     super::args::take_container_names(args, verb)
 }
 
+/// 这个容器现在是不是被 `pause` 停住了。
+///
+/// # 从 `/proc` 的真相判，不记账
+///
+/// 记一个"我 pause 过"的标记文件是更省事的做法，但那份账会过期：容器进程可能被
+/// 别的途径 `SIGCONT` 起来，或者整个退掉又换了个 pid。这里直接看容器里的进程
+/// 处于什么状态——`T` 就是被停住了。与 `liveness` 靠锁文件而不是靠 pid 判活
+/// 是同一条思路：**能从系统真相直接读出来的，就不要另记一份账**。
+///
+/// 判据是"有进程，且**每一个**都处于 `T`"：`pause` 是给整棵进程树发 SIGSTOP 的，
+/// 只有部分停住说明它并非处于 pause 状态（可能是 guest 自己里面有进程被停）。
+#[cfg(target_os = "linux")]
+pub(super) fn is_paused(dir: &std::path::Path) -> bool {
+    let Some(root) = runstate::container_pid(dir) else {
+        return false;
+    };
+    let pids = super::top::container_pids(root);
+    let mut seen = 0usize;
+    for pid in pids {
+        match super::top::proc_state(pid) {
+            // 读不到 = 进程刚退出，不参与判断
+            None => continue,
+            Some('T') => seen += 1,
+            Some(_) => return false,
+        }
+    }
+    seen > 0
+}
+
+/// Windows 侧没有 `pause`（F9.21 只在 Linux 可用），因此永远不是暂停态。
+/// 如实返回 false，而不是让调用方各自去猜。
+#[cfg(not(target_os = "linux"))]
+pub(super) fn is_paused(_dir: &std::path::Path) -> bool {
+    false
+}
+
 pub fn cmd_pause(args: &[String]) -> Result<u32> {
     run(args, Action::Pause)
 }

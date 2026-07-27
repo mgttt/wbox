@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.31 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.32 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -62,6 +62,7 @@ F9.1–F9.31 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.29 `ps -q`/`rm -f` | RMF.1–RMF.5 | 一起补才凑齐 `rm -f $(ps -aq)` 清场惯用法；`-q` 只出名字（说明行会被当成容器名传下去）；`-f` 复用 stop 那条路 |
 | F9.30 多容器名一致性 | RMF.6–RMF.7 | `stop`/`pause`/`unpause` 也收多个名字；单个容器失败时返回原始错误而非无信息量的汇总；共用措辞里不塞调用方专属动词 |
 | F9.31 `images -q`/`rmi` 多引用 | IMQ.1–IMQ.3 | 修掉 IMAGE 列印缓存目录名（照抄去 rmi 用不了）；还原引用后**往返校验**才采用；枚举从打印里拆出成 `oci::list_refs` |
+| F9.32 暂停状态可见 | PZ.4–PZ.5 | 修掉 `inspect` 的 `Paused` 写死 false、`ps` 把暂停容器显示成 running；状态从 `/proc` 的 `T` 实测而不是记账（账会过期） |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -109,10 +110,21 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
   一次性读全也能凑够行数——那证明不了跟随。改成同时断言命令自身耗时 > 0，
   才是真的在验「它等到了后来才产生的输出」。
 
+### 一个屡试屡中的找 bug 手法
+
+最近两轮的缺陷都是同一类，且都不是「功能没做」，而是「做了，但输出/状态是假的」：
+
+- `wbox images` 印的镜像名喂不回给 `rmi`（F9.31）；
+- `wbox pause` 真停住了，但 `ps` 说 running、`inspect` 的 `Paused` 写死 false（F9.32）。
+
+手法很简单，值得固定下来：**凡是命令打印出来的标识符，实测能不能喂回给别的命令；
+凡是结构化输出里的状态字段，实测能不能变**。两条都不看代码，只看真实行为——
+写死 false 的字段在代码里看着毫不起眼，一跑就露馅。
+
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **398 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **194 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **399 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **196 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -124,7 +136,7 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.31）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.32）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

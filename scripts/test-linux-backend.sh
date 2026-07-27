@@ -1865,6 +1865,17 @@ else
   report FAIL "PZ.1 pause 冻结" "rc=$prc 停后立即=$during 再过 1 秒=$still（应相同）"
 fi
 
+# 暂停状态必须**看得见**。此前 pause 是真停了（PZ.1 已证），但 ps 仍显示
+# "running"、inspect 的 Paused 写死 false——用户没有任何办法把暂停的容器和正常
+# 跑的区分开，而 docker 用户会拿 .State.Paused 去写脚本（F9.32）。
+pzps=$(HOME=$WORK/home "$WBOX_ABS" ps | awk '$1=="pzc"{print $2}')
+pzins=$(HOME=$WORK/home "$WBOX_ABS" inspect pzc 2>&1 | grep '"Paused"')
+if [ "$pzps" = "paused" ] && printf '%s' "$pzins" | grep -q true; then
+  report PASS "PZ.4 暂停状态在 ps 与 inspect 里都看得见"
+else
+  report FAIL "PZ.4 暂停可见性" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
+fi
+
 pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
 sleep 1
 after=$(cat "$PZFILE" 2>/dev/null)
@@ -1872,6 +1883,15 @@ if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$still" ]; then
   report PASS "PZ.2 unpause 后容器恢复工作（计数 $still → $after）"
 else
   report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$still 恢复 1 秒后=$after（应不同）"
+fi
+
+# 恢复后状态也要跟着变回去——只会往一个方向变的"状态"等于没有状态
+pzps=$(HOME=$WORK/home "$WBOX_ABS" ps | awk '$1=="pzc"{print $2}')
+pzins=$(HOME=$WORK/home "$WBOX_ABS" inspect pzc 2>&1 | grep '"Paused"')
+if [ "$pzps" = "running" ] && printf '%s' "$pzins" | grep -q false; then
+  report PASS "PZ.5 unpause 后状态变回 running（可逆，不是单向标记）"
+else
+  report FAIL "PZ.5 状态可逆" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
 fi
 HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
