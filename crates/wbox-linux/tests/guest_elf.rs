@@ -580,3 +580,38 @@ fn proc_self_exe_points_at_the_running_image() {
     assert_ok(&o, 0, "readlink /proc/self/exe");
     assert_eq!(o.stdout.trim(), "/busybox");
 }
+
+#[test]
+fn dash_s_enables_the_syscall_trace_with_the_sys_tag() {
+    let Some(root) = busybox_rootfs("stracecli") else { return };
+    // `-s`（打印 syscall）与 `-e`（诊断走 stderr）是被取代的 blink 的命令行
+    // 拼写。产品用例 WP.4S 就用 `-s -e` 检查发布二进制**还能**吐 syscall 记录，
+    // 并按 `(sys)` 这个子系统标签筛行——两者都得保住。
+    let o = emulate(
+        &["-s", "-e", "/busybox", "true"],
+        &[("WBOX_PREFIX", root.to_str().unwrap())],
+    );
+    assert_ok(&o, 0, "-s -e 跟正常运行");
+    assert!(
+        o.stderr.contains("(sys)"),
+        "syscall 记录必须带 (sys) 标签：{}",
+        o.stderr
+    );
+    assert!(o.stderr.contains("syscall"), "{}", o.stderr);
+
+    // 不给 -s 时不该有任何 syscall 噪音
+    let o = bb_run(&root, &["true"], &[]);
+    assert_ok(&o, 0, "默认不 trace");
+    assert!(!o.stderr.contains("(sys)"), "默认不该 trace：{}", o.stderr);
+}
+
+#[test]
+fn guest_own_options_are_not_eaten_by_the_runtime() {
+    let Some(root) = busybox_rootfs("argpass") else { return };
+    // 程序名之后的参数一律原样交给 guest：`-s` 出现在程序名之后是 **guest** 的
+    // 选项，不能被我们当成"开 trace"。busybox echo 会把它打出来。
+    let o = bb_run(&root, &["echo", "-s", "--version"], &[]);
+    assert_ok(&o, 0, "guest 自己的选项");
+    assert_eq!(o.stdout, "-s --version\n");
+    assert!(!o.stderr.contains("(sys)"), "{}", o.stderr);
+}

@@ -195,8 +195,10 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
     ];
 
     if m.os.strace {
+        // `(sys)` 是沿用被取代的 blink 的子系统标签：驱动 blink 的脚本
+        // （含 scripts/test-windows-product.ps1 的 WP.4S）按它筛 syscall 行。
         eprintln!(
-            "wbox-linux: syscall {} ({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
+            "wbox-linux: (sys) syscall {} ({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x})",
             nr, a[0], a[1], a[2], a[3], a[4], a[5]
         );
     }
@@ -336,7 +338,7 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         332 => sys_statx(m, a[0] as i32, a[1], a[2] as i32, a[4]),
         _ => {
             if m.os.strace {
-                eprintln!("wbox-linux: syscall {nr} 未实现 -> ENOSYS");
+                eprintln!("wbox-linux: (sys) syscall {nr} 未实现 -> ENOSYS");
             }
             -ENOSYS
         }

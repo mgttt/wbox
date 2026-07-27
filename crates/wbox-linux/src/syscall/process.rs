@@ -128,7 +128,7 @@ pub fn sys_fork(m: &mut Machine, child_stack: u64, ret_rip: u64) -> i64 {
 pub fn sys_clone(m: &mut Machine, flags: u64, child_stack: u64, ret_rip: u64) -> i64 {
     if flags & (CLONE_VM | CLONE_THREAD) != 0 {
         if m.os.strace {
-            eprintln!("wbox-linux: clone(flags={flags:#x}) 是线程创建，未实现 -> ENOSYS");
+            eprintln!("wbox-linux: (sys) clone(flags={flags:#x}) 是线程创建，未实现 -> ENOSYS");
         }
         return -ENOSYS;
     }
@@ -170,7 +170,7 @@ pub fn sys_execve(m: &mut Machine, path: u64, argv_p: u64, envp_p: u64) -> Resul
     let mut fresh = Mem::new();
     let program = proc::load_into(&mut fresh, &m.os.vfs, &prog, &argv, &envp).map_err(|e| {
         if m.os.strace {
-            eprintln!("wbox-linux: execve('{prog}') 失败：{}", e.msg);
+            eprintln!("wbox-linux: (sys) execve('{prog}') 失败：{}", e.msg);
         }
         e.errno
     })?;

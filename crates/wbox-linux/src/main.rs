@@ -32,6 +32,8 @@ through this executable bypasses AppContainer/Job isolation.
 选项：
   --version          打印版本后退出
   --help             打印本帮助后退出
+  -s                 打印每次 syscall（等价于 WBOX_STRACE=1）
+  -e                 诊断输出到 stderr（本实现一直如此，接受以兼容旧命令行）
 
 环境变量：
   WBOX_PREFIX=<目录> guest 的 / 映射到的宿主目录（兼容名 BLINK_PREFIX）
@@ -44,34 +46,45 @@ through this executable bypasses AppContainer/Job isolation.
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    // 第一个参数决定一切：我们支持的选项都是终结性的（打印后退出），
-    // 其余情况第一个非选项参数就是 guest 程序，后面全部原样交给 guest
-    // ——**不能**继续解析，否则 guest 自己的 `--version` 会被我们吃掉。
-    let first = args.next();
-    let (prog, rest): (Option<String>, Vec<String>) = match first.as_deref() {
-        None => {
-            eprint!("{}", usage());
-            return ExitCode::from(2);
+    // 只吃**前导**选项，第一个非选项参数就是 guest 程序，它之后的一律原样
+    // 交给 guest ——**不能**继续解析，否则 guest 自己的 `--version` 会被我们
+    // 吃掉。程序名本身以 `-` 开头时用 `--` 显式终止选项。
+    let mut strace = false;
+    let mut prog: Option<String> = None;
+    let mut rest: Vec<String> = Vec::new();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--version" => {
+                println!("wbox-linux {VERSION}");
+                return ExitCode::SUCCESS;
+            }
+            "--help" | "-h" => {
+                print!("{}", usage());
+                return ExitCode::SUCCESS;
+            }
+            // -s/-e 是被取代的 blink 的命令行拼写，保留以免驱动它的脚本失效。
+            // -s = 打印 syscall；-e = 诊断走 stderr（我们一直如此，接受即忽略）。
+            "-s" => strace = true,
+            "-e" => {}
+            "--" => {
+                prog = args.next();
+                rest = args.collect();
+                break;
+            }
+            _ => {
+                prog = Some(a);
+                rest = args.collect();
+                break;
+            }
         }
-        Some("--version") => {
-            println!("wbox-linux {VERSION}");
-            return ExitCode::SUCCESS;
-        }
-        Some("--help") | Some("-h") => {
-            print!("{}", usage());
-            return ExitCode::SUCCESS;
-        }
-        // `--` 显式终止选项：后面第一个是程序名（程序名本身可能以 - 开头）
-        Some("--") => (args.next(), args.collect()),
-        Some(_) => (first, args.collect()),
-    };
+    }
 
     let Some(prog) = prog else {
         eprint!("{}", usage());
         return ExitCode::from(2);
     };
 
-    match run(&prog, &rest) {
+    match run(&prog, &rest, strace) {
         Ok(code) => ExitCode::from(code as u8),
         Err(e) => {
             eprintln!("wbox-linux: {e}");
@@ -81,8 +94,11 @@ fn main() -> ExitCode {
 }
 
 /// 装配并运行 guest，返回退出码。
-fn run(prog: &str, argv_rest: &[String]) -> Result<i32, String> {
-    let mut m = Machine::new(Os::new());
+fn run(prog: &str, argv_rest: &[String], strace: bool) -> Result<i32, String> {
+    let mut os = Os::new();
+    // 命令行的 -s 与 WBOX_STRACE=1 是或的关系：任一给出就开。
+    os.strace |= strace;
+    let mut m = Machine::new(os);
 
     let mut argv: Vec<Vec<u8>> = vec![prog.as_bytes().to_vec()];
     argv.extend(argv_rest.iter().map(|s| s.as_bytes().to_vec()));

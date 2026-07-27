@@ -72,7 +72,7 @@ wbox-linux: fatal: unsupported instruction at 0x5555555567e5: d9 e8 48 89 e5 ...
 
 ## 3. 已验证到哪一档
 
-门禁：`cargo test -p wbox-linux`（165 项：84 单测 + 61 指令语义 + 20 端到端）。
+门禁：`cargo test -p wbox-linux`（167 项：84 单测 + 61 指令语义 + 22 端到端）。
 指令语义测试用手工汇编的字节序列，**不依赖任何工具链**，Windows CI 上跑的是
 同一批断言。
 
@@ -94,6 +94,7 @@ wbox-linux: fatal: unsupported instruction at 0x5555555567e5: d9 e8 48 89 e5 ...
 | 内部控制键（`WBOX_*` / `BLINK_*`）不透传给 guest | ✅ |
 | 指令预算（`WBOX_MAX_INSNS`）能打断死循环 guest | ✅ |
 | `#!` 脚本经解释器执行 | ✅ |
+| `-s` / `-e`（被取代引擎的命令行拼写）仍可开 syscall 记录，标签 `(sys)` | ✅ |
 | `cargo check --target x86_64-pc-windows-msvc` | ✅ |
 
 sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移位/向量路径正确性
