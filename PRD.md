@@ -177,6 +177,7 @@ wbox
 | `images -q` / `rmi` 多引用 | 有 | F9.31：**并修掉 IMAGE 列印缓存目录名、照抄去 rmi 用不了的缺陷**；补齐 `wbox rmi $(wbox images -q)`（门禁 IMQ.1–IMQ.3）|
 | 暂停状态可见 | 有 | F9.32：**修掉 `Paused` 写死 false、`ps` 把暂停容器显示成 running 的缺陷**；状态从 `/proc` 实测（门禁 PZ.4–PZ.5）|
 | `inspect` 的挂载与端口 | 有 | F9.33：**修掉 `Mounts` 写死 `[]`、端口根本不出现的缺陷**；`.Mounts`/`.HostConfig.PortBindings` 如实反映 `-v`/`-p`（门禁 INS.1–INS.3）|
+| 状态口径与网络模式 | 有 | F9.34：状态标签收敛成一处（`compose ps` 此前漏了 `paused`）；`NetworkMode` 补上 `container:<NAME>` 三态（门禁 INS.4–INS.5）|
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
@@ -233,7 +234,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.33 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.34 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -911,7 +912,8 @@ F9
 ├── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
 ├── F9.31 `images -q` / `rmi` 多引用        —— [done]（门禁 IMQ.1–IMQ.3）
 ├── F9.32 暂停状态可见（ps / inspect）      —— [done]（仅 Linux，门禁 PZ.4–PZ.5）
-└── F9.33 inspect 如实反映挂载与端口       —— [done]（门禁 INS.1–INS.3）
+├── F9.33 inspect 如实反映挂载与端口       —— [done]（门禁 INS.1–INS.3）
+└── F9.34 状态口径收敛与网络模式三态      —— [done]（门禁 INS.4–INS.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1043,6 +1045,29 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.34 状态口径收敛与网络模式三态** `[done]`（门禁 INS.4–INS.5）。
+
+两处，都是同一个手法扫出来的。
+
+**一、`NetworkMode` 少了一态。** `--network container:X` 起的容器**确实共享了对端
+的 netns**（实测两边 `/proc/self/ns/net` 是同一个 inode），`inspect` 却报
+`"NetworkMode": "none"`。根因是记录里只有 `allow_network` 这个两态开关，而网络
+模式其实是三态。`ExecContext` 补 `network_container` 后，三态各自如实报出。
+
+**二、状态标签此前有三份。** `ps`、`inspect`、`compose ps` 各写了一份
+`match liveness { … }`，于是 F9.32 给前两处补上 `paused` 之后，`compose ps`
+仍把暂停的服务显示成 `running`。收敛成 `cli::status::label` 一处，三处共用；
+以后再加状态（比如 `restarting`）也只改这一个地方。
+
+**顺带修掉一个会永久误报的判据**（PZ.4 偶发红查出来的）：`is_paused` 原本要求
+**整棵进程树每一个进程都处于 `T`**。看着更严格，实际是错的——`pause` 只停「发信号
+那一刻已存在的进程」（F9.21 已写明这条代价），一个刚 fork 出来的子进程会逃掉；
+它自己很快退出，但**父进程被停住就没人回收它**，于是留下一个僵尸。按「每一个都要
+T」来判，那个僵尸会让容器**永远**显示成 running——而它其实是个已经死了的进程。
+与 RMF.4 那次 `kill -0` 把僵尸认成活着是同一个坑。改成看**容器 init 是否为 `T`**：
+它是 SIGSTOP 一定送达、SIGCONT 也一定送达的那个，语义上正是「这个容器停了没有」的
+答案。改后连跑四轮 PZ 全绿。
 
 **F9.33 `inspect` 如实反映挂载与端口** `[done]`（门禁 INS.1–INS.3）。
 

@@ -56,24 +56,22 @@ fn parse<'a>(args: &'a [String], verb: &str) -> Result<Vec<&'a str>> {
 /// 处于什么状态——`T` 就是被停住了。与 `liveness` 靠锁文件而不是靠 pid 判活
 /// 是同一条思路：**能从系统真相直接读出来的，就不要另记一份账**。
 ///
-/// 判据是"有进程，且**每一个**都处于 `T`"：`pause` 是给整棵进程树发 SIGSTOP 的，
-/// 只有部分停住说明它并非处于 pause 状态（可能是 guest 自己里面有进程被停）。
+/// 判据是**容器的 init 处于 `T`**，而不是"整棵树每一个进程都处于 T"。
+///
+/// 后者看着更严格，实际是错的，而且会偶发误报：`pause` 只停"发信号那一刻已存在
+/// 的进程"（这条代价 PRD F9.21 已写明）。一个在枚举与发信号之间刚 fork 出来的
+/// 子进程会逃掉；它自己很快退出，但**父进程被停住就没人回收它**，于是留下一个
+/// 僵尸挂在那儿。按"每一个都要 T"来判，那个僵尸会让容器永远显示成 running——
+/// 而它其实是个已经死了的进程（与 RMF.4 那次 `kill -0` 把僵尸认成活着同一个坑）。
+///
+/// init 停住就是这个容器被 pause 了：它是 SIGSTOP 一定送达的那个，
+/// 也是恢复时 SIGCONT 一定送达的那个，语义上正是"这个容器停了没有"的答案。
 #[cfg(target_os = "linux")]
 pub(super) fn is_paused(dir: &std::path::Path) -> bool {
     let Some(root) = runstate::container_pid(dir) else {
         return false;
     };
-    let pids = super::top::container_pids(root);
-    let mut seen = 0usize;
-    for pid in pids {
-        match super::top::proc_state(pid) {
-            // 读不到 = 进程刚退出，不参与判断
-            None => continue,
-            Some('T') => seen += 1,
-            Some(_) => return false,
-        }
-    }
-    seen > 0
+    matches!(super::top::proc_state(root), Some('T'))
 }
 
 /// Windows 侧没有 `pause`（F9.21 只在 Linux 可用），因此永远不是暂停态。

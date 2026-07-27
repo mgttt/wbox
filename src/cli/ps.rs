@@ -77,14 +77,9 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         .unwrap_or(0);
     println!("{:<20} {:<20} {:<8} {:<10} 命令", "名称", "状态", "PID", "已运行");
     for (e, l) in rows {
-        // 暂停的容器此前显示成 "running"，于是 pause 完全看不出来——
-        // 用户没有任何办法把暂停的容器和正常跑的区分开。
-        let base = match l {
-            Liveness::Created => "created",
-            Liveness::Running if super::pause::is_paused(&runstate::dir_for(&e.name).unwrap_or_default()) => "paused",
-            Liveness::Running => "running",
-            Liveness::Exited => "exited",
-        };
+        // 状态标签走共享口径（`status::label`）：三处显示状态的地方各写一份
+        // match 的话，加了新状态必然漏掉其中一处（F9.32 就漏了 compose ps）。
+        let base = super::status::label(&runstate::dir_for(&e.name).unwrap_or_default(), *l);
         // 健康状态并进"状态"列而不是新增一列（docker 也是这么显示的）：
         // 没开健康检查的容器占多数，为它们凭空加一列空白不划算。
         let state = match crate::runstate::dir_for(&e.name)

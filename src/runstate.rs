@@ -90,6 +90,13 @@ pub struct ExecContext {
     pub volumes: Vec<String>,
     /// `-p` 端口映射，形如 `host:guest`（仅 TCP）。同上，供 `inspect` 如实报出。
     pub ports: Vec<String>,
+    /// `--network container:<NAME>` 的对端容器名。
+    ///
+    /// 网络模式其实有三态（none / host / container:X），而 `allow_network`
+    /// 只有两态。缺这一维时 `inspect` 会把一个**确实共享了对端 netns** 的容器
+    /// 报成 `NetworkMode: "none"`——实测两边 `/proc/self/ns/net` 是同一个 inode，
+    /// 报告却说它没网络。
+    pub network_container: Option<String>,
 }
 
 impl Entry {
@@ -100,6 +107,7 @@ impl Entry {
                 "workdir": context.workdir,
                 "volumes": context.volumes,
                 "ports": context.ports,
+                "network_container": context.network_container,
             })
         });
         let v = serde_json::json!({
@@ -141,6 +149,10 @@ impl Entry {
                 workdir: context.get("workdir")?.as_str()?.to_string(),
                 volumes: strings("volumes"),
                 ports: strings("ports"),
+                network_container: context
+                    .get("network_container")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             })
         });
         Some(Entry {
@@ -1318,6 +1330,7 @@ mod tests {
                 workdir: "/work".into(),
                 volumes: vec!["/h:/g:ro".into()],
                 ports: vec!["8080:80".into()],
+                network_container: Some("peer".into()),
             }),
         };
         let encoded = e.to_json();
@@ -1342,6 +1355,7 @@ mod tests {
         assert_eq!(ctx.workdir, "/w");
         assert!(ctx.volumes.is_empty(), "缺失按空处理");
         assert!(ctx.ports.is_empty());
+        assert!(ctx.network_container.is_none());
     }
 
     #[test]

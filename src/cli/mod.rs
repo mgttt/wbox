@@ -27,6 +27,7 @@ mod export;
 mod restart;
 mod rename;
 mod prune;
+mod status;
 mod stats;
 mod pause;
 mod diff;

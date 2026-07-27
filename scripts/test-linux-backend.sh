@@ -2088,6 +2088,28 @@ else
   report FAIL "INS.3 空 Mounts" "$(printf '%s' "$insj" | grep -A4 '"Mounts"' | tr '\n' ' ' | head -c 160)"
 fi
 
+# 网络模式是三态（none / host / container:X），而记录里原本只有 allow_network
+# 这个两态开关，于是一个**确实共享了对端 netns** 的容器被报成 "none"。
+# 判据先确认两边 net namespace 真是同一个，再看 inspect 怎么说。
+HOME=$INSH "$WBOX_ABS" run -d --name inspeer --network container:insc -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+insa=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
+insb=$(HOME=$INSH "$WBOX_ABS" exec inspeer -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
+insm=$(HOME=$INSH "$WBOX_ABS" inspect inspeer 2>&1 | grep NetworkMode)
+if [ -n "$insa" ] && [ "$insa" = "$insb" ] \
+   && printf '%s' "$insm" | grep -q 'container:insc'; then
+  report PASS "INS.4 inspect 的 NetworkMode 反映 container:<NAME> 三态"
+else
+  report FAIL "INS.4 NetworkMode 三态" "netns 相同=$([ "$insa" = "$insb" ] && echo 是 || echo 否) inspect: $(printf '%s' "$insm" | tr -d ' ')"
+fi
+
+insm=$(HOME=$INSH "$WBOX_ABS" inspect insplain 2>&1 | grep NetworkMode)
+if printf '%s' "$insm" | grep -q '"none"'; then
+  report PASS "INS.5 未开网络的容器仍如实报 none（没被三态改造带歪）"
+else
+  report FAIL "INS.5 none 未受影响" "$(printf '%s' "$insm" | tr -d ' ')"
+fi
+
 HOME=$INSH "$WBOX_ABS" rm -f $(HOME=$INSH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
 rm -rf "$INSH" "$WORK/insdata"
 

@@ -727,6 +727,7 @@ fn register_for_spawn(
             .iter()
             .map(|p| format!("{}:{}", p.host, p.guest))
             .collect(),
+        network_container: spec.network_container.clone(),
     };
     let reservation = std::env::var(SUPERVISED_TOKEN_ENV).ok();
     let mut reg = crate::runstate::register_with_context(
