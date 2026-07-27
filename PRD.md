@@ -139,7 +139,7 @@ wbox
 | 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
 | `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
 | `--cap-add` / `--cap-drop` | 有 | F9.8：先 drop 后 add，含 `ALL`（门禁 CAP.1–CAP.5）|
-| seccomp 剖面 | 无 | 尚未定契约 |
+| seccomp | 部分 | F9.9：**拒绝名单**（门禁 SEC.1–SEC.6）；docker 用的是允许名单，二者边界强度不同 |
 | Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
 
 #### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
@@ -743,7 +743,8 @@ F9
 ├── F9.5 构建分层缓存                         —— [done]（Linux + Windows，WP.18）
 ├── F9.6 重启策略 `--restart`                 —— [done]（门禁 R.1–R.5）
 ├── F9.7 `--user UID[:GID]`                   —— [partial] 仅 Linux，只映射一个 id
-└── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
+├── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
+└── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -838,6 +839,44 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.9 `--seccomp-deny`** `[partial]`（门禁 SEC.1–SEC.6）。
+
+**为什么是拒绝名单而不是 docker 的允许名单**，这点比实现本身更要紧，否则用户
+会以为拿到了 docker 级别的边界。docker 默认放行一份精选的约三百个 syscall、
+其余一律拒绝；那份名单是它多年生产经验的产物。照抄一份自己没有同等验证的名单
+会造出"看着像 docker、行为不一样"的坑——漏掉一个 syscall 就是一类程序起不来，
+而且往往在很深的地方才炸。
+
+**代价直说**：拒绝名单不是完备边界。没写进名单的一律放行，内核新增的 syscall
+也自动放行。它兑现的是"这几个我明确不想让 guest 调的调不了"（挡 `ptrace`、
+`mount`、`keyctl` 是运维上最常见的诉求），每一条都能验证；它不兑现
+"未知的一律挡住"。
+
+与 F9.8 互补，谁也替代不了谁：capability 管"有没有权限做某类事"，seccomp 管
+"这个入口能不能进"。有些 syscall 不需要任何 capability（`ptrace` 同 uid 的进程
+就是），只能靠 seccomp 拦。
+
+几处不做就出错的细节：
+
+- **必须比对 `seccomp_data.arch`**。同一个 x86-64 内核也接受 x32 ABI，两套 ABI
+  的 syscall 号不同；不比对就会"按 x86-64 的号拦，换 x32 的号绕过"。架构不符
+  一律 kill，不是放行。未适配的架构**明确拒绝**而不是静默不装——静默不装是最坏
+  的结果，用户以为拦住了。
+- **顺序排在 `--cap-drop` 之后**：过滤器可能把 `capset` 本身也拦了，反过来就会
+  让 `--cap-drop` 静默失效。
+- **装载前置 `PR_SET_NO_NEW_PRIVS`**：没有它，内核要求调用者持有 `CAP_SYS_ADMIN`
+  才允许装过滤器，而我们恰恰可能刚被 `--cap-drop` 削掉。
+- **拒绝 `execve`/`execveat` 是自毁配置**，在参数层就挡下。过滤器是在
+  `execve` guest 之前装上的（装晚了 guest 已经在跑），且分不出"启动用的那次
+  exec"与"guest 自己发起的 exec"，所以这个配置没有可用形态。不拦的话用户只会
+  看到一句 "Operation not permitted"，看不出是自己配的。
+- 名表**刻意不求全**，只收常被点名拦截的那些；写不出名字可以**直接写号**
+  （`--seccomp-deny 165`）。号一律取自 `libc::SYS_*`，跨架构自动正确。
+
+BPF 指令序列是纯函数、可离线断言（`filter_program_shape_and_jump_offsets`）：
+seccomp 一装上就撤不掉，靠"跑一遍看看"调试代价太高，而跳转偏移算错的表现是
+"配置了却没拦住"——最危险的失败形态。
 
 **F9.8 `--cap-add` / `--cap-drop`** `[done]`（门禁 CAP.1–CAP.5）。
 

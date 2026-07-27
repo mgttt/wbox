@@ -76,6 +76,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   -u, --user <UID[:GID]>  guest 内身份（仅 Linux；只收数字，见 PRD F9.7）
   --cap-drop <CAP|ALL>  丢弃 capability（仅 Linux；可重复，见 PRD F9.8）
   --cap-add <CAP|ALL>   保留/加回 capability（仅 Linux；先 drop 后 add）
+  --seccomp-deny <SYSCALL,...>  按 syscall 拒绝（仅 Linux；返回 EPERM，见 PRD F9.9）
   -d, --detach      后台运行：立即返回容器名，输出落盘到日志（wbox logs 读取）
   --pull            显式声明拉取语义（缺缓存本就会自动 pull）
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）

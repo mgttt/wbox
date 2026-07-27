@@ -127,6 +127,9 @@ pub struct RunSpec {
     /// capability 裁剪（PRD F9.8，仅 Linux 宿主）。默认保留全部。
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub caps: crate::caps::CapPolicy,
+    /// seccomp 拒绝名单（PRD F9.9，仅 Linux 宿主）。默认不装过滤器。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub seccomp: crate::seccomp::SeccompPolicy,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；

@@ -337,11 +337,21 @@ reap_check() {
     return
   fi
   kill -9 "$wb" 2>/dev/null
-  sleep 2
+  # 轮询到全部消失，而不是"睡 2 秒然后看一眼"。收割是内核的级联
+  # （PDEATHSIG → 中间进程 → PID 1 退出 → ns 内清空），机器一忙就可能超过任何
+  # 固定等待；用定长 sleep 当判据会造出与产品无关的偶发红灯（实测遇到过一次）。
+  # 判据本身没有放松：到期仍有存活照样 FAIL。
+  local deadline=$((SECONDS + 10))
   alive=""
-  for p in $tree; do
-    [ "$p" = "$wb" ] && continue
-    kill -0 "$p" 2>/dev/null && alive="$alive $p"
+  while :; do
+    alive=""
+    for p in $tree; do
+      [ "$p" = "$wb" ] && continue
+      kill -0 "$p" 2>/dev/null && alive="$alive $p"
+    done
+    [ -z "$alive" ] && break
+    [ "$SECONDS" -ge "$deadline" ] && break
+    sleep 0.2
   done
   if [ -z "$alive" ]; then
     report PASS "$name（kill 前进程树 $n 个，之后全部消失）"
@@ -730,6 +740,75 @@ if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "未知 capability"; then
   report PASS "CAP.5 未知 capability 名报错而非静默忽略"
 else
   report FAIL "CAP.5 未知名字" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 150)"
+fi
+
+echo
+echo "=== SEC seccomp 拦截（PRD F9.9）==="
+
+# SEC.1 不配就不装过滤器。/proc/self/status 的 Seccomp 字段 0=disabled 2=filter。
+run lbetest -- /bin/sh -c 'grep "^Seccomp:" /proc/self/status'
+secmode=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ "$secmode" = "0" ]; then
+  report PASS "SEC.1 不配 --seccomp-deny 时不装过滤器（Seccomp=0）"
+else
+  report FAIL "SEC.1 默认不装过滤器" "rc=$rc Seccomp=$secmode（期望 0）"
+fi
+
+# SEC.2 配了就必须真的装上（Seccomp=2 = filter 模式）。
+run --seccomp-deny ptrace lbetest -- /bin/sh -c 'grep "^Seccomp:" /proc/self/status'
+secmode=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ "$secmode" = "2" ]; then
+  report PASS "SEC.2 --seccomp-deny 后进入 filter 模式（Seccomp=2）"
+else
+  report FAIL "SEC.2 装载过滤器" "rc=$rc Seccomp=$secmode（期望 2）"
+fi
+
+# SEC.3 **行为**判据。位模式对不代表拦对了 syscall 号——跳转偏移算错就会
+# 落到 ALLOW 上，表现成"配了却没拦住"。这条直接看 mount 有没有被挡，
+# 且基线（不配时）同一操作必须成功，否则断言没有意义。
+run lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt && echo MOUNT_OK'
+sec_base=$rc
+run --seccomp-deny mount lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt && echo MOUNT_OK'
+if [ "$sec_base" -eq 0 ] && ! printf '%s' "$OUT" | grep -q MOUNT_OK; then
+  report PASS "SEC.3 --seccomp-deny mount 实际拦住挂载（基线同操作成功）"
+elif [ "$sec_base" -ne 0 ]; then
+  report SKIP "SEC.3 mount 行为判据" "基线挂载本身就失败（rc=$sec_base），无法判定"
+else
+  report FAIL "SEC.3 mount 行为判据" "配了却仍挂载成功: $(printf '%s' "$OUT" | head -c 150)"
+fi
+
+# SEC.4 裸号是逃生口：名表刻意不求全，写号必须等价于写名字。
+# syscall 号按架构而定，shell 里没有可移植的查法，故只在 x86-64 上断言
+# （mount = 165），其余架构记 SKIP —— 宁可不测，也不要用一个可能错的号
+# 造出假失败。
+run --seccomp-deny mount lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt 2>/dev/null || echo DENIED'
+byname=$OUT
+if [ "$(uname -m)" = "x86_64" ]; then
+  run --seccomp-deny 165 lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt 2>/dev/null || echo DENIED'
+  if printf '%s' "$byname" | grep -q DENIED && printf '%s' "$OUT" | grep -q DENIED; then
+    report PASS "SEC.4 写 syscall 号与写名字等价（逃生口可用）"
+  else
+    report FAIL "SEC.4 裸号逃生口" "按名字=$(printf '%s' "$byname"|head -c 60) 按号=$(printf '%s' "$OUT"|head -c 60)"
+  fi
+else
+  report SKIP "SEC.4 裸号逃生口" "syscall 号随架构而变，本用例只在 x86-64 上断言（当前 $(uname -m)）"
+fi
+
+# SEC.5 拒绝 execve 等于拒绝启动容器自己，必须在参数层就说清楚，
+# 不能让用户只看到一句 "Operation not permitted"。
+sout=$(HOME=$WORK/home "$WBOX_ABS" run --seccomp-deny execve lbetest -- /bin/true 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "启动容器本身"; then
+  report PASS "SEC.5 拒绝 execve 的自毁配置被挡下并解释原因"
+else
+  report FAIL "SEC.5 自毁配置" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# SEC.6 拼错的名字要报错，并指出可以直接写号。
+sout=$(HOME=$WORK/home "$WBOX_ABS" run --seccomp-deny ptraze lbetest -- /bin/true 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "未知 syscall"; then
+  report PASS "SEC.6 未知 syscall 名报错而非静默忽略"
+else
+  report FAIL "SEC.6 未知名字" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
 fi
 
 echo

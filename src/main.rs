@@ -23,6 +23,8 @@ mod build;
 mod caps;
 mod portfwd;
 mod restart;
+// seccomp-bpf 按 syscall 拦截（PRD F9.9）。解析与 BPF 构造可单测；落地在 linux_ns。
+mod seccomp;
 // 运行中容器的状态目录与发现（PRD F8.a）。跨平台：锁语义由 OS 保证。
 mod runstate;
 // 测试脚手架：环境变量互斥 + 自动还原（进程级全局状态在并行用例下必须串行化）。

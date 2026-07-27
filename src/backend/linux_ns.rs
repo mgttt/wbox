@@ -83,6 +83,9 @@ struct NsPlan {
     limits: LimitPlan,
     /// capability 裁剪计划（PRD F9.8），fork 前算好
     caps: CapPlan,
+    /// seccomp 过滤器程序（PRD F9.9），fork 前构造好。空 = 不装。
+    /// 子进程里不能分配，BPF 指令序列必须在这之前就备齐。
+    seccomp: Vec<libc::sock_filter>,
 }
 
 /// capability 裁剪的**预算好**形式。fork 后的子进程不能分配、不能读文件，
@@ -291,6 +294,11 @@ pub(super) fn spawn_isolated(
         new_root,
         limits,
         caps: build_cap_plan(&spec.caps),
+        seccomp: if spec.seccomp.is_default() {
+            Vec::new()
+        } else {
+            crate::seccomp::build_filter(&spec.seccomp)
+        },
     };
 
     if spec.verbose {
@@ -305,6 +313,7 @@ pub(super) fn spawn_isolated(
             format!("容器 {} ← 宿主 {}（gid {} ← {}）", target_uid, uid, target_gid, gid),
         );
         verbose_kv("capability", spec.caps.summary());
+        verbose_kv("seccomp", spec.seccomp.summary());
         verbose_kv(
             "网络",
             if new_netns {
@@ -559,7 +568,10 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     // capability 放在**最后**丢：上面每一步 mount/pivot_root 都要 CAP_SYS_ADMIN。
     // 收在这个包装里而不是散在两个 return 分支上——宿主模式与镜像模式各有一个
     // 出口，逐个补调用迟早会漏掉一个，而漏掉的那次是"以为收紧了其实没有"。
-    apply_caps(&p.caps)
+    apply_caps(&p.caps)?;
+    // seccomp 排在 capability 之后：过滤器可能把 capset 本身也拦了，
+    // 顺序反过来就会让 --cap-drop 静默失效。
+    crate::seccomp::apply(&p.seccomp)
 }
 
 /// [`enter_namespaces`] 的主体：建立命名空间并切根（不含 capability 裁剪）。

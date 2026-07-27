@@ -42,6 +42,8 @@ pub struct RunOptions {
     /// `--cap-drop` / `--cap-add`（PRD F9.8，仅 Linux）。先 drop 后 add。
     pub cap_drop: Vec<crate::caps::CapSelector>,
     pub cap_add: Vec<crate::caps::CapSelector>,
+    /// `--seccomp-deny`（PRD F9.9，仅 Linux）。可重复，每项可逗号分隔。
+    pub seccomp_deny: Vec<String>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -69,6 +71,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         user: None,
         cap_drop: Vec::new(),
         cap_add: Vec::new(),
+        seccomp_deny: Vec::new(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -138,6 +141,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--restart" => {
                 let v = super::args::take_value(args, &mut i, "--restart")?;
                 opts.restart = crate::restart::parse_restart(&v)?;
+            }
+            "--seccomp-deny" => {
+                let v = super::args::take_value(args, &mut i, "--seccomp-deny")?;
+                opts.seccomp_deny.push(v);
             }
             "--cap-drop" => {
                 let v = super::args::take_value(args, &mut i, "--cap-drop")?;
@@ -237,6 +244,9 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         restart: opts.restart,
         user: opts.user,
         caps: crate::caps::CapPolicy::resolve(&opts.cap_drop, &opts.cap_add),
+        // 解析已在 cmd_run 的前置校验里做过一次并报过错，这里不会失败；
+        // 真失败也只会退化成"不装过滤器"，故用 unwrap_or_default 而非 expect。
+        seccomp: crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny).unwrap_or_default(),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -296,6 +306,12 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
         &opts.cap_drop,
         &opts.cap_add,
     ))?;
+    // 解析错误（拼错的 syscall 名）必须在这里就报出来，而不是等到组装 RunSpec
+    // 时被 unwrap_or_default 吞成"没配过"。
+    let seccomp = crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny)?;
+    crate::seccomp::reject_if_unsupported(&seccomp)?;
+    crate::seccomp::reject_unsupported_arch(&seccomp)?;
+    crate::seccomp::reject_self_defeating(&seccomp)?;
     crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)
 }
 
