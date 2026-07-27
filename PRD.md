@@ -147,7 +147,7 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G3 Linux | P.6-P.18；Windows detach/logs/stop 产品路径仍待门禁 |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G3 Windows/Linux | P.6-P.18、WP.6-WP.7；Windows stop 仍只有人工产品路径证据 |
 | F8.4 exec | 未实现 | 无 | 先完成 Windows 可行性取证 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
@@ -157,6 +157,8 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.3`：只用最终两个 exe 和仓库内静态 ELF，从本地缓存执行 Linux guest。
 - `WP.4`：bundle 中不存在运行时 DLL 或仓库路径依赖。
 - `WP.5`：前台正常退出后状态目录无运行记录。
+- `WP.6`：Windows detach 后可由 `ps` 观察，并可通过 `logs` 读取输出。
+- `WP.7`：`rm` 删除已退出的 detached 记录。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -326,7 +328,7 @@ rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` �
 修复后，Win32 私有匿名映射直接由 `W32Mmap64` 在 guest 虚拟地址窗口内 commit，
 只有需要 snapshot-fork 文件身份的共享匿名映射保留临时文件路径；页表与映射
 保护失败也会明确报错，不再进入未定义行为。CI `30238223406` 的
-`WP.1-WP.5` 全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
+`WP.1-WP.7` 全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
 Alpine 3.20 的 `/bin/sh`，执行 `uname` 与读取 `/etc/alpine-release` 均为 rc0。
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
@@ -533,7 +535,7 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 242 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 持续覆盖，Windows 已实机验证 detach/logs/stop/rm，仍缺 Windows 持续门禁；F8.4 未实现 |
+| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 与 Windows WP.6-WP.7 持续覆盖，Windows stop 已人工实测但仍缺持续门禁；F8.4 未实现 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -575,8 +577,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[active]` F8.1-F8.3 已落地；补 Windows detach/logs/stop 持续门禁，并完成
-   F8.4 `exec` 的 Windows 可行性取证后再决定是否实现。
+4. `[active]` F8.1-F8.3 已落地；补 Windows stop 持续门禁，并完成 F8.4
+   `exec` 的 Windows 可行性取证后再决定是否实现。
 
 ## 8. 验收与发布
 
