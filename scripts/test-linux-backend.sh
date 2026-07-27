@@ -2030,6 +2030,89 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== RT wbox restart（PRD F9.26）==="
+
+# 判据是**换了一条命 + 配置照旧**：容器 PID 必须变（真的重起了，不是没动），
+# 且原来的运行配置仍然生效。只断言 rc=0 的话，一个什么都不做的实现也能过。
+# 用与其它组同一个 HOME：镜像缓存在那里，另起一个干净 HOME 会因为找不到
+# lbetest 而整组失败（吃过一次亏）。
+RTH=$WORK/home
+HOME=$RTH "$WBOX_ABS" run -d --name rtc --hostname rtbox lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+rt1=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+rout=$(HOME=$RTH "$WBOX_ABS" restart rtc 2>&1); rrc=$?
+sleep 2
+rt2=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt1" ] && [ -n "$rt2" ] && [ "$rt1" != "$rt2" ]; then
+  report PASS "RT.1 restart 换了一条命（PID $rt1 → $rt2）且容器仍在运行"
+else
+  report FAIL "RT.1 restart 生效" "rc=$rrc 前=$rt1 后=$rt2（应都非空且不同）"
+fi
+
+# 原配置要照旧生效：--hostname 是 run 时给的，重启后必须还在
+rhost=$(HOME=$RTH "$WBOX_ABS" exec rtc -- /bin/hostname 2>&1)
+if printf '%s' "$rhost" | grep -qx 'rtbox'; then
+  report PASS "RT.2 重启后沿用原运行配置（--hostname 仍生效）"
+else
+  report FAIL "RT.2 沿用原配置" "容器内 hostname=$(printf '%s' "$rhost" | tr '\n' ' ' | head -c 80)（期望 rtbox）"
+fi
+
+# 名字只该出现一次：restart 内部要调 stop，但那一步不该也打一遍名字
+if [ "$(printf '%s\n' "$rout" | grep -c '^rtc$')" -eq 1 ]; then
+  report PASS "RT.3 restart 只汇报一次容器名（内部 stop 不重复打印）"
+else
+  report FAIL "RT.3 输出" "输出: $(printf '%s' "$rout" | tr '\n' '|' | head -c 120)"
+fi
+
+# 已退出的容器也能 restart（docker 语义）。这一条同时验证了 `run -d` 起的容器
+# 确实记下了启动配置——补这条之前只有 create 的容器能再启动。
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+sleep 1
+rout=$(HOME=$RTH "$WBOX_ABS" restart rtc 2>&1); rrc=$?
+sleep 2
+rt3=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt3" ]; then
+  report PASS "RT.4 已退出的容器也能 restart（run -d 的启动配置被记住了）"
+else
+  report FAIL "RT.4 重启已退出容器" "rc=$rrc PID=$rt3 输出: $(printf '%s' "$rout" | head -c 150)"
+fi
+
+# start 同样受益：这是同一份配置的另一个入口
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+sleep 1
+rout=$(HOME=$RTH "$WBOX_ABS" start rtc 2>&1); rrc=$?
+sleep 2
+rt4=$(HOME=$RTH "$WBOX_ABS" ps | awk '$1=="rtc"{print $3}')
+if [ "$rrc" -eq 0 ] && [ -n "$rt4" ]; then
+  report PASS "RT.5 start 也能拉起 run -d 起过的已退出容器"
+else
+  report FAIL "RT.5 start 已退出容器" "rc=$rrc PID=$rt4 输出: $(printf '%s' "$rout" | head -c 150)"
+fi
+
+rout=$(HOME=$RTH "$WBOX_ABS" restart nosuchrt 2>&1); rrc=$?
+if [ "$rrc" -ne 0 ]; then
+  report PASS "RT.6 restart 不存在的容器时报错"
+else
+  report FAIL "RT.6 未知容器" "rc=$rrc"
+fi
+
+# 收尾必须**等它真的退出**再 rm：`rm` 按设计会拒绝运行中的容器，
+# kill 返回不等于状态已翻成 exited。直接 kill 完就 rm，偶发会留下一个还在跑的
+# rtc 污染后面按 `ps` 判断的用例——这正是本轮撞到过一次的偶发红。
+# 用轮询而不是固定 sleep：固定睡多久都只是猜，而轮询判的是真实状态。
+HOME=$RTH "$WBOX_ABS" kill rtc >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  HOME=$RTH "$WBOX_ABS" ps 2>/dev/null | awk '$1=="rtc"{found=1} END{exit !found}' || break
+  sleep 0.5
+done
+HOME=$RTH "$WBOX_ABS" rm rtc >/dev/null 2>&1
+if HOME=$RTH "$WBOX_ABS" ps -a 2>/dev/null | awk '$1=="rtc"{found=1} END{exit !found}'; then
+  report FAIL "RT.7 收尾清理" "rtc 未被清掉，会污染后面按 ps 判断的用例"
+else
+  report PASS "RT.7 收尾后不留 rtc 记录（不污染后续用例）"
+fi
+
+echo
 echo "=== EX wbox export / import（PRD F9.25）==="
 
 # export 导出的必须是**合并后的容器现状**：改过的以容器为准、删掉的不能复活、

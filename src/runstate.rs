@@ -29,6 +29,13 @@ const OPERATION_LOCK: &str = ".operations.lock";
 const DETACHED_RESERVATION: &str = ".detached-reservation";
 const CREATED_MARKER: &str = ".created";
 const CREATE_CONFIG: &str = "create.json";
+/// `run -d` 记下的重启配置。
+///
+/// **与 `create.json` 是两个文件，不能合并**：`create.json` 的存在本身就是
+/// "这个名字被 create 占用了、该走 start"的标记（见 `reserve_detached`），
+/// 而 `run -d` 起的容器并不处于那个状态。共用一个文件会让 `run -d` 之后再
+/// `run -d` 同名容器被误判成"已有 create 配置"。
+const RUN_ARGS: &str = "run-args.json";
 const EXIT_CODE: &str = "exit-code";
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -374,19 +381,7 @@ pub fn create_pending(
     std::fs::create_dir_all(&dir)
         .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
     let result = (|| {
-        let config = serde_json::json!({
-            "schema": 1,
-            "run_args": args,
-        });
-        let config_path = dir.join(CREATE_CONFIG);
-        std::fs::write(&config_path, config.to_string())
-            .map_err(|e| WboxError::args(format!("写 create.json 失败：{}", e)))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| WboxError::args(format!("限制 create.json 权限失败：{}", e)))?;
-        }
+        write_run_config(&dir.join(CREATE_CONFIG), args)?;
         let entry = Entry {
             name: name.to_string(),
             pid: 0,
@@ -410,20 +405,60 @@ pub fn create_pending(
     result
 }
 
+/// 把"怎么再启动一次"落盘。`create` 与 `run -d` 各写各的文件，格式相同。
+///
+/// 权限收到 0600：argv 里可能有 `-e TOKEN=...` 这类东西，它不该比原命令行
+/// 更容易被同机别的用户读到。
+fn write_run_config(path: &Path, args: &[String]) -> Result<()> {
+    let config = serde_json::json!({ "schema": 1, "run_args": args });
+    std::fs::write(path, config.to_string()).map_err(|e| {
+        WboxError::args(format!("写 {} 失败：{}", path.display(), e))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| WboxError::args(format!("限制 {} 权限失败：{}", path.display(), e)))?;
+    }
+    Ok(())
+}
+
+/// `run -d` 的父进程记下重启配置，好让 `start`/`restart` 对它同样可用。
+///
+/// 补这个之前只有 `create` 的容器能再启动，`run -d` 起的容器一退出就没法拉回来
+/// ——而 docker 两种都能 `start`/`restart`。写失败不致命：容器照跑，只是这一个
+/// 名字以后不能重启，故只回报给调用方决定要不要出声。
+pub fn save_run_args(dir: &Path, args: &[String]) -> Result<()> {
+    write_run_config(&dir.join(RUN_ARGS), args)
+}
+
+/// 读"怎么再启动一次"。`create.json` 优先，其次 `run -d` 记下的那份。
 fn read_create_args(dir: &Path) -> Result<Vec<String>> {
-    let text = std::fs::read_to_string(dir.join(CREATE_CONFIG))
-        .map_err(|_| WboxError::args("容器没有可重用的 create 配置"))?;
+    let (text, from) = match std::fs::read_to_string(dir.join(CREATE_CONFIG)) {
+        Ok(t) => (t, CREATE_CONFIG),
+        Err(_) => match std::fs::read_to_string(dir.join(RUN_ARGS)) {
+            Ok(t) => (t, RUN_ARGS),
+            // 前台 run 的容器退出即清理（连目录都不留），所以走到这里的多半是
+            // 被外部动过的残留。说清哪两种容器可以再启动，比只说"没有配置"有用。
+            Err(_) => {
+                return Err(WboxError::args(
+                    "容器没有可重用的启动配置：只有 `wbox create` 和 `wbox run -d` 起的容器\
+                     会记下配置（前台 run 的容器退出即清理）",
+                ))
+            }
+        },
+    };
     let value: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| WboxError::args(format!("create.json 不可读：{}", e)))?;
+        .map_err(|e| WboxError::args(format!("{} 不可读：{}", from, e)))?;
     value
         .get("run_args")
         .and_then(|args| args.as_array())
-        .ok_or_else(|| WboxError::args("create.json 缺少 run_args"))?
+        .ok_or_else(|| WboxError::args(format!("{} 缺少 run_args", from)))?
         .iter()
         .map(|arg| {
             arg.as_str()
                 .map(str::to_string)
-                .ok_or_else(|| WboxError::args("create.json 的 run_args 含非字符串值"))
+                .ok_or_else(|| WboxError::args(format!("{} 的 run_args 含非字符串值", from)))
         })
         .collect()
 }
@@ -435,7 +470,7 @@ fn restore_created_dir(dir: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name == CREATE_CONFIG || name == "meta.json" || name == CREATED_MARKER {
+        if name == CREATE_CONFIG || name == RUN_ARGS || name == "meta.json" || name == CREATED_MARKER {
             continue;
         }
         let path = entry.path();

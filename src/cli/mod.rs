@@ -24,6 +24,7 @@ pub mod start;
 mod commit;
 mod cp;
 mod export;
+mod restart;
 mod stats;
 mod pause;
 mod diff;
@@ -55,6 +56,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
   wbox create [RUN OPTIONS] IMAGE|-- PROGRAM        保存容器配置但不启动
   wbox start <NAME>...                              启动 created/exited 容器
+  wbox restart [-t <秒>] <NAME>...                  停掉再按原配置起来（见 PRD F9.26）
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
@@ -162,6 +164,7 @@ const VERBS: &[(&str, Scope, Handler)] = &[
     ("exec", Scope::Container, exec::cmd_exec),
     ("rm", Scope::Container, rm::cmd_rm),
     ("stop", Scope::Container, stop::cmd_stop),
+    ("restart", Scope::Container, restart::cmd_restart),
     ("kill", Scope::Container, kill::cmd_kill),
     ("top", Scope::Container, top::cmd_top),
     ("diff", Scope::Container, diff::cmd_diff),
