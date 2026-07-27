@@ -400,6 +400,27 @@ Linux 上无对应物（如 AppContainer profile），应明确报"该宿主不�
 并以 `WBOX_LBE_REQUIRE=1` 把"能力缺失"从 SKIP 提为 FAIL——**这条门禁不允许
 静默零覆盖**。
 
+**取证进展（截至目前，只写已被日志证实的部分）**：
+1. **布局 B 的文件机制可用** —— 控制器逐级下发之后，无进程的父级能 enable
+   `subtree_control`，叶子 cgroup 里 `memory.max`/`pids.max`/`cpu.max` 齐全
+   且三个写入全部成功。这是 runc/systemd 采用的形状。
+2. **"布局 A 不可能" 目前证据不足，先前的结论已撤回。** 探针一度打印
+   "布局 A 在 cgroup v2 下不可能成立"，但它自己的日志显示：**所有**
+   `cgroup.procs` 写入都是 `Permission denied`，包括在任何 `subtree_control`
+   被 enable **之前**的那次。那是纯权限问题（cgroup v2 迁移进程要求对源与目的的
+   **共同祖先**有写权限，而源在 root 拥有的 `/system.slice/...` 下，共同祖先是
+   根 cgroup），与 no-internal-process 规则无关。据此还连带产生两个假结论
+   （"含进程的 cgroup 仍可 enable" —— 其实那个 cgroup 是空的）。
+   探针已改为用 sudo 迁移进程以排除该干扰项，并且只在"确实挪进去了"时才对
+   规则下判断。
+3. wbox 至今**没有真正在一个可写的委派 cgroup 里跑过**（日志显示它始终留在
+   `/system.slice/hosted-compute-agent.service`），故"它会不会用 cgroup v2"
+   这个问题目前**无解**，不能归咎于 wbox 的实现。
+
+教训与 §10.5 前两条同源：**工具自身出错时，最容易把工具的毛病读成被测对象的
+毛病**。两次都是探针的问题（一次漏了逐级下发，一次把 EACCES 当成规则约束），
+若照着改代码，就会去修一个并不存在的缺陷。
+
 cgroup v2 **首选路径**仍无覆盖，且原因与上面不同：runner 是 cgroup v2、
 控制器齐全，但 runner 用户对自己的 cgroup 目录**没有写权限**（委派未开），
 `create_dir` 直接失败。本仓开发容器则是 cgroup **v1**。两处环境都只能覆盖

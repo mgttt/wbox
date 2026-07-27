@@ -10,9 +10,16 @@
 #   布局 A（wbox 当前做法）：进程和它要限额的子 cgroup 在同一个父级下
 #       base/            <- wbox 进程在这里
 #         └── child/     <- wbox 想在这里写 memory.max
-#     预判会失败：cgroup v2 的 "no internal process" 规则要求——父 cgroup 里
+#     待验：cgroup v2 的 "no internal process" 规则要求——父 cgroup 里
 #     有进程时，不能对它 enable subtree_control 把控制器下发给子级；而不
 #     enable，子级里根本不会出现 memory.max 这些文件。
+#
+# **移动进程必须用 sudo**：cgroup v2 迁移进程要求对**源与目的的共同祖先**也有
+# 写权限。我们只 chown 了自己造的子树，源却在 root 拥有的
+# /system.slice/... 下，共同祖先是根 cgroup —— 于是所有
+# `echo pid > cgroup.procs` 一律 EACCES。上一版没意识到这点，把这个纯权限
+# 错误当成了 "no internal process" 规则的证据，脚本还据此打印了
+# "布局 A 不可能成立" —— 那个结论**不成立**，已撤回。
 #
 #   布局 B（runc/systemd 的做法）：进程先挪到旁边的 leaf，父级才好下发控制器
 #       base/            <- 无进程，subtree_control = "+memory +pids +cpu"
@@ -80,16 +87,26 @@ echo "  $BASE/a/cgroup.controllers = $(cat "$BASE/a/cgroup.controllers" 2>/dev/n
 # 把一个**子进程**（不是本 shell，避免影响 CI runner 自身）挪进 $BASE/a
 sleep 300 &
 victim=$!
-if echo "$victim" > "$BASE/a/cgroup.procs" 2>/tmp/probe.err; then
-  echo "  [ok]   把测试进程 $victim 移入 $BASE/a"
+moved_in=0
+if sudo sh -c "echo $victim > '$BASE/a/cgroup.procs'" 2>/tmp/probe.err; then
+  moved_in=1
+  echo "  [ok]   把测试进程 $victim 移入 $BASE/a（经 sudo：跨 root 拥有的共同祖先）"
 else
-  echo "  [FAIL] 移入 $BASE/a —— $(tr -d '\n' </tmp/probe.err)"
+  echo "  [FAIL] 连 sudo 都移不进 $BASE/a —— $(tr -d '\n' </tmp/probe.err)"
 fi
-# 关键一步：$BASE/a 里有进程，还能不能给子级下发控制器？
-if echo "+memory" > "$BASE/a/cgroup.subtree_control" 2>/tmp/probe.err; then
-  echo "  [ok]   含进程的 cgroup 仍可 enable subtree_control（与预判相反！）"
+echo "  a/cgroup.procs 实际内容：$(cat "$BASE/a/cgroup.procs" 2>/dev/null | tr '\n' ' ')"
+# 关键一步：$BASE/a 里**确实有进程**时，还能不能给子级下发控制器？
+# 只有 moved_in=1 时这条结论才有意义 —— 空 cgroup 当然能 enable，
+# 拿空 cgroup 的成功去说"含进程也能 enable"是上一版犯的错。
+if [ "$moved_in" = 1 ]; then
+  if echo "+memory" > "$BASE/a/cgroup.subtree_control" 2>/tmp/probe.err; then
+    echo "  [!!]   **含进程**的 cgroup 仍可 enable subtree_control —— 布局 A 可能可行"
+  else
+    echo "  [预期] **含进程**的 cgroup 无法 enable subtree_control —— $(tr -d '\n' </tmp/probe.err)"
+    echo "         => 这才是 no-internal-process 规则的直接证据"
+  fi
 else
-  echo "  [预期] 含进程的 cgroup 无法 enable subtree_control —— $(tr -d '\n' </tmp/probe.err)"
+  echo "  [跳过] 进程没进去，对 subtree_control 的判断无意义（不下结论）"
 fi
 mkdir -p "$BASE/a/child" 2>/dev/null
 echo "  $BASE/a/child 内可见文件：$(ls "$BASE/a/child" 2>/dev/null | tr '\n' ' ')"
@@ -108,11 +125,12 @@ if echo "+memory" > "$BASE/a2/cgroup.subtree_control" 2>/tmp/probe.err; then
   echo "  [ok]   空 cgroup 可 enable subtree_control"
   sleep 300 &
   v2=$!
-  if echo "$v2" > "$BASE/a2/cgroup.procs" 2>/tmp/probe.err; then
-    echo "  [!!]   已 enable 的 cgroup 仍可塞进程 —— 布局 A 也许可行，需重新评估"
+  # 同样经 sudo，排除"共同祖先无写权限"这个与规则无关的干扰项
+  if sudo sh -c "echo $v2 > '$BASE/a2/cgroup.procs'" 2>/tmp/probe.err; then
+    echo "  [!!]   已 enable subtree_control 的 cgroup 仍可塞进程 —— 布局 A 也许可行"
   else
-    echo "  [预期] 已 enable subtree_control 的 cgroup **拒绝**塞进程 —— $(tr -d '\n' </tmp/probe.err)"
-    echo "         => 布局 A（wbox 现在的做法）在 cgroup v2 下不可能成立"
+    echo "  [预期] 已 enable subtree_control 的 cgroup **拒绝**塞进程（sudo 也不行）—— $(tr -d '\n' </tmp/probe.err)"
+    echo "         => 两个方向都堵死，布局 A 在 cgroup v2 下不成立"
   fi
   kill -9 "$v2" 2>/dev/null; wait "$v2" 2>/dev/null
 else
@@ -150,7 +168,7 @@ done
 # 真把一个进程放进 target，确认限额确实生效
 sleep 300 &
 victim=$!
-echo "$victim" > "$BASE/b/target/cgroup.procs" 2>/dev/null
+sudo sh -c "echo $victim > '$BASE/b/target/cgroup.procs'" 2>/dev/null
 echo "  target/cgroup.procs 内容：$(cat "$BASE/b/target/cgroup.procs" 2>/dev/null | tr '\n' ' ')"
 kill -9 "$victim" 2>/dev/null; wait "$victim" 2>/dev/null
 rmdir "$BASE/b/supervisor" "$BASE/b/target" "$BASE/b" 2>/dev/null
@@ -178,10 +196,13 @@ fi
 # run/ 已经 enable 了 subtree_control，而 cgroup v2 的 "no internal process"
 # 规则**同时**禁止往这样的 cgroup 里塞进程 —— 若如此，wbox「在自己所在 cgroup
 # 下建子目录写限额」的做法就是死路，必须改成 supervisor/target 两个 leaf。
-out=$(bash -c "if echo \$\$ > '$BASE/run/cgroup.procs'; then
-                 echo 'MOVED-IN ok'
+# 注意 `mypid=$$` 必须先在**外层 bash** 里取好：直接写
+# `sudo sh -c "echo $$ > ..."` 取到的是那个临时 sh 的 pid，挪错进程。
+out=$(bash -c "mypid=\$\$
+               if sudo sh -c \"echo \$mypid > '$BASE/run/cgroup.procs'\"; then
+                 echo 'MOVED-IN ok（经 sudo）'
                else
-                 echo \"MOVED-IN FAILED（rc=\$?）—— 这就是布局 A 走不通的直接证据\"
+                 echo 'MOVED-IN FAILED —— 连 sudo 都挪不进去，本次无法验证 wbox 的 cgroup 路径'
                fi
                echo \"wbox 实际所在 cgroup: \$(sed -n 's/^0:://p' /proc/self/cgroup)\"
                exec '$PWD/$WBOX' run -V --memory 16 -- /bin/true" 2>&1)
@@ -191,7 +212,12 @@ echo "$out" | sed 's/^/  | /'
 if echo "$out" | grep -q "限额（cgroup v2）"; then
   echo "  ==> wbox 走了 cgroup v2 首选路径"
 elif echo "$out" | grep -q "rlimit 兜底"; then
-  echo "  ==> wbox 退化到 rlimit 兜底（首选路径仍未覆盖）"
+  if echo "$out" | grep -q "MOVED-IN ok"; then
+    echo "  ==> wbox **确实身处可写的委派 cgroup** 却仍退化到 rlimit"
+    echo "      => 这才是 wbox 自身逻辑/布局的问题，值得改代码"
+  else
+    echo "  ==> wbox 退化到 rlimit，但它压根没被挪进委派 cgroup —— 本次不能归咎于 wbox"
+  fi
 else
   echo "  ==> 无法判断走了哪条路径"
 fi
