@@ -1808,23 +1808,28 @@ rm -f "$PZFILE"
 HOME=$WORK/home "$WBOX_ABS" run -d --name pzc -v "$WORK:/pz" lbetest -- \
   /bin/sh -c 'i=0; while :; do i=$((i+1)); echo $i > /pz/pzcount; sleep 0.05; done' >/dev/null 2>&1
 sleep 2
-before=$(cat "$PZFILE" 2>/dev/null)
 pout=$(HOME=$WORK/home "$WBOX_ABS" pause pzc 2>&1); prc=$?
-sleep 1
+# 两次采样都在 pause **之后**。先前拿 pause 之前的读数当基线是错的：
+# 从采样到 pause 真正生效之间有几十毫秒，容器照跑，计数会 +1，
+# 于是判据偶发红而产品无恙（实测撞到过一次）。要断言的本来就是
+# "停下来之后不再变"，那就该只看停下来之后的两个点。
+sleep 0.3
 during=$(cat "$PZFILE" 2>/dev/null)
-if [ "$prc" -eq 0 ] && [ -n "$before" ] && [ "$before" = "$during" ]; then
+sleep 1
+still=$(cat "$PZFILE" 2>/dev/null)
+if [ "$prc" -eq 0 ] && [ -n "$during" ] && [ "$during" = "$still" ]; then
   report PASS "PZ.1 pause 后容器真的停止工作（计数冻结在 $during）"
 else
-  report FAIL "PZ.1 pause 冻结" "rc=$prc 之前=$before 暂停 1 秒后=$during（应相同）"
+  report FAIL "PZ.1 pause 冻结" "rc=$prc 停后立即=$during 再过 1 秒=$still（应相同）"
 fi
 
 pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
 sleep 1
 after=$(cat "$PZFILE" 2>/dev/null)
-if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$during" ]; then
-  report PASS "PZ.2 unpause 后容器恢复工作（计数 $during → $after）"
+if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$still" ]; then
+  report PASS "PZ.2 unpause 后容器恢复工作（计数 $still → $after）"
 else
-  report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$during 恢复 1 秒后=$after（应不同）"
+  report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$still 恢复 1 秒后=$after（应不同）"
 fi
 HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
