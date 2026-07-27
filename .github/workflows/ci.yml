@@ -300,6 +300,15 @@ jobs:
       # Ubuntu 24.04 起 AppArmor 默认禁掉 unprivileged user namespace，而这条
       # 门禁的全部用例都以它为前置。不打开的话脚本会老实 SKIP 全部用例并返回
       # 0 —— 门禁"全绿"但一个用例都没跑（实际发生过，见 run 30207284306）。
+      # 趁 sysctl 还没打开，先在**真实的 Ubuntu 24.04 默认配置**下跑一次，
+      # 确认报错文案能告诉用户"是 AppArmor 关了 userns"以及怎么开。这是该提示
+      # 唯一的真机验证机会——开发容器既没有那个 sysctl，也不让改配额。
+      # 不判定成败：这里本来就该失败，看的是失败得清不清楚。
+      - name: 取证 —— userns 被封禁时的报错文案（不判定成败）
+        continue-on-error: true
+        run: |
+          echo "apparmor_restrict_unprivileged_userns = $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo '(无此文件)')"
+          target/debug/wbox run -- /bin/true 2>&1 | head -20 || true
       - name: 打开 unprivileged user namespace（rootless 隔离的硬前置）
         run: |
           if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then

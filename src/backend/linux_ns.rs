@@ -226,8 +226,10 @@ pub(super) fn spawn_isolated(
 
     let mut child = cmd.spawn().map_err(|e| {
         WboxError::spawn(format!(
-            "启动容器进程 '{}' 失败：{}",
-            prepared.cmd[0], e
+            "启动容器进程 '{}' 失败：{}{}",
+            prepared.cmd[0],
+            e,
+            spawn_failure_hint(&e)
         ))
     })?;
     let status = child
@@ -333,6 +335,63 @@ unsafe fn bring_up_loopback() {
     ifr.flags = (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
     libc::ioctl(fd, SIOCSIFFLAGS, &mut ifr as *mut IfReqFlags);
     libc::close(fd);
+}
+
+/// 宿主对 unprivileged user namespace 的三种常见封禁方式。
+/// 分开成纯函数是为了可测——真去关掉宿主的 userns 没法在单测里做。
+///
+/// 参数就是三个 sysctl 的原始内容（`None` = 该文件不存在）。
+fn userns_hint_from(
+    apparmor_restrict: Option<&str>,
+    unpriv_clone: Option<&str>,
+    max_user_ns: Option<&str>,
+) -> Option<&'static str> {
+    if apparmor_restrict.map(str::trim) == Some("1") {
+        // Ubuntu 24.04 起的默认值。GitHub 的 ubuntu runner 就是这个配置，
+        // 本项目的 CI 门禁曾因此静默零覆盖，说明这条路很多人会踩。
+        return Some(
+            "\n提示：本宿主由 AppArmor 禁用了 unprivileged user namespace\
+             （kernel.apparmor_restrict_unprivileged_userns=1，Ubuntu 24.04+ 的默认值）。\
+             wbox 的隔离以它为前置。解法：\
+             `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`（临时），\
+             或为 wbox 装一份允许 userns 的 AppArmor profile，或以 root 运行",
+        );
+    }
+    if unpriv_clone.map(str::trim) == Some("0") {
+        return Some(
+            "\n提示：本宿主禁用了 unprivileged user namespace\
+             （kernel.unprivileged_userns_clone=0，部分 Debian/RHEL 衍生版的默认值）。\
+             解法：`sudo sysctl -w kernel.unprivileged_userns_clone=1`，或以 root 运行",
+        );
+    }
+    if max_user_ns.map(str::trim) == Some("0") {
+        return Some(
+            "\n提示：本宿主把 user namespace 配额设成了 0\
+             （user.max_user_namespaces=0）。\
+             解法：`sudo sysctl -w user.max_user_namespaces=<正整数>`",
+        );
+    }
+    None
+}
+
+/// 给 spawn 失败补一条可操作的提示。
+///
+/// 起因：在 Ubuntu 24.04（含 GitHub ubuntu runner）上，wbox 只会打印
+/// "启动容器进程 '/bin/echo' 失败：Operation not permitted"——用户完全看不出
+/// 是宿主关了 unprivileged user namespace，更不知道怎么开。权限类错误才去查
+/// 那几个 sysctl，其它错误（命令不存在等）原样返回，不添乱。
+fn spawn_failure_hint(e: &std::io::Error) -> String {
+    use std::io::ErrorKind;
+    if !matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::InvalidInput) {
+        return String::new();
+    }
+    let read = |p: &str| std::fs::read_to_string(p).ok();
+    let a = read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns");
+    let c = read("/proc/sys/kernel/unprivileged_userns_clone");
+    let m = read("/proc/sys/user/max_user_namespaces");
+    userns_hint_from(a.as_deref(), c.as_deref(), m.as_deref())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// 让本进程在父进程死亡时被 `SIGKILL`（L3 生命周期绑定）。
@@ -866,6 +925,46 @@ mod tests {
                 assert_ne!(f & bit, 0, "{} namespace 不该受 --allow-network 影响", n);
             }
         }
+    }
+
+    /// 三种封禁 userns 的方式都要能认出来，并且各自给出**能照做**的解法。
+    /// 起因：Ubuntu 24.04（含 GitHub ubuntu runner）默认由 AppArmor 关掉
+    /// unprivileged userns，而 wbox 那时只打印 "Operation not permitted"，
+    /// 用户既看不出原因也不知道怎么办。
+    #[test]
+    fn userns_hint_recognizes_each_restriction() {
+        let apparmor = userns_hint_from(Some("1\n"), None, None).expect("应认出 AppArmor 限制");
+        assert!(apparmor.contains("apparmor_restrict_unprivileged_userns"));
+        assert!(apparmor.contains("sysctl"), "提示必须给出可照做的命令");
+
+        let clone = userns_hint_from(None, Some("0\n"), None).expect("应认出 unprivileged_userns_clone=0");
+        assert!(clone.contains("unprivileged_userns_clone"));
+
+        let maxns = userns_hint_from(None, None, Some("0\n")).expect("应认出配额为 0");
+        assert!(maxns.contains("max_user_namespaces"));
+
+        // 优先级：AppArmor 最常见，同时命中时先报它
+        let both = userns_hint_from(Some("1"), Some("0"), Some("0")).unwrap();
+        assert!(both.contains("AppArmor"), "同时命中时应优先报 AppArmor：{}", both);
+    }
+
+    /// 宿主没有任何限制时不能瞎提示——否则会把"命令不存在"这类无关错误
+    /// 引到错误的方向上去。
+    #[test]
+    fn userns_hint_silent_when_unrestricted() {
+        assert!(userns_hint_from(Some("0"), Some("1"), Some("31231")).is_none());
+        assert!(userns_hint_from(None, None, None).is_none(), "文件都不存在时不该提示");
+    }
+
+    /// 只有权限类错误才去查 sysctl；其它错误原样返回，不添乱。
+    #[test]
+    fn spawn_hint_only_for_permission_errors() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            spawn_failure_hint(&Error::new(ErrorKind::NotFound, "no such file")),
+            "",
+            "命令不存在与 userns 无关，不该扯上 sysctl"
+        );
     }
 
     /// `IfReqFlags` 必须与内核 `struct ifreq` 同大小，否则 SIOCSIFFLAGS
