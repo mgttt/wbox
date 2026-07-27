@@ -496,9 +496,9 @@ fi
 
 # R.5 管理面必须跟随第二代 PID。第一代写 marker 后失败，第二代保持运行；
 # 若 container.pid 仍是第一代，top 会拿不到 /proc 子树。
-rm -f "$CACHE/rootfs/restart-ready"
-HOME=$WORK/home "$WBOX_ABS" run -d --name rmanage --restart on-failure:1 \
-  -- /bin/sh -c 'if [ -f /restart-ready ]; then sleep 20; else : > /restart-ready; exit 7; fi' \
+rm -f "$WORK/restart-ready"
+HOME=$WORK/home "$WBOX_ABS" run -d --name rmanage --restart on-failure:1 --workdir "$WORK" \
+  -- /bin/sh -c 'if [ -f restart-ready ]; then sleep 20; else : > restart-ready; exit 7; fi' \
   >/dev/null 2>&1
 sleep 3
 rmtop=$(HOME=$WORK/home "$WBOX_ABS" top rmanage 2>&1); rmrc=$?
@@ -509,7 +509,7 @@ else
 fi
 HOME=$WORK/home "$WBOX_ABS" kill rmanage >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm rmanage >/dev/null 2>&1
-rm -f "$CACHE/rootfs/restart-ready"
+rm -f "$WORK/restart-ready"
 
 echo
 echo "=== B 镜像构建（PRD F9.3）==="
