@@ -259,14 +259,18 @@ CMD ["--help"]
     /// COPY 源不得逃出构建上下文——否则构建成了读取宿主任意文件的通道。
     #[test]
     fn copy_source_cannot_escape_context() {
-        let ctx = std::env::temp_dir().join(format!("wbox-bctx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&ctx);
+        let root = std::env::temp_dir().join(format!("wbox-bctx-{}", std::process::id()));
+        let ctx = root.join("context");
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(ctx.join("sub")).unwrap();
         std::fs::write(ctx.join("sub/f.txt"), b"x").unwrap();
+        // 越界源必须真实存在，否则 canonicalize 只测到“不存在”，没有覆盖
+        // starts_with(root) 这条安全断言。放在同一临时根下可跨 Windows/Linux。
+        std::fs::write(root.join("outside.txt"), b"host-only").unwrap();
         assert!(resolve_context_path(&ctx, "sub/f.txt").is_ok());
-        let e = resolve_context_path(&ctx, "../../etc/hostname").unwrap_err();
+        let e = resolve_context_path(&ctx, "../outside.txt").unwrap_err();
         assert!(format!("{}", e).contains("逃出"), "{}", e);
-        let _ = std::fs::remove_dir_all(&ctx);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// COPY 目标不得用 `..` 逃出 rootfs。
