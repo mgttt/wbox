@@ -86,10 +86,7 @@ fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
     // 已退出的容器没有可附着的 namespace。必须明确拒绝——否则命令会跑在**宿主**
     // 上，而用户以为它跑在容器里，这比报错危险得多。
     if runstate::liveness(&dir) == Liveness::Exited {
-        return Err(WboxError::args(format!(
-            "容器 '{}' 已退出，无法 exec（namespace 已随之消失）",
-            name
-        )));
+        return Err(runstate::already_exited(name));
     }
     let pid = runstate::container_pid(&dir).ok_or_else(|| {
         WboxError::args(format!(
@@ -104,10 +101,7 @@ fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
 fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
     let locked = runstate::lock_existing(name)?;
     if runstate::liveness(&locked.dir) == Liveness::Exited {
-        return Err(WboxError::args(format!(
-            "容器 '{}' 已退出，无法 exec",
-            name
-        )));
+        return Err(runstate::already_exited(name));
     }
     if locked.entry.stopping {
         return Err(WboxError::args(format!(

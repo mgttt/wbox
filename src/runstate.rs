@@ -461,9 +461,28 @@ pub fn read_meta(dir: &Path) -> Option<Entry> {
 pub fn resolve_existing(name: &str) -> Result<PathBuf> {
     let dir = dir_for(name)?;
     if !dir.exists() {
-        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+        return Err(missing_record(name));
     }
     Ok(dir)
+}
+
+/// "查无此记录"的统一措辞。
+///
+/// 单独抽出来是因为它有**两个**产生点：[`resolve_existing`] 走无锁快路径，
+/// 而 [`lock_existing`] 必须**先拿操作锁再判存在**（否则与并发 `stop` 有竞态），
+/// 没法直接复用前者。两处各写一份文案，任何一处改动都会让用户在不同子命令下
+/// 看到不同说法——所以复用的是措辞，不是控制流。
+pub(crate) fn missing_record(name: &str) -> WboxError {
+    WboxError::args(format!("没有名为 '{}' 的容器记录", name))
+}
+
+/// "容器已退出"的统一措辞（`exec` 两侧共用）。
+///
+/// Linux 与 Windows 的 `exec` 走完全不同的实现，但用户看到的这句话必须一致：
+/// 它描述的是**容器状态**，与实现无关。此前两侧各写一份，已经分叉成
+/// "已退出，无法 exec（namespace 已随之消失）"和"已退出，无法 exec"。
+pub(crate) fn already_exited(name: &str) -> WboxError {
+    WboxError::args(format!("容器 '{}' 已退出，无法 exec", name))
 }
 
 /// 持有状态根的操作锁，并返回同一代运行记录。调用方应只在核对实例并取得
@@ -495,7 +514,7 @@ pub fn lock_existing(name: &str) -> Result<LockedEntry> {
         .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
     let operation_lock = lock_operations(root)?;
     if !dir.exists() {
-        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+        return Err(missing_record(name));
     }
     let entry = read_meta(&dir).ok_or_else(|| {
         WboxError::args(format!("容器 '{}' 的 meta.json 不可读", name))
@@ -537,7 +556,7 @@ pub fn remove(name: &str) -> Result<()> {
         .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
     let _operation_lock = lock_operations(root)?;
     if !dir.exists() {
-        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+        return Err(missing_record(name));
     }
     match liveness(&dir) {
         Liveness::Running => Err(WboxError::args(format!(
