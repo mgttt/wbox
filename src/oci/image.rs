@@ -12,6 +12,8 @@ use sha2::Digest;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 /// manifest list / index 的 media type 判断。
 fn is_index(media_type: &str) -> bool {
@@ -27,6 +29,145 @@ pub struct PullSummary {
     pub manifest_digest: String,
 }
 
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn sibling_path(dest: &Path, role: &str, unique: bool) -> anyhow::Result<PathBuf> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少父目录：{}", dest.display()))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少目录名：{}", dest.display()))?
+        .to_string_lossy();
+    if unique {
+        let serial = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(parent.join(format!(
+            ".{}.wbox-{}-{}-{}",
+            name,
+            role,
+            std::process::id(),
+            serial
+        )))
+    } else {
+        Ok(parent.join(format!(".{}.wbox-{}", name, role)))
+    }
+}
+
+struct StagingDir {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingDir {
+    fn create(dest: &Path) -> anyhow::Result<Self> {
+        let parent = dest
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少父目录：{}", dest.display()))?;
+        std::fs::create_dir_all(parent)?;
+        let path = sibling_path(dest, "staging", true)?;
+        std::fs::create_dir(&path)?;
+        Ok(Self { path, armed: true })
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingDir {
+    fn drop(&mut self) {
+        if self.armed {
+            std::fs::remove_dir_all(&self.path).ok();
+        }
+    }
+}
+
+struct PullCommitLock {
+    path: PathBuf,
+}
+
+impl PullCommitLock {
+    fn acquire(dest: &Path, timeout: Duration) -> anyhow::Result<Self> {
+        let path = sibling_path(dest, "pull.lock", false)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "等待镜像缓存提交锁超时：{}（可能有另一 pull 正在提交）",
+                            path.display()
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+
+impl Drop for PullCommitLock {
+    fn drop(&mut self) {
+        std::fs::remove_dir(&self.path).ok();
+    }
+}
+
+fn replace_cache_dir_with(
+    staging: &Path,
+    dest: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
+    if !dest.exists() {
+        rename(staging, dest).with_context(|| {
+            format!(
+                "提交镜像缓存失败：{} -> {}",
+                staging.display(),
+                dest.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let backup = sibling_path(dest, "backup", true)?;
+    rename(dest, &backup).with_context(|| {
+        format!(
+            "备份旧镜像缓存失败：{} -> {}",
+            dest.display(),
+            backup.display()
+        )
+    })?;
+
+    if let Err(install_error) = rename(staging, dest) {
+        if let Err(rollback_error) = rename(&backup, dest) {
+            anyhow::bail!(
+                "提交新镜像缓存失败：{}；回滚旧缓存也失败：{}。旧缓存保留在 {}",
+                install_error,
+                rollback_error,
+                backup.display()
+            );
+        }
+        return Err(anyhow::anyhow!(
+            "提交新镜像缓存失败，旧缓存已恢复：{}",
+            install_error
+        ));
+    }
+
+    if let Err(e) = std::fs::remove_dir_all(&backup) {
+        eprintln!(
+            "wbox: 警告：新镜像已提交，但旧缓存备份清理失败 {}：{}",
+            backup.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
+fn replace_cache_dir(staging: &Path, dest: &Path) -> anyhow::Result<()> {
+    replace_cache_dir_with(staging, dest, |from, to| std::fs::rename(from, to))
+}
+
 /// 拉取一个镜像并解包到 `dest`（dest 下生成 rootfs/ 与元数据文件）。
 pub fn pull_image(
     client: &RegistryClient,
@@ -36,6 +177,10 @@ pub fn pull_image(
     dest: &Path,
     verbose: bool,
 ) -> crate::error::Result<PullSummary> {
+    let mut staging = StagingDir::create(dest)
+        .context("创建镜像 staging 目录失败")
+        .ctx(ErrKind::Registry)?;
+
     // ---- 1. 取 manifest（可能是 index）----
     let (ctype, body, header_digest) = client.get_manifest(&iref.repo, &iref.reference)?;
     // 按 digest 取回的内容（index 或 manifest）一律先过 digest 校验，防止 digest 链断裂。
@@ -91,15 +236,10 @@ pub fn pull_image(
         );
     }
 
-    // ---- 3. 准备输出目录（重新 pull 同 tag 时先清掉旧 rootfs，避免残留）----
-    let rootfs = dest.join("rootfs");
-    if rootfs.exists() {
-        std::fs::remove_dir_all(&rootfs)
-            .context("清理旧 rootfs 失败")
-            .ctx(ErrKind::Registry)?;
-    }
+    // ---- 3. 准备 staging rootfs；成功提交前绝不修改现有缓存 ----
+    let rootfs = staging.path.join("rootfs");
     std::fs::create_dir_all(&rootfs)
-        .context("创建 rootfs 目录失败")
+        .context("创建 staging rootfs 目录失败")
         .ctx(ErrKind::Registry)?;
 
     // ---- 4. 逐层拉取、校验、解包 ----
@@ -141,16 +281,25 @@ pub fn pull_image(
         .ctx(ErrKind::Registry)?;
 
     // ---- 5. 写元数据 ----
-    std::fs::write(dest.join("manifest.json"), &manifest_bytes)
-        .and_then(|_| std::fs::write(dest.join("config.json"), &config_bytes))
+    std::fs::write(staging.path.join("manifest.json"), &manifest_bytes)
+        .and_then(|_| std::fs::write(staging.path.join("config.json"), &config_bytes))
         .and_then(|_| {
             std::fs::write(
-                dest.join("layers.json"),
+                staging.path.join("layers.json"),
                 serde_json::to_string_pretty(&layer_digests).unwrap(),
             )
         })
         .context("写入镜像元数据失败")
         .ctx(ErrKind::Registry)?;
+
+    // ---- 6. 同卷提交：同一目标串行交换，失败恢复旧缓存 ----
+    let _commit_lock = PullCommitLock::acquire(dest, Duration::from_secs(300))
+        .context("获取镜像缓存提交锁失败")
+        .ctx(ErrKind::Registry)?;
+    replace_cache_dir(&staging.path, dest)
+        .context("替换镜像缓存失败")
+        .ctx(ErrKind::Registry)?;
+    staging.disarm();
 
     Ok(PullSummary {
         layers: layers.len(),
@@ -494,7 +643,8 @@ fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> anyhow::Result<()>
 ///   也须解析在 rootfs 内，否则不创建。
 /// - H3：symlink 在所有层应用期间保存在逻辑链接表中，最终才落地；Windows
 ///   无 SeCreateSymbolicLinkPrivilege 时把最终目标内容复制到链接位置。
-pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Result<()> {
+#[cfg(test)]
+fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Result<()> {
     let mut symlinks = SymlinkState::default();
     unpack_layer_with_state(blob, dest, media_type, &mut symlinks)?;
     finalize_symlinks(dest, &symlinks)
@@ -749,6 +899,88 @@ mod tests {
         let mut e = GzEncoder::new(Vec::new(), flate2::Compression::fast());
         e.write_all(data).unwrap();
         e.finish().unwrap()
+    }
+
+    #[test]
+    fn failed_cache_swap_restores_old_cache_and_cleans_staging() {
+        let dir = tmpdir("pull-rollback");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(dest.join("rootfs")).unwrap();
+        std::fs::write(dest.join("rootfs/marker"), b"old-complete").unwrap();
+
+        let staging = StagingDir::create(&dest).unwrap();
+        std::fs::create_dir_all(staging.path.join("rootfs")).unwrap();
+        std::fs::write(staging.path.join("rootfs/marker"), b"new-complete").unwrap();
+        std::fs::write(staging.path.join("manifest.json"), b"{}").unwrap();
+        let staging_path = staging.path.clone();
+
+        let mut rename_call = 0;
+        let err = replace_cache_dir_with(&staging.path, &dest, |from, to| {
+            rename_call += 1;
+            if rename_call == 2 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected install rename failure",
+                ));
+            }
+            std::fs::rename(from, to)
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("旧缓存已恢复"), "{err}");
+        assert_eq!(
+            std::fs::read(dest.join("rootfs/marker")).unwrap(),
+            b"old-complete"
+        );
+
+        // 模拟 pull_image 错误返回：guard 必须清掉未提交的 staging。
+        drop(staging);
+        assert!(!staging_path.exists(), "失败 staging 不应残留");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("backup")),
+            "成功回滚后不应残留 backup"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn staging_guard_cleans_simulated_download_failure() {
+        let dir = tmpdir("pull-staging-cleanup");
+        let dest = dir.join("image");
+        let staging_path;
+        {
+            let staging = StagingDir::create(&dest).unwrap();
+            staging_path = staging.path.clone();
+            std::fs::create_dir_all(staging.path.join("rootfs")).unwrap();
+            std::fs::write(staging.path.join("rootfs/partial-layer"), b"partial").unwrap();
+        }
+        assert!(!staging_path.exists(), "下载失败后必须清理 staging");
+        assert!(!dest.exists(), "失败 pull 不得生成目标缓存");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pull_commit_lock_serializes_same_destination() {
+        let dir = tmpdir("pull-lock");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = PullCommitLock::acquire(&dest, Duration::from_millis(50)).unwrap();
+        let err = PullCommitLock::acquire(&dest, Duration::from_millis(50))
+            .err()
+            .expect("第二个提交者应等待超时");
+        assert!(err.to_string().contains("超时"), "{err}");
+        drop(first);
+        let second = PullCommitLock::acquire(&dest, Duration::from_millis(50)).unwrap();
+        drop(second);
+        assert!(
+            !sibling_path(&dest, "pull.lock", false).unwrap().exists(),
+            "释放提交锁后不得残留锁目录"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
