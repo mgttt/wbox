@@ -98,6 +98,47 @@ try {
         throw "normal foreground runs left a state record: $ps"
     }
     Write-Host "PASS WP.5 normal-run state cleanup"
+
+    # WP.6 backgrounded lifecycle on Windows: --detach -> ps -> logs -> rm.
+    # Linux gates this end to end (P.9-P.18); Windows previously covered only
+    # the two platform-specific pieces by unit test (lock semantics, process
+    # termination). Without this the README's lifecycle claim is unverified
+    # on the very host the product targets.
+    $bg = & $portableWbox run -d --name product-bg --workdir $env:SystemRoot\System32 -- `
+        cmd.exe /d /c "echo DETACH_E2E_OK" 2>&1 | Out-String
+    Assert-Exit 0 "WP.6 detach launch" $bg
+    if ($bg.Trim() -ne "product-bg") {
+        throw "WP.6 detach should print just the container name, got: $bg"
+    }
+
+    # The container is short-lived; wait for it to be recorded as exited.
+    # Detached records persist after exit by design (that is what makes
+    # `logs` useful afterwards), so this must not race on cleanup.
+    $seen = $false
+    foreach ($i in 1..30) {
+        Start-Sleep -Milliseconds 500
+        $psAll = & $portableWbox ps --all 2>&1 | Out-String
+        if ($psAll -match "product-bg") { $seen = $true; break }
+    }
+    if (-not $seen) {
+        throw "WP.6 detached container never appeared in ps --all"
+    }
+
+    $bgLog = & $portableWbox logs product-bg 2>&1 | Out-String
+    Assert-Exit 0 "WP.6 logs read" $bgLog
+    if ($bgLog -notmatch "DETACH_E2E_OK") {
+        throw "WP.6 logs did not contain the guest marker: $bgLog"
+    }
+    Write-Host "PASS WP.6 Windows detach -> ps -> logs"
+
+    & $portableWbox rm product-bg 2>&1 | Out-Null
+    Assert-Exit 0 "WP.7 rm detached record"
+    $psAfter = & $portableWbox ps --all 2>&1 | Out-String
+    if ($psAfter -match "product-bg") {
+        throw "WP.7 rm left the record behind: $psAfter"
+    }
+    Write-Host "PASS WP.7 rm clears the detached record"
+
     if ($null -ne $guestFailure) {
         throw $guestFailure
     }
