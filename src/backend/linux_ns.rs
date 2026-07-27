@@ -698,6 +698,13 @@ fn try_cgroup_plan(
 
     // 把**自己**挪进 supervisor：这一步之后 own 才没有直接进程，
     // 才可能给子级下发控制器。挪不动就说明这里不是我们能支配的委派根。
+    //
+    // 注意这是一个**不可回滚的副作用**：一旦挪成功，即便后续步骤失败退回
+    // rlimit，wbox 也仍待在 supervisor 里（不再挪回去——挪回 own 会让 own
+    // 重新变成"含进程"，反而把状态搞乱）。后果仅是 wbox 自己多待在一层
+    // 子 cgroup 中，不影响限额语义；代价是 `wbox-supervisor` 这个目录删不掉
+    // （里面有进程），会留在委派根下。它是**固定名字**而非 per-pid，故最多
+    // 只留一个，不会累积。
     if std::fs::write(supervisor.join("cgroup.procs"), std::process::id().to_string()).is_err() {
         return abandon();
     }
