@@ -367,7 +367,7 @@ impl Backend for BlinkBackend {
         // 双层隔离：wbox-linux.exe 经 NativeBackend 在 AppContainer + Job 内启动。
         // run_image 已把共享 cache 复制到状态目录，并仅向本 profile SID 授予
         // 修改权；prepared.workdir 绝不能重新指回共享镜像缓存。
-        super::native::spawn_blink(
+        super::native::spawn_native(
             spec,
             prepared,
             &format!("wbox-linux（blink 模拟器，BLINK_PREFIX={}）", prepared.workdir.display()),

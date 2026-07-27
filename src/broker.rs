@@ -6,9 +6,8 @@
 use crate::error::{Result, WboxError};
 use crate::token::{self, OwnedHandle};
 use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
-    ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    HLOCAL, INVALID_HANDLE_VALUE,
+    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_PIPE_CONNECTED,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -21,9 +20,8 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FlushFileBuffers, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, ReadFile, WriteFile, BY_HANDLE_FILE_INFORMATION,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+    CreateFileW, FileAttributeTagInfo, FlushFileBuffers, GetFileInformationByHandleEx, ReadFile,
+    WriteFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
@@ -44,13 +42,8 @@ const PIPE_BUFFER: u32 = 8192;
 const OP_HELLO: u16 = 1;
 const OP_PING: u16 = 2;
 const OP_OPEN: u16 = 3;
-const OP_LOOKUP: u16 = 4;
-const OP_READDIR: u16 = 5;
 const OPEN_FIXED_LEN: usize = 12;
-const READDIR_FIXED_LEN: usize = 8;
 const MAX_RELATIVE_PATH: usize = 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 65_536;
-const MAX_DIRECTORY_NAME_BYTES: usize = 16 * 1024 * 1024;
 
 const STATUS_OK: i32 = 0;
 const STATUS_PROTOCOL: i32 = -71; // Linux EPROTO
@@ -67,9 +60,6 @@ const FILE_DIRECTORY_FILE: u32 = 0x0001;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
 const FILE_OPEN_REPARSE_POINT_OPTION: u32 = 0x0020_0000;
-const FILE_NAMES_INFORMATION_CLASS: u32 = 12;
-const STATUS_NO_MORE_FILES_NT: i32 = 0x8000_0006u32 as i32;
-const STATUS_BUFFER_OVERFLOW_NT: i32 = 0x8000_0005u32 as i32;
 
 #[repr(C)]
 struct NtUnicodeString {
@@ -109,20 +99,6 @@ extern "system" {
         ea_buffer: *mut core::ffi::c_void,
         ea_length: u32,
     ) -> i32;
-
-    fn NtQueryDirectoryFile(
-        file_handle: HANDLE,
-        event: HANDLE,
-        apc_routine: *mut core::ffi::c_void,
-        apc_context: *mut core::ffi::c_void,
-        io_status_block: *mut NtIoStatusBlock,
-        file_information: *mut core::ffi::c_void,
-        length: u32,
-        file_information_class: u32,
-        return_single_entry: u8,
-        file_name: *mut NtUnicodeString,
-        restart_scan: u8,
-    ) -> i32;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,32 +132,6 @@ struct OpenRequest {
     linux_flags: u32,
     mode: u32,
     components: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PathRequest {
-    mount_id: u32,
-    components: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReadDirRequest {
-    path: PathRequest,
-    cursor: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BrokerMetadata {
-    mode: u32,
-    size: u64,
-    inode: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum FinalKind {
-    File,
-    Directory,
-    Any,
 }
 
 pub(crate) struct BrokerMount {
@@ -221,36 +171,11 @@ impl BrokerMount {
     }
 
     fn open_existing_file(&self, components: &[String]) -> Result<OwnedHandle> {
-        self.open_path(components, FinalKind::File)
-    }
-
-    fn lookup(&self, components: &[String]) -> Result<BrokerMetadata> {
-        if components.is_empty() {
-            return metadata_from_handle(self.root.raw());
-        }
-        let opened = self.open_path(components, FinalKind::Any)?;
-        metadata_from_handle(opened.raw())
-    }
-
-    fn read_directory(&self, components: &[String]) -> Result<Vec<String>> {
-        if components.is_empty() {
-            return read_directory_names(self.root.raw());
-        }
-        let opened = self.open_path(components, FinalKind::Directory)?;
-        read_directory_names(opened.raw())
-    }
-
-    fn open_path(&self, components: &[String], final_kind: FinalKind) -> Result<OwnedHandle> {
         let mut parent: Option<OwnedHandle> = None;
         for (index, component) in components.iter().enumerate() {
             let root = parent.as_ref().map_or(self.root.raw(), OwnedHandle::raw);
             let final_component = index + 1 == components.len();
-            let kind = if final_component {
-                final_kind
-            } else {
-                FinalKind::Directory
-            };
-            let opened = nt_open_relative(root, component, kind)?;
+            let opened = nt_open_relative(root, component, final_component)?;
             let attributes = file_attributes(opened.raw())?;
             if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 return Err(WboxError::spawn(format!(
@@ -259,14 +184,8 @@ impl BrokerMount {
                 )));
             }
             if final_component {
-                match final_kind {
-                    FinalKind::File if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 => {
-                        return Err(WboxError::spawn("broker OPEN 只接受普通文件"));
-                    }
-                    FinalKind::Directory if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 => {
-                        return Err(WboxError::spawn("broker READDIR 只接受目录"));
-                    }
-                    _ => {}
+                if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                    return Err(WboxError::spawn("broker OPEN 首版只接受普通文件"));
                 }
                 return Ok(opened);
             }
@@ -278,7 +197,7 @@ impl BrokerMount {
             }
             parent = Some(opened);
         }
-        Err(WboxError::spawn("broker path 缺少路径组件"))
+        Err(WboxError::spawn("broker OPEN 缺少路径组件"))
     }
 }
 
@@ -301,38 +220,7 @@ impl OpenRequest {
         if linux_flags != 0 || mode != 0 {
             return Err("open flags");
         }
-        let path =
-            PathRequest::decode_payload(mount_id, &request.payload[OPEN_FIXED_LEN..], false)?;
-        Ok(Self {
-            mount_id,
-            linux_flags,
-            mode,
-            components: path.components,
-        })
-    }
-}
-
-impl PathRequest {
-    fn decode(
-        request: &Request,
-        opcode: u16,
-        allow_empty: bool,
-    ) -> std::result::Result<Self, &'static str> {
-        if request.opcode != opcode || request.flags != 0 || request.payload.len() < 4 {
-            return Err("opcode/flags/payload");
-        }
-        let mount_id = u32::from_le_bytes(request.payload[0..4].try_into().unwrap());
-        Self::decode_payload(mount_id, &request.payload[4..], allow_empty)
-    }
-
-    fn decode_payload(
-        mount_id: u32,
-        path_bytes: &[u8],
-        allow_empty: bool,
-    ) -> std::result::Result<Self, &'static str> {
-        if mount_id == 0 {
-            return Err("mount id");
-        }
+        let path_bytes = &request.payload[OPEN_FIXED_LEN..];
         if path_bytes.len() > MAX_RELATIVE_PATH {
             return Err("path too long");
         }
@@ -342,40 +230,20 @@ impl PathRequest {
             return Err("path syntax");
         }
         let mut components = Vec::new();
-        if !path.is_empty() {
-            for component in path.split('/') {
-                if component.is_empty() || component == "." || component == ".." {
-                    return Err("path component");
-                }
-                components.push(component.to_string());
+        for component in path.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err("path component");
             }
-        } else if !allow_empty {
+            components.push(component.to_string());
+        }
+        if components.is_empty() {
             return Err("missing path");
         }
         Ok(Self {
             mount_id,
+            linux_flags,
+            mode,
             components,
-        })
-    }
-}
-
-impl ReadDirRequest {
-    fn decode(request: &Request) -> std::result::Result<Self, &'static str> {
-        if request.opcode != OP_READDIR
-            || request.flags != 0
-            || request.payload.len() < READDIR_FIXED_LEN
-        {
-            return Err("opcode/flags/payload");
-        }
-        let mount_id = u32::from_le_bytes(request.payload[0..4].try_into().unwrap());
-        let cursor = u32::from_le_bytes(request.payload[4..8].try_into().unwrap());
-        Ok(Self {
-            path: PathRequest::decode_payload(
-                mount_id,
-                &request.payload[READDIR_FIXED_LEN..],
-                true,
-            )?,
-            cursor,
         })
     }
 }
@@ -398,119 +266,7 @@ fn file_attributes(handle: HANDLE) -> Result<u32> {
     Ok(info.FileAttributes)
 }
 
-fn metadata_from_handle(handle: HANDLE) -> Result<BrokerMetadata> {
-    let attributes = file_attributes(handle)?;
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    if unsafe { GetFileInformationByHandle(handle, &mut info) } == 0 {
-        return Err(last_error("GetFileInformationByHandle(broker metadata)"));
-    }
-    let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
-    let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    let inode = (u64::from(info.dwVolumeSerialNumber) << 32) ^ file_index;
-    let mode = if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        0o040_555
-    } else {
-        0o100_444
-    };
-    Ok(BrokerMetadata { mode, size, inode })
-}
-
-fn read_directory_names(handle: HANDLE) -> Result<Vec<String>> {
-    let mut names = Vec::new();
-    let mut name_bytes = 0usize;
-    let mut restart = 1u8;
-    loop {
-        let mut storage = vec![0u64; 2048];
-        let mut io = NtIoStatusBlock {
-            status: 0,
-            information: 0,
-        };
-        let status = unsafe {
-            NtQueryDirectoryFile(
-                handle,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut io,
-                storage.as_mut_ptr().cast(),
-                (storage.len() * std::mem::size_of::<u64>()) as u32,
-                FILE_NAMES_INFORMATION_CLASS,
-                0,
-                std::ptr::null_mut(),
-                restart,
-            )
-        };
-        restart = 0;
-        if status == STATUS_NO_MORE_FILES_NT {
-            break;
-        }
-        if status < 0 && status != STATUS_BUFFER_OVERFLOW_NT {
-            return Err(WboxError::spawn(format!(
-                "NtQueryDirectoryFile 失败，NTSTATUS=0x{:08X}",
-                status as u32
-            )));
-        }
-        let used = io
-            .information
-            .min(storage.len() * std::mem::size_of::<u64>());
-        if used == 0 {
-            if status == STATUS_BUFFER_OVERFLOW_NT {
-                return Err(WboxError::spawn(
-                    "NtQueryDirectoryFile 缓冲区不足且未返回条目",
-                ));
-            }
-            break;
-        }
-        let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), used) };
-        let mut offset = 0usize;
-        loop {
-            if offset.checked_add(12).is_none_or(|end| end > bytes.len()) {
-                return Err(WboxError::spawn("NtQueryDirectoryFile 返回截断的目录项"));
-            }
-            let next = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
-            let name_len =
-                u32::from_le_bytes(bytes[offset + 8..offset + 12].try_into().unwrap()) as usize;
-            let name_end = offset
-                .checked_add(12)
-                .and_then(|start| start.checked_add(name_len))
-                .ok_or_else(|| WboxError::spawn("NtQueryDirectoryFile 目录项长度溢出"))?;
-            if !name_len.is_multiple_of(2) || name_end > bytes.len() {
-                return Err(WboxError::spawn("NtQueryDirectoryFile 返回无效文件名长度"));
-            }
-            let utf16 = unsafe {
-                std::slice::from_raw_parts(
-                    bytes[offset + 12..name_end].as_ptr().cast::<u16>(),
-                    name_len / 2,
-                )
-            };
-            let name = String::from_utf16(utf16)
-                .map_err(|_| WboxError::spawn("NtQueryDirectoryFile 返回非法 UTF-16 文件名"))?;
-            if name != "." && name != ".." {
-                name_bytes = name_bytes
-                    .checked_add(name.len())
-                    .ok_or_else(|| WboxError::spawn("broker 目录名总长度溢出"))?;
-                if names.len() >= MAX_DIRECTORY_ENTRIES || name_bytes > MAX_DIRECTORY_NAME_BYTES {
-                    return Err(WboxError::spawn("broker 目录超过枚举硬上限"));
-                }
-                names.push(name);
-            }
-            if next == 0 {
-                break;
-            }
-            offset = offset
-                .checked_add(next)
-                .ok_or_else(|| WboxError::spawn("NtQueryDirectoryFile next offset 溢出"))?;
-            if offset >= bytes.len() {
-                return Err(WboxError::spawn("NtQueryDirectoryFile next offset 越界"));
-            }
-        }
-    }
-    names.sort();
-    names.dedup();
-    Ok(names)
-}
-
-fn nt_open_relative(root: HANDLE, name: &str, kind: FinalKind) -> Result<OwnedHandle> {
+fn nt_open_relative(root: HANDLE, name: &str, final_component: bool) -> Result<OwnedHandle> {
     let mut name_wide: Vec<u16> = name.encode_utf16().collect();
     let byte_len = name_wide
         .len()
@@ -535,14 +291,17 @@ fn nt_open_relative(root: HANDLE, name: &str, kind: FinalKind) -> Result<OwnedHa
         information: 0,
     };
     let mut opened = std::ptr::null_mut();
-    let desired_access =
-        FILE_READ_DATA | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS;
+    let desired_access = if final_component {
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS
+    } else {
+        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE_ACCESS
+    };
     let create_options = FILE_SYNCHRONOUS_IO_NONALERT
         | FILE_OPEN_REPARSE_POINT_OPTION
-        | match kind {
-            FinalKind::File => FILE_NON_DIRECTORY_FILE,
-            FinalKind::Directory => FILE_DIRECTORY_FILE,
-            FinalKind::Any => 0,
+        | if final_component {
+            FILE_NON_DIRECTORY_FILE
+        } else {
+            FILE_DIRECTORY_FILE
         };
     let status = unsafe {
         NtCreateFile(
@@ -889,7 +648,7 @@ impl BrokerSession {
             },
         )?;
         if ping_status == STATUS_OK && expect_open {
-            self.serve_open_loop()?;
+            self.serve_open()?;
         }
         unsafe {
             FlushFileBuffers(self.pipe.raw());
@@ -902,75 +661,8 @@ impl BrokerSession {
         }
     }
 
-    fn serve_open_loop(&self) -> Result<()> {
-        while let Some(request) = read_request_or_disconnect(self.pipe.raw())? {
-            match request.opcode {
-                OP_OPEN => self.serve_open(request)?,
-                OP_LOOKUP => self.serve_lookup(request)?,
-                OP_READDIR => self.serve_readdir(request)?,
-                _ => self.write_status(&request, STATUS_PROTOCOL, Vec::new())?,
-            }
-        }
-        Ok(())
-    }
-
-    fn write_status(&self, request: &Request, status: i32, payload: Vec<u8>) -> Result<()> {
-        write_response(
-            self.pipe.raw(),
-            &Response {
-                opcode: request.opcode,
-                request_id: request.request_id,
-                status,
-                payload,
-            },
-        )
-    }
-
-    fn mount(&self, id: u32) -> Option<&BrokerMount> {
-        self.mounts.iter().find(|mount| mount.id == id)
-    }
-
-    fn serve_lookup(&self, request: Request) -> Result<()> {
-        let parsed = match PathRequest::decode(&request, OP_LOOKUP, true) {
-            Ok(parsed) => parsed,
-            Err(_) => return self.write_status(&request, STATUS_PROTOCOL, Vec::new()),
-        };
-        let Some(mount) = self.mount(parsed.mount_id) else {
-            return self.write_status(&request, STATUS_NOT_FOUND, Vec::new());
-        };
-        let metadata = match mount.lookup(&parsed.components) {
-            Ok(metadata) => metadata,
-            Err(_) => return self.write_status(&request, STATUS_NOT_FOUND, Vec::new()),
-        };
-        let mut payload = Vec::with_capacity(24);
-        payload.extend_from_slice(&metadata.mode.to_le_bytes());
-        payload.extend_from_slice(&0u32.to_le_bytes());
-        payload.extend_from_slice(&metadata.size.to_le_bytes());
-        payload.extend_from_slice(&metadata.inode.to_le_bytes());
-        self.write_status(&request, STATUS_OK, payload)
-    }
-
-    fn serve_readdir(&self, request: Request) -> Result<()> {
-        let parsed = match ReadDirRequest::decode(&request) {
-            Ok(parsed) => parsed,
-            Err(_) => return self.write_status(&request, STATUS_PROTOCOL, Vec::new()),
-        };
-        let Some(mount) = self.mount(parsed.path.mount_id) else {
-            return self.write_status(&request, STATUS_NOT_FOUND, Vec::new());
-        };
-        let names = match mount.read_directory(&parsed.path.components) {
-            Ok(names) => names,
-            Err(_) => return self.write_status(&request, STATUS_AUTH, Vec::new()),
-        };
-        let cursor = parsed.cursor as usize;
-        if cursor > names.len() {
-            return self.write_status(&request, STATUS_PROTOCOL, Vec::new());
-        }
-        let payload = encode_readdir_page(&names, cursor)?;
-        self.write_status(&request, STATUS_OK, payload)
-    }
-
-    fn serve_open(&self, request: Request) -> Result<()> {
+    fn serve_open(&self) -> Result<()> {
+        let request = read_request(self.pipe.raw())?;
         let request_id = request.request_id;
         let opcode = request.opcode;
         let parsed = match OpenRequest::decode(&request) {
@@ -987,7 +679,7 @@ impl BrokerSession {
                 );
             }
         };
-        let Some(mount) = self.mount(parsed.mount_id) else {
+        let Some(mount) = self.mounts.iter().find(|mount| mount.id == parsed.mount_id) else {
             return write_response(
                 self.pipe.raw(),
                 &Response {
@@ -1028,101 +720,21 @@ impl BrokerSession {
             return Err(last_error("DuplicateHandle(broker OPEN)"));
         }
         let payload = (remote as usize as u64).to_le_bytes().to_vec();
-        let response = Response {
-            opcode,
-            request_id,
-            status: STATUS_OK,
-            payload,
-        };
-        if let Err(write_error) = write_response(self.pipe.raw(), &response) {
-            let mut reclaimed = std::ptr::null_mut();
-            let cleanup = unsafe {
-                DuplicateHandle(
-                    self.process.raw(),
-                    remote,
-                    GetCurrentProcess(),
-                    &mut reclaimed,
-                    0,
-                    0,
-                    DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS,
-                )
-            };
-            if cleanup == 0 {
-                return Err(WboxError::spawn(format!(
-                    "{}；撤销目标进程 broker OPEN HANDLE 也失败：GetLastError={}",
-                    write_error,
-                    unsafe { GetLastError() }
-                )));
-            }
-            drop(OwnedHandle(reclaimed));
-            return Err(write_error);
-        }
-        Ok(())
+        write_response(
+            self.pipe.raw(),
+            &Response {
+                opcode,
+                request_id,
+                status: STATUS_OK,
+                payload,
+            },
+        )
     }
-}
-
-fn encode_readdir_page(names: &[String], cursor: usize) -> Result<Vec<u8>> {
-    if cursor > names.len() {
-        return Err(WboxError::spawn("broker READDIR cursor 越界"));
-    }
-    let mut payload = vec![0u8; 12];
-    let mut next = cursor;
-    while next < names.len() {
-        let bytes = names[next].as_bytes();
-        let name_len = u16::try_from(bytes.len())
-            .map_err(|_| WboxError::spawn("broker READDIR 文件名过长"))?;
-        if payload.len() + 2 + bytes.len() > MAX_PAYLOAD {
-            break;
-        }
-        payload.extend_from_slice(&name_len.to_le_bytes());
-        payload.extend_from_slice(bytes);
-        next += 1;
-    }
-    if next == cursor && cursor < names.len() {
-        return Err(WboxError::spawn("broker READDIR 单个文件名超过响应上限"));
-    }
-    payload[0..4].copy_from_slice(&(next as u32).to_le_bytes());
-    payload[4..8].copy_from_slice(&u32::from(next == names.len()).to_le_bytes());
-    payload[8..12].copy_from_slice(&((next - cursor) as u32).to_le_bytes());
-    Ok(payload)
 }
 
 fn read_request(pipe: HANDLE) -> Result<Request> {
-    read_request_or_disconnect(pipe)?.ok_or_else(|| WboxError::spawn("broker 请求提前 EOF"))
-}
-
-fn read_request_or_disconnect(pipe: HANDLE) -> Result<Option<Request>> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
-    let mut read = 0u32;
-    let ok = unsafe {
-        ReadFile(
-            pipe,
-            header.as_mut_ptr(),
-            header.len() as u32,
-            &mut read,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        let error = unsafe { GetLastError() };
-        if error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA {
-            return Ok(None);
-        }
-        return Err(WboxError::spawn(format!(
-            "ReadFile(broker request header) 失败，GetLastError={}",
-            error
-        )));
-    }
-    if read == 0 {
-        return Ok(None);
-    }
-    if read as usize != header.len() {
-        return Err(WboxError::spawn(format!(
-            "broker 请求 header 截断：{} != {}",
-            read,
-            header.len()
-        )));
-    }
+    read_exact(pipe, &mut header)?;
     let payload_len = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(WboxError::spawn(format!(
@@ -1135,7 +747,6 @@ fn read_request_or_disconnect(pipe: HANDLE) -> Result<Option<Request>> {
         read_exact(pipe, &mut payload)?;
     }
     Request::decode(&header, payload)
-        .map(Some)
         .map_err(|e| WboxError::spawn(format!("broker 请求帧无效：{:?}", e)))
 }
 
@@ -1396,71 +1007,6 @@ mod tests {
         }
     }
 
-    fn path_request(opcode: u16, path: &[u8], mount_id: u32, request_id: u64) -> Request {
-        let mut payload = Vec::with_capacity(4 + path.len());
-        payload.extend_from_slice(&mount_id.to_le_bytes());
-        payload.extend_from_slice(path);
-        Request {
-            opcode,
-            request_id,
-            flags: 0,
-            payload,
-        }
-    }
-
-    fn readdir_request(path: &[u8], mount_id: u32, cursor: u32, request_id: u64) -> Request {
-        let mut payload = Vec::with_capacity(READDIR_FIXED_LEN + path.len());
-        payload.extend_from_slice(&mount_id.to_le_bytes());
-        payload.extend_from_slice(&cursor.to_le_bytes());
-        payload.extend_from_slice(path);
-        Request {
-            opcode: OP_READDIR,
-            request_id,
-            flags: 0,
-            payload,
-        }
-    }
-
-    fn decode_readdir_names(payload: &[u8]) -> Vec<String> {
-        assert!(payload.len() >= 12);
-        let count = u32::from_le_bytes(payload[8..12].try_into().unwrap()) as usize;
-        let mut names = Vec::with_capacity(count);
-        let mut offset = 12;
-        for _ in 0..count {
-            let len = u16::from_le_bytes(payload[offset..offset + 2].try_into().unwrap()) as usize;
-            offset += 2;
-            names.push(
-                std::str::from_utf8(&payload[offset..offset + len])
-                    .unwrap()
-                    .to_string(),
-            );
-            offset += len;
-        }
-        assert_eq!(offset, payload.len());
-        names
-    }
-
-    #[test]
-    fn readdir_pages_stay_bounded_and_resume_by_cursor() {
-        let names = (0..500)
-            .map(|index| format!("entry-{index:04}-{}", "x".repeat(24)))
-            .collect::<Vec<_>>();
-        let first = encode_readdir_page(&names, 0).unwrap();
-        assert!(first.len() <= MAX_PAYLOAD);
-        let first_cursor = u32::from_le_bytes(first[0..4].try_into().unwrap()) as usize;
-        assert!(first_cursor > 0 && first_cursor < names.len());
-        assert_eq!(u32::from_le_bytes(first[4..8].try_into().unwrap()), 0);
-        assert_eq!(decode_readdir_names(&first), names[..first_cursor]);
-
-        let second = encode_readdir_page(&names, first_cursor).unwrap();
-        assert!(second.len() <= MAX_PAYLOAD);
-        assert_eq!(
-            decode_readdir_names(&second),
-            names[first_cursor..u32::from_le_bytes(second[0..4].try_into().unwrap()) as usize]
-        );
-        assert!(encode_readdir_page(&names, names.len() + 1).is_err());
-    }
-
     #[test]
     fn open_request_accepts_only_normalized_read_only_relative_paths() {
         let parsed = OpenRequest::decode(&open_request(b"dir/canary.txt", 7, 0, 0)).unwrap();
@@ -1538,41 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn readonly_mount_looks_up_and_enumerates_without_host_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "wbox_broker_lookup_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(root.join("nested")).unwrap();
-        std::fs::write(root.join("nested").join("canary.txt"), b"canary").unwrap();
-        std::fs::write(root.join("root.txt"), b"root").unwrap();
-
-        let mount = BrokerMount::open_readonly(1, &root).unwrap();
-        let root_metadata = mount.lookup(&[]).unwrap();
-        assert_eq!(root_metadata.mode & 0o170_000, 0o040_000);
-        let file_metadata = mount
-            .lookup(&["nested".to_string(), "canary.txt".to_string()])
-            .unwrap();
-        assert_eq!(file_metadata.mode & 0o170_000, 0o100_000);
-        assert_eq!(file_metadata.size, 6);
-        assert_eq!(
-            mount.read_directory(&[]).unwrap(),
-            ["nested".to_string(), "root.txt".to_string()]
-        );
-        assert_eq!(
-            mount.read_directory(&["nested".to_string()]).unwrap(),
-            ["canary.txt".to_string()]
-        );
-
-        drop(mount);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn broker_child_probe() {
         let Ok(raw_handle) = std::env::var("WBOX_TEST_BROKER_HANDLE") else {
             return;
@@ -1616,73 +1127,31 @@ mod tests {
         assert_eq!(ping.request_id, 2);
 
         if let Ok(path) = std::env::var("WBOX_TEST_BROKER_OPEN_PATH") {
-            for request_id in [3, 4] {
-                let mut request = open_request(path.as_bytes(), 1, 0, 0);
-                request.request_id = request_id;
-                write_request(pipe.raw(), &request).unwrap();
-                let opened = read_response(pipe.raw()).unwrap();
-                assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
-                assert_eq!(opened.request_id, request_id);
-                assert_eq!(opened.payload.len(), 8);
-                let remote =
-                    u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
-                let remote = OwnedHandle(remote);
-                let mut buffer = [0u8; 64];
-                let mut read = 0;
-                assert_ne!(
-                    unsafe {
-                        ReadFile(
-                            remote.raw(),
-                            buffer.as_mut_ptr(),
-                            buffer.len() as u32,
-                            &mut read,
-                            std::ptr::null_mut(),
-                        )
-                    },
-                    0
-                );
-                assert_eq!(
-                    &buffer[..read as usize],
-                    std::env::var("WBOX_TEST_BROKER_OPEN_EXPECTED")
-                        .unwrap()
-                        .as_bytes()
-                );
-            }
-
-            write_request(pipe.raw(), &path_request(OP_LOOKUP, b"", 1, 5)).unwrap();
-            let root = read_response(pipe.raw()).unwrap();
-            assert_eq!(root.status, STATUS_OK);
-            assert_eq!(root.payload.len(), 24);
-            assert_eq!(
-                u32::from_le_bytes(root.payload[0..4].try_into().unwrap()) & 0o170_000,
-                0o040_000
-            );
-
-            write_request(pipe.raw(), &path_request(OP_LOOKUP, path.as_bytes(), 1, 6)).unwrap();
-            let file = read_response(pipe.raw()).unwrap();
-            assert_eq!(file.status, STATUS_OK);
-            assert_eq!(
-                u32::from_le_bytes(file.payload[0..4].try_into().unwrap()) & 0o170_000,
-                0o100_000
+            write_request(pipe.raw(), &open_request(path.as_bytes(), 1, 0, 0)).unwrap();
+            let opened = read_response(pipe.raw()).unwrap();
+            assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
+            assert_eq!(opened.payload.len(), 8);
+            let remote = u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
+            let remote = OwnedHandle(remote);
+            let mut buffer = [0u8; 64];
+            let mut read = 0;
+            assert_ne!(
+                unsafe {
+                    ReadFile(
+                        remote.raw(),
+                        buffer.as_mut_ptr(),
+                        buffer.len() as u32,
+                        &mut read,
+                        std::ptr::null_mut(),
+                    )
+                },
+                0
             );
             assert_eq!(
-                u64::from_le_bytes(file.payload[8..16].try_into().unwrap()),
+                &buffer[..read as usize],
                 std::env::var("WBOX_TEST_BROKER_OPEN_EXPECTED")
                     .unwrap()
-                    .len() as u64
-            );
-
-            write_request(pipe.raw(), &readdir_request(b"", 1, 0, 7)).unwrap();
-            let root_entries = read_response(pipe.raw()).unwrap();
-            assert_eq!(root_entries.status, STATUS_OK);
-            assert!(decode_readdir_names(&root_entries.payload).contains(&"nested".to_string()));
-
-            write_request(pipe.raw(), &readdir_request(b"nested", 1, 0, 8)).unwrap();
-            let nested_entries = read_response(pipe.raw()).unwrap();
-            assert_eq!(nested_entries.status, STATUS_OK);
-            assert_eq!(
-                decode_readdir_names(&nested_entries.payload),
-                ["canary.txt".to_string()]
+                    .as_bytes()
             );
         }
     }

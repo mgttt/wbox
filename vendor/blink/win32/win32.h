@@ -108,9 +108,6 @@ struct W32FdInfo {
   int dev;       // sentinel number when kind == W32FD_SPECIAL
 };
 int W32FdClassify(int fd, struct W32FdInfo *out);
-// Authenticate the precisely inherited supervisor channel when present.
-// Returns zero when no broker was configured or after a successful handshake.
-int W32BrokerInit(void);
 int WboxEventfdCreate(unsigned int initval, int flags);
 struct itimerspec;
 int WboxTimerfdCreate(int clockid, int flags);

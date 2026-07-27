@@ -879,11 +879,6 @@ request header
 ├── magic:u32 / version:u16 / opcode:u16
 ├── request_id:u64 / payload_len:u32 / flags:u32
 └── payload_len、连接数、并发请求数均有固定硬上限
-
-filesystem opcodes
-├── LOOKUP(mount_id, relative_path) -> mode / size / inode
-├── OPEN(mount_id, O_RDONLY, relative_path) -> duplicated HANDLE
-└── READDIR(mount_id, cursor, relative_path) -> next_cursor / eof / UTF-8 names
 ```
 
 - `[done: transport component gate]` 采用 message-mode named pipe 并启用
@@ -903,13 +898,6 @@ filesystem opcodes
   `HELLO/PING`；`register_rejects_process_outside_target_job` 与
   `register_rejects_different_appcontainer_sid` 分别裁决 rogue Job 与错误 profile。
   codec 同时拒绝错误版本、长度不一致和超过 4096 字节的 payload。
-- `[done: production bootstrap gate]` `BlinkBackend` 的真实启动路径已创建 endpoint，
-  只把预连接 client HANDLE 放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`，并在
-  `on_created` 完成 Job/SID 注册后启动 supervisor 服务线程。`wbox-linux.exe`
-  启动时解析 generation + nonce，完成 `HELLO/PING` 后立即删除三项 bootstrap
-  环境变量；缺失 broker 时仍可独立运行，认证或协议失败则 fail closed。
-  Windows 原生程序后端不创建、不继承该通道。本门禁只证明生产生命周期接线，
-  不代表 volume 数据面已经接入。
 - 当前 transport 已实现 `HELLO`、`PING`；`OPEN` 帧解析组件也已落地，只接受非零
   mount id、Linux flags/mode 与 UTF-8 相对路径，并在任何宿主 open 前拒绝绝对路径、
   空组件、`.`/`..`、反斜杠、冒号、非法 UTF-8 和超过 1024 字节的路径。首个数据面
@@ -922,28 +910,12 @@ filesystem opcodes
   volume 读取 canary，`readonly_mount_rejects_intermediate_junction_escape` 证明
   junction 外部 canary 不可达。Blink fd-backed hostfs 尚未消费该 HANDLE，不能据此
   宣称 Windows `-v` 可用。只读 mount 最终在 broker 与 VFS 两层都拒绝写/创建/截断。
-  `[done: OPEN session gate]` 认证后的 session 可串行处理多个 `OPEN`，正常断线结束
-  session；真机 child 连续两次打开并读取同一 canary。若 remote HANDLE 已复制但响应
-  写回失败，supervisor 用 `DUPLICATE_CLOSE_SOURCE` 从目标进程撤销该 HANDLE，避免
-  错误路径只能等进程退出才回收。
-- `[done: directory protocol gate]` `LOOKUP` 与分页 `READDIR` 已实现。目录和文件
-  元数据来自已逐组件安全打开的 HANDLE；枚举使用
-  `NtQueryDirectoryFile(FileNamesInformation)`，不调用 `FindFirstFile`，也不把
-  HANDLE 还原成宿主路径。目录项排序后按 cursor 分页，每帧仍受 4096 字节上限，
-  单目录最多 65536 项/16 MiB UTF-8 名称。真机 AppContainer child 已验证根目录与
-  嵌套目录 `LOOKUP/READDIR`，500 项单测验证分页恢复。Blink `brokerfs` 尚未接线，
-  因此 Windows `-v` 仍不可开放。
 - broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
   host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，
   不能另起第二个 broker。
 - `on_created` 只能做快速 session 注册，不能等 guest 发出请求，否则主线程仍挂起
   会死锁。`HELLO/OPEN` 都在恢复后由 broker 线程处理。
-- Blink 文件数据面必须落在独立的 Windows `brokerfs` device，不能把 broker mount
-  根塞进现有 hostfs。最小正规链路是 `remote HANDLE -> _open_osfhandle ->
-  HostfsInfo.filefd -> VfsInfo -> guest fd`；成功转换后 HANDLE 只由 CRT fd 关闭一次。
-  禁止经过 `HostfsGetOptimalDirFdName`、`W32ResolveAt` 或当前 path-based
-  `fdopendir`。目录枚举必须等 broker `LOOKUP/READDIR`，不能从 HANDLE 还原宿主路径。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、

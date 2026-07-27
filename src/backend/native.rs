@@ -115,22 +115,6 @@ impl Backend for NativeBackend {
 /// - `target_desc`：verbose 输出中的目标描述（原生进程 / wbox-linux 模拟器）。
 #[cfg(windows)]
 pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> Result<u32> {
-    spawn_windows(spec, prepared, target_desc, false)
-}
-
-/// 启动 Blink，并建立仅由该 AppContainer 进程继承的 supervisor broker 通道。
-#[cfg(windows)]
-pub fn spawn_blink(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> Result<u32> {
-    spawn_windows(spec, prepared, target_desc, true)
-}
-
-#[cfg(windows)]
-fn spawn_windows(
-    spec: &RunSpec,
-    prepared: &Prepared,
-    target_desc: &str,
-    enable_broker: bool,
-) -> Result<u32> {
     // ---- 0. 子进程环境：prepared.env 为 prepare 阶段构造的**显式白名单**
     //    环境（含强制覆盖项），经 lpEnvironment 直接传给 CreateProcessW，
     //    不再通过本进程 set_var 继承（默认不透传宿主环境/机密，H6）----
@@ -155,27 +139,6 @@ fn spawn_windows(
     // ---- 3. Job Object ----
     let mut job = job::Job::create_for_container(&spec.name, spec.limits)?;
 
-    let endpoint = if enable_broker {
-        Some(crate::broker::BrokerEndpoint::create(&profile.sid_string()?)?)
-    } else {
-        None
-    };
-    let mut child_env = prepared.env.clone();
-    if let Some(endpoint) = &endpoint {
-        child_env.push((
-            "WBOX_BROKER_HANDLE".to_string(),
-            (endpoint.client_handle() as usize).to_string(),
-        ));
-        child_env.push((
-            "WBOX_BROKER_GENERATION".to_string(),
-            endpoint.generation().to_string(),
-        ));
-        child_env.push((
-            "WBOX_BROKER_NONCE".to_string(),
-            endpoint.nonce().iter().map(|byte| format!("{byte:02x}")).collect(),
-        ));
-    }
-
     // ---- 4. verbose 摘要 ----
     if spec.verbose {
         println!("wbox 隔离配置:");
@@ -196,12 +159,12 @@ fn spawn_windows(
         );
         println!("  工作目录     : {}", workdir);
         println!("  执行目标     : {}", target_desc);
-        if !child_env.is_empty() {
+        if !prepared.env.is_empty() {
             println!(
                 "  注入环境变量 : {}",
-                child_env
+                prepared
+                    .env
                     .iter()
-                    .filter(|(k, _)| !k.starts_with("WBOX_BROKER_"))
                     .map(|(k, _)| k.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -212,38 +175,8 @@ fn spawn_windows(
 
     // ---- 5. 启动并等待 ----
     let cmdline = sandbox::build_cmdline(&prepared.cmd)?;
-    let mut broker_thread = None;
-    let handles = endpoint
-        .as_ref()
-        .map(|endpoint| vec![endpoint.client_handle()])
-        .unwrap_or_default();
-    let run_result = if let Some(endpoint) = endpoint {
-        sandbox::run_container_with_handles_and_created_hook(
-            &profile,
-            &caps,
-            &cmdline,
-            &workdir,
-            &mut job,
-            &child_env,
-            &handles,
-            |process, job| {
-                let session = endpoint.register(process, job)?;
-                broker_thread = Some(std::thread::spawn(move || session.serve_hello_ping()));
-                Ok(())
-            },
-        )
-    } else {
-        sandbox::run_container(&profile, &caps, &cmdline, &workdir, &mut job, &child_env)
-    };
-    let broker_result = broker_thread.map(|thread| {
-        thread
-            .join()
-            .map_err(|_| WboxError::spawn("broker 服务线程 panic"))?
-    });
-    let code = run_result?;
-    if let Some(result) = broker_result {
-        result?;
-    }
+    let code =
+        sandbox::run_container(&profile, &caps, &cmdline, &workdir, &mut job, &prepared.env)?;
     // 主进程退出即代表容器生命周期结束。先在状态锁下发布 stopping，阻止新的
     // exec 加入，再显式清空 Job 内已有的派生进程。
     let mut locked = crate::runstate::lock_existing(&spec.name)?;
