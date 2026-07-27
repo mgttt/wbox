@@ -97,7 +97,7 @@ struct Vfs g_vfs = {
 };
 
 static bool VfsIsReadonly(const struct VfsInfo *info) {
-  return info && info->device && (info->device->flags & MS_RDONLY);
+  return info && info->device && (info->device->flags & MS_RDONLY_LINUX);
 }
 
 static int VfsReadonly(void) {
@@ -312,12 +312,12 @@ int VfsMount(const char *source, const char *target, const char *fstype,
   if (flags & MS_SILENT_LINUX) {
     flags &= ~MS_SILENT_LINUX;
   }
-  if (flags & ~MS_RDONLY) {
+  if (flags & ~MS_RDONLY_LINUX) {
     // Theoretically, we can support a lot of the Linux flags without
     // changing the current design. However, as the major intended
     // usecase is to simply mount hostfs, this is currently not supported.
     LOGF("Unsupported mount flags: 0x%llx",
-         (unsigned long long)(flags & ~MS_RDONLY));
+         (unsigned long long)(flags & ~MS_RDONLY_LINUX));
   }
   if (VfsTraverse(target, &targetinfo, true) == -1) {
     if (getenv("WBOX_DEBUG_VFS"))

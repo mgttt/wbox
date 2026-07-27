@@ -791,10 +791,14 @@ F9
 
 1. `BLINK_OVERLAYS` 只是冒号分隔的候选根，不表达 `host -> guest`，Windows
    盘符还会被误拆；数据面必须走 `VfsMount(source,target,"hostfs",flags)`。
-2. 不得递归修改用户目录 ACL。父 wbox 应以 `FILE_FLAG_OPEN_REPARSE_POINT`
-   打开并验证 volume 根，通过 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只继承该句柄；
-   mount manifest 只记录句柄值、guest target、对象类型与 `read_only`，不泄漏
-   宿主路径。
+2. 不得递归修改用户目录 ACL。`sandbox.rs` 已支持
+   `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 精确继承并用 RAII 恢复原继承位；真机测试
+   `inherited_directory_handle_does_not_bypass_child_dacl` 同时证明：AppContainer
+   成功继承目录根 HANDLE 后，`NtCreateFile(RootDirectory=...)` 打开无 profile
+   ACE 的子文件仍返回 `STATUS_ACCESS_DENIED`。因此“只传根 HANDLE”不是数据面，
+   也不能靠递归 ACL 破坏用户目录；必须由非 AppContainer broker 逐项校验并打开，
+   再向 Blink 复制精确对象 HANDLE。mount manifest 只记录 broker 通道、guest
+   target、对象类型与 `read_only`，不泄漏宿主路径。
 3. Win32 hostfs 必须以继承根 HANDLE 为锚做相对打开，逐组件拒绝 reparse
    越界；不能把 volume 加进单一文本 `WBOX_ROOT` allowlist。
 4. `[done: component gate]` `VfsDevice.flags` 的 `MS_RDONLY` 已在
@@ -1319,9 +1323,9 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
-2. `[active]` 完成 Windows OCI bind volume 的目录根 HANDLE 精确继承、
-   root-relative Win32 打开与 reparse 逃逸门禁；VFS `MS_RDONLY` 组件门禁已落地，
-   CLI 在数据面完成前继续明确拒绝。
+2. `[active]` 完成 Windows OCI bind volume broker、逐组件 reparse 逃逸门禁与
+   fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证和 VFS `MS_RDONLY` 组件门禁
+   已落地，CLI 在 broker 数据面完成前继续明确拒绝。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。

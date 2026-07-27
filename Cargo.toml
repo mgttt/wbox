@@ -53,6 +53,8 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_System_Memory",
     "Win32_System_Diagnostics_Debug",
+    # Windows OCI volume 根句柄与 AppContainer 继承探针
+    "Win32_Storage_FileSystem",
 ]
 
 [profile.release]

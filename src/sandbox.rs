@@ -12,14 +12,17 @@
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
-use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::Foundation::{
+    GetHandleInformation, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+};
 use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, TerminateProcess,
     InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    STARTUPINFOEXW, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTUPINFOEXW, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
 };
 
 use crate::error::Result;
@@ -42,13 +45,38 @@ pub fn run_container(
     job: &mut crate::job::Job,
     env: &[(String, String)],
 ) -> Result<u32> {
-    run_container_with_start_hook(
+    run_container_with_handles(
         profile,
         capabilities,
         cmdline,
         workdir,
         job,
         env,
+        &[],
+    )
+}
+
+/// 与 [`run_container`] 相同，并只向子进程继承 `handles` 中列出的句柄。
+///
+/// 句柄会在 `CreateProcessW` 的短暂窗口内设置 `HANDLE_FLAG_INHERIT`，随后按原值
+/// 恢复；`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 保证父进程的其他可继承句柄不泄漏。
+pub fn run_container_with_handles(
+    profile: &AppContainerProfile,
+    capabilities: &[CapabilitySid],
+    cmdline: &str,
+    workdir: &str,
+    job: &mut crate::job::Job,
+    env: &[(String, String)],
+    handles: &[HANDLE],
+) -> Result<u32> {
+    run_container_with_start_hook_and_handles(
+        profile,
+        capabilities,
+        cmdline,
+        workdir,
+        job,
+        env,
+        handles,
         |_| {},
     )
 }
@@ -68,8 +96,42 @@ pub fn run_container_with_start_hook<F>(
 where
     F: FnOnce(&mut crate::job::Job),
 {
+    run_container_with_start_hook_and_handles(
+        profile,
+        capabilities,
+        cmdline,
+        workdir,
+        job,
+        env,
+        &[],
+        on_started,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // 保持两个公开启动入口的参数顺序一致
+fn run_container_with_start_hook_and_handles<F>(
+    profile: &AppContainerProfile,
+    capabilities: &[CapabilitySid],
+    cmdline: &str,
+    workdir: &str,
+    job: &mut crate::job::Job,
+    env: &[(String, String)],
+    handles: &[HANDLE],
+    on_started: F,
+) -> Result<u32>
+where
+    F: FnOnce(&mut crate::job::Job),
+{
     let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
     let workdir_wide = to_wide(workdir);
+    let mut inherited_handles = handles.to_vec();
+    inherited_handles.sort_unstable_by_key(|handle| *handle as usize);
+    inherited_handles.dedup();
+    let _inherit_guards = inherited_handles
+        .iter()
+        .copied()
+        .map(InheritHandleGuard::enable)
+        .collect::<Result<Vec<_>>>()?;
 
     // ---- capability 属性数组（借用，生命周期覆盖整个创建过程）----
     let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
@@ -89,10 +151,16 @@ where
     };
 
     // ---- 初始化 attribute list（两次调用：先取大小，再填充）----
+    let attribute_count = if inherited_handles.is_empty() { 1 } else { 2 };
     let mut attr_list_size: usize = 0;
     // # Safety: 第一次调用只查询所需大小，传 null 列表指针，预期失败。
     unsafe {
-        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_list_size);
+        InitializeProcThreadAttributeList(
+            std::ptr::null_mut(),
+            attribute_count,
+            0,
+            &mut attr_list_size,
+        );
     }
     if attr_list_size == 0 {
         let err = unsafe { GetLastError() };
@@ -103,7 +171,9 @@ where
     let attr_list: LPPROC_THREAD_ATTRIBUTE_LIST =
         attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
     // # Safety: attr_buf 大小/对齐满足要求，attr_list_size 来自上一步查询。
-    let ok = unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_list_size) };
+    let ok = unsafe {
+        InitializeProcThreadAttributeList(attr_list, attribute_count, 0, &mut attr_list_size)
+    };
     if ok == 0 {
         let err = unsafe { GetLastError() };
         return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList 失败，GetLastError={}", err)));
@@ -129,6 +199,29 @@ where
     if ok == 0 {
         let err = unsafe { GetLastError() };
         return Err(crate::error::WboxError::spawn(format!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}", err)));
+    }
+
+    if !inherited_handles.is_empty() {
+        // # Safety: attribute list 容量为 2；数组在 CreateProcessW 返回前保持有效；
+        // 每个句柄均由上方 guard 临时设置为 inheritable。
+        let ok = unsafe {
+            UpdateProcThreadAttribute(
+                attr_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                inherited_handles.as_mut_ptr() as *const core::ffi::c_void,
+                inherited_handles.len() * std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(crate::error::WboxError::spawn(format!(
+                "UpdateProcThreadAttribute(HANDLE_LIST) 失败，GetLastError={}",
+                err
+            )));
+        }
     }
 
     // ---- STARTUPINFOEXW：stdio 直接继承当前控制台 ----
@@ -157,7 +250,7 @@ where
             cmd_wide.as_mut_ptr(),
             std::ptr::null(), // 进程安全属性（默认）
             std::ptr::null(), // 线程安全属性（默认）
-            0,                // 不继承额外句柄（stdio 走控制台自动继承）
+            i32::from(!inherited_handles.is_empty()),
             flags,
             env_wide.as_ptr() as *const core::ffi::c_void, // 显式环境块
             workdir_wide.as_ptr(),
@@ -208,6 +301,49 @@ where
         return Err(crate::error::WboxError::spawn(format!("GetExitCodeProcess 失败，GetLastError={}", err)));
     }
     Ok(code)
+}
+
+struct InheritHandleGuard {
+    handle: HANDLE,
+    original_flags: u32,
+}
+
+impl InheritHandleGuard {
+    fn enable(handle: HANDLE) -> Result<Self> {
+        let mut original_flags = 0;
+        // # Safety: 调用方提供仍然有效的内核句柄；这里只读取并临时修改继承位。
+        if unsafe { GetHandleInformation(handle, &mut original_flags) } == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(crate::error::WboxError::spawn(format!(
+                "GetHandleInformation 失败，GetLastError={}",
+                err
+            )));
+        }
+        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(crate::error::WboxError::spawn(format!(
+                "SetHandleInformation(HANDLE_FLAG_INHERIT) 失败，GetLastError={}",
+                err
+            )));
+        }
+        Ok(Self {
+            handle,
+            original_flags,
+        })
+    }
+}
+
+impl Drop for InheritHandleGuard {
+    fn drop(&mut self) {
+        // # Safety: 句柄由调用方保证覆盖 CreateProcessW 调用；恢复原继承位。
+        unsafe {
+            SetHandleInformation(
+                self.handle,
+                HANDLE_FLAG_INHERIT,
+                self.original_flags & HANDLE_FLAG_INHERIT,
+            )
+        };
+    }
 }
 
 /// 构造 CreateProcessW lpEnvironment 所需的 UTF-16 环境块
@@ -547,7 +683,11 @@ mod real_windows_tests {
     use super::*;
     use crate::backend::Limits;
     use crate::job::Job;
-    use crate::token::{AppContainerProfile, CapabilitySid};
+    use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
 
     fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
         AppContainerProfile::create(name, caps)
@@ -591,6 +731,179 @@ mod real_windows_tests {
 
     fn minimal_process_env() -> Vec<(String, String)> {
         crate::backend::env::build_child_env(&[], &[], false, crate::backend::env::GuestFlavor::Windows)
+    }
+
+    #[repr(C)]
+    struct NtUnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+
+    #[repr(C)]
+    struct NtObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *mut NtUnicodeString,
+        attributes: u32,
+        security_descriptor: *mut core::ffi::c_void,
+        security_quality_of_service: *mut core::ffi::c_void,
+    }
+
+    #[repr(C)]
+    struct NtIoStatusBlock {
+        status: isize,
+        information: usize,
+    }
+
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut HANDLE,
+            desired_access: u32,
+            object_attributes: *mut NtObjectAttributes,
+            io_status_block: *mut NtIoStatusBlock,
+            allocation_size: *mut i64,
+            file_attributes: u32,
+            share_access: u32,
+            create_disposition: u32,
+            create_options: u32,
+            ea_buffer: *mut core::ffi::c_void,
+            ea_length: u32,
+        ) -> i32;
+    }
+
+    fn nt_open_relative(root: HANDLE, name: &str) -> i32 {
+        const OBJ_CASE_INSENSITIVE: u32 = 0x40;
+        const FILE_READ_DATA: u32 = 0x0001;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const FILE_OPEN: u32 = 1;
+        const FILE_NON_DIRECTORY_FILE: u32 = 0x0040;
+        const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0020;
+        const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let mut name_wide: Vec<u16> = name.encode_utf16().collect();
+        let mut unicode = NtUnicodeString {
+            length: (name_wide.len() * 2) as u16,
+            maximum_length: (name_wide.len() * 2) as u16,
+            buffer: name_wide.as_mut_ptr(),
+        };
+        let mut attributes = NtObjectAttributes {
+            length: std::mem::size_of::<NtObjectAttributes>() as u32,
+            root_directory: root,
+            object_name: &mut unicode,
+            attributes: OBJ_CASE_INSENSITIVE,
+            security_descriptor: std::ptr::null_mut(),
+            security_quality_of_service: std::ptr::null_mut(),
+        };
+        let mut io = NtIoStatusBlock {
+            status: 0,
+            information: 0,
+        };
+        let mut opened = std::ptr::null_mut();
+        // # Safety: 所有 NT 结构及 UTF-16 缓冲区覆盖调用；root 是继承目录句柄。
+        let status = unsafe {
+            NtCreateFile(
+                &mut opened,
+                FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                &mut attributes,
+                &mut io,
+                std::ptr::null_mut(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                FILE_OPEN,
+                FILE_NON_DIRECTORY_FILE
+                    | FILE_SYNCHRONOUS_IO_NONALERT
+                    | FILE_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if status >= 0 {
+            drop(OwnedHandle(opened));
+        }
+        status
+    }
+
+    /// 由 `inherited_directory_handle_does_not_bypass_child_dacl` 复制并降权启动。
+    #[test]
+    fn inherited_directory_handle_child_probe() {
+        let Ok(raw) = std::env::var("WBOX_TEST_ROOT_HANDLE") else {
+            return;
+        };
+        let root = raw.parse::<usize>().unwrap() as HANDLE;
+        let status = nt_open_relative(root, "canary.txt");
+        const STATUS_ACCESS_DENIED: i32 = 0xC000_0022u32 as i32;
+        assert_eq!(
+            status, STATUS_ACCESS_DENIED,
+            "目录 HANDLE 不应绕过 canary 子对象 DACL；NTSTATUS=0x{:08X}",
+            status as u32
+        );
+    }
+
+    /// 架构探针：AppContainer 即使精确继承了目录根 HANDLE，打开后代时仍会执行
+    /// 后代对象的 DACL 检查。该事实决定 Windows OCI volume 不能只靠 HANDLE，
+    /// 必须走 broker 或有回滚能力的 profile 专属 ACL。
+    #[test]
+    fn inherited_directory_handle_does_not_bypass_child_dacl() {
+        let base = std::env::temp_dir().join(unique_name("handle_probe"));
+        let exec_dir = base.join("exec");
+        let volume_dir = base.join("volume");
+        std::fs::create_dir_all(&exec_dir).unwrap();
+        std::fs::create_dir_all(&volume_dir).unwrap();
+        std::fs::write(volume_dir.join("canary.txt"), b"secret").unwrap();
+
+        let child = exec_dir.join("wbox-handle-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+        crate::acl::grant_read_recursive(&exec_dir).unwrap();
+
+        let root_wide = to_wide(&volume_dir.to_string_lossy());
+        const GENERIC_READ: u32 = 0x8000_0000;
+        // # Safety: 路径为 NUL 结尾；目录以 reparse-point 本体方式打开。
+        let root = unsafe {
+            CreateFileW(
+                root_wide.as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(!root.is_null(), "打开 volume 根目录失败");
+        let root = OwnedHandle(root);
+
+        let profile = create_profile(&unique_name("handle_profile"), &[]);
+        let mut job = Job::create(Limits::default()).unwrap();
+        let cmdline = build_cmdline(&[
+            child.to_string_lossy().into_owned(),
+            "--exact".to_string(),
+            "sandbox::real_windows_tests::inherited_directory_handle_child_probe".to_string(),
+            "--nocapture".to_string(),
+        ])
+        .unwrap();
+        let mut env = minimal_process_env();
+        env.push((
+            "WBOX_TEST_ROOT_HANDLE".to_string(),
+            (root.raw() as usize).to_string(),
+        ));
+        let rc = run_container_with_handles(
+            &profile,
+            &[],
+            &cmdline,
+            &exec_dir.to_string_lossy(),
+            &mut job,
+            &env,
+            &[root.raw()],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "AppContainer HANDLE/DACL 子探针失败");
+
+        drop(profile);
+        drop(root);
+        let _ = std::fs::remove_dir_all(base);
     }
 
     /// 完整链路：在 AppContainer + Job 内起 hostname.exe，期望 rc=0。
