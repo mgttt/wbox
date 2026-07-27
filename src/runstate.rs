@@ -150,7 +150,7 @@ pub fn liveness(dir: &Path) -> Liveness {
     }
 }
 
-/// 一次运行的登记。**RAII**：drop 时删掉整个状态目录。
+/// 一次运行的登记。**RAII**：drop 时释放锁，并按 `persist` 决定是否清目录。
 ///
 /// 崩溃时 drop 不会执行，状态目录会残留——这是刻意接受的：锁已随进程消失，
 /// [`liveness`] 会把它判为 `Exited`，`ps` 如实显示，`rm` 负责清理。
@@ -160,6 +160,13 @@ pub struct Registration {
     dir: PathBuf,
     /// 持有到 drop 为止；这个句柄就是"我还活着"的证据
     lock: Option<File>,
+    /// 退出后**保留**记录与日志（`--detach` 用）。
+    ///
+    /// 前台容器退出即清理：输出已经打在用户终端上了，留个空目录只是垃圾。
+    /// 后台容器相反——用户回头查 `wbox logs` 正是为了看它到底输出了什么，
+    /// 一退出就把日志删掉等于把这个命令的主要用途废掉。因此后台记录保留为
+    /// `exited`，由 `wbox rm` 显式清理（与 docker 的 ps -a / rm 一致）。
+    persist: bool,
 }
 
 impl Registration {
@@ -180,21 +187,108 @@ impl Registration {
 fn purge_dir(dir: &Path) {
     let _ = std::fs::remove_file(dir.join("meta.json"));
     let _ = std::fs::remove_file(dir.join("lock"));
+    // 日志也要删：留着会让 remove_dir 因非空而失败，状态目录就永远清不掉
+    let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
+    let _ = std::fs::remove_file(dir.join(LOG_STDERR));
     let _ = std::fs::remove_dir(dir);
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        // Windows 不允许删除仍被打开的锁文件，因此必须先显式关闭句柄。
+        // 先放锁：无论留不留目录，都要让 liveness 立刻能判出"已退出"。
+        // （Windows 还额外要求关掉句柄才能删文件。）
         drop(self.lock.take());
-        purge_dir(&self.dir);
+        if !self.persist {
+            purge_dir(&self.dir);
+        }
     }
 }
 
-/// 登记一次运行。同名容器已在运行时**报错**而不是覆盖——覆盖会让用户
-/// "以为还在跑的那个"悄无声息地从列表里消失（PRD F8.c）。
+/// 日志文件名（`--detach` 时 guest 的 stdout/stderr 落盘处）。
+pub const LOG_STDOUT: &str = "stdout.log";
+pub const LOG_STDERR: &str = "stderr.log";
+
+/// 日志体积上限。超过后**丢旧留新**并在截断处留标记——见 [`enforce_log_cap`]。
+/// 默认 8 MiB；`WBOX_LOG_MAX_BYTES` 可覆盖（测试用小值，不必写满 8MB）。
+pub fn log_cap_bytes() -> u64 {
+    std::env::var("WBOX_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(8 * 1024 * 1024)
+}
+
+/// 以**追加**方式打开日志文件。追加是关键：[`enforce_log_cap`] 靠截断控制
+/// 体积，而只有 append 模式的写入才会在截断后从新的文件末尾（0）继续；
+/// 普通写模式下 writer 自带偏移，截断后文件立刻变回原大小的稀疏文件，
+/// 上限就形同虚设。
+pub fn open_log_append(dir: &Path, file: &str) -> Result<File> {
+    File::options()
+        .create(true)
+        .append(true)
+        .open(dir.join(file))
+        .map_err(|e| WboxError::args(format!("打开日志 '{}' 失败：{}", file, e)))
+}
+
+/// 超上限则清空并写入一行截断说明。
+///
+/// 这是**丢旧留新**的粗粒度轮转，不是精细的按行轮转：容器日志的价值绝大多数
+/// 在最近的输出，而实现精确轮转要在 wbox 与 guest 之间插一层转写，代价远大于
+/// 收益。关键是两条：体积有界，且**截断这件事对用户可见**——无声丢日志比
+/// 日志不全更糟。
+pub fn enforce_log_cap(dir: &Path, file: &str) {
+    let path = dir.join(file);
+    let Ok(md) = std::fs::metadata(&path) else {
+        return;
+    };
+    let cap = log_cap_bytes();
+    if md.len() <= cap {
+        return;
+    }
+    // 截断到 0；append 写入方随后从头继续（见 open_log_append 的说明）
+    if let Ok(f) = File::options().write(true).open(&path) {
+        let _ = f.set_len(0);
+        use std::io::Write;
+        let mut f = f;
+        let _ = writeln!(
+            f,
+            "[wbox] 日志超过 {} 字节上限，已丢弃此前内容（保留最新输出）",
+            cap
+        );
+    }
+}
+
+/// [`register_with`] 的简写（不保留日志）。生产路径一律走 `register_with`
+/// ——它要按是否 supervised 决定日志去留——故此处只剩测试在用。
+#[cfg(test)]
 pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration> {
+    register_with(name, cmd, target, false)
+}
+
+/// [`register`] 的完整形式。`keep_logs=true` 时不清除既有日志——
+/// `--detach` 流程里日志文件是**父进程**先建好、再作为子进程 stdio 传下去的，
+/// 子进程随后才登记；此时若按"复用残留"的常规逻辑清目录，就会把父进程刚建好
+/// 的日志一起删掉，容器还没开口就先失声。
+pub fn register_with(
+    name: &str,
+    cmd: &[String],
+    target: &str,
+    keep_logs: bool,
+) -> Result<Registration> {
     let dir = dir_for(name)?;
+    if dir.exists() && keep_logs {
+        // detach 的子进程：目录是父进程刚建的，锁还没人持有，直接接手即可
+        let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
+            WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
+        })?;
+        write_meta(&dir, name, cmd, target)?;
+        return Ok(Registration {
+            dir,
+            lock: Some(lock),
+            // detach：退出后保留，供 `wbox logs` 事后查看
+            persist: true,
+        });
+    }
     if dir.exists() {
         match liveness(&dir) {
             Liveness::Running => {
@@ -225,12 +319,30 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
         cmd: cmd.to_vec(),
         target: target.to_string(),
     };
-    std::fs::write(dir.join("meta.json"), entry.to_json())
-        .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
+    write_meta_entry(&dir, entry)?;
     Ok(Registration {
         dir,
         lock: Some(lock),
+        persist: false,
     })
+}
+
+fn write_meta(dir: &Path, name: &str, cmd: &[String], target: &str) -> Result<()> {
+    write_meta_entry(
+        dir,
+        Entry {
+            name: name.to_string(),
+            pid: std::process::id(),
+            created_unix: now_unix(),
+            cmd: cmd.to_vec(),
+            target: target.to_string(),
+        },
+    )
+}
+
+fn write_meta_entry(dir: &Path, entry: Entry) -> Result<()> {
+    std::fs::write(dir.join("meta.json"), entry.to_json())
+        .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))
 }
 
 /// 删除一条已退出的容器记录（`wbox rm`）。
@@ -416,5 +528,31 @@ mod tests {
         assert_eq!(Entry::from_json(&e.to_json()).unwrap(), e);
         assert!(Entry::from_json("{}").is_none());
         assert!(Entry::from_json("nonsense").is_none());
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+    use crate::testenv::EnvGuard;
+
+    /// 上限逻辑本身：超限即清空并留下可见标记。
+    #[test]
+    fn cap_truncates_and_marks() {
+        let d = std::env::temp_dir().join(format!("wbox-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut g = EnvGuard::new();
+        g.set("WBOX_LOG_MAX_BYTES", "100");
+        std::fs::write(d.join(LOG_STDOUT), vec![b'x'; 5000]).unwrap();
+        enforce_log_cap(&d, LOG_STDOUT);
+        let after = std::fs::read_to_string(d.join(LOG_STDOUT)).unwrap();
+        assert!(after.len() < 500, "应已截断，实际 {} 字节", after.len());
+        assert!(after.contains("已丢弃此前内容"), "截断要可见：{}", after);
+        // 未超限的不动
+        std::fs::write(d.join(LOG_STDERR), b"small").unwrap();
+        enforce_log_cap(&d, LOG_STDERR);
+        assert_eq!(std::fs::read_to_string(d.join(LOG_STDERR)).unwrap(), "small");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

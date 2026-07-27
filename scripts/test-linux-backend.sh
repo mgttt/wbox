@@ -524,6 +524,73 @@ fi
 advp=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/advice/meta.json'))['pid'])" 2>/dev/null)
 [ -n "$advp" ] && kill -9 "$advp" 2>/dev/null
 
+# ---- F8.2 --detach / logs ----
+
+# P.9 --detach 必须**立即返回**并打印容器名，容器继续在后台跑。
+t0=$(date +%s)
+dname=$(HOME=$PSHOME "$WBOX_ABS" run -d --name bg1 -- /bin/sh -c 'echo OUT1; echo ERR1 >&2; sleep 20' 2>&1)
+t1=$(date +%s)
+if [ "$dname" = bg1 ] && [ $((t1-t0)) -le 3 ]; then
+  report PASS "P.9 --detach 立即返回并打印容器名"
+else
+  report FAIL "P.9 --detach 返回" "输出='$dname' 耗时=$((t1-t0))s"
+fi
+
+sleep 2
+if HOME=$PSHOME "$WBOX_ABS" ps | grep -q "bg1.*running"; then
+  report PASS "P.10 detach 的容器在后台持续运行"
+else
+  report FAIL "P.10 后台运行" "$(HOME=$PSHOME "$WBOX_ABS" ps | tr '\n' ' ' | head -c 200)"
+fi
+
+# P.11 stdout/stderr 分别落盘且可读
+o=$(HOME=$PSHOME "$WBOX_ABS" logs bg1 2>&1)
+e=$(HOME=$PSHOME "$WBOX_ABS" logs bg1 --stderr 2>&1)
+if printf '%s' "$o" | grep -q OUT1 && printf '%s' "$e" | grep -q ERR1 \
+   && ! printf '%s' "$o" | grep -q ERR1; then
+  report PASS "P.11 logs 分别读取 stdout / stderr"
+else
+  report FAIL "P.11 logs 读取" "out='$(printf '%s' "$o"|head -c 80)' err='$(printf '%s' "$e"|head -c 80)'"
+fi
+
+bgp=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/bg1/meta.json'))['pid'])" 2>/dev/null)
+[ -n "$bgp" ] && kill -9 "$bgp" 2>/dev/null
+sleep 1
+
+# P.12 后台容器退出后**保留**记录与日志——这正是 logs 的主要用途（事后查看
+# 一个已经跑完的后台任务到底输出了什么）。前台容器则仍是退出即清理（P.5）。
+HOME=$PSHOME "$WBOX_ABS" run -d --name bg2 -- /bin/sh -c 'echo AFTER_EXIT' >/dev/null 2>&1
+sleep 2
+if HOME=$PSHOME "$WBOX_ABS" ps -a | grep -q "bg2.*exited" \
+   && HOME=$PSHOME "$WBOX_ABS" logs bg2 2>/dev/null | grep -q AFTER_EXIT; then
+  report PASS "P.12 detach 容器退出后仍保留记录与日志（可事后查看）"
+else
+  report FAIL "P.12 退出后保留" "$(HOME=$PSHOME "$WBOX_ABS" ps -a | tr '\n' ' ' | head -c 200)"
+fi
+
+# P.13 日志体积必须有界。这条专挑**短命暴写**的容器：它一秒内写完就退出，
+# 活不到看门狗的第一次 tick，只靠周期检查会让整份输出原样落盘（实测 2.5MB）。
+HOME=$PSHOME WBOX_LOG_MAX_BYTES=4096 "$WBOX_ABS" run -d --name flood \
+  -- /bin/sh -c 'i=0; while [ $i -lt 200000 ]; do echo "x $i"; i=$((i+1)); done' >/dev/null 2>&1
+sleep 4
+fsz=$(stat -c%s "$PSHOME/.wbox/run/flood/stdout.log" 2>/dev/null || echo 0)
+if [ "$fsz" -gt 0 ] && [ "$fsz" -lt 200000 ] \
+   && grep -q "已丢弃此前内容" "$PSHOME/.wbox/run/flood/stdout.log" 2>/dev/null; then
+  report PASS "P.13 日志体积有界且截断可见（短命暴写也挡得住）"
+else
+  report FAIL "P.13 日志上限" "大小=$fsz（应远小于 200000 且含截断标记）"
+fi
+
+# P.14 前台容器没有日志文件时，要说清楚"只有 --detach 才落盘"，
+# 不能让用户以为容器没有输出。
+HOME=$PSHOME "$WBOX_ABS" run --name fglog -- /bin/echo hi >/dev/null 2>&1
+lg=$(HOME=$PSHOME "$WBOX_ABS" logs fglog 2>&1)
+if printf '%s' "$lg" | grep -qE "没有名为|--detach"; then
+  report PASS "P.14 前台容器读 logs 时给出可懂解释"
+else
+  report FAIL "P.14 前台 logs 文案" "$(printf '%s' "$lg" | head -c 150)"
+fi
+
 # P.5 正常退出不留残留：RAII 应当把状态目录删干净
 HOME=$PSHOME "$WBOX_ABS" run --name psclean -- /bin/true >/dev/null 2>&1
 if [ ! -d "$PSHOME/.wbox/run/psclean" ]; then
