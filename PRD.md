@@ -502,12 +502,37 @@ F4
 2026-07-28 的首个纯 Rust 纵切已落在 `src/runtime`：安全解析 little-endian
 x86-64 `ET_EXEC` 的 `PT_LOAD`、建立带执行权限检查的 guest 地址空间，解释
 `MOV r64,imm` 与 `syscall`，并由手工构造的 ELF 执行 Linux `exit(42)`。当前仅是
-G0 骨架，尚无栈、通用指令或产品 backend，不能运行 BusyBox/Ubuntu。
+G0 骨架，尚无栈、通用指令或产品 backend，不能运行 BusyBox/Ubuntu。指令解码
+使用仅启用 `std+decoder` 的纯 Rust `iced-x86`；wbox 自己实现 CPU 状态与语义，
+不引入 C/C++ decoder。
 
 F4.R0 初次审计发现 native 源只存在于两个遗留根：`vendor/blink=452`、
 `tests/guest=22`；Rust 门禁要求数量只能下降且不得扩散。Cargo 在 Windows 当前
 走系统 Schannel，但 Linux target 的 `native-tls -> openssl-sys` 仍是 C 依赖，
 必须改为纯 Rust TLS/crypto 或用纯 Rust 重写后才能满足 §2.2.1。
+
+**vendor/blink Rust 替换图**：
+
+```text
+不迁移，Rust 接管后直接删除
+├── blinkenlights TUI、反向调试、BIOS/i8086/显卡模拟
+├── 非 x86-64 宿主的 JIT 模板与交叉工具链
+├── third_party 测试镜像、摘要和下载脚本
+└── libz C；产品 OCI gzip 已使用 flate2 的纯 Rust backend
+
+按产品纵切迁移
+├── R1 iced-x86 decoder + Rust CPU/register/flags/instruction semantics
+├── R2 ELF64、动态加载、guest memory、stack/auxv、mmap/brk
+├── R3 Linux syscall dispatcher、errno、fd 与时间
+├── R4 Rust VFS/rootfs/proc/dev、路径边界、volume ro/rw
+├── R5 fork/clone/exec、线程、futex、信号与 wait
+├── R6 socket、poll/epoll、eventfd/timerfd/signalfd
+└── R7 可选纯 Rust JIT；解释器产品门禁通过前不引入
+```
+
+`tests/guest/*.c` 先改为 no_std Rust x86-64 Linux fixtures，作为每个纵切的验收；
+迁移期 Blink 只允许作为差分 oracle，不进入最终构建或发布。每层达到对应 fixture
+与 Alpine/Ubuntu 门禁后，删除其旧测试、CI 和 vendor 依赖，不维持双实现。
 
 以下 Blink 结果仅作为纯 Rust 迁移的行为基线，不再证明目标架构完成。历史上直接
 运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc

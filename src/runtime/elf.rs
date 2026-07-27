@@ -144,6 +144,25 @@ impl AddressSpace {
         let offset = (address - region.start) as usize;
         Ok(&region.bytes[offset..offset + length])
     }
+
+    pub(super) fn executable_window(&self, address: u64) -> Result<&[u8]> {
+        let region = self
+            .regions
+            .iter()
+            .find(|region| {
+                address >= region.start && address < region.start + region.bytes.len() as u64
+            })
+            .ok_or_else(|| {
+                RuntimeError::new(format!("unmapped guest instruction at {address:#x}"))
+            })?;
+        if region.flags & PF_X == 0 {
+            return Err(RuntimeError::new(format!(
+                "instruction fetch from non-executable memory at {address:#x}"
+            )));
+        }
+        let offset = (address - region.start) as usize;
+        Ok(&region.bytes[offset..region.bytes.len().min(offset + 15)])
+    }
 }
 
 fn checked_range(

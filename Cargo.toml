@@ -20,6 +20,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 sha2 = "0.10"        # blob digest 校验（sha256）
 serde_json = "1"     # manifest / config JSON 解析（用 Value，不引入 serde derive）
 base64 = "0.22"      # 认证 token 请求等编码辅助
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。
