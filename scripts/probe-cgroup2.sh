@@ -52,7 +52,7 @@ echo "  根 cgroup.subtree_control= $(cat /sys/fs/cgroup/cgroup.subtree_control)
 echo "  自身 cgroup              = $(sed -n 's/^0:://p' /proc/self/cgroup)"
 
 cleanup() {
-  sudo rmdir "$BASE"/*/ 2>/dev/null
+  sudo rmdir "$BASE"/*/*/ "$BASE"/*/ 2>/dev/null
   sudo rmdir "$BASE" 2>/dev/null
 }
 trap cleanup EXIT
@@ -98,6 +98,28 @@ if echo $((16*1024*1024)) > "$BASE/a/child/memory.max" 2>/tmp/probe.err; then
 else
   echo "  [FAIL] 布局 A 写不了 memory.max —— $(tr -d '\n' </tmp/probe.err)"
 fi
+# 反向再验一次：先给空的 a2 下发控制器，再试着往里塞进程。
+# 若这一步被拒，就说明"进程与被限额子 cgroup 同父"在 cgroup v2 下**根本不可能**
+# ——两个方向都堵死：有进程就不能 enable，enable 了就不能进进程。
+say "布局 A 反向验证 —— 先 enable 再塞进程"
+mkdir -p "$BASE/a2" 2>/dev/null
+sudo chown -R "$(id -u):$(id -g)" "$BASE/a2" 2>/dev/null
+if echo "+memory" > "$BASE/a2/cgroup.subtree_control" 2>/tmp/probe.err; then
+  echo "  [ok]   空 cgroup 可 enable subtree_control"
+  sleep 300 &
+  v2=$!
+  if echo "$v2" > "$BASE/a2/cgroup.procs" 2>/tmp/probe.err; then
+    echo "  [!!]   已 enable 的 cgroup 仍可塞进程 —— 布局 A 也许可行，需重新评估"
+  else
+    echo "  [预期] 已 enable subtree_control 的 cgroup **拒绝**塞进程 —— $(tr -d '\n' </tmp/probe.err)"
+    echo "         => 布局 A（wbox 现在的做法）在 cgroup v2 下不可能成立"
+  fi
+  kill -9 "$v2" 2>/dev/null; wait "$v2" 2>/dev/null
+else
+  echo "  [FAIL] 空 cgroup 都 enable 不了 —— $(tr -d '\n' </tmp/probe.err)"
+fi
+rmdir "$BASE/a2" 2>/dev/null
+
 kill -9 "$victim" 2>/dev/null; wait "$victim" 2>/dev/null
 rmdir "$BASE/a/child" 2>/dev/null; rmdir "$BASE/a" 2>/dev/null
 
@@ -150,7 +172,18 @@ else
 fi
 # 在子 shell 里把自己挪进 $BASE/run 再 exec wbox —— 这样 wbox 的
 # /proc/self/cgroup 指向一个它有写权限的目录，正是 cgroup2_self_dir 要找的。
-out=$(bash -c "echo \$\$ > '$BASE/run/cgroup.procs' 2>/dev/null;
+#
+# **这一步的错误绝不能吞**（上一版用 2>/dev/null 吞了，结果只看到"wbox 退化
+# 到 rlimit"却不知道是它自己的问题还是根本没挪进去）。这里恰恰是问题的核心：
+# run/ 已经 enable 了 subtree_control，而 cgroup v2 的 "no internal process"
+# 规则**同时**禁止往这样的 cgroup 里塞进程 —— 若如此，wbox「在自己所在 cgroup
+# 下建子目录写限额」的做法就是死路，必须改成 supervisor/target 两个 leaf。
+out=$(bash -c "if echo \$\$ > '$BASE/run/cgroup.procs'; then
+                 echo 'MOVED-IN ok'
+               else
+                 echo \"MOVED-IN FAILED（rc=\$?）—— 这就是布局 A 走不通的直接证据\"
+               fi
+               echo \"wbox 实际所在 cgroup: \$(sed -n 's/^0:://p' /proc/self/cgroup)\"
                exec '$PWD/$WBOX' run -V --memory 16 -- /bin/true" 2>&1)
 rc=$?
 echo "  rc=$rc"
