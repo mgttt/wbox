@@ -105,6 +105,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   -e, --env <K=V>   注入显式环境变量；可重复；不支持仅写 K 继承宿主值
   --env-file <FILE> 从文件读入环境变量（一行一个 KEY=VALUE，# 注释）；避免密钥进命令行
   --entrypoint <CMD>  覆盖镜像声明的 Entrypoint（空串 = 清空；仅镜像模式，见 PRD F9.36）
+  --private-tmp     宿主程序模式下把 TMPDIR/TEMP/TMP 指向容器私有目录（见 PRD §4.9 W6）
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              退出即清理；与 -d 同用时也自动删除状态和日志
   --interactive     连接 stdio（默认）

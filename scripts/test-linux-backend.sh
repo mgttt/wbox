@@ -2061,6 +2061,64 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== PT --private-tmp 私有临时目录（PRD §4.9 W6）==="
+
+# 宿主程序模式不换根，容器里的 /tmp 就是**宿主真实的 /tmp**——程序往那儿写的
+# 临时文件会留在宿主上。这一格（Q1/Q4 共用的宿主程序模式）此前没有任何办法挡它。
+PTH=$WORK/pthome
+rm -rf "$PTH" && mkdir -p "$PTH"
+PTMARK=/tmp/wbox-pt-probe-$$
+rm -f "$PTMARK"
+
+# 先确认缺口真实存在：不加选项时，写 /tmp 确实落在宿主上
+HOME=$PTH "$WBOX_ABS" run --rm -- /bin/sh -c "echo leaked > $PTMARK" >/dev/null 2>&1
+if [ -e "$PTMARK" ]; then
+  report PASS "PT.1 基线：不加选项时容器写 /tmp 确实落在宿主（缺口真实存在）"
+else
+  report FAIL "PT.1 基线" "宿主上没出现 $PTMARK，这组用例的前提不成立"
+fi
+rm -f "$PTMARK"
+
+# 加了选项后，TMPDIR 指向容器私有目录，写进去的东西不出现在宿主 /tmp
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp --name ptc -- \
+  /bin/sh -c 'echo "$TMPDIR"; echo y > "$TMPDIR/inside"; ls "$TMPDIR"' 2>&1)
+ptdir=$(printf '%s\n' "$ptout" | head -1)
+if printf '%s' "$ptdir" | grep -q '/.wbox/run/ptc/tmp' && printf '%s\n' "$ptout" | grep -qx 'inside'; then
+  report PASS "PT.2 --private-tmp 把 TMPDIR 指向容器私有目录且可写"
+else
+  report FAIL "PT.2 私有 TMPDIR" "输出: $(printf '%s' "$ptout" | tr '\n' '|' | head -c 180)"
+fi
+
+# 三个变量都要设：TMPDIR 是 POSIX 约定，TEMP/TMP 是 Windows 的——
+# 这条选项要在 Q1 与 Q4 两格都成立，而两格走的是同一个宿主程序模式。
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp -- \
+  /bin/sh -c 'echo "[$TMPDIR][$TEMP][$TMP]"' 2>&1 | tail -1)
+if ! printf '%s' "$ptout" | grep -q '\[\]'; then
+  report PASS "PT.3 TMPDIR/TEMP/TMP 三个变量都指向私有目录"
+else
+  report FAIL "PT.3 三变量" "得到 '$ptout'（不该有空项）"
+fi
+
+# 用户显式的 -e 必须赢：静默覆盖用户的显式意图是最难查的那类行为
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp -e TMPDIR=/my/own -- \
+  /bin/sh -c 'echo "$TMPDIR"' 2>&1 | tail -1)
+if [ "$ptout" = "/my/own" ]; then
+  report PASS "PT.4 用户显式的 -e TMPDIR 覆盖注入值（不静默改写显式意图）"
+else
+  report FAIL "PT.4 显式 -e 优先" "得到 '$ptout'（期望 /my/own）"
+fi
+
+# 镜像模式换根后 /tmp 本就私有，这个选项没有意义 —— 明确拒绝而不是假装做了事
+ptout=$(HOME=$WORK/home "$WBOX_ABS" run --rm --private-tmp lbetest -- /bin/true 2>&1); ptrc=$?
+if [ "$ptrc" -ne 0 ] && printf '%s' "$ptout" | grep -q '宿主程序模式'; then
+  report PASS "PT.5 镜像模式下明确拒绝（换根后 /tmp 本就私有）"
+else
+  report FAIL "PT.5 镜像模式拒绝" "rc=$ptrc 输出: $(printf '%s' "$ptout" | head -c 150)"
+fi
+
+rm -rf "$PTH"
+
+echo
 echo "=== MS 多阶段构建（PRD F9.39）==="
 
 MSH=$WORK/mshome

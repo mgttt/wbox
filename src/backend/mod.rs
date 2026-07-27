@@ -116,6 +116,10 @@ pub struct RunSpec {
     /// 曾经只有这一个字段，于是镜像模式下 `-w` 与镜像的 `WorkingDir` 都无处安放，
     /// 被静默丢掉了（F9.37 修的就是这个）。
     pub workdir: PathBuf,
+    /// 宿主程序模式下把 `TMPDIR`/`TEMP`/`TMP` 指向容器私有目录（§4.9 W6）。
+    ///
+    /// 镜像模式不需要它：换根之后 `/tmp` 本就在容器自己的可写层里。
+    pub private_tmp: bool,
     /// 容器**内**的工作目录（绝对路径）。`None` = 不指定，落在 `/`。
     ///
     /// 来源按优先级：`-w/--workdir` > 镜像 config 的 `WorkingDir`。

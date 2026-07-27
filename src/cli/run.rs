@@ -54,6 +54,8 @@ pub struct RunOptions {
     pub uts_container: Option<String>,
     /// `--hostname NAME`（仅 Linux；UTS namespace 已默认隔离）
     pub hostname: Option<String>,
+    /// `--private-tmp`：宿主程序模式下给容器一个私有临时目录（§4.9 W6）。
+    pub private_tmp: bool,
     /// `--entrypoint`：覆盖镜像声明的 Entrypoint（F9.36）。
     /// `Some("")` 表示显式清空，与 `None`（没写这个选项）不是一回事。
     pub entrypoint: Option<String>,
@@ -127,6 +129,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         ipc_container: None,
         uts_container: None,
         hostname: None,
+        private_tmp: false,
         entrypoint: None,
         positional: None,
         cmd: Vec::new(),
@@ -276,6 +279,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             }
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
+            "--private-tmp" => opts.private_tmp = true,
             "--entrypoint" => {
                 opts.entrypoint = Some(super::args::take_value(args, &mut i, "--entrypoint")?);
             }
@@ -367,6 +371,7 @@ fn make_spec(
         keep_profile: opts.keep_profile,
         workdir,
         guest_workdir,
+        private_tmp: opts.private_tmp,
         cmd,
         env,
         volumes: opts.volumes.clone(),
@@ -459,6 +464,12 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
     // `--entrypoint` 覆盖的是**镜像**声明的 Entrypoint；宿主程序模式没有镜像，
     // 也就没有可覆盖的东西。明确拒绝而不是静默忽略——静默忽略会让用户以为
     // 自己换掉了要跑的程序，实际跑的还是原来那个。
+    if opts.private_tmp && opts.positional.is_some() {
+        return Err(WboxError::args(
+            "--private-tmp 只对宿主程序模式有意义：镜像模式已换根，\
+             /tmp 本就在容器自己的可写层里，不会碰到宿主的 /tmp",
+        ));
+    }
     if opts.entrypoint.is_some() && opts.positional.is_none() {
         return Err(WboxError::args(
             "--entrypoint 只对镜像模式有意义（它覆盖的是镜像声明的 Entrypoint）；\
@@ -809,6 +820,16 @@ fn register_for_spawn(
     if supervised && auto_remove {
         reg.remove_on_drop();
     }
+    // 私有临时目录必须**登记之后**建：登记会把残留的已退出目录整个清掉再重建
+    // （见 `register_with_context` 对 Exited 的 purge），提前建的会被一并抹掉。
+    // 建不出来要让容器起不来——环境变量已经指向它了，静默失败会让 guest 往一个
+    // 不存在的目录写临时文件，报出来的错与真实原因毫无关系。
+    if spec.private_tmp {
+        let dir = crate::runstate::private_tmp_dir(reg.dir());
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            WboxError::args(format!("创建私有临时目录 '{}' 失败：{}", dir.display(), e))
+        })?;
+    }
     Ok(reg)
 }
 
@@ -905,7 +926,26 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
             .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
     // 宿主程序模式不换根，`workdir` 就是真正的工作目录，没有「容器内 cwd」这一层
-    let spec = make_spec(opts, workdir, None, cmd, opts.env.clone());
+    let mut env = opts.env.clone();
+    if opts.private_tmp {
+        // 三个变量都设：`TMPDIR` 是 POSIX 约定，`TEMP`/`TMP` 是 Windows 的，
+        // 而这条选项要在两格都成立（Q1 与 Q4 走的是同一个宿主程序模式）。
+        // 放在 `opts.env` **之后**会覆盖用户显式给的值，所以放在前面——
+        // 用户写了 `-e TMPDIR=...` 就该以他的为准。
+        let name = opts
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
+        let dir = crate::runstate::private_tmp_dir(&crate::runstate::dir_for(&name)?);
+        let shown = dir.to_string_lossy().into_owned();
+        let mut pre: Vec<(String, String)> = ["TMPDIR", "TEMP", "TMP"]
+            .iter()
+            .map(|k| (k.to_string(), shown.clone()))
+            .collect();
+        pre.extend(env);
+        env = pre;
+    }
+    let spec = make_spec(opts, workdir, None, cmd, env);
     match backend::host_program_backend_kind() {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
@@ -1037,6 +1077,30 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    /// `--private-tmp` 注入的三个变量要能被用户显式的 `-e` 覆盖：
+    /// 注入放在 `opts.env` **之前**，后写的同名键才会赢。
+    /// 反过来的话，用户写了 `-e TMPDIR=...` 却毫无效果——静默覆盖用户的显式意图
+    /// 是最难查的那类行为。
+    #[test]
+    fn private_tmp_does_not_override_an_explicit_env() {
+        let a: Vec<String> = ["--private-tmp", "-e", "TMPDIR=/my/own", "--", "/bin/true"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let o = super::parse_run_args(&a).unwrap();
+        assert!(o.private_tmp);
+        assert_eq!(o.env, vec![("TMPDIR".to_string(), "/my/own".to_string())]);
+    }
+
+    /// 镜像模式下它没有意义（换根后 /tmp 本就是私有的），要明确拒绝。
+    #[test]
+    fn private_tmp_is_rejected_in_image_mode() {
+        let a: Vec<String> = ["--private-tmp", "someimage"].iter().map(|s| s.to_string()).collect();
+        let o = super::parse_run_args(&a).unwrap();
+        let m = format!("{}", super::validate_options(&o).unwrap_err());
+        assert!(m.contains("宿主程序模式"), "{}", m);
+    }
+
     use super::*;
 
     fn parse(args: &[&str]) -> Result<RunOptions> {

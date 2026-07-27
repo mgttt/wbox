@@ -141,6 +141,16 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 薄包装的代价不是多几行，是**多一个可以忘记更新的地方**。合并成一个函数、
 把新参数写成必填的 `Option`，编译器就会把所有调用点逼出来。
 
+### 「要另一台机器才能做」的条目，先拆开看机制
+
+Q1 的三条可做项一开始整体挂在「待 Windows 验证」。后来发现 **W6 根本不必**：
+它的机制是「建一个目录 + 注入三个环境变量」，完全平台中立，而 Q1 与 Q4 走的还是
+同一个宿主程序模式——于是在 Linux 侧实现并取证了（`--private-tmp`，PT.1–PT.5），
+只把「那三个变量在 AppContainer 下是否确实被遵守」留给那台机器。
+
+问法：**这条待办里，真正依赖那台机器的是哪一部分？** 常常只是最后的取证，
+而机制本身在这边就能做完、做对、钉住。
+
 ### 给「已记录的差异」配门禁，是为了将来能提醒你改文档
 
 上一轮 `COPY --from` 还没实现，我配了 AF.3 断言它**明确拒绝**。这一轮把它实现了，
@@ -197,9 +207,11 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
   复现：`grep -rnE "TODO|FIXME|XXX|HACK|unimplemented!|todo!" src/ scripts/`
 - `PRD.md` §4.9 `[TODO-PLAN]`：原十二项**十一项已完成**，只剩 **W3**
   （Windows 文件系统写重定向取证，需真 Windows 机器）。
-  另新立 **W6/W7/W8** 三条 Q1 可做项（临时目录私有化 / 只读授权粒度 /
-  capability 粒度），它们由 Linux 侧提出、**可行性未经实测**，标着「待验证」——
-  接手的 Windows agent 先验证再实现，验证不成立就改成「不做」并写明原因。
+  另新立 **W6/W7/W8** 三条 Q1 可做项。其中 **W6 已在 Linux 侧实现并取证**
+  （`--private-tmp`，门禁 PT.1–PT.5）——它的机制（建目录 + 注入三个环境变量）
+  完全平台中立，只有「那三个变量在 AppContainer 下是否确实被遵守」需要真 Windows。
+  W7/W8 仍标「待验证」：接手的 Windows agent 先验证再实现，
+  验证不成立就改成「不做」并写明原因。
 - PRD 里的 `[partial]` 共 6 处（F9.1/F9.7/F9.9/F9.13/F9.14/F9.21），
   **都是已论证的取舍而非待办**，各自条目里写明了为什么只做到这一步。
 
@@ -209,8 +221,8 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **414 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **232 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **416 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **237 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净

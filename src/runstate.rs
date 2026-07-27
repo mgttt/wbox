@@ -1053,6 +1053,17 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
+/// 容器私有的临时目录（`PRD.md` §4.9 W6）：`<状态目录>/tmp`。
+///
+/// **放在状态目录里**是刻意的：容器记录被清理时它一并消失，不需要另一套生命周期
+/// ——与 `wineprefix` 的位置选择同一条理由（§4.9 L2）。
+///
+/// 只算路径，不建目录：状态目录在登记时可能被清掉重建（见 `register_with_context`
+/// 对残留 Exited 的 `purge_dir`），所以必须**登记之后**再建。
+pub fn private_tmp_dir(dir: &Path) -> PathBuf {
+    dir.join("tmp")
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
