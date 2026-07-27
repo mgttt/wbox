@@ -397,7 +397,9 @@ digest，并解包约 29.7 MB rootfs。Windows 实机通过 `wbox run` 验证：
 非关键链接不能宣称完整还原。其二，`uname -m` 一度错误输出构建年份 `2026`：
 `SysUname` 用 `strcpy` 把过长构建元数据写入 Linux 固定 65 字节的 `version`
 字段，覆盖了其后的 `machine`。实现已改为字段内有界 `snprintf`，组件矩阵新增
-精确断言 `uname -m == x86_64`；待 Windows CI artifact 回灌本机复测后关闭。
+精确断言 `uname -m == x86_64`。CI 30253571295 的真 Windows 矩阵通过；同一
+artifact 回灌本机后，Ubuntu 24.04 的 `uname -m=x86_64`、Bash、APT 2.8.3、
+dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部通过，问题关闭。
 
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
@@ -737,7 +739,7 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地与 CI 30250676453 通过；资源超限仍缺行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
-| Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
+| Windows Linux guest | active | CI 30253571295 全通过；同一 artifact 实机运行 Alpine 3.20 与 Ubuntu 24.04，Ubuntu 的 shell/Bash/APT/架构/隔离/退出码均通过 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
