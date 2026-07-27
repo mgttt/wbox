@@ -220,6 +220,52 @@ else
   report FAIL "H.5 宿主模式无残留" "出现了 .wbox_oldroot 或新增文件"
 fi
 
+# ---- H.6–H.9：Q4（Linux 上跑 Windows 程序）那一格的能力取证 ----
+#
+# PRD §2.4 Q4 声称"复用 Q3 同一条 Linux 链路，F9 的身份/capability/seccomp 等
+# 对 wine 目标同样生效"。**这个声称必须有门禁**，否则只是一句听着合理的话。
+#
+# 判据落在**宿主程序模式**上而不是真的调 wine：wine 目标走的正是这条路径
+# （wrap_if_pe 只是替换最终 argv，隔离链路一字不差），而宿主模式无需装 wine，
+# 因此这组用例在任何机器上都真的会跑，不会退化成 SKIP。
+# 只在镜像模式验证是不够的——那证明不了不换根的这条路径也吃到了同样的能力。
+
+hrun --user 1000:1001 -- /bin/sh -c 'id -u; id -g'
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT" | tr '\n' ' ')" = "1000 1001" ]; then
+  report PASS "H.6 宿主模式下 --user 生效（Q4 复用同一链路的取证）"
+else
+  report FAIL "H.6 宿主模式 --user" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 120)"
+fi
+
+hrun --cap-drop ALL -- /bin/sh -c 'grep "^CapEff" /proc/self/status'
+capeff=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ "$capeff" = "0000000000000000" ]; then
+  report PASS "H.7 宿主模式下 --cap-drop ALL 生效"
+else
+  report FAIL "H.7 宿主模式 --cap-drop" "rc=$rc CapEff=$capeff（期望全 0）"
+fi
+
+hrun --seccomp-deny mount -- /bin/sh -c 'grep "^Seccomp:" /proc/self/status'
+secmode=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ "$secmode" = "2" ]; then
+  report PASS "H.8 宿主模式下 --seccomp-deny 装载过滤器"
+else
+  report FAIL "H.8 宿主模式 --seccomp-deny" "rc=$rc Seccomp=$secmode（期望 2）"
+fi
+
+# H.9 行为判据：宿主模式下丢掉 SYS_ADMIN 后挂载同样被拒，
+# 且不带该选项时同一操作成功——否则这条断言没有意义。
+hrun -- /bin/sh -c 'mount -t tmpfs none /mnt 2>/dev/null && echo MOUNT_OK'
+h_base=$rc
+hrun --cap-drop SYS_ADMIN -- /bin/sh -c 'mount -t tmpfs none /mnt 2>/dev/null && echo MOUNT_OK'
+if [ "$h_base" -eq 0 ] && ! printf '%s' "$OUT" | grep -q MOUNT_OK; then
+  report PASS "H.9 宿主模式下丢 SYS_ADMIN 后挂载被拒（基线同操作成功）"
+elif [ "$h_base" -ne 0 ]; then
+  report SKIP "H.9 宿主模式 capability 行为判据" "基线挂载本身就失败（rc=$h_base），无法判定"
+else
+  report FAIL "H.9 宿主模式 capability 行为判据" "丢掉 SYS_ADMIN 后仍挂载成功"
+fi
+
 if command -v python3 >/dev/null 2>&1; then
   probe="import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)

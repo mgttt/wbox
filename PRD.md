@@ -157,6 +157,10 @@ wbox
 
 #### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
 
+这一格的隔离能力**不是单独实现的**：wine 目标复用宿主程序模式的整条链路，
+因此 Q3 的 F9 能力自动适用。取证放在宿主模式（H.6–H.9）而不是 wine 用例上——
+后者缺 wine 就会 SKIP，而"缺环境时静默跳过"正是本项目吃过亏的地方（§4.9 W1）。
+
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
 | 运行 Windows CLI 程序 | 有 | 复用 Linux 隔离层调用系统 Wine |
@@ -166,7 +170,7 @@ wbox
 | `wineprefix` 与宿主隔离 | 有 | 用专用的 `~/.wbox/wineprefix`，不碰用户自己的 `~/.wine` |
 | `wineprefix` **容器之间**隔离 | 有 | 每容器一个 prefix，置于其状态目录内，随容器记录一并清理（§4.9 L2）|
 | GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
-| 隔离/限额/身份/capability/seccomp/健康检查 | 有 | **复用 Q3 同一条 Linux 链路**：wine 目标走宿主程序模式，`--user`/`--cap-*`/`--seccomp-deny`/`--health-cmd`/`--restart`/`-v`/`-p` 一并生效（已实测宿主模式下 `CapEff` 清零、`Seccomp=2`、uid 改写生效）|
+| 隔离/限额/身份/capability/seccomp/健康检查 | 有 | **复用 Q3 同一条 Linux 链路**：wine 目标走宿主程序模式（`wrap_if_pe` 只替换最终 argv，隔离链路一字不差），故 `--user`/`--cap-*`/`--seccomp-deny`/`--restart` 一并生效。门禁 H.6–H.9 在宿主模式上取证（不依赖装 wine，故任何机器都真的会跑）|
 | overlay 可写层 | 不适用 | F9.12 只对镜像模式（换根）有意义；wine 目标不换根 |
 
 ### 2.4.1 每格的下一步

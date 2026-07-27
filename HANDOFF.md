@@ -52,7 +52,7 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **342 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **109 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **113 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
