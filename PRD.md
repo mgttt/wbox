@@ -818,6 +818,37 @@ F9
 6. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
    文件 bind 在真正实现前必须明确拒绝，不能把文件悄悄当目录。
 
+**Windows OCI filesystem broker 契约**（实现时不得弱化）：
+
+```text
+supervisor
+├── 持有 volume 根 HANDLE、命名 Job 与 broker listener
+├── on_created 注册仍挂起的目标 PID/process HANDLE，成功后才恢复 guest
+├── 数据管道 \\.\pipe\LOCAL\wbox.<container-hash>.<generation>.<random>
+└── guest 断线时 fail closed；禁止回退到绝对宿主路径或临时 ACL
+
+request header
+├── magic:u32 / version:u16 / opcode:u16
+├── request_id:u64 / payload_len:u32 / flags:u32
+└── payload_len、连接数、并发请求数均有固定硬上限
+```
+
+- 采用 message-mode named pipe，启用 `PIPE_REJECT_REMOTE_CLIENTS`；DACL 只允许
+  当前用户 SID 与该 profile 的精确 AppContainer SID，并设置 Low Integrity
+  mandatory label。不得授予 `Everyone` 或 `ALL APPLICATION PACKAGES`。
+- 连接后以 `GetNamedPipeClientProcessId` 取得真实 PID，验证其仍属于当前命名 Job、
+  token AppContainer SID 与 profile 相同且 generation 未过期；请求体中的 PID
+  一律不可信。`OpenProcess` 只申请 broker 所需的
+  `PROCESS_DUP_HANDLE | SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION`。
+- 首批 opcode 为 `HELLO`、`PING`、`OPEN`。`OPEN` 只接受 mount id、Linux open
+  flags/mode 与相对路径；Win32 access mask 由 broker allowlist 映射，不接收 guest
+  原始 access mask。只读 mount 在 broker 与 VFS 两层都拒绝写/创建/截断。
+- broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有 listener；
+  restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
+  control pipe 把挂起 PID 附着到同一 broker，不能另起第二个 broker。
+- `on_created` 只能做快速 session 注册与 listener-ready 检查，不能等待 guest
+  连接，否则主线程仍挂起会死锁。`HELLO/OPEN/DuplicateHandle` 都在恢复后异步进行。
+
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
 `--rm`、stop、启动失败与 supervisor 强杀都不能泄漏句柄、状态目录或宿主权限。

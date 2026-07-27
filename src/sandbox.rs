@@ -1067,10 +1067,17 @@ mod real_windows_tests {
         )
         .unwrap_err();
         assert!(format!("{}", err).contains("broker setup probe failed"), "{}", err);
-        assert!(
-            job.process_ids().unwrap().is_empty(),
-            "created hook 失败后不能在 Job 内留下挂起进程"
-        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if job.process_ids().unwrap().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "created hook 失败后不能在 Job 内留下挂起进程"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// 缺省（空 capabilities）状态下子进程无 INTERNET_CLIENT，AppContainer
