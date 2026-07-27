@@ -907,6 +907,83 @@ fn write_layered_manifest(
     Ok(Some(()))
 }
 
+/// `wbox commit`：把容器的改动固化成一个新镜像（PRD F9.20）。
+///
+/// **整条链路都是复用**，没有一件新机制：
+/// - 基础 rootfs 用 [`link_tree`] 硬链接铺开（F9.18），磁盘不翻倍；
+/// - 容器的改动就在 overlay upper 里，用 [`merge_overlay_upper`] 合并进去
+///   （F9.18 的同一份合并逻辑，whiteout/opaque 一并处理）；
+/// - 元数据用 [`write_layered_manifest`] 写成"基础层 + 增量层"（F9.17），
+///   于是 commit 出来的镜像 push 时基础层同样会被 `HEAD` 跳过。
+///
+/// 换句话说，这一格能成立是因为前面几格把机制建对了；这里只做编排。
+#[cfg(not(windows))]
+pub(crate) fn commit_container(container: &str, tag: &str) -> Result<u32> {
+    let state = crate::runstate::resolve_existing(container)?;
+    let upper = state.join("layer").join("upper");
+    if !upper.is_dir() {
+        // 与 `wbox diff` 同一条判断：没有 overlay 层就拿不到"改了什么"。
+        // 静默 commit 一份与镜像完全相同的副本更糟——用户会以为改动固化了。
+        return Err(WboxError::args(format!(
+            "容器 '{}' 没有 overlay 可写层，无法 commit：\
+             宿主程序模式不换根，或本机内核不支持 rootless overlay 而回退了共享写入（PRD F9.12）",
+            container
+        )));
+    }
+    // 容器的镜像 rootfs 就是 overlay 的 lowerdir，记在 exec_context 里
+    let base_rootfs = crate::runstate::read_meta(&state)
+        .and_then(|m| m.exec_context.map(|c| PathBuf::from(c.workdir)))
+        .ok_or_else(|| {
+            WboxError::args(format!("容器 '{}' 未记录镜像路径，无法确定基础镜像", container))
+        })?;
+    let base_dir = base_rootfs.parent().ok_or_else(|| {
+        WboxError::args("镜像 rootfs 路径异常，取不到镜像目录")
+    })?;
+
+    let iref = crate::oci::ImageRef::parse(tag, None)?;
+    let out_dir = crate::oci::image_dir(&iref)?;
+    if out_dir.starts_with(base_dir) || base_dir.starts_with(&out_dir) {
+        // 覆盖基础镜像会在铺硬链接的中途把 lower 抽掉，结果不可预测
+        return Err(WboxError::args(format!(
+            "commit 目标 '{}' 与容器的基础镜像是同一份，拒绝原地覆盖",
+            tag
+        )));
+    }
+    let rootfs = out_dir.join("rootfs");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
+
+    println!("wbox: commit {} → {}", container, iref.qualified_ref());
+    link_tree(&base_rootfs, &rootfs)?;
+    merge_overlay_upper(&upper, &rootfs)?;
+    // 换根暂存目录是 wbox 的产物，不属于镜像内容（与 push/diff 的处理一致）
+    let _ = std::fs::remove_dir_all(rootfs.join(".wbox_oldroot"));
+
+    // 继承基础镜像的运行期配置：commit 出来的镜像应当能像原镜像一样跑起来
+    let mut cfg = ConfigAccum::default();
+    if let Some(base_cfg) = crate::oci::config::ImageConfig::load(base_dir)? {
+        cfg.env = base_cfg.env.clone();
+        cfg.workdir = base_cfg.working_dir.clone();
+        if !base_cfg.cmd.is_empty() {
+            cfg.cmd = Some(base_cfg.cmd.clone());
+        }
+        if !base_cfg.entrypoint.is_empty() {
+            cfg.entrypoint = Some(base_cfg.entrypoint.clone());
+        }
+    }
+    std::fs::write(out_dir.join("config.json"), cfg.to_json())
+        .map_err(|e| WboxError::args(format!("写 config.json 失败：{}", e)))?;
+    if write_layered_manifest(base_dir, &out_dir, &rootfs, &cfg)?.is_none() {
+        std::fs::write(out_dir.join("manifest.json"), "{}")
+            .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
+        std::fs::write(out_dir.join("layers.json"), "[]")
+            .map_err(|e| WboxError::args(format!("写 layers.json 失败：{}", e)))?;
+    }
+    println!("commit 完成：{}", iref.qualified_ref());
+    Ok(0)
+}
+
 /// 执行一条 `RUN`。
 ///
 /// **直接复用运行期的容器路径**（同一个 backend、同一套 namespace 与限额），

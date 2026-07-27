@@ -21,6 +21,7 @@ pub mod rm;
 pub mod stop;
 pub mod run;
 pub mod start;
+mod commit;
 mod diff;
 pub mod top;
 pub mod wait;
@@ -37,6 +38,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox push <REF> [--registry HOST] [-V]            把本地镜像推回 registry（平铺单层，见 PRD F9.13）
   wbox compose [-f FILE] [-p NAME] up -d|down|ps    多容器编排子集（仅 Linux，见 PRD F9.14）
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
+  wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
@@ -156,6 +158,7 @@ fn cmd_container(args: &[String]) -> Result<u32> {
         Some("kill") => kill::cmd_kill(&args[1..]),
         Some("top") => top::cmd_top(&args[1..]),
         Some("diff") => diff::cmd_diff(&args[1..]),
+        Some("commit") => commit::cmd_commit(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
             "未知 container 子命令 '{}'（支持 create / start / ls / inspect / wait / logs / exec / rm / stop / kill / top）",
             other
@@ -225,6 +228,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("kill") => kill::cmd_kill(&args[1..]),
         Some("top") => top::cmd_top(&args[1..]),
         Some("diff") => diff::cmd_diff(&args[1..]),
+        Some("commit") => commit::cmd_commit(&args[1..]),
         #[cfg(target_os = "linux")]
         Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),
         Some("--help") | Some("-h") => {

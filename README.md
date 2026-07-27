@@ -41,7 +41,7 @@ Portable Windows 发布包包含两个文件：
 |---|---|---|
 | Windows × Windows 程序 | Sandboxie-Plus | **无文件系统写重定向、无注册表虚拟化**——原生 PE 程序发真 NT 调用，架构里没有介入点；已兑现的是「拒绝 + 显式授权」|
 | Windows × Linux 镜像 | WSL2 / Docker Desktop | 已有 `build` 子集+分层缓存/`--restart`；无卷挂载/端口映射/`--user`，**性能不可比** |
-| Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（原样回推，保留分层）/`diff`/`compose` 子集/IPC·UTS 隔离与共享；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
+| Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（原样回推，保留分层）/`diff`/`commit`/`compose` 子集/IPC·UTS 隔离与共享；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
 | Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖（wineprefix 已按容器隔离） |
 
 每格的**下一步**（哪些缺口打算补、哪些永远不补）见 `PRD.md` §2.4.1。

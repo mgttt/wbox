@@ -138,6 +138,7 @@ wbox
 | 资源限额 | 有 | cgroup v2 首选，受限时明确回退或拒绝 |
 | `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
 | `diff` | 有 | F9.19：A/C/D 与 docker 对齐；直接读 overlay upper，不扫全树（门禁 DF.1–DF.3）|
+| `commit` | 有 | F9.20：容器改动固化成新镜像，与基础镜像共享磁盘（门禁 CM.1–CM.4）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -815,7 +816,8 @@ F9
 ├── F9.16 原始层留存与原样回推                 —— [done]（门禁 PSH.6–PSH.7）
 ├── F9.17 构建产物分层（基础层 + 增量层）      —— [done]（门禁 PSH.8a–PSH.8c）
 ├── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
-└── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
+├── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
+└── F9.20 `wbox commit` 固化容器改动           —— [done]（仅 Linux，门禁 CM.1–CM.4）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1010,6 +1012,28 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.20 `wbox commit`** `[done]`（门禁 CM.1–CM.4）。把容器的改动固化成新镜像。
+
+**整条链路都是复用，没有一件新机制**——这一格能成立，是因为前面几格把机制建对了：
+
+- 基础 rootfs 用 `link_tree` 硬链接铺开（F9.18），磁盘不翻倍（实测合计 1452KB
+  vs 两份之和 2808KB）；
+- 容器的改动就在 overlay upper 里，用 `merge_overlay_upper` 合并进去（F9.18 的
+  同一份逻辑，whiteout / opaque 一并处理）；
+- 元数据走 `write_layered_manifest`（F9.17），于是 commit 出来的镜像 push 时
+  基础层同样会被 `HEAD` 跳过。
+
+判据分两半，缺一不可：改动真的固化（新增/改动/**删除**三类都测，CM.1），
+以及**基础镜像逐字节不变**（CM.2）。后半条是这条链路最危险的失败形态——
+产物看着对而基础镜像被改坏，破坏的是别的镜像且很晚才会发现。
+
+两处明确拒绝：没有 overlay 层时报错而不是 commit 一份与镜像相同的副本
+（那会让用户以为改动固化了）；commit 目标与容器自己的基础镜像相同时拒绝，
+否则会在铺硬链接的中途把 lower 抽掉。
+
+不支持"省略镜像名自动生成"。docker 会给个随机 ID，而 wbox 的缓存按名寻址，
+随机名只会留下一堆没人认领的镜像。
 
 **F9.19 `wbox diff`** `[done]`（门禁 DF.1–DF.3）。列出容器相对镜像改动了什么，
 输出格式与 `docker diff` 一致（`A`/`C`/`D` + 容器内路径）。

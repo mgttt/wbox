@@ -1741,6 +1741,64 @@ HOME=$WORK/home "$WBOX_ABS" rm dfhost >/dev/null 2>&1
 rm -rf "$CACHE/rootfs/dfetc"
 
 echo
+echo "=== CM wbox commit（PRD F9.20）==="
+
+# 判据分两半，缺一不可：改动真的固化进新镜像；基础镜像**未被动过**。
+# 后半条是这条链路（硬链接 + overlay 合并）最危险的失败形态。
+mkdir -p "$CACHE/rootfs/cmetc"
+printf 'orig\n' > "$CACHE/rootfs/cmetc/conf"
+printf 'gone\n' > "$CACHE/rootfs/cmetc/todelete"
+cmbase=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+HOME=$WORK/home "$WBOX_ABS" run -d --name cmc lbetest -- \
+  /bin/sh -c 'echo new > /cmetc/conf; rm /cmetc/todelete; echo x > /cmadded.txt; sleep 30' >/dev/null 2>&1
+sleep 2
+cout=$(HOME=$WORK/home "$WBOX_ABS" commit cmc cmmine:v1 2>&1); crc=$?
+
+# 新镜像跑起来：新增在、改动生效、删除也固化了
+vout=$(HOME=$WORK/home "$WBOX_ABS" run --rm --name cmv cmmine:v1 -- \
+  /bin/sh -c 'cat /cmetc/conf; cat /cmadded.txt; test -e /cmetc/todelete && echo STILL || echo DELETED' 2>&1)
+if [ "$crc" -eq 0 ] \
+   && printf '%s' "$vout" | grep -qx 'new' \
+   && printf '%s' "$vout" | grep -qx 'x' \
+   && printf '%s' "$vout" | grep -qx 'DELETED'; then
+  report PASS "CM.1 commit 固化新增/改动/删除三类改动"
+else
+  report FAIL "CM.1 改动固化" "rc=$crc 输出: $(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+cmafter=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+if [ "$cmbase" = "$cmafter" ] && [ "$(cat "$CACHE/rootfs/cmetc/conf")" = "orig" ] \
+   && [ -f "$CACHE/rootfs/cmetc/todelete" ]; then
+  report PASS "CM.2 commit 后基础镜像缓存逐字节不变"
+else
+  report FAIL "CM.2 基础镜像完整性" "摘要变了=$([ "$cmbase" = "$cmafter" ] && echo 否 || echo 是) conf=$(cat "$CACHE/rootfs/cmetc/conf" 2>/dev/null)"
+fi
+
+# 磁盘共享：commit 出来的镜像与基础镜像共享数据块
+CMD1=$WORK/home/.wbox/images/registry-1.docker.io/library_cmmine/v1/rootfs
+cb1=$(du -s "$CACHE/rootfs" | cut -f1)
+cb2=$(du -s "$CMD1" | cut -f1)
+cboth=$(du -sc "$CACHE/rootfs" "$CMD1" | tail -1 | cut -f1)
+if [ "$cboth" -lt $(( (cb1 + cb2) * 3 / 4 )) ]; then
+  report PASS "CM.3 commit 产物与基础镜像共享磁盘（合计 ${cboth}KB，两份之和 $((cb1+cb2))KB）"
+else
+  report FAIL "CM.3 磁盘共享" "合计=${cboth}KB 两份之和=$((cb1+cb2))KB"
+fi
+
+# 覆盖基础镜像会在铺硬链接中途把 lower 抽掉，必须拒绝
+cout=$(HOME=$WORK/home "$WBOX_ABS" commit cmc lbetest:latest 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "拒绝原地覆盖"; then
+  report PASS "CM.4 拒绝 commit 覆盖容器自己的基础镜像"
+else
+  report FAIL "CM.4 原地覆盖守卫" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill cmc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm cmc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rmi cmmine:v1 >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/cmetc"
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。
