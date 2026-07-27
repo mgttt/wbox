@@ -489,14 +489,24 @@ F3
 ```text
 F4
 ├── F4.R0 `[active]` 删除 Blink/C 产品依赖与构建链
-├── F4.R1 `[planned]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈
-├── F4.R2 `[planned]` 纯 Rust x86-64 解释执行器；JIT 只能使用纯 Rust backend
+├── F4.R1 `[active]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈
+├── F4.R2 `[active]` 纯 Rust x86-64 解释执行器；JIT 只能使用纯 Rust backend
 ├── F4.R3 `[planned]` 纯 Rust Linux syscall、fd、信号和进程模型
 ├── F4.R4 `[planned]` 纯 Rust guest VFS、rootfs、/proc、/dev 和只读卷
 ├── F4.R5 `[planned]` 动态 glibc、线程、fork/exec、epoll、socket
 ├── F4.R6 `[planned]` Alpine/Ubuntu 24.04 产品门禁
 └── F4.R7 `[planned]` 从仓库、CI、文档和发布物删除 vendor/blink
 ```
+
+2026-07-28 的首个纯 Rust 纵切已落在 `src/runtime`：安全解析 little-endian
+x86-64 `ET_EXEC` 的 `PT_LOAD`、建立带执行权限检查的 guest 地址空间，解释
+`MOV r64,imm` 与 `syscall`，并由手工构造的 ELF 执行 Linux `exit(42)`。当前仅是
+G0 骨架，尚无栈、通用指令或产品 backend，不能运行 BusyBox/Ubuntu。
+
+F4.R0 初次审计发现 native 源只存在于两个遗留根：`vendor/blink=452`、
+`tests/guest=22`；Rust 门禁要求数量只能下降且不得扩散。Cargo 在 Windows 当前
+走系统 Schannel，但 Linux target 的 `native-tls -> openssl-sys` 仍是 C 依赖，
+必须改为纯 Rust TLS/crypto 或用纯 Rust 重写后才能满足 §2.2.1。
 
 以下 Blink 结果仅作为纯 Rust 迁移的行为基线，不再证明目标架构完成。历史上直接
 运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
