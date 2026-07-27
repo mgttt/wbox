@@ -334,13 +334,10 @@ fn spawn_log_watchdog(dir: std::path::PathBuf) {
 ///
 /// 收成一个函数而不是在四个 spawn 点各写一遍：漏掉任何一处都会让那条路径的
 /// 容器在 `ps` 里隐身，而"少列了一个"比"多列了一个"难发现得多。
-fn spawn_with_state(
-    b: &dyn Backend,
+fn register_for_spawn(
     spec: &backend::RunSpec,
-    prepared: &backend::Prepared,
     target: &str,
-    auto_remove: bool,
-) -> Result<u32> {
+) -> Result<crate::runstate::Registration> {
     // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
     // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
     let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
@@ -348,13 +345,23 @@ fn spawn_with_state(
         allow_network: spec.allow_network,
         workdir: spec.workdir.to_string_lossy().into_owned(),
     };
-    let reg = crate::runstate::register_with_context(
+    crate::runstate::register_with_context(
         &spec.name,
         &spec.cmd,
         target,
         supervised,
         Some(exec_context),
-    )?;
+    )
+}
+
+fn spawn_registered(
+    b: &dyn Backend,
+    spec: &backend::RunSpec,
+    prepared: &backend::Prepared,
+    reg: crate::runstate::Registration,
+    auto_remove: bool,
+) -> Result<u32> {
+    let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
     if supervised {
         spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
     }
@@ -382,6 +389,17 @@ fn spawn_with_state(
         }
     }
     rc
+}
+
+fn spawn_with_state(
+    b: &dyn Backend,
+    spec: &backend::RunSpec,
+    prepared: &backend::Prepared,
+    target: &str,
+    auto_remove: bool,
+) -> Result<u32> {
+    let reg = register_for_spawn(spec, target)?;
+    spawn_registered(b, spec, prepared, reg, auto_remove)
 }
 
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
@@ -455,7 +473,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         }
     }
 
-    let spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    let mut spec = make_spec(opts, dir.join("rootfs"), merged, env);
     // 按宿主分派（docs/architecture.md §3）：Windows 上 guest 是跑不了的
     // Linux ELF，必须经 wbox-linux 模拟；Linux 上宿主自己就能执行，走原生
     // namespace 隔离，省掉一整层模拟开销。规则本体在 backend::image_backend_kind
@@ -463,8 +481,33 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     match backend::image_backend_kind() {
         backend::ImageBackendKind::Blink => {
             let backend = BlinkBackend;
+            #[cfg(windows)]
+            let reg = {
+                let reg = register_for_spawn(&spec, &iref.repo_tag())?;
+                let private_rootfs = reg.dir().join("rootfs");
+                backend::create_private_rootfs(
+                    &spec.workdir,
+                    &private_rootfs,
+                    &spec.name,
+                )?;
+                spec.workdir = private_rootfs;
+                reg
+            };
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag(), opts.auto_remove)
+            #[cfg(windows)]
+            {
+                spawn_registered(&backend, &spec, &prepared, reg, opts.auto_remove)
+            }
+            #[cfg(not(windows))]
+            {
+                spawn_with_state(
+                    &backend,
+                    &spec,
+                    &prepared,
+                    &iref.repo_tag(),
+                    opts.auto_remove,
+                )
+            }
         }
         backend::ImageBackendKind::LinuxNative => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);

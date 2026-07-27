@@ -20,7 +20,7 @@ use windows_sys::Win32::Foundation::{GetLastError, HLOCAL, LocalFree};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
     EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID,
-    TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
@@ -36,6 +36,9 @@ const ALL_APP_PACKAGES_SID: &str = "S-1-15-2-1";
 /// GENERIC_READ | GENERIC_EXECUTE（windows-sys 0.59 未在启用的 feature 集内导出常量，
 /// 按 Win32 头文件值定义：只读 + 遍历/执行，rootfs 只需读）。
 const ACCESS_READ_EXECUTE: u32 = 0x8000_0000 | 0x2000_0000;
+/// GENERIC_ALL。私有运行副本只向该容器 SID 授权，guest 需要完整创建、改写、
+/// rename 与删除语义；共享镜像缓存仍只有读取 ACE。
+const ACCESS_MODIFY: u32 = 0x1000_0000;
 
 /// 递归地为 `root` 及其全部子孙文件/目录添加 ALL APPLICATION PACKAGES 读取 ACE。
 pub fn grant_read_recursive(root: &Path) -> Result<()> {
@@ -46,13 +49,27 @@ pub fn grant_read_recursive(root: &Path) -> Result<()> {
         )));
     }
     let mut count = 0u32;
-    grant_tree(root, &mut count)?;
+    grant_tree(root, ALL_APP_PACKAGES_SID, ACCESS_READ_EXECUTE, &mut count)?;
+    Ok(())
+}
+
+/// 仅向指定 AppContainer profile 的确定性 SID 授予私有 rootfs 修改权。
+pub fn grant_modify_recursive_for_profile(root: &Path, profile_name: &str) -> Result<()> {
+    if !root.is_dir() {
+        return Err(WboxError::profile(format!(
+            "私有 rootfs 目录 '{}' 不存在，无法授权",
+            root.display()
+        )));
+    }
+    let sid = crate::token::AppContainerProfile::derived_sid_string(profile_name)?;
+    let mut count = 0u32;
+    grant_tree(root, &sid, ACCESS_MODIFY, &mut count)?;
     Ok(())
 }
 
 /// 递归遍历并授权。单项失败即整体报错（授权不全 = 运行时莫名 EACCES）。
-fn grant_tree(path: &Path, count: &mut u32) -> Result<()> {
-    grant_read_ace(path, path.is_dir())?;
+fn grant_tree(path: &Path, sid: &str, access: u32, count: &mut u32) -> Result<()> {
+    grant_ace(path, path.is_dir(), sid, access)?;
     *count += 1;
     if path.is_dir() {
         let entries = std::fs::read_dir(path)
@@ -60,23 +77,26 @@ fn grant_tree(path: &Path, count: &mut u32) -> Result<()> {
             .ctx(ErrKind::Registry)?;
         for entry in entries {
             let entry = entry.context("读取目录项失败").ctx(ErrKind::Registry)?;
-            grant_tree(&entry.path(), count)?;
+            grant_tree(&entry.path(), sid, access, count)?;
         }
     }
     Ok(())
 }
 
-/// 对单个路径授予读取 ACE（目录带继承标志，文件不继承）。
-fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
-    // 1. 从字符串构造 ALL APPLICATION PACKAGES SID
-    let sid_str = to_wide(ALL_APP_PACKAGES_SID);
+/// 对单个路径授予 ACE（目录带继承标志，文件不继承）。
+fn grant_ace(path: &Path, is_dir: bool, sid_text: &str, access: u32) -> Result<()> {
+    // 1. 从字符串构造 trustee SID
+    let sid_str = to_wide(sid_text);
     let mut sid: PSID = std::ptr::null_mut();
     // # Safety: sid_str 为 NUL 结尾宽字符串；sid 为有效输出指针，
     // 成功后由 LocalFree 释放（见函数末尾 guard）。
     let ok = unsafe { ConvertStringSidToSidW(sid_str.as_ptr(), &mut sid) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(WboxError::registry(format!("ConvertStringSidToSidW({}) 失败，GetLastError={}", ALL_APP_PACKAGES_SID, err)));
+        return Err(WboxError::registry(format!(
+            "ConvertStringSidToSidW({}) 失败，GetLastError={}",
+            sid_text, err
+        )));
     }
     let _sid_guard = LocalGuard(sid as HLOCAL);
 
@@ -108,11 +128,11 @@ fn grant_read_ace(path: &Path, is_dir: bool) -> Result<()> {
         pMultipleTrustee: std::ptr::null_mut(),
         MultipleTrusteeOperation: 0, // NO_MULTIPLE_TRUSTEE
         TrusteeForm: TRUSTEE_IS_SID,
-        TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+        TrusteeType: TRUSTEE_IS_UNKNOWN,
         ptstrName: sid as *mut u16,
     };
     let ea = EXPLICIT_ACCESS_W {
-        grfAccessPermissions: ACCESS_READ_EXECUTE,
+        grfAccessPermissions: access,
         grfAccessMode: SET_ACCESS,
         grfInheritance: if is_dir {
             SUB_CONTAINERS_AND_OBJECTS_INHERIT

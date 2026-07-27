@@ -80,6 +80,7 @@ $stopName = "product-stop"
 $stopPids = @()
 $execName = "product-exec"
 $crashName = "product-crash"
+$writeBgName = "product-write-bg"
 
 try {
     New-Item -ItemType Directory -Force -Path $bundle, $rootfs | Out-Null
@@ -148,6 +149,55 @@ try {
         throw "WP.3D directory enumeration did not return the fixture entry: $directoryGuest"
     }
     Write-Host "PASS WP.3D AppContainer Linux directory enumeration"
+
+    $writeGuest = & $portableWbox run --name product-write local.test/wbox-fixture:latest `
+        /busybox sh -c 'echo PRIVATE_WRITE_OK > /probe/private-write && cat /probe/private-write' `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.3W Windows OCI private writable rootfs" $writeGuest
+    if ($writeGuest -notmatch "PRIVATE_WRITE_OK") {
+        throw "WP.3W private writable rootfs did not produce its marker: $writeGuest"
+    }
+    if (Test-Path -LiteralPath (Join-Path $rootfs "probe\private-write")) {
+        throw "WP.3W guest write modified the shared image cache"
+    }
+    if (Test-Path -LiteralPath (Join-Path $testHome ".wbox\run\product-write")) {
+        throw "WP.3W foreground private rootfs was not cleaned after exit"
+    }
+    Write-Host "PASS WP.3W Windows OCI private writable rootfs and cache isolation"
+
+    $writeBg = & $portableWbox run -d --name $writeBgName local.test/wbox-fixture:latest `
+        /busybox sh -c 'echo PRIVATE_BG_OK > /probe/private-bg && cat /probe/private-bg' `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.3WB detached private rootfs launch" $writeBg
+    $writeBgDir = Join-Path $testHome ".wbox\run\$writeBgName"
+    $writeBgFile = Join-Path $writeBgDir "rootfs\probe\private-bg"
+    foreach ($i in 1..40) {
+        if (Test-Path -LiteralPath $writeBgFile -PathType Leaf) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not (Test-Path -LiteralPath $writeBgFile -PathType Leaf)) {
+        throw "WP.3WB detached private rootfs did not persist its guest file"
+    }
+    if (Test-Path -LiteralPath (Join-Path $rootfs "probe\private-bg")) {
+        throw "WP.3WB detached guest modified the shared image cache"
+    }
+    $writeBgRemoved = $false
+    $writeBgRemoveOutput = ""
+    foreach ($i in 1..40) {
+        $writeBgRemoveOutput = & $portableWbox rm $writeBgName 2>&1 | Out-String
+        if ($LASTEXITCODE -eq 0) {
+            $writeBgRemoved = $true
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $writeBgRemoved) {
+        throw "WP.3WB could not remove exited private rootfs: $writeBgRemoveOutput"
+    }
+    if (Test-Path -LiteralPath $writeBgDir) {
+        throw "WP.3WB wbox rm did not remove the private rootfs"
+    }
+    Write-Host "PASS WP.3WB detached private rootfs persists until rm"
 
     $runtimeHelp = & (Join-Path $bundle "wbox-linux.exe") --help 2>&1 | Out-String
     Assert-Exit 0 "WP.4 wbox-linux identity help" $runtimeHelp
@@ -506,6 +556,8 @@ finally {
         & $portableWbox rm $execName 2>&1 | Out-Null
         & $portableWbox stop $crashName 2>&1 | Out-Null
         & $portableWbox rm $crashName 2>&1 | Out-Null
+        & $portableWbox stop $writeBgName 2>&1 | Out-Null
+        & $portableWbox rm $writeBgName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {

@@ -114,6 +114,108 @@ pub(super) fn ensure_resolv_conf(rootfs: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// 为 Windows OCI 运行创建完整的私有 rootfs 副本。
+///
+/// 首版优先保证语义正确：guest 的 create/write/rename/delete 都只发生在副本；
+/// 共享镜像缓存绝不作为工作根。后续可把复制实现替换为具备 copy-up/whiteout
+/// 的稀疏层，而不改变调用方生命周期。
+#[cfg(windows)]
+pub(crate) fn create_private_rootfs(
+    source: &Path,
+    destination: &Path,
+    profile_name: &str,
+) -> Result<()> {
+    super::require_rootfs_dir(source)?;
+    if destination.exists() {
+        return Err(WboxError::spawn(format!(
+            "私有 rootfs '{}' 已存在，拒绝与旧运行实例合并",
+            destination.display()
+        )));
+    }
+    copy_rootfs_tree(source, destination)?;
+    crate::acl::grant_modify_recursive_for_profile(destination, profile_name)?;
+    Ok(())
+}
+
+fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination).map_err(|e| {
+        WboxError::spawn(format!(
+            "创建私有 rootfs 目录 '{}' 失败：{}",
+            destination.display(),
+            e
+        ))
+    })?;
+    let entries = std::fs::read_dir(source).map_err(|e| {
+        WboxError::spawn(format!("读取 rootfs '{}' 失败：{}", source.display(), e))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| WboxError::spawn(format!("读取 rootfs 目录项失败：{}", e)))?;
+        let src = entry.path();
+        let dst = destination.join(entry.file_name());
+        let ty = entry.file_type().map_err(|e| {
+            WboxError::spawn(format!("读取 rootfs 项 '{}' 类型失败：{}", src.display(), e))
+        })?;
+        if ty.is_dir() {
+            copy_rootfs_tree(&src, &dst)?;
+        } else if ty.is_file() {
+            std::fs::copy(&src, &dst).map_err(|e| {
+                WboxError::spawn(format!(
+                    "复制 rootfs 文件 '{}' 到 '{}' 失败：{}",
+                    src.display(),
+                    dst.display(),
+                    e
+                ))
+            })?;
+        } else if ty.is_symlink() {
+            copy_rootfs_symlink(&src, &dst)?;
+        } else {
+            return Err(WboxError::spawn(format!(
+                "rootfs 项 '{}' 类型不受 Windows 私有层支持",
+                src.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+
+    let target = std::fs::read_link(source).map_err(|e| {
+        WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
+    })?;
+    let target_is_dir = std::fs::metadata(source).map(|m| m.is_dir()).unwrap_or(false);
+    let result = if target_is_dir {
+        symlink_dir(&target, destination)
+    } else {
+        symlink_file(&target, destination)
+    };
+    result.map_err(|e| {
+        WboxError::spawn(format!(
+            "复制 rootfs symlink '{}' 到 '{}' 失败：{}",
+            source.display(),
+            destination.display(),
+            e
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
+    let target = std::fs::read_link(source).map_err(|e| {
+        WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
+    })?;
+    std::os::unix::fs::symlink(&target, destination).map_err(|e| {
+        WboxError::spawn(format!(
+            "复制 rootfs symlink '{}' 到 '{}' 失败：{}",
+            source.display(),
+            destination.display(),
+            e
+        ))
+    })
+}
+
 /// 构造 wbox-linux 的命令行：`wbox-linux.exe <guest cmd...>`。
 /// （rootfs 不经命令行传递，而是工作目录 + BLINK_PREFIX 环境变量。）
 fn build_blink_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
@@ -171,8 +273,8 @@ impl Backend for BlinkBackend {
     #[cfg(windows)]
     fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32> {
         // 双层隔离：wbox-linux.exe 经 NativeBackend 在 AppContainer + Job 内启动。
-        // rootfs 目录需已对 AppContainer SID 授权（pull 时由 acl.rs 完成，
-        // 手工复制的缓存可运行 `icacls <rootfs> /grant "*S-1-15-2-1:(OI)(CI)(RX)" /T`）。
+        // run_image 已把共享 cache 复制到状态目录，并仅向本 profile SID 授予
+        // 修改权；prepared.workdir 绝不能重新指回共享镜像缓存。
         super::native::spawn_native(
             spec,
             prepared,
@@ -313,6 +415,27 @@ mod tests {
         assert!(rootfs.join("dev").is_dir());
         assert!(rootfs.join("proc").is_dir());
         let _ = std::fs::remove_dir_all(&rootfs);
+    }
+
+    #[test]
+    fn private_rootfs_copy_is_independent_from_image_cache() {
+        let source = temp_rootfs("private-source");
+        let destination = source.with_file_name(format!(
+            "{}-copy",
+            source.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(source.join("etc")).unwrap();
+        std::fs::write(source.join("etc/value"), b"cached").unwrap();
+
+        copy_rootfs_tree(&source, &destination).unwrap();
+        std::fs::write(destination.join("etc/value"), b"private").unwrap();
+        std::fs::write(destination.join("created"), b"guest").unwrap();
+        std::fs::remove_file(destination.join("etc/value")).unwrap();
+
+        assert_eq!(std::fs::read(source.join("etc/value")).unwrap(), b"cached");
+        assert!(!source.join("created").exists());
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&destination);
     }
 
     #[test]

@@ -230,10 +230,8 @@ pub struct Registration {
 }
 
 impl Registration {
-    /// 状态目录路径。目前只有单测用得上（F8.2 的 `logs` 会用它定位日志文件），
-    /// 故标 `cfg(test)` 而不是挂 `allow(dead_code)`——后者会连真正的死代码
-    /// 一起放过。
-    #[cfg(test)]
+    /// 状态目录路径。Windows OCI 的私有可写 rootfs 也放在这里，使前台退出、
+    /// `--rm` 和显式 `wbox rm` 都复用同一生命周期清理路径。
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -245,6 +243,10 @@ impl Registration {
 /// 尽力而为、不报错：清理失败顶多留下一条 `Exited` 记录，比 panic 或让
 /// 调用方多一条错误分支都好。
 fn purge_dir(dir: &Path) {
+    // Windows OCI 的私有 rootfs 可能包含任意深度的 guest 文件树，必须先递归
+    // 清理。路径名固定且始终拼在已校验的容器状态目录下，不能由 guest 指向
+    // 目录外部。
+    let _ = std::fs::remove_dir_all(dir.join("rootfs"));
     let _ = std::fs::remove_file(dir.join("meta.json"));
     let _ = std::fs::remove_file(dir.join("lock"));
     // 日志也要删：留着会让 remove_dir 因非空而失败，状态目录就永远清不掉
@@ -642,6 +644,9 @@ mod tests {
         let _home = TempHome::new("cleanup");
         let dir = {
             let reg = register("c2", &["/bin/true".into()], "(native)").unwrap();
+            let private_file = reg.dir().join("rootfs/var/lib/app/state");
+            std::fs::create_dir_all(private_file.parent().unwrap()).unwrap();
+            std::fs::write(&private_file, b"private").unwrap();
             reg.dir().to_path_buf()
         };
         assert!(!dir.exists(), "drop 后状态目录应已删除：{}", dir.display());
