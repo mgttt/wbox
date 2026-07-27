@@ -1921,6 +1921,73 @@ HOME=$WORK/home "$WBOX_ABS" rm cpc >/dev/null 2>&1
 rm -rf "$CACHE/rootfs/cpetc" "$WORK/tree" "$WORK/in.txt" "$WORK/out.conf"
 
 echo
+echo "=== ST wbox stats（PRD F9.24）==="
+
+# 判据是**区分能力**，不是"命令跑通了"。一个死循环烧 CPU、一个纯 sleep，
+# stats 必须把这两个区分开——只断言 rc=0 的话，一个恒返回 0.00% 的实现也能过。
+HOME=$WORK/home "$WBOX_ABS" run -d --name stbusy lbetest -- \
+  /bin/sh -c 'while :; do :; done' >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" run -d --name stidle lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats stbusy stidle 2>&1); strc=$?
+
+stb=$(printf '%s\n' "$stout" | awk '$1=="stbusy"{print $2}' | tr -d '%')
+sti=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $2}' | tr -d '%')
+# busy 至少要有明显占用；idle 必须接近 0。阈值取得宽松，判的是"分得开"。
+if [ "$strc" -eq 0 ] \
+   && [ -n "$stb" ] && [ -n "$sti" ] \
+   && awk "BEGIN{exit !($stb > 20)}" \
+   && awk "BEGIN{exit !($sti < 5)}"; then
+  report PASS "ST.1 stats 区分得开忙闲容器（busy ${stb}% vs idle ${sti}%）"
+else
+  report FAIL "ST.1 CPU% 区分度" "rc=$strc busy=$stb idle=$sti 输出: $(printf '%s' "$stout" | tr '\n' '|' | head -c 200)"
+fi
+
+# 内存与进程数要是真数字。0 内存意味着采样根本没落到容器上。
+stmem=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $3}')
+stpid=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $4}')
+if printf '%s' "$stmem" | grep -qE '^[0-9.]+(B|KiB|MiB|GiB|TiB)$' \
+   && [ -n "$stpid" ] && [ "$stpid" -ge 1 ] 2>/dev/null; then
+  report PASS "ST.2 内存与进程数取到真实数值（$stmem / $stpid 个进程）"
+else
+  report FAIL "ST.2 内存与进程数" "内存=$stmem 进程=$stpid"
+fi
+
+# 两种数据来源精度不同，必须标注；落到 /proc 那条路时还要打出重复计入的脚注。
+# 印成一个样子会让人把 RSS 合计当成 cgroup 那种精确值。
+stsrc=$(printf '%s\n' "$stout" | awk '$1=="stidle"{print $5}')
+if [ "$stsrc" = "cgroup" ]; then
+  report PASS "ST.3 标注数据来源（本机走 cgroup 精确记账）"
+elif [ "$stsrc" = "proc*" ] && printf '%s' "$stout" | grep -q '重复计入'; then
+  report PASS "ST.3 标注数据来源，并说明 RSS 合计会重复计入共享页"
+else
+  report FAIL "ST.3 来源标注" "来源列=$stsrc 有脚注=$(printf '%s' "$stout" | grep -qc 重复计入 && echo 是 || echo 否)"
+fi
+
+# 不带名字时列出全部运行中的容器（与 ps 默认视图一致）
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats 2>&1); strc=$?
+if [ "$strc" -eq 0 ] && printf '%s' "$stout" | grep -q stbusy && printf '%s' "$stout" | grep -q stidle; then
+  report PASS "ST.4 不带名字时列出全部运行中的容器"
+else
+  report FAIL "ST.4 全量列出" "rc=$strc 输出: $(printf '%s' "$stout" | tr '\n' '|' | head -c 200)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill stbusy >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" kill stidle >/dev/null 2>&1
+sleep 1
+
+# 已退出的容器要报错。打印一行 0 会被读成"这个容器很闲"，而不是"它已经没了"。
+stout=$(HOME=$WORK/home "$WBOX_ABS" stats stidle 2>&1); strc=$?
+if [ "$strc" -ne 0 ] && printf '%s' "$stout" | grep -q '已退出'; then
+  report PASS "ST.5 已退出的容器报错而非打印一行 0"
+else
+  report FAIL "ST.5 已退出容器" "rc=$strc 输出: $(printf '%s' "$stout" | head -c 150)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
+
+echo
 echo "=== SL save / load（PRD F9.22）==="
 
 SLTAR=$WORK/saved.tar
