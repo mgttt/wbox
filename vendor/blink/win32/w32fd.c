@@ -545,6 +545,9 @@ static int W32Err(void) {
   return W32ErrFromHost(GetLastError());
 }
 
+static void W32SetFdPath(int fd, const wchar_t *path);
+static void W32CopyFdPath(int oldfd, int newfd);
+
 static int W32ToCrt(HANDLE h, int flags) {
   int cflags = 0;
   if (flags & O_APPEND) cflags |= 0x0008;       // _O_APPEND
@@ -556,6 +559,9 @@ static int W32ToCrt(HANDLE h, int flags) {
   if (fd == -1) {
     CloseHandle(h);
   } else {
+    // A CRT descriptor number may be reused after a close path outside this
+    // shim. Never let an unrelated old filesystem path follow the new handle.
+    W32SetFdPath(fd, NULL);
     W32SetAccess(fd, flags);
   }
   return fd;
@@ -689,6 +695,7 @@ int openat(int dirfd, const char *path, int flags, ...) {
   }
   if (flags & O_APPEND) SetFilePointer(h, 0, NULL, FILE_END);
   int ofd = W32ToCrt(h, flags);
+  if (ofd != -1) W32SetFdPath(ofd, wbuf);
   W32SetAppend(ofd, (flags & O_APPEND) != 0);
   W32SetNonblock(ofd, (flags & O_NDELAY) != 0);
   return ofd;
@@ -709,12 +716,49 @@ static int IsSpecial(int fd) {
 #define W32_FDTRACK_MAX 65536
 static unsigned char g_fdappend[W32_FDTRACK_MAX / 8];
 static unsigned char g_fdnonblock[W32_FDTRACK_MAX / 8];
+static wchar_t *g_fdpath[W32_FDTRACK_MAX];
+static SRWLOCK g_fdpathlock = SRWLOCK_INIT;
 struct W32FdStatus {
   int refs;
   int append;
   int nonblock;
 };
 static struct W32FdStatus *g_fdstatus[W32_FDTRACK_MAX];
+
+static void W32SetFdPath(int fd, const wchar_t *path) {
+  wchar_t *copy;
+  if (fd < 0 || fd >= W32_FDTRACK_MAX) return;
+  copy = path ? _wcsdup(path) : NULL;
+  AcquireSRWLockExclusive(&g_fdpathlock);
+  free(g_fdpath[fd]);
+  g_fdpath[fd] = copy;
+  ReleaseSRWLockExclusive(&g_fdpathlock);
+}
+
+static void W32CopyFdPath(int oldfd, int newfd) {
+  wchar_t *copy = NULL;
+  if (newfd < 0 || newfd >= W32_FDTRACK_MAX) return;
+  AcquireSRWLockShared(&g_fdpathlock);
+  if (oldfd >= 0 && oldfd < W32_FDTRACK_MAX && g_fdpath[oldfd])
+    copy = _wcsdup(g_fdpath[oldfd]);
+  ReleaseSRWLockShared(&g_fdpathlock);
+  AcquireSRWLockExclusive(&g_fdpathlock);
+  free(g_fdpath[newfd]);
+  g_fdpath[newfd] = copy;
+  ReleaseSRWLockExclusive(&g_fdpathlock);
+}
+
+int W32GetFdPath(int fd, wchar_t *out, size_t cap) {
+  int ok = 0;
+  AcquireSRWLockShared(&g_fdpathlock);
+  if (fd >= 0 && fd < W32_FDTRACK_MAX && g_fdpath[fd] &&
+      wcslen(g_fdpath[fd]) < cap) {
+    wcscpy(out, g_fdpath[fd]);
+    ok = 1;
+  }
+  ReleaseSRWLockShared(&g_fdpathlock);
+  return ok;
+}
 
 union W32IoStatusValue {
   LONG status;
@@ -1720,6 +1764,7 @@ int close(int fd) {
   if (!IsSpecial(fd)) {
     W32DropStatus(fd);
     W32SetAccess(fd, -1);
+    W32SetFdPath(fd, NULL);
   }
   switch (W32FdClassify(fd, NULL)) {
     case W32FD_SOCKET:
@@ -1976,6 +2021,7 @@ int dup(int fd) {
   int nfd = W32ToCrt(duph, W32GetAccess(fd));
   if (nfd == -1) return -1;
   W32ShareStatus(fd, nfd);
+  W32CopyFdPath(fd, nfd);
   return nfd;
 }
 
@@ -2028,6 +2074,7 @@ int dup2(int fd, int fd2) {
   }
   W32ShareStatus(fd, fd2);
   W32SetAccess(fd2, W32GetAccess(fd));
+  W32CopyFdPath(fd, fd2);
   return fd2;
 }
 

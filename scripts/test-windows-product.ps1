@@ -86,6 +86,9 @@ try {
     Copy-Item -LiteralPath $wboxSource -Destination (Join-Path $bundle "wbox.exe")
     Copy-Item -LiteralPath $linuxSource -Destination (Join-Path $bundle "wbox-linux.exe")
     Copy-Item -LiteralPath $busyboxSource -Destination (Join-Path $rootfs "busybox")
+    New-Item -ItemType Directory -Force -Path (Join-Path $rootfs "probe") | Out-Null
+    Set-Content -LiteralPath (Join-Path $rootfs "probe\directory-entry-ok") `
+        -Encoding utf8NoBOM -Value "ok"
 
     Set-Content -LiteralPath (Join-Path $image "manifest.json") -Encoding utf8NoBOM -Value "{}"
     Set-Content -LiteralPath (Join-Path $image "layers.json") -Encoding utf8NoBOM -Value "[]"
@@ -134,6 +137,25 @@ try {
         Write-Host "PASS WP.4 portable two-executable bundle"
     }
 
+    # AppContainer can deny GetFinalPathNameByHandleW while still allowing
+    # directory reads. wbox-linux must enumerate through the path remembered
+    # by openat(), otherwise language runtimes such as Python see empty stdlib
+    # directories and fail to import even `encodings`.
+    $directoryGuest = & $portableWbox run --name product-dir local.test/wbox-fixture:latest `
+        /busybox sh -c "ls /probe | grep directory-entry-ok" 2>&1 | Out-String
+    Assert-Exit 0 "WP.3D AppContainer Linux directory enumeration" $directoryGuest
+    if ($directoryGuest -notmatch "directory-entry-ok") {
+        throw "WP.3D directory enumeration did not return the fixture entry: $directoryGuest"
+    }
+    Write-Host "PASS WP.3D AppContainer Linux directory enumeration"
+
+    $runtimeHelp = & (Join-Path $bundle "wbox-linux.exe") --help 2>&1 | Out-String
+    Assert-Exit 0 "WP.4 wbox-linux identity help" $runtimeHelp
+    if ($runtimeHelp -notmatch "internal Linux ELF runtime" -or
+        $runtimeHelp -notmatch "Use wbox.exe") {
+        throw "WP.4 wbox-linux help did not identify the container CLI: $runtimeHelp"
+    }
+
     $ps = & $portableWbox ps --all 2>&1 | Out-String
     Assert-Exit 0 "post-run state inspection" $ps
     if ($ps -match "product-(native|env|guest)") {
@@ -180,6 +202,20 @@ try {
         throw "WP.7 rm left the record behind: $psAfter"
     }
     Write-Host "PASS WP.7 rm clears the detached record"
+
+    $autoRemoveName = "product-auto-rm"
+    $autoRemove = & $portableWbox run -d --rm --name $autoRemoveName `
+        --workdir $env:SystemRoot\System32 -- cmd.exe /d /c "exit /b 0" 2>&1 | Out-String
+    Assert-Exit 0 "WP.7A detached --rm launch" $autoRemove
+    $autoRemoveDir = Join-Path $testHome ".wbox\run\$autoRemoveName"
+    foreach ($i in 1..30) {
+        if (-not (Test-Path -LiteralPath $autoRemoveDir)) { break }
+        Start-Sleep -Milliseconds 200
+    }
+    if (Test-Path -LiteralPath $autoRemoveDir) {
+        throw "WP.7A --rm left a detached state directory: $autoRemoveDir"
+    }
+    Write-Host "PASS WP.7A detached --rm removes state and logs"
 
     # WP.8-WP.12 continuously gate the Windows stop contract against a real
     # supervisor -> guest -> child tree. Every process is identified by a PID

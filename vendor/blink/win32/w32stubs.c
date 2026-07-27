@@ -147,8 +147,9 @@ DIR *opendir(const char *path) {
 }
 
 DIR *fdopendir(int fd) {
-  // blink's getdents64 opens the dir with open(O_DIRECTORY) and then
-  // fdopendir()s the fd; recover the path from the handle.
+  // AppContainer may deny GetFinalPathNameByHandleW even when the directory
+  // itself is readable. Prefer the normalized path remembered by openat();
+  // retain handle recovery for inherited/foreign descriptors.
   HANDLE h = (HANDLE)_get_osfhandle(fd);
   if (h == INVALID_HANDLE_VALUE) {
     errno = EBADF;
@@ -159,11 +160,14 @@ DIR *fdopendir(int fd) {
     errno = ENOMEM;
     return NULL;
   }
-  DWORD n = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, 0);
-  if (!n || n >= W32_PATH_MAX) {
-    free(wbuf);
-    errno = ENOENT;
-    return NULL;
+  extern int W32GetFdPath(int, wchar_t *, size_t);
+  if (!W32GetFdPath(fd, wbuf, W32_PATH_MAX)) {
+    DWORD n = GetFinalPathNameByHandleW(h, wbuf, W32_PATH_MAX, 0);
+    if (!n || n >= W32_PATH_MAX) {
+      free(wbuf);
+      errno = ENOENT;
+      return NULL;
+    }
   }
   DIR *d = OpendirW(wbuf, NULL);
   free(wbuf);
