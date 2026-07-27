@@ -605,12 +605,11 @@ mod tests {
 /// 驱动，而 wbox 明确不装驱动（PRD §2.3 / §2.4 天花板一）。**静默忽略 `-v`
 /// 比不支持更糟**：用户会以为目录已经挂进去了。
 pub fn reject_volumes_if_unsupported(volumes: &[VolumeMount]) -> Result<()> {
-    if volumes.is_empty() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(crate::error::WboxError::args(
-        "-v 卷挂载目前只在 Linux 宿主可用：Windows 侧需要文件系统重定向，而那要 minifilter 驱动（PRD §2.4 天花板一，取证见 §4.9 W3）",
-    ))
+    crate::error::WboxError::require_linux(
+        !volumes.is_empty(),
+        "-v 卷挂载",
+        "Windows 侧需要文件系统重定向，而那要 minifilter 驱动（PRD §2.4 天花板一，取证见 §4.9 W3）",
+    )
 }
 
 /// 一条 `-v host:guest[:ro]` 挂载。
@@ -791,13 +790,11 @@ pub fn parse_user(spec: &str) -> Result<UserSpec> {
 
 /// `--user` 在**当前宿主**是否可用。
 pub fn reject_user_if_unsupported(user: Option<UserSpec>) -> Result<()> {
-    if user.is_none() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(crate::error::WboxError::args(
-        "--user 目前只在 Linux 宿主可用：它靠 user namespace 的 uid/gid 映射实现，\
-         Windows 侧的 AppContainer 没有对应语义",
-    ))
+    crate::error::WboxError::require_linux(
+        user.is_some(),
+        "--user",
+        "它靠 user namespace 的 uid/gid 映射实现，Windows 侧的 AppContainer 没有对应语义",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -821,11 +818,11 @@ pub fn reject_network_container_conflicts(
 ) -> Result<()> {
     use crate::error::WboxError;
     let Some(peer) = peer else { return Ok(()) };
-    if !cfg!(target_os = "linux") {
-        return Err(WboxError::args(
-            "--network container: 目前只在 Linux 宿主可用：它靠加入目标容器的network namespace 实现，Windows 侧没有对应原语",
-        ));
-    }
+    WboxError::require_linux(
+        true,
+        "--network container:",
+        "它靠加入目标容器的 network namespace 实现，Windows 侧没有对应原语",
+    )?;
     if allow_network {
         return Err(WboxError::args(format!(
             "--network container:{} 与 --allow-network/--network host 冲突：网络只能来自一个地方（目标容器或宿主）",

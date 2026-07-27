@@ -122,13 +122,11 @@ pub fn validate(spec: &HealthSpec) -> Result<()> {
 /// 探针要 `setns` 进容器，那是 Linux 的原语；Windows 侧 exec 走的是另一套
 /// （同 Job + 同 SID 重建），尚未打通，故明确拒绝而不是静默不探。
 pub fn reject_if_unsupported(spec: Option<&HealthSpec>) -> Result<()> {
-    if spec.is_none() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(WboxError::args(
-        "--health-cmd 目前只在 Linux 宿主可用：探针要 setns 进容器的 namespace 执行，\
-         Windows 侧尚未打通对应路径",
-    ))
+    WboxError::require_linux(
+        spec.is_some(),
+        "--health-cmd",
+        "探针要 setns 进容器的 namespace 执行，Windows 侧尚未打通对应路径",
+    )
 }
 
 /// 写状态文件。写失败只是这一轮状态没更新，不该让 supervisor 挂掉。

@@ -192,13 +192,11 @@ pub fn reject_self_defeating(policy: &SeccompPolicy) -> Result<()> {
 
 /// `--seccomp-deny` 在**当前宿主**是否可用。
 pub fn reject_if_unsupported(policy: &SeccompPolicy) -> Result<()> {
-    if policy.is_default() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(WboxError::args(
-        "--seccomp-deny 目前只在 Linux 宿主可用：seccomp-bpf 是 Linux 的机制，\
-         Windows 侧没有等价的 syscall 级过滤器",
-    ))
+    WboxError::require_linux(
+        !policy.is_default(),
+        "--seccomp-deny",
+        "seccomp-bpf 是 Linux 的机制，Windows 侧没有等价的 syscall 级过滤器",
+    )
 }
 
 // ---------------------------------------------------------------------------

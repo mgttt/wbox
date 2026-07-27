@@ -231,13 +231,11 @@ impl CapPolicy {
 /// AppContainer 走的是 SID + capability SID 的另一套模型，两者不能互相翻译。
 /// 静默忽略会让用户以为已经收紧了。
 pub fn reject_if_unsupported(policy: &CapPolicy) -> Result<()> {
-    if policy.is_default() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(WboxError::args(
-        "--cap-add/--cap-drop 目前只在 Linux 宿主可用：capability 是 Linux 的概念，\
-         Windows 侧 AppContainer 用的是另一套 SID 模型，无法逐条对应",
-    ))
+    WboxError::require_linux(
+        !policy.is_default(),
+        "--cap-add/--cap-drop",
+        "capability 是 Linux 的概念，Windows 侧 AppContainer 用的是另一套 SID 模型，无法逐条对应",
+    )
 }
 
 #[cfg(test)]

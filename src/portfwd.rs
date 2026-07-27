@@ -78,12 +78,11 @@ pub fn reject_conflicting_network(ports: &[PortMap], allow_network: bool) -> Res
 
 /// 端口转发在**当前宿主**是否可用。
 pub fn reject_if_unsupported(ports: &[PortMap]) -> Result<()> {
-    if ports.is_empty() || cfg!(target_os = "linux") {
-        return Ok(());
-    }
-    Err(WboxError::args(
-        "-p 端口转发目前只在 Linux 宿主可用（PRD §4.9 F9.2）",
-    ))
+    WboxError::require_linux(
+        !ports.is_empty(),
+        "-p 端口转发",
+        "转发线程要 setns 进容器 netns，Windows 侧没有对应原语（PRD F9.2）",
+    )
 }
 
 #[cfg(target_os = "linux")]

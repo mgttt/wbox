@@ -1062,7 +1062,9 @@ TODO-PLAN
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
-└── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
+├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
+├── L3 `wbox push` 镜像推送                   [Linux agent] 待认领
+└── L4 compose 子集                           [任一 agent] 待认领
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -1129,6 +1131,34 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 已删除的记录，最后一次 `wbox rm` 的预期非零码残留成整个 PowerShell 脚本的退出
 码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
 退出，不会被掩盖。
+
+### L3 `wbox push` 镜像推送 `[Linux agent]` `[待认领]`
+
+**先想清楚推什么**。缓存布局是**解包后的 rootfs**（`rootfs/` + 三个 json），
+pull 时层 tar 已解开丢弃，没有原始 blob 可以原样回推。可行路线是 **flatten**：
+把 rootfs 打成单层 tar.gz（`tar` crate 已在依赖树里，pull 解包用的就是它），
+算 digest，生成单层 manifest + config 再推。这与 `docker commit` 后 push 的
+语义一致，须在文档里说清"推出去的是平铺单层，不保留原始分层"。
+
+协议是 OCI Distribution 的上传三步：`POST /v2/<repo>/blobs/uploads/` 拿
+Location → `PUT <location>&digest=...` 单体上传（层 + config 各一次，先 HEAD
+判存在可跳过）→ `PUT /v2/<repo>/manifests/<tag>`。`RegistryClient` 目前只有
+GET/匿名 token；push 需要 POST/PUT + Basic 凭证换 token（凭证已有 F7 的存储与
+脱敏约束，**只发给获准的认证端点**）。
+
+**验证是难点**：不能拿真 registry 当门禁。建议门禁里用 python3 起一个最小
+registry stub（收 POST/PUT、存内存、response 202/201），断言收到的 manifest
+与 blob digest 对得上；再用 `wbox pull` 从 stub 拉回来跑通，形成闭环。
+
+### L4 compose 子集 `[任一 agent]` `[待认领]`
+
+范围要先钉死，否则会滑向"重新实现 docker-compose"。建议第一刀只做：
+`services.<name>.{image, command, volumes, ports, environment, depends_on,
+restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做启动
+顺序不做 condition。YAML 解析引 `serde_yaml`（新依赖，需过 §2.2 的"纯 Rust、
+无 C 编译"门槛——它满足）。网络语义：同一 compose 文件里的服务默认
+`--network container:<第一个服务>` 共享 netns（F9.11 已就绪），经 localhost
+互访，这与 docker 的 bridge+DNS 不同但对 sidecar 场景等价，文档要直说。
 
 ### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 

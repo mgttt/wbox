@@ -69,6 +69,20 @@ impl WboxError {
         Self::msg(ErrKind::Args, msg)
     }
 
+    /// 「该选项只在 Linux 宿主可用」的统一出口。
+    ///
+    /// 六个 Linux 专属选项（-v/-p/--user/--cap-*/--seccomp-deny/--health-cmd）
+    /// 各写过一遍同形状的检查：**配置了且宿主不是 Linux 就带理由报错**。收敛到
+    /// 这里保证两件事一致：报错的措辞结构（哪个选项、为何做不到）与"没配置就
+    /// 一律放行"的判定。`configured=false` 恒 Ok——静默忽略只发生在配置了却
+    /// 不生效的情况，那才是要防的。
+    pub fn require_linux(configured: bool, flag: &str, why: &str) -> crate::error::Result<()> {
+        if !configured || cfg!(target_os = "linux") {
+            return Ok(());
+        }
+        Err(Self::args(format!("{} 目前只在 Linux 宿主可用：{}", flag, why)))
+    }
+
     /// 便捷构造：AppContainer profile 错误。
     // 仅 Windows 专属模块与测试使用。
     #[cfg_attr(not(any(windows, test)), allow(dead_code))]
