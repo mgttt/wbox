@@ -1,0 +1,455 @@
+//! 端到端：用真实的 Linux x86-64 静态 ELF 跑模拟器。
+//!
+//! 需要工具链的用例在缺 `gcc` 时**跳过并说明原因**，不让本地环境差异把
+//! 门禁搞成红的；`busybox` 用例读仓库里自带的静态二进制，所以任何有那个
+//! 文件的环境都会真跑。
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// 被测的模拟器可执行文件（cargo 会保证它已构建）。
+const EMU: &str = env!("CARGO_BIN_EXE_wbox-linux");
+
+fn repo_root() -> PathBuf {
+    // crates/wbox-linux -> 仓库根
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap()
+        .to_path_buf()
+}
+
+fn have(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// 每个测试用独立的临时目录，避免并行跑时互相踩。
+fn tmpdir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("wbox-linux-test-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+struct Out {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// 在模拟器里跑一个 guest 程序。
+fn emulate(args: &[&str], env: &[(&str, &str)]) -> Out {
+    let mut c = Command::new(EMU);
+    c.args(args);
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let o = c.output().expect("启动 wbox-linux 失败");
+    Out {
+        code: o.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&o.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+    }
+}
+
+/// 断言辅助：失败时把 stderr 一起打出来，否则模拟器的诊断信息看不到。
+fn assert_ok(o: &Out, want_code: i32, ctx: &str) {
+    assert_eq!(
+        o.code, want_code,
+        "{ctx}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        o.stdout, o.stderr
+    );
+}
+
+#[test]
+fn version_flag_works_without_a_guest() {
+    let o = emulate(&["--version"], &[]);
+    assert_ok(&o, 0, "--version 应成功");
+    assert!(o.stdout.contains("wbox-linux"), "{}", o.stdout);
+}
+
+#[test]
+fn missing_guest_reports_a_clear_error() {
+    let o = emulate(&["/definitely/not/here"], &[]);
+    assert_ne!(o.code, 0);
+    assert!(
+        o.stderr.contains("读取") && o.stderr.contains("/definitely/not/here"),
+        "错误信息要指名找不到哪个文件：{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn non_elf_input_is_rejected_not_silently_run() {
+    let d = tmpdir("nonelf");
+    let f = d.join("junk");
+    std::fs::write(&f, b"this is not an ELF at all\n").unwrap();
+    let o = emulate(&[f.to_str().unwrap()], &[]);
+    assert_ne!(o.code, 0);
+    assert!(o.stderr.contains("ELF"), "{}", o.stderr);
+}
+
+#[test]
+fn raw_syscall_asm_guest_writes_and_exits() {
+    if !have("gcc") {
+        eprintln!("跳过：环境里没有 gcc");
+        return;
+    }
+    let d = tmpdir("asm");
+    let src = d.join("hi.s");
+    std::fs::write(
+        &src,
+        r#"
+.globl _start
+.section .rodata
+msg: .ascii "hello from guest\n"
+.set msglen, . - msg
+.text
+_start:
+    mov $1, %eax
+    mov $1, %edi
+    lea msg(%rip), %rsi
+    mov $msglen, %edx
+    syscall
+    mov $60, %eax
+    mov $7, %edi
+    syscall
+"#,
+    )
+    .unwrap();
+    let bin = d.join("hi");
+    let st = Command::new("gcc")
+        .args(["-nostdlib", "-static", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(st.success(), "汇编 guest 编译失败");
+
+    let o = emulate(&[bin.to_str().unwrap()], &[]);
+    assert_ok(&o, 7, "exit(7) 的退出码要透传");
+    assert_eq!(o.stdout, "hello from guest\n");
+}
+
+#[test]
+fn static_libc_guest_runs_printf_malloc_and_string_functions() {
+    if !have("gcc") {
+        eprintln!("跳过：环境里没有 gcc");
+        return;
+    }
+    let d = tmpdir("libc");
+    let src = d.join("t.c");
+    // 这些函数覆盖的是模拟器最容易出错的几处：printf 的可变参数与格式化、
+    // malloc 要的 brk/mmap、strlen/strcmp 的 SSE2 实现、以及退出码。
+    std::fs::write(
+        &src,
+        r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    printf("argc=%d\n", argc);
+    char buf[64];
+    strcpy(buf, "hello");
+    strcat(buf, " world");
+    printf("len=%zu buf=%s\n", strlen(buf), buf);
+    int *p = malloc(4 * sizeof(int));
+    for (int i = 0; i < 4; i++) p[i] = i * i;
+    printf("sq=%d%d%d%d\n", p[0], p[1], p[2], p[3]);
+    free(p);
+    printf("cmp=%d\n", strcmp("abc", "abd") < 0 ? -1 : 1);
+    long sum = 0;
+    for (long i = 0; i < 100000; i++) sum += i;   /* 让循环/进位路径跑久一点 */
+    printf("sum=%ld\n", sum);
+    return 3;
+}
+"#,
+    )
+    .unwrap();
+    let bin = d.join("t");
+    let st = Command::new("gcc")
+        .args(["-static", "-O1", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .status()
+        .unwrap();
+    if !st.success() {
+        eprintln!("跳过：这个环境没有静态 libc 可链接");
+        return;
+    }
+
+    let o = emulate(&[bin.to_str().unwrap(), "x", "y"], &[]);
+    assert_ok(&o, 3, "return 3 要变成退出码 3");
+    assert!(o.stdout.contains("argc=3"), "{}", o.stdout);
+    assert!(o.stdout.contains("len=11 buf=hello world"), "{}", o.stdout);
+    assert!(o.stdout.contains("sq=0149"), "{}", o.stdout);
+    assert!(o.stdout.contains("cmp=-1"), "{}", o.stdout);
+    assert!(o.stdout.contains("sum=4999950000"), "{}", o.stdout);
+}
+
+#[test]
+fn dynamically_linked_guest_runs_through_its_interpreter() {
+    if !have("gcc") {
+        eprintln!("跳过：环境里没有 gcc");
+        return;
+    }
+    let d = tmpdir("dynamic");
+    let src = d.join("dy.c");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdio.h>
+int main(void) { puts("dynamic ok"); return 0; }
+"#,
+    )
+    .unwrap();
+    let bin = d.join("dy");
+    // 默认就是动态链接：这条路径要跑通 PT_INTERP（加载 ld.so）、
+    // 动态链接器自身的重定位、以及 TLS 初始化——静态用例完全覆盖不到。
+    let st = Command::new("gcc")
+        .args(["-O1", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(st.success(), "动态 guest 编译失败");
+
+    let o = emulate(&[bin.to_str().unwrap()], &[]);
+    assert_ok(&o, 0, "动态链接 guest");
+    assert_eq!(o.stdout, "dynamic ok\n");
+}
+
+#[test]
+fn file_io_roundtrip_through_the_guest() {
+    if !have("gcc") {
+        eprintln!("跳过：环境里没有 gcc");
+        return;
+    }
+    let d = tmpdir("fileio");
+    let src = d.join("io.c");
+    std::fs::write(
+        &src,
+        r#"
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    FILE *f = fopen(argv[1], "w");
+    if (!f) { perror("fopen w"); return 1; }
+    fputs("line one\nline two\n", f);
+    fclose(f);
+    f = fopen(argv[1], "r");
+    if (!f) { perror("fopen r"); return 2; }
+    char buf[128];
+    int n = 0;
+    while (fgets(buf, sizeof buf, f)) { printf("got:%s", buf); n++; }
+    fclose(f);
+    printf("lines=%d\n", n);
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let bin = d.join("io");
+    let st = Command::new("gcc")
+        .args(["-static", "-O1", "-o"])
+        .arg(&bin)
+        .arg(&src)
+        .status()
+        .unwrap();
+    if !st.success() {
+        eprintln!("跳过：这个环境没有静态 libc 可链接");
+        return;
+    }
+    let data = d.join("data.txt");
+    let o = emulate(&[bin.to_str().unwrap(), data.to_str().unwrap()], &[]);
+    assert_ok(&o, 0, "文件读写往返");
+    assert!(o.stdout.contains("got:line one"), "{}", o.stdout);
+    assert!(o.stdout.contains("lines=2"), "{}", o.stdout);
+    // 落盘的内容宿主侧也要能读到
+    assert_eq!(
+        std::fs::read_to_string(&data).unwrap(),
+        "line one\nline two\n"
+    );
+}
+
+// ------------------------------------------------------------- busybox
+
+fn busybox() -> Option<PathBuf> {
+    let p = repo_root().join("busybox");
+    if p.is_file() {
+        Some(p)
+    } else {
+        eprintln!("跳过：仓库里没有 busybox");
+        None
+    }
+}
+
+#[test]
+fn busybox_basic_applets() {
+    let Some(bb) = busybox() else { return };
+    let bb = bb.to_str().unwrap().to_string();
+
+    let o = emulate(&[&bb, "echo", "hello", "busybox"], &[]);
+    assert_ok(&o, 0, "busybox echo");
+    assert_eq!(o.stdout, "hello busybox\n");
+
+    // uname 的内容来自我们的 sys_uname，必须自洽
+    let o = emulate(&[&bb, "uname", "-a"], &[]);
+    assert_ok(&o, 0, "busybox uname");
+    assert!(o.stdout.contains("Linux"), "{}", o.stdout);
+    assert!(o.stdout.contains("x86_64"), "{}", o.stdout);
+
+    // 退出码：true/false 必须分得清
+    assert_ok(&emulate(&[&bb, "true"], &[]), 0, "busybox true");
+    assert_ok(&emulate(&[&bb, "false"], &[]), 1, "busybox false");
+}
+
+#[test]
+fn busybox_reads_files_and_directories() {
+    let Some(bb) = busybox() else { return };
+    let bb = bb.to_str().unwrap().to_string();
+    let d = tmpdir("bbfs");
+    std::fs::write(d.join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(d.join("b.txt"), "beta\n").unwrap();
+    std::fs::create_dir(d.join("sub")).unwrap();
+
+    // cat：走 openat/read/write
+    let o = emulate(&[&bb, "cat", d.join("a.txt").to_str().unwrap()], &[]);
+    assert_ok(&o, 0, "busybox cat");
+    assert_eq!(o.stdout, "alpha\n");
+
+    // ls：走 getdents64
+    let o = emulate(&[&bb, "ls", d.to_str().unwrap()], &[]);
+    assert_ok(&o, 0, "busybox ls");
+    for want in ["a.txt", "b.txt", "sub"] {
+        assert!(o.stdout.contains(want), "ls 少了 {want}：{}", o.stdout);
+    }
+
+    // wc -c：走 stat/read，验证字节数正确
+    let o = emulate(&[&bb, "wc", "-c", d.join("a.txt").to_str().unwrap()], &[]);
+    assert_ok(&o, 0, "busybox wc");
+    assert!(o.stdout.starts_with('6'), "{}", o.stdout);
+
+    // 不存在的文件要报错并给非零退出码
+    let o = emulate(&[&bb, "cat", d.join("nope").to_str().unwrap()], &[]);
+    assert_ne!(o.code, 0, "读不存在的文件必须非零退出");
+}
+
+#[test]
+fn busybox_sha256_matches_known_value() {
+    let Some(bb) = busybox() else { return };
+    let d = tmpdir("bbsha");
+    let f = d.join("x");
+    std::fs::write(&f, "abc").unwrap();
+    let o = emulate(
+        &[bb.to_str().unwrap(), "sha256sum", f.to_str().unwrap()],
+        &[],
+    );
+    assert_ok(&o, 0, "busybox sha256sum");
+    // "abc" 的 SHA-256 是已知常量：算错一位就说明整数/移位路径有问题
+    assert!(
+        o.stdout
+            .starts_with("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "sha256 不对，说明算术路径有 bug：{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn wbox_prefix_confines_the_guest_to_the_rootfs() {
+    let Some(bb) = busybox() else { return };
+    let d = tmpdir("prefix");
+    // 搭一个最小 rootfs：/bin/busybox + /hello.txt
+    std::fs::create_dir_all(d.join("bin")).unwrap();
+    std::fs::copy(&bb, d.join("bin/busybox")).unwrap();
+    std::fs::write(d.join("hello.txt"), "inside\n").unwrap();
+    // rootfs **之外**放一个诱饵，guest 不应该读到它
+    let outside = d.parent().unwrap().join("wbox-linux-canary.txt");
+    std::fs::write(&outside, "SHOULD-NOT-BE-READABLE\n").unwrap();
+
+    let prefix = d.to_str().unwrap();
+
+    // guest 视角的绝对路径应解析到 rootfs 里
+    let o = emulate(
+        &["/bin/busybox", "cat", "/hello.txt"],
+        &[("WBOX_PREFIX", prefix)],
+    );
+    assert_ok(&o, 0, "prefix 下读 rootfs 内文件");
+    assert_eq!(o.stdout, "inside\n");
+
+    // 用 ../ 往上爬不能逃出 prefix
+    let escape = format!("/../{}", outside.file_name().unwrap().to_string_lossy());
+    let o = emulate(
+        &["/bin/busybox", "cat", &escape],
+        &[("WBOX_PREFIX", prefix)],
+    );
+    assert_ne!(o.code, 0, "越过 prefix 的读取必须失败");
+    assert!(
+        !o.stdout.contains("SHOULD-NOT-BE-READABLE"),
+        "guest 逃出了 rootfs！读到了 {}",
+        outside.display()
+    );
+
+    // 更深的爬升同样不行
+    let o = emulate(
+        &["/bin/busybox", "cat", "/../../../../etc/hostname"],
+        &[("WBOX_PREFIX", prefix)],
+    );
+    assert_ne!(o.code, 0, "多级 ../ 也必须被限制在 prefix 内");
+}
+
+#[test]
+fn internal_control_env_is_not_leaked_to_the_guest() {
+    let Some(bb) = busybox() else { return };
+    // WBOX_*/BLINK_* 是内部控制键，按 PRD §F7.2 不得透传给 guest
+    let o = emulate(
+        &[bb.to_str().unwrap(), "env"],
+        &[("WBOX_SECRET_KNOB", "1"), ("BLINK_SECRET_KNOB", "1"), ("VISIBLE", "yes")],
+    );
+    assert_ok(&o, 0, "busybox env");
+    assert!(o.stdout.contains("VISIBLE=yes"), "普通变量该透传：{}", o.stdout);
+    assert!(
+        !o.stdout.contains("WBOX_SECRET_KNOB") && !o.stdout.contains("BLINK_SECRET_KNOB"),
+        "内部控制键泄漏给了 guest：{}",
+        o.stdout
+    );
+}
+
+#[test]
+fn instruction_budget_env_stops_a_runaway_guest() {
+    let Some(bb) = busybox() else { return };
+    // 给一个极小的指令预算：guest 一定跑不完，必须被终止而不是挂住
+    let o = emulate(
+        &[bb.to_str().unwrap(), "echo", "hi"],
+        &[("WBOX_MAX_INSNS", "1000")],
+    );
+    assert_ne!(o.code, 0, "预算耗尽应非零退出");
+    assert!(
+        o.stderr.contains("signal") || o.stderr.contains("fatal"),
+        "应有明确诊断：{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn shebang_script_runs_through_its_interpreter() {
+    let Some(bb) = busybox() else { return };
+    let d = tmpdir("shebang");
+    let script = d.join("s");
+    // 用 busybox 的 echo applet 当解释器：#! <busybox> echo
+    std::fs::write(
+        &script,
+        format!("#!{} echo\n", bb.to_str().unwrap()),
+    )
+    .unwrap();
+    let o = emulate(&[script.to_str().unwrap(), "tail"], &[]);
+    assert_ok(&o, 0, "#! 脚本");
+    // echo 会把 [echo] <脚本路径> tail 都打出来
+    assert!(o.stdout.contains("tail"), "{}", o.stdout);
+    assert!(o.stdout.contains(script.to_str().unwrap()), "{}", o.stdout);
+}

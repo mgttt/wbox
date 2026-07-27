@@ -5,7 +5,7 @@
 //!
 //! `wbox run` 有两类目标（见 backend/mod.rs）：
 //! - 本地 Windows 可执行路径 → NativeBackend（AppContainer + Job 直接运行）；
-//! - 已 pull 的 OCI 镜像引用（或带 `--pull`）→ BlinkBackend（wbox-linux 模拟，
+//! - 已 pull 的 OCI 镜像引用（或带 `--pull`）→ EmuBackend（wbox-linux 模拟，
 //!   骨架；config.json 的 Env/Cmd/Entrypoint/WorkingDir 在此消费）。
 //!
 //! 退出码约定（SPEC §2 + OCI 扩展）：
@@ -39,7 +39,7 @@ mod testenv;
 mod acl;
 // Windows OCI filesystem broker transport。CLI 在完整 OPEN/hostfs 门禁前仍拒绝 -v。
 #[cfg(windows)]
-#[allow(dead_code)] // staged component; activated when Blink OPEN/hostfs gates are complete
+#[allow(dead_code)] // staged component; activated when emulator OPEN/hostfs gates are complete
 mod broker;
 #[cfg(windows)]
 mod job;

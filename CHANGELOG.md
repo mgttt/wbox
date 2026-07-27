@@ -6,6 +6,39 @@
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 里程碑以功能线回溯标注（项目以 trunk 滚动开发，tag 自 v1.0-rc 起）。
 
+## [未发布] —— 全 Rust 化：模拟器重写 + 去掉 C 依赖
+
+**里程碑：wbox 不再包含任何参与产品构建的 C/C++ 代码。**
+
+### 变更
+
+- **`wbox-linux` 模拟器用 Rust 重写**（新 crate `crates/wbox-linux`）。
+  删除 `vendor/blink`（约 122k 行 C，含 win32 移植层与 third_party）。
+  新实现零第三方依赖，含 ELF64 加载（`PT_LOAD`/`ET_DYN` 偏置/`PT_INTERP`）、
+  稀疏页表地址空间、x86-64 整数指令全集、SSE/SSE2（整数向量 + 浮点）、
+  以及约 50 个 Linux syscall。
+- **registry 的 TLS 换成纯 Rust**：`native-tls`（Linux 上链接系统 OpenSSL）
+  → `rustls` + `rustls-rustcrypto`。同时 `ureq` 2 → 3。
+  取舍说明见 `docs/rust-rewrite.md` §5（该 provider 当前是 alpha 版本）。
+- **CI 不再需要 C 工具链**：`build-wbox-linux` 从 MSYS2 + MinGW-w64 编 C
+  改成 `cargo build -p wbox-linux`。clippy/check/test 门禁加 `--workspace`，
+  新 crate 才真正进入 CI 视野。
+- 后端模块更名：`backend::blink` / `BlinkBackend` → `backend::emu` / `EmuBackend`
+  （`BLINK_PREFIX` 环境变量名保留兼容，模拟器同时认 `WBOX_PREFIX`）。
+- 新文档 `docs/rust-rewrite.md`，替代随 `vendor/blink` 一并删除的 `WIN32-PORT.md`。
+
+### 已验证
+
+`cargo test --workspace` 共 492 项通过（wbox 350 + 模拟器 142）。模拟器实测跑通：
+静态 glibc 程序、动态链接程序（走 ld.so）、仓库内静态 busybox 十余个 applet、
+真实动态 coreutils，以及 `wbox image pull alpine:3.20` 后其中的动态 musl PIE
+busybox。`cargo check --target x86_64-pc-windows-msvc` 通过。
+
+### 剩余缺口
+
+`fork`/`clone`/`execve`（多进程）、x87 浮点、线程、信号投递、socket/epoll、
+JIT 均未实现，一律明确报错而不静默跑错。逐条见 `docs/rust-rewrite.md` §4。
+
 ## [未发布] —— 真机 CI 首次打通（2026-07-26）
 
 **里程碑：`build-wbox-linux` 在真 Windows 上首次转绿。** 此前该 job 从仓库

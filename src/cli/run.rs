@@ -1,6 +1,6 @@
 //! `wbox run` 子命令：参数结构、手写解析与目标分派（原生 / 镜像）。
 
-use crate::backend::{self, Backend, BlinkBackend, Limits, RunSpec, RunTarget};
+use crate::backend::{self, Backend, EmuBackend, Limits, RunSpec, RunTarget};
 
 /// `ps` 里表示"非镜像目标"的占位串。
 const NATIVE_TARGET: &str = "(native)";
@@ -837,7 +837,7 @@ fn ensure_image_cached(opts: &RunOptions, iref: &oci::ImageRef) -> Result<std::p
     Ok(dir)
 }
 
-/// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
+/// 镜像模式：消费 config.json，经 EmuBackend（wbox-linux 模拟）执行。
 fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     let dir = ensure_image_cached(opts, &iref)?;
 
@@ -874,8 +874,8 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     // namespace 隔离，省掉一整层模拟开销。规则本体在 backend::image_backend_kind
     // （可单测），此处只做分发。
     match backend::image_backend_kind() {
-        backend::ImageBackendKind::Blink => {
-            let backend = BlinkBackend;
+        backend::ImageBackendKind::Emu => {
+            let backend = EmuBackend;
             #[cfg(windows)]
             let reg = {
                 let reg = register_for_spawn(&spec, &iref.qualified_ref(), opts.auto_remove)?;

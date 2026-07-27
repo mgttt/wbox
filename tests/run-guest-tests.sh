@@ -7,7 +7,7 @@
 #   tests/run-guest-tests.sh [wbox-linux.exe] [--skip-slow]
 #
 # Env:
-#   WBOX_LINUX          wbox-linux.exe path (else $1, else ./vendor/blink/build-win32/wbox-linux.exe)
+#   WBOX_LINUX          wbox-linux.exe path (else $1, else ./target/release/wbox-linux.exe)
 #   WBOX_MATRIX_MODE    native|wine|auto (same detection as test-matrix.sh)
 #   WINE                wine binary (wine mode)
 #   WBOX_GUEST_PREBUILT=1  do NOT compile; use prebuilt tests/guest/bin/*
@@ -32,7 +32,7 @@ for a in "$@"; do
   esac
 done
 if [ -z "$WBOX_LINUX" ]; then
-  for c in ./vendor/blink/build-win32/wbox-linux.exe ./wbox-linux.exe; do
+  for c in ./target/release/wbox-linux.exe ./wbox-linux.exe; do
     [ -f "$c" ] && WBOX_LINUX=$c && break
   done
 fi

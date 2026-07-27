@@ -967,6 +967,6 @@ fn build_backend() -> crate::backend::LinuxNativeBackend {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn build_backend() -> crate::backend::BlinkBackend {
-    crate::backend::BlinkBackend
+fn build_backend() -> crate::backend::EmuBackend {
+    crate::backend::EmuBackend
 }

@@ -5,9 +5,9 @@
 //! 环境策略这条链路在 Linux 宿主上完整跑通并可单测；隔离本身（user/mount/pid
 //! namespace、`pivot_root`、cgroup v2）属 L1/L2，`spawn` 目前明确报未实现。
 //!
-//! 与 `BlinkBackend` 的关键差异：
+//! 与 `EmuBackend` 的关键差异：
 //! - 不需要模拟器——宿主就是 Linux，guest ELF 直接执行，故命令行即 `spec.cmd`
-//!   本身（Blink 侧要在前面插 `wbox-linux.exe`）；
+//!   本身（模拟器侧要在前面插 `wbox-linux.exe`）；
 //! - 不注入 `BLINK_PREFIX`——rootfs 由 L1 的 `pivot_root` 真正成为 `/`，
 //!   而不是靠模拟器的 VFS 前缀；
 //! - 环境白名单用 POSIX 风味（见 `env::GuestFlavor`），不注入 `SystemRoot`。
@@ -87,13 +87,13 @@ impl Backend for LinuxNativeBackend {
         }
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
         super::require_rootfs_dir(rootfs)?;
-        // guest 程序要能解析域名：与 Blink 侧同一处理（缺失/空则注入公共 DNS）。
+        // guest 程序要能解析域名：与模拟器侧同一处理（缺失/空则注入公共 DNS）。
         // L1 的 mount namespace 落地后，这里写入的 resolv.conf 会随 rootfs
         // 一起成为容器内的 /etc/resolv.conf。
         if super::ensure_resolv_conf(rootfs)? && spec.verbose {
             super::verbose_kv(
                 "resolv.conf",
-                format!("rootfs 缺失/为空，已注入公共 DNS {}", super::blink::DEFAULT_DNS),
+                format!("rootfs 缺失/为空，已注入公共 DNS {}", super::emu::DEFAULT_DNS),
             );
         }
         // 环境：POSIX 风味白名单 + 镜像 Env（保留键已剥离）+ 强制项。
@@ -138,7 +138,7 @@ impl Backend for LinuxNativeBackend {
     #[cfg(not(target_os = "linux"))]
     fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
         Err(WboxError::spawn(
-            "Linux 原生后端只能在 Linux 宿主上执行（当前宿主请用 BlinkBackend）",
+            "Linux 原生后端只能在 Linux 宿主上执行（当前宿主请用 EmuBackend）",
         ))
     }
 }
@@ -172,7 +172,7 @@ mod tests {
         let rootfs = temp_rootfs("plan");
         let s = spec(&rootfs, &["/bin/sh", "-l"], vec![]);
         let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();
-        // 与 Blink 的关键差异：命令行就是 guest 命令本身，前面不插模拟器
+        // 与模拟器后端的关键差异：命令行就是 guest 命令本身，前面不插模拟器
         assert_eq!(p.cmd, vec!["/bin/sh", "-l"]);
         assert_eq!(p.workdir, rootfs);
         let _ = std::fs::remove_dir_all(&rootfs);
@@ -188,7 +188,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&rootfs);
     }
 
-    /// POSIX 风味不得注入 Windows 键——这是 Linux 后端与 Blink 后端
+    /// POSIX 风味不得注入 Windows 键——这是 Linux 后端与模拟器后端
     /// 在环境策略上的分水岭，回归了会把 `SystemRoot=C:\Windows` 塞进容器。
     #[test]
     fn prepare_env_is_posix_flavored() {
@@ -209,7 +209,7 @@ mod tests {
     }
 
     /// 镜像 Env 照常注入，保留键（WBOX_*/BLINK_*）照常剥离——
-    /// 与 Blink/Native 共用同一出口，此处确认 Linux 后端没绕过它。
+    /// 与模拟器/Native 共用同一出口，此处确认 Linux 后端没绕过它。
     #[test]
     fn prepare_applies_shared_env_policy() {
         let rootfs = temp_rootfs("policy");

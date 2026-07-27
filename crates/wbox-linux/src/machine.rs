@@ -1,0 +1,88 @@
+//! `Machine`：CPU + 地址空间 + OS 状态，以及执行异常的定义。
+
+use crate::cpu::Cpu;
+use crate::mem::{Fault, Mem};
+use crate::syscall::Os;
+
+/// 中断执行的事件。名字沿用 x86 的异常，`Exit` 是 guest 主动退出。
+#[derive(Debug, Clone)]
+pub enum Exception {
+    /// #PF：访存越权或未映射。
+    Fault(Fault),
+    /// #UD：解码不出来或未实现的指令。带上原始字节，方便照着 objdump 补。
+    Undefined { rip: u64, bytes: Vec<u8> },
+    /// #DE：除零或商溢出。
+    DivideError { rip: u64 },
+    /// #BP：`int3`。
+    Breakpoint { rip: u64 },
+    /// guest 调用了 `exit`/`exit_group`。
+    Exit(i32),
+    /// guest 被信号打断且默认动作是终止（退出码 128+signo，与 shell 一致）。
+    Killed { signo: i32 },
+}
+
+impl std::fmt::Display for Exception {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Exception::Fault(x) => write!(f, "{x}"),
+            Exception::Undefined { rip, bytes } => {
+                write!(f, "unsupported instruction at {rip:#x}:")?;
+                for b in bytes {
+                    write!(f, " {b:02x}")?;
+                }
+                Ok(())
+            }
+            Exception::DivideError { rip } => write!(f, "divide error at {rip:#x}"),
+            Exception::Breakpoint { rip } => write!(f, "breakpoint at {rip:#x}"),
+            Exception::Exit(c) => write!(f, "exit({c})"),
+            Exception::Killed { signo } => write!(f, "killed by signal {signo}"),
+        }
+    }
+}
+
+impl From<Fault> for Exception {
+    fn from(x: Fault) -> Self {
+        Exception::Fault(x)
+    }
+}
+
+pub type ExecResult<T> = Result<T, Exception>;
+
+pub struct Machine {
+    pub cpu: Cpu,
+    pub mem: Mem,
+    pub os: Os,
+    /// `WBOX_TRACE=1`：每条指令打一行寄存器转储到 stderr。
+    pub trace: bool,
+}
+
+impl Machine {
+    pub fn new(os: Os) -> Self {
+        Machine {
+            cpu: Cpu::new(),
+            mem: Mem::new(),
+            os,
+            trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
+        }
+    }
+
+    /// 一直执行到 guest 退出或出错，返回退出码。
+    ///
+    /// `max_insns` 是安全阀（0 = 不限）：单测和 `WBOX_MAX_INSNS` 用它保证
+    /// 死循环的 guest 不会把测试挂住。
+    pub fn run(&mut self, max_insns: u64) -> ExecResult<i32> {
+        loop {
+            if max_insns != 0 && self.cpu.icount >= max_insns {
+                return Err(Exception::Killed { signo: 24 }); // SIGXCPU
+            }
+            if self.trace {
+                eprintln!("{}", self.cpu.dump());
+            }
+            match self.step() {
+                Ok(()) => {}
+                Err(Exception::Exit(code)) => return Ok(code),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}

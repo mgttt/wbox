@@ -27,7 +27,7 @@
 //!
 //! Windows 没有 namespace 的“进入”原语。原生目标采用可对齐子集：重新派生
 //! 同一 AppContainer SID、按原网络策略重建 capability，并把挂起的新进程加入
-//! 同一命名 Job。OCI/Blink 缺少可靠的 rootfs/env 重建语义，明确拒绝。
+//! 同一命名 Job。OCI/模拟器缺少可靠的 rootfs/env 重建语义，明确拒绝。
 
 use crate::error::{Result, WboxError};
 use crate::runstate::{self, Liveness};
@@ -126,7 +126,7 @@ fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
     if locked.entry.target != "(native)" {
         return Err(WboxError::args(format!(
             "Windows exec 当前只支持原生容器；'{}' 的目标是 '{}'，\
-             OCI/Blink 无法可靠重建 rootfs 与环境",
+             OCI/模拟器无法可靠重建 rootfs 与环境",
             name, locked.entry.target
         )));
     }

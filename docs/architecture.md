@@ -19,7 +19,7 @@ CLI (`src/cli`)
 ├── Win32: token/job/sandbox/acl
 ├── Linux: user/PID/mount/net namespace + cgroup/rlimit
 ├── OCI: registry/config/image/cache
-└── wbox-linux: `vendor/blink`
+└── wbox-linux: `crates/wbox-linux`（纯 Rust x86-64 模拟器）
 ```
 
 CLI 只负责解析和分派；`RunSpec` 表达后端无关意图；后端负责把网络、限额、
@@ -82,8 +82,8 @@ hostfs 以该 HANDLE 为锚；不能通过递归修改用户 ACL 或扩大 `WBOX
 解析，之后只使用 host/VFS fd；元数据查找仍使用原 guest fd。不得把未跟踪的
 guest 数字直接回退为同号宿主 fd，也不得重复翻译已转换的 fd。
 
-完整移植结构、构建参数和 syscall 支持见
-`../vendor/blink/WIN32-PORT.md`。
+模拟器的完整架构、已验证范围、剩余缺口和运行期开关见
+`rust-rewrite.md`。
 
 ## 3. Linux 后端
 
@@ -252,7 +252,7 @@ Windows 命令行必须按 `CommandLineToArgvW`/CRT 规则编码，特别处理�
 | `src/job.rs` | Job Object |
 | `src/sandbox.rs` | Windows 进程启动编排 |
 | `src/acl.rs` | Windows rootfs ACL |
-| `vendor/blink/win32/` | wbox-linux 的 Win32 适配 |
+| `crates/wbox-linux/` | x86-64 Linux 用户态模拟器（纯 Rust） |
 | `tests/guest/` | Linux guest 行为回归 |
 
 共享行为应放在既有公共模块；平台 FFI 留在平台模块。不要为一个调用点引入新
