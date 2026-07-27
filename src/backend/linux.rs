@@ -21,6 +21,10 @@ use super::{Backend, Prepared, RunSpec};
 #[cfg(target_os = "linux")]
 #[path = "linux_ns.rs"]
 mod ns;
+/// 资源限额的规划与落实。与 `ns` 的唯一接口是 `LimitPlan`。
+#[cfg(target_os = "linux")]
+#[path = "linux_limits.rs"]
+mod limits;
 use crate::error::{Result, WboxError};
 
 /// 运行形态：镜像容器 vs 宿主程序。
@@ -49,8 +53,6 @@ impl Backend for LinuxNativeBackend {
         if self.0 == LinuxMode::Host {
             // 宿主模式：不换根，故不校验 rootfs、不注入 resolv.conf
             // （用宿主自己的 /etc/resolv.conf）。workdir 就是工作目录。
-            // 同下：wine 分支在非 Linux 目标下整块 cfg 掉，mut 是条件性需要的
-            #[allow(unused_mut)]
             let mut env = super::build_sanitized_env(
                 &spec.env,
                 &[],
@@ -58,44 +60,21 @@ impl Backend for LinuxNativeBackend {
                 spec.verbose,
                 super::env::GuestFlavor::Linux,
             );
-            // 台阶③：目标若是 PE，插一个 wine 加载器在前面。隔离原语一律不变
+            let mut cmd = spec.cmd.clone();
+            // 台阶③：目标若是 PE 就在前面插一个 wine 加载器；隔离原语一行不改
             // ——wine 只是执行器变体，`--memory`/`--max-procs`/`--allow-network`
             // 走的仍是同一条实现，不会出现"wine 那条路忘了限额"的分叉。
-            // 非 Linux 目标下这两个绑定不会被改写（wine 分支整块 cfg 掉），
-            // 故 mut 是条件性需要的
-            #[allow(unused_mut)]
-            let mut cmd = spec.cmd.clone();
-            #[allow(unused_mut)]
-            let mut via_wine: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
-            // wine 模块只在 Linux 编译：Windows 宿主跑 PE 走的是原生
-            // AppContainer 路径，压根不该出现 wine。
-            #[cfg(target_os = "linux")]
-            if super::wine::is_pe(std::path::Path::new(&cmd[0])) {
-                let wine = super::wine::find_wine(
-                    std::env::var("WBOX_WINE").ok().as_deref(),
-                    std::env::var("PATH").ok().as_deref(),
-                )?;
-                let prefix = super::wine::prepare_prefix()?;
-                super::wine::augment_env(&mut env, &prefix, spec.verbose);
-                cmd.insert(0, wine.display().to_string());
-                via_wine = Some((wine, prefix));
-            }
+            // 非 Linux 宿主上 wrap_if_pe 是空实现（见 backend::wine），
+            // 所以这里不需要任何 cfg。
+            let wine_lines = super::wine::wrap_if_pe(&mut cmd, &mut env, spec.verbose)?;
             if spec.verbose {
                 super::verbose_kv("宿主后端", "linux-native（宿主程序模式，不换根）");
                 super::verbose_kv("工作目录", spec.workdir.display());
-                match &via_wine {
-                    Some((w, p)) => {
-                        #[cfg(target_os = "linux")]
-                        let ver = super::wine::version(w).unwrap_or_else(|| "版本未知".to_string());
-                        #[cfg(not(target_os = "linux"))]
-                        let ver = String::new();
-                        // 版本要打出来：wine 版本差异是 Windows 程序行为差异的
-                        // 头号来源，而那类差异不属 wbox 缺陷（architecture §3.4）。
-                        super::verbose_kv(
-                            "执行器",
-                            format!("wine（目标是 PE）：{}［{}］", w.display(), ver),
-                        );
-                        super::verbose_kv("WINEPREFIX", p.display());
+                match &wine_lines {
+                    Some(lines) => {
+                        for (k, v) in lines {
+                            super::verbose_kv(k, v);
+                        }
                     }
                     None => super::verbose_kv("执行器", "直接执行（目标是本机 ELF）"),
                 }
@@ -107,12 +86,7 @@ impl Backend for LinuxNativeBackend {
             });
         }
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
-        if !rootfs.is_dir() {
-            return Err(WboxError::registry(format!(
-                "镜像 rootfs 目录 '{}' 不存在（是否已成功 pull？）",
-                rootfs.display()
-            )));
-        }
+        super::require_rootfs_dir(rootfs)?;
         // guest 程序要能解析域名：与 Blink 侧同一处理（缺失/空则注入公共 DNS）。
         // L1 的 mount namespace 落地后，这里写入的 resolv.conf 会随 rootfs
         // 一起成为容器内的 /etc/resolv.conf。
@@ -133,7 +107,6 @@ impl Backend for LinuxNativeBackend {
         // 解释这个文件，于是 busybox sh 把 PE 当 shell 脚本读，吐出
         // "MZ....: not found" 加一串语法错误——用户完全看不出发生了什么
         // （实测如此，rc=2）。宁可给一句能懂的话。
-        #[cfg(target_os = "linux")]
         {
             let guest = cmd[0].strip_prefix('/').unwrap_or(&cmd[0]);
             if super::wine::is_pe(&rootfs.join(guest)) {

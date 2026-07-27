@@ -182,6 +182,44 @@ pub fn augment_env(env: &mut Vec<(String, String)>, prefix: &Path, verbose: bool
     }
 }
 
+/// 若 `cmd[0]` 是 PE，就地把 wine 加载器插到最前面并补齐环境；否则什么都不做。
+///
+/// 返回 `-V` 该打印的若干行（键值对）。把"要不要用 wine + 怎么用 + 打印什么"
+/// 收成**一次调用**，是为了让调用方（`linux.rs`）不必关心 wine 的存在：
+/// 非 Linux 宿主上有一个同名空实现（见 `mod.rs` 的 cfg 选择），调用方因此
+/// 一个 `cfg` 都不用写。此前那段内联 cfg 逼得三个绑定都挂 `#[allow(unused_mut)]`
+/// ——属性本身就是"抽象漏了"的信号。
+pub fn wrap_if_pe(
+    cmd: &mut Vec<String>,
+    env: &mut Vec<(String, String)>,
+    verbose: bool,
+) -> Result<Option<Vec<(&'static str, String)>>> {
+    if cmd.is_empty() || !is_pe(Path::new(&cmd[0])) {
+        return Ok(None);
+    }
+    let loader = find_wine(
+        std::env::var("WBOX_WINE").ok().as_deref(),
+        std::env::var("PATH").ok().as_deref(),
+    )?;
+    let prefix = prepare_prefix()?;
+    augment_env(env, &prefix, verbose);
+    cmd.insert(0, loader.display().to_string());
+
+    // 版本要打出来：wine 版本差异是 Windows 程序行为差异的头号来源，而那类
+    // 差异不属 wbox 缺陷（docs/architecture.md §3.4）。只在 verbose 时取，
+    // 免得每次运行都多 fork 一个 wine。
+    let mut lines = Vec::new();
+    if verbose {
+        let ver = version(&loader).unwrap_or_else(|| "版本未知".to_string());
+        lines.push((
+            "执行器",
+            format!("wine（目标是 PE）：{}［{}］", loader.display(), ver),
+        ));
+        lines.push(("WINEPREFIX", prefix.display().to_string()));
+    }
+    Ok(Some(lines))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

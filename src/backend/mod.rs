@@ -19,8 +19,12 @@ pub mod env;
 // prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
 mod linux;
 /// 台阶③：Linux 上跑 Windows 程序的执行器变体（集成 wine，非新后端）。
-/// 只在 Linux 宿主编译——Windows 上跑 PE 本来就是原生路径，不需要 wine。
+/// 非 Linux 宿主用 `wine_stub` 顶上同名空实现——Windows 上跑 PE 本来就是原生
+/// 路径，不需要 wine。这样调用方无需写任何 `cfg`。
 #[cfg(target_os = "linux")]
+pub mod wine;
+#[cfg(not(target_os = "linux"))]
+#[path = "wine_stub.rs"]
 pub mod wine;
 // native 的 prepare 纯逻辑跨平台可编译（spawn 链路内部 cfg），
 // 使命令校验/环境构造可在 Linux 沙箱单测。
@@ -146,6 +150,21 @@ pub(crate) fn validate_container_name(name: &str) -> Result<()> {
         return Err(crate::error::WboxError::args(format!(
             "容器名长度非法（{} 字符）：AppContainer profile 名须为 1..={} 字符",
             len, MAX_CONTAINER_NAME_CHARS
+        )));
+    }
+    Ok(())
+}
+
+/// 校验镜像 rootfs 目录存在。
+///
+/// Blink 与 LinuxNative 两个镜像后端各自写过一遍几乎一样的检查与文案；
+/// 收到这里保证**报错口径一致**——同一个"没 pull 成功"的处境，不该因为
+/// 宿主不同而给出两种说法。
+pub(crate) fn require_rootfs_dir(rootfs: &std::path::Path) -> Result<()> {
+    if !rootfs.is_dir() {
+        return Err(crate::error::WboxError::registry(format!(
+            "镜像 rootfs 目录 '{}' 不存在（是否已成功 pull？）",
+            rootfs.display()
         )));
     }
     Ok(())

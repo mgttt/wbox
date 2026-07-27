@@ -111,12 +111,7 @@ impl Backend for BlinkBackend {
         super::require_cmd(&spec.cmd)?;
         let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
-        if !rootfs.is_dir() {
-            return Err(WboxError::registry(format!(
-                "镜像 rootfs 目录 '{}' 不存在（是否已成功 pull？）",
-                rootfs.display()
-            )));
-        }
+        super::require_rootfs_dir(rootfs)?;
         if spec.verbose {
             super::verbose_kv("Linux 后端模拟器", format!("{}（{}）", exe.display(), src));
             super::verbose_kv("rootfs", rootfs.display());
