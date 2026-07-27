@@ -208,6 +208,7 @@ mod tests {
             ],
             volumes: Vec::new(),
             ports: Vec::new(),
+            restart: Default::default(),
             verbose: false,
             env_pass_all: false,
         }

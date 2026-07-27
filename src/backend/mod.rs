@@ -113,6 +113,8 @@ pub struct RunSpec {
     pub volumes: Vec<VolumeMount>,
     /// 端口转发（PRD F9.2，仅 Linux 宿主）
     pub ports: Vec<crate::portfwd::PortMap>,
+    /// 重启策略（PRD F9.6）。由 supervisor 在 guest 退出后据此决定是否重跑。
+    pub restart: crate::restart::RestartPolicy,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；

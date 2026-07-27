@@ -64,6 +64,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              退出即清理；与 -d 同用时也自动删除状态和日志
   --interactive     连接 stdio（默认）
+  --restart <POLICY>  退出后重启：no（默认）/ on-failure[:次数] / always；与 --rm 互斥
   -d, --detach      后台运行：立即返回容器名，输出落盘到日志（wbox logs 读取）
   --pull            显式声明拉取语义（缺缓存本就会自动 pull）
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
@@ -288,6 +289,7 @@ mod tests {
             env: cfg.env.clone(),
             volumes: Vec::new(),
             ports: Vec::new(),
+            restart: Default::default(),
             verbose: false,
             env_pass_all: false,
         };

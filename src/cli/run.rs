@@ -35,6 +35,8 @@ pub struct RunOptions {
     pub volumes: Vec<backend::VolumeMount>,
     /// `-p host:guest` 端口转发（PRD F9.2，仅 Linux）
     pub ports: Vec<crate::portfwd::PortMap>,
+    /// `--restart` 重启策略（PRD F9.6）
+    pub restart: crate::restart::RestartPolicy,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -58,6 +60,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         auto_remove: false,
         volumes: Vec::new(),
         ports: Vec::new(),
+        restart: Default::default(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -124,6 +127,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--rm" => opts.auto_remove = true,
             "--interactive" => opts.detach = false, // 显式前台（默认）
             "--detach" | "-d" => opts.detach = true,
+            "--restart" => {
+                let v = super::args::take_value(args, &mut i, "--restart")?;
+                opts.restart = crate::restart::parse_restart(&v)?;
+            }
             "--volume" | "-v" => {
                 let v = super::args::take_value(args, &mut i, "--volume")?;
                 opts.volumes.push(backend::parse_volume(&v)?);
@@ -207,6 +214,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         env,
         volumes: opts.volumes.clone(),
         ports: opts.ports.clone(),
+        restart: opts.restart,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -217,6 +225,7 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     // 这两条必须在 --detach 分叉**之前**：否则父进程照常返回容器名，真正的
     // 拒绝只会写进 supervisor 的日志里，用户还以为起成功了。
     crate::portfwd::reject_if_unsupported(&opts.ports)?;
+    crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
     crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)?;
 
     // --detach：把自己再拉起一份作为 supervisor，父进程立刻返回。
@@ -378,6 +387,38 @@ fn register_for_spawn(
     Ok(reg)
 }
 
+/// 按 `--restart` 策略反复拉起 guest，返回**最后一次**的退出码。
+///
+/// 循环放在 supervisor 里而不是另起守护进程，除了不引入常驻服务
+/// （PRD §2.2「免安装、无服务」），还白得一个正确性质：`wbox stop` 终止的正是
+/// supervisor，**人为停掉的容器不会被自己重新拉起**——不需要额外维护一个
+/// "这次是不是人为停的"标记，那种标记恰恰是容易与实际状态不同步的东西。
+///
+/// 代价对应地也说清：supervisor 崩溃时重启随之失效。要覆盖那种情况就得有
+/// 常驻守护进程，与上面的前提冲突。
+fn spawn_with_restart(
+    b: &dyn Backend,
+    spec: &backend::RunSpec,
+    prepared: &backend::Prepared,
+) -> Result<u32> {
+    let mut restarts = 0u32;
+    loop {
+        let rc = b.spawn(spec, prepared)?;
+        if !spec.restart.should_restart(rc, restarts) {
+            return Ok(rc);
+        }
+        restarts += 1;
+        // 固定退避：一个起手就失败的容器若无间隔重启，会瞬间刷爆日志并空转
+        // CPU。不做指数退避是因为容器重启的典型诉求是"尽快恢复服务"，
+        // 退避太久反而违背意图；有上限的场景由 on-failure:N 控制。
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        eprintln!(
+            "wbox: 容器 '{}' 以退出码 {} 结束，按 --restart 策略第 {} 次重启",
+            spec.name, rc, restarts
+        );
+    }
+}
+
 fn spawn_registered(
     b: &dyn Backend,
     spec: &backend::RunSpec,
@@ -393,7 +434,7 @@ fn spawn_registered(
     #[cfg(target_os = "linux")]
     crate::runstate::spawn_container_pid_recorder(spec.name.clone());
     crate::portfwd::spawn_forwarders(spec.name.clone(), spec.ports.clone());
-    let rc = b.spawn(spec, prepared);
+    let rc = spawn_with_restart(b, spec, prepared);
     if supervised {
         if let Ok(code) = rc.as_ref() {
             crate::runstate::record_exit_code(reg.dir(), *code)?;

@@ -636,6 +636,7 @@ fn run_step(rootfs: &Path, cmd: &str, cfg: &ConfigAccum) -> Result<()> {
         env: cfg.env.clone(),
         volumes: Vec::new(),
         ports: Vec::new(),
+            restart: Default::default(),
         verbose: false,
         env_pass_all: false,
     };

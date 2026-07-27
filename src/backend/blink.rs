@@ -395,6 +395,7 @@ mod tests {
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             volumes: Vec::new(),
             ports: Vec::new(),
+            restart: Default::default(),
             verbose: false,
             env_pass_all: false,
         }

@@ -441,6 +441,60 @@ CEOF
 fi
 
 echo
+echo "=== R 重启策略（PRD F9.6）==="
+
+# R.1 on-failure:N 要在 N 次之后**真的停下**——否则一个必然失败的容器会无限
+# 重启，刷爆日志并空转 CPU。
+HOME=$WORK/home "$WBOX_ABS" run -d --name rf --restart on-failure:2 \
+  -- /bin/sh -c 'echo ATTEMPT; exit 3' >/dev/null 2>&1
+sleep 5
+n=$(HOME=$WORK/home "$WBOX_ABS" logs rf 2>/dev/null | grep -c ATTEMPT)
+st=$(HOME=$WORK/home "$WBOX_ABS" ps -a 2>/dev/null | grep -c "rf .*exited")
+if [ "$n" -eq 3 ] && [ "$st" -eq 1 ]; then
+  report PASS "R.1 on-failure:2 重启两次后停下（共 3 次尝试）"
+else
+  report FAIL "R.1 on-failure 次数" "尝试 $n 次（期望 3），exited=$st"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm rf >/dev/null 2>&1
+
+# R.2 退出码 0 是"活儿干完了"，on-failure 不该把它当失败
+HOME=$WORK/home "$WBOX_ABS" run -d --name rok --restart on-failure \
+  -- /bin/sh -c 'echo ONCE; exit 0' >/dev/null 2>&1
+sleep 3
+n=$(HOME=$WORK/home "$WBOX_ABS" logs rok 2>/dev/null | grep -c ONCE)
+if [ "$n" -eq 1 ]; then
+  report PASS "R.2 退出码 0 不触发 on-failure 重启"
+else
+  report FAIL "R.2 成功退出不重启" "跑了 $n 次（期望 1）"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm rok >/dev/null 2>&1
+
+# R.3 **关键性质**：always 会持续重启，但 `stop` 之后必须不再拉起。
+# 这条正是"循环放在 supervisor 里"换来的——stop 终止的就是 supervisor，
+# 无需再维护一个"是不是人为停的"标记（那种标记最容易与实际状态不同步）。
+HOME=$WORK/home "$WBOX_ABS" run -d --name ral --restart always \
+  -- /bin/sh -c 'echo TICK; sleep 1' >/dev/null 2>&1
+sleep 4
+n1=$(HOME=$WORK/home "$WBOX_ABS" logs ral 2>/dev/null | grep -c TICK)
+HOME=$WORK/home "$WBOX_ABS" stop ral >/dev/null 2>&1
+sleep 2; n2=$(HOME=$WORK/home "$WBOX_ABS" logs ral 2>/dev/null | grep -c TICK)
+sleep 3; n3=$(HOME=$WORK/home "$WBOX_ABS" logs ral 2>/dev/null | grep -c TICK)
+if [ "$n1" -gt 1 ] && [ "$n2" -eq "$n3" ]; then
+  report PASS "R.3 always 持续重启，stop 后不再拉起（$n1 次 → 停 → $n2=$n3）"
+else
+  report FAIL "R.3 always/stop" "重启 $n1 次（应 >1）；停后 $n2 → $n3（应相等）"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm ral >/dev/null 2>&1
+
+# R.4 --restart 与 --rm 语义矛盾，必须报错而非静默让一方胜出
+cout=$(HOME=$WORK/home "$WBOX_ABS" run --restart always --rm -- /bin/true 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "不能同时使用"; then
+  report PASS "R.4 --restart 与 --rm 冲突时报错"
+else
+  report FAIL "R.4 冲突检测" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 150)"
+fi
+
+echo
 echo "=== B 镜像构建（PRD F9.3）==="
 
 BCTX=$WORK/bctx

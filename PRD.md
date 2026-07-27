@@ -132,7 +132,8 @@ wbox
 | overlay 分层存储 | 无 | rootless 下 overlayfs 未必可用 |
 | 镜像 push | 无 | |
 | compose / pod | 无 | |
-| restart policy / healthcheck | 无 | |
+| restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
+| healthcheck | 无 | |
 | 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
 | `--user` / `--cap-add` / seccomp 剖面 | 无 | rootless 下语义与 docker 不同，需先定契约 |
 | Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
@@ -790,6 +791,22 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.6 重启策略** `[done]`（门禁 R.1–R.4）。`no` / `on-failure[:N]` / `always`。
+
+循环放在 **supervisor 自己**身上，而不是另起守护进程。除了不引入常驻服务
+（§2.2「免安装、无服务」），还白得一个正确性质：`wbox stop` 终止的正是
+supervisor，**人为停掉的容器不会被自己重新拉起**——不需要维护一个"这次是不是
+人为停的"标记，而那种标记恰恰最容易与实际状态不同步。
+
+代价对应说清：**supervisor 崩溃时重启随之失效**。要覆盖那种情况就得有常驻
+守护进程，与上面的前提冲突。
+
+其余取舍：退出码 0 视为"活儿干完了"，`on-failure` 不重启；重启间固定 500ms
+退避（起手就失败的容器若无间隔会刷爆日志并空转 CPU；不做指数退避是因为重启
+的典型诉求是尽快恢复服务，有上限的场景交给 `on-failure:N`）；与 `--rm` 冲突
+时报错——两者对"退出"的处置直接矛盾，静默让一方胜出会让用户无从知道实际
+生效的是哪个。
 
 ## 4.9 [TODO-PLAN] 跨宿主协作交接点
 
