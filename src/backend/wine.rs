@@ -136,24 +136,33 @@ pub fn version(wine: &Path) -> Option<String> {
 
 /// wine 需要一个**可写**的 prefix（首次运行会在里面铺一整套假 C: 盘）。
 ///
-/// 放在 `~/.wbox/wineprefix` 而不是默认的 `~/.wine`：
-/// - wbox 的子进程环境是白名单制的，`HOME` 刻意不透传（会泄漏宿主用户目录），
-///   没有 `HOME` 时 wine 会去写 `/.wine` 并失败；
-/// - 与镜像缓存同在 `~/.wbox` 下，用户清理时一处就够，也不会污染用户自己的
-///   `~/.wine`（那里可能装着别的应用）。
-pub fn default_prefix() -> Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| WboxError::spawn("无法确定用户主目录（USERPROFILE/HOME 均未设置）"))?;
-    Ok(PathBuf::from(home).join(".wbox").join("wineprefix"))
+/// # 为什么按容器分，而不是共用一个
+///
+/// 曾经所有容器共用 `~/.wbox/wineprefix`。它与**宿主**是隔离的（不碰用户
+/// 自己的 `~/.wine`），但**容器之间不隔离**：两个容器先后跑 Windows 程序，
+/// 会互相看到对方对注册表、C 盘布局、已装组件的改动。wbox 的卖点就是隔离，
+/// 这条与默认约束（PRD §2.2）直接冲突。
+///
+/// 现在每个容器一个 prefix，且**放在该容器的状态目录内**
+/// （`~/.wbox/run/<name>/wineprefix`）。选这个位置不是随意的：容器记录被
+/// `rm`（或前台容器退出）时，`runstate::purge_dir` 会整棵删掉状态目录，
+/// prefix 自然跟着走——**不需要新增一条清理路径**，也就不会出现"清理逻辑
+/// 漏了某种产物"的老问题。
+///
+/// 代价要说清：新 prefix 首次运行时 wine 要 bootstrap（铺假 C: 盘），有秒级
+/// 开销。想跨运行复用就给容器起同一个 `--name`，或用 `WINEPREFIX` 显式指定。
+pub fn container_prefix(container: &str) -> Result<PathBuf> {
+    Ok(crate::runstate::dir_for(container)?.join("wineprefix"))
 }
 
 /// 确保 prefix 目录存在（wine 首次运行会在里面铺假 C: 盘，目录不存在会失败）。
-/// 返回最终使用的 prefix：`WINEPREFIX` 已在环境里就尊重用户的选择。
-pub fn prepare_prefix() -> Result<PathBuf> {
+///
+/// `WINEPREFIX` 已在环境里就尊重用户的选择——显式指定优先于 wbox 的默认值，
+/// 这也是需要跨容器共享 prefix 时的出口。
+pub fn prepare_prefix(container: &str) -> Result<PathBuf> {
     let p = match std::env::var_os("WINEPREFIX") {
         Some(v) => PathBuf::from(v),
-        None => default_prefix()?,
+        None => container_prefix(container)?,
     };
     std::fs::create_dir_all(&p).map_err(|e| {
         WboxError::spawn(format!("创建 WINEPREFIX '{}' 失败：{}", p.display(), e))
@@ -193,6 +202,7 @@ pub fn wrap_if_pe(
     cmd: &mut Vec<String>,
     env: &mut Vec<(String, String)>,
     verbose: bool,
+    container: &str,
 ) -> Result<Option<Vec<(&'static str, String)>>> {
     if cmd.is_empty() || !is_pe(Path::new(&cmd[0])) {
         return Ok(None);
@@ -201,7 +211,7 @@ pub fn wrap_if_pe(
         std::env::var("WBOX_WINE").ok().as_deref(),
         std::env::var("PATH").ok().as_deref(),
     )?;
-    let prefix = prepare_prefix()?;
+    let prefix = prepare_prefix(container)?;
     augment_env(env, &prefix, verbose);
     cmd.insert(0, loader.display().to_string());
 
@@ -329,5 +339,59 @@ mod tests {
             !verbose_env.iter().any(|(k, _)| k == "WINEDEBUG"),
             "-V 时不该压掉 wine 的诊断输出"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use crate::testenv::TempHome;
+
+    /// 核心属性：**不同容器拿到不同 prefix**。共用一个的话，两个容器会互相
+    /// 看到对方对注册表/C 盘的改动——这正是 L2 要消除的问题。
+    #[test]
+    fn each_container_gets_its_own_prefix() {
+        let _home = TempHome::new("wine-iso");
+        let a = container_prefix("alpha").unwrap();
+        let b = container_prefix("beta").unwrap();
+        assert_ne!(a, b, "两个容器不能共用 prefix");
+        assert!(a.ends_with("wineprefix"));
+    }
+
+    /// prefix 必须落在**该容器的状态目录内**——清理才能搭 purge_dir 的车，
+    /// 不必新增一条清理路径。这条断言就是在钉住那个设计决定。
+    #[test]
+    fn prefix_lives_inside_container_state_dir() {
+        let _home = TempHome::new("wine-loc");
+        let dir = crate::runstate::dir_for("c1").unwrap();
+        assert_eq!(container_prefix("c1").unwrap(), dir.join("wineprefix"));
+    }
+
+    /// 容器记录被清理时，prefix 应当跟着消失（不留垃圾、也不泄漏到下个同名容器）。
+    #[test]
+    fn prefix_is_removed_with_the_container_record() {
+        let _home = TempHome::new("wine-clean");
+        let p = prepare_prefix("gone").unwrap();
+        std::fs::write(p.join("marker"), b"x").unwrap();
+        assert!(p.exists());
+        // 造一条"已退出"的记录再 rm，走的是与真实清理相同的路径
+        let dir = crate::runstate::dir_for("gone").unwrap();
+        std::fs::write(dir.join("lock"), b"").unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"name":"gone","pid":1,"created_unix":1,"cmd":["x"],"target":"t"}"#,
+        )
+        .unwrap();
+        crate::runstate::remove("gone").unwrap();
+        assert!(!p.exists(), "容器记录删了，wineprefix 也该没了");
+    }
+
+    /// 用户显式给的 `WINEPREFIX` 优先——需要跨容器共享时的出口。
+    #[test]
+    fn explicit_env_prefix_wins() {
+        let mut home = TempHome::new("wine-env");
+        let custom = home.dir.join("mine");
+        home.env().set("WINEPREFIX", &custom);
+        assert_eq!(prepare_prefix("whatever").unwrap(), custom);
     }
 }

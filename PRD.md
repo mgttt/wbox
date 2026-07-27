@@ -146,7 +146,7 @@ wbox
 | 在隔离内运行（Wine 本身不提供）| **有，这是 wbox 的增量** | Wine 只做 ABI 翻译，不做隔离 |
 | 自带 Wine | 无 | 依赖宿主已装；缺失时明确报错 |
 | `wineprefix` 与宿主隔离 | 有 | 用专用的 `~/.wbox/wineprefix`，不碰用户自己的 `~/.wine` |
-| `wineprefix` **容器之间**隔离 | 无 | 所有容器共用**同一个** `~/.wbox/wineprefix`，会互相看到对方的注册表/C 盘改动 → §4.9 L2 |
+| `wineprefix` **容器之间**隔离 | 有 | 每容器一个 prefix，置于其状态目录内，随容器记录一并清理（§4.9 L2）|
 | GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
 
 ### 2.5 两条硬天花板
@@ -800,7 +800,7 @@ TODO-PLAN
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 待认领
-└── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 待做
+└── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -886,29 +886,28 @@ rootfs 里执行命令——这条路径本身已经通了（Q2 已能跑 OCI �
 且有持续门禁；做不到时在 §2.4 的 Q2 表格里如实标注，别让 `build` 在 Windows
 上静默产出半成品镜像。
 
-### L2 Wine 象限的 `wineprefix` 隔离 `[Linux agent]`
+### L2 Wine 象限的 `wineprefix` 隔离 `[Linux agent]` `[done]`
 
 **这是本轮做四象限检视时发现的缺口，之前没人记过。**
 
-先把已经做对的部分说清楚（我第一版把这条写错了，核过代码才改正）：wbox
-**没有**用宿主默认的 `~/.wine`，而是专用的 `~/.wbox/wineprefix`
-（见 `backend::wine::default_prefix`），所以**与宿主的隔离是有的**，
-用户自己装了别的应用的 `~/.wine` 不会被污染。
+先把原本就做对的部分说清楚（初稿我写错过一次，核代码后改正）：wbox **没有**
+用宿主默认的 `~/.wine`，而是专用目录，所以**与宿主的隔离一直是有的**。
 
-**真正缺的是容器之间的隔离**：所有 wbox 容器共用**同一个**
-`~/.wbox/wineprefix`。两个容器先后跑 Windows 程序时会互相看到对方对注册表、
-C 盘布局、已装组件的改动——而按容器隔离的默认约束（§2.2），这是不该发生的。
+**缺的是容器之间那一层**：所有容器共用同一个 `~/.wbox/wineprefix`，两个容器
+先后跑 Windows 程序会互相看到对方对注册表、C 盘布局、已装组件的改动。
 
-**要定的语义**：
+**已实现**：每容器一个 prefix，放在**该容器的状态目录内**
+（`~/.wbox/run/<name>/wineprefix`）。这个位置是关键设计——容器记录被 `rm`
+或前台容器退出时，`purge_dir` 整棵删掉状态目录，prefix 自然跟着走，
+**不需要新增清理路径**。
 
-- 每容器一个独立 prefix（放在状态目录下？还是镜像缓存下？）——独立性与
-  "每次都要重建 prefix 很慢"之间要权衡。
-- 是否提供跨运行复用的命名 prefix（类似命名卷），否则每次 `run` 都重建。
-- prefix 初始化失败时的行为：明确报错，不要退回共用宿主 prefix——那正是要
-  消除的问题。
+顺带把 `purge_dir` 从"逐个列举已知产物"改成整棵递归删除：它已经列到第八个
+文件了，每加一种状态文件就得记得回来补一行，漏掉的后果很隐蔽——`remove_dir`
+因非空静默失败，`ps -a` 里挂一条永远清不掉的记录。
 
-**判据**：两个容器先后修改 prefix，互相不可见；且门禁要能验证这一点
-（现有 W 段可扩展）。
+代价如实记录：新 prefix 首次运行 wine 要 bootstrap（铺假 C: 盘），**有秒级
+开销**。要跨运行复用就给容器起同一个 `--name`，或用 `WINEPREFIX` 显式指定
+（后者优先级最高，也是需要跨容器共享时的出口）。
 
 ### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

@@ -12,6 +12,9 @@ pub fn wrap_if_pe(
     _cmd: &mut Vec<String>,
     _env: &mut Vec<(String, String)>,
     _verbose: bool,
+    // 与 Linux 侧同签名：那边要用容器名定位 per-container 的 wineprefix。
+    // 签名一旦分叉，调用点就得重新写 cfg，这个模块存在的意义也就没了。
+    _container: &str,
 ) -> Result<Option<Vec<(&'static str, String)>>> {
     Ok(None)
 }

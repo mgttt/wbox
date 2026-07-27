@@ -354,19 +354,19 @@ pub fn adopt_detached(name: &str, token: &str) -> Result<DetachedReservation> {
 /// 尽力而为、不报错：清理失败顶多留下一条 `Exited` 记录，比 panic 或让
 /// 调用方多一条错误分支都好。
 fn purge_dir(dir: &Path) {
-    // Windows OCI 的私有 rootfs 可能包含任意深度的 guest 文件树，必须先递归
-    // 清理。路径名固定且始终拼在已校验的容器状态目录下，不能由 guest 指向
-    // 目录外部。
-    let _ = std::fs::remove_dir_all(dir.join("rootfs"));
-    let _ = std::fs::remove_file(dir.join("meta.json"));
-    let _ = std::fs::remove_file(dir.join("lock"));
-    // 日志也要删：留着会让 remove_dir 因非空而失败，状态目录就永远清不掉
-    let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
-    let _ = std::fs::remove_file(dir.join(LOG_STDERR));
-    let _ = std::fs::remove_file(dir.join(CONTAINER_PID));
-    let _ = std::fs::remove_file(dir.join(EXIT_CODE));
-    let _ = std::fs::remove_file(dir.join(DETACHED_RESERVATION));
-    let _ = std::fs::remove_dir(dir);
+    // **整棵删掉，不逐个列举已知产物。**
+    //
+    // 这里原先是"删 meta.json、删 lock、删两个日志、删 container.pid、删
+    // exit code、删预留文件、递归删 rootfs，最后 remove_dir"——每新增一种
+    // 状态文件就得记得回来补一行，而漏掉的后果很隐蔽：`remove_dir` 因非空
+    // 静默失败，状态目录永远留着，`ps -a` 里挂一条清不掉的记录。本轮给
+    // wineprefix 找落脚处时正好又要加第九个，与其继续列举不如一次删干净。
+    //
+    // 安全性由调用方保证：`dir` 只能来自 [`dir_for`]（已挡掉路径分隔符与
+    // `..`），因此必定落在状态根目录之下；guest 无法把它指到别处。
+    // Windows 上还要求先关掉 owner 锁句柄，否则文件仍被占用——`Drop` 已经
+    // 先 `drop(lock)` 再调本函数。
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 impl Drop for Registration {
@@ -1167,6 +1167,9 @@ pub fn record_container_pid(name: &str, pid: u32) {
 
 /// 读回 [`record_container_pid`] 写下的 pid。
 #[cfg(target_os = "linux")]
+/// 与 [`record_container_pid`] 同为 Linux 专有：两个调用方（`exec` 的
+/// setns 附着、`-p` 端口转发的连接器）都只在 Linux 编译。
+#[cfg(target_os = "linux")]
 pub fn container_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join(CONTAINER_PID))
         .ok()?
@@ -1175,6 +1178,7 @@ pub fn container_pid(dir: &Path) -> Option<u32> {
         .ok()
 }
 
+#[cfg(target_os = "linux")]
 pub const CONTAINER_PID: &str = "container.pid";
 
 /// 起一个线程，在容器进程出现后把它的 pid 记下来。

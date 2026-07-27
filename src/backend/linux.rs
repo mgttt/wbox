@@ -66,7 +66,7 @@ impl Backend for LinuxNativeBackend {
             // 走的仍是同一条实现，不会出现"wine 那条路忘了限额"的分叉。
             // 非 Linux 宿主上 wrap_if_pe 是空实现（见 backend::wine），
             // 所以这里不需要任何 cfg。
-            let wine_lines = super::wine::wrap_if_pe(&mut cmd, &mut env, spec.verbose)?;
+            let wine_lines = super::wine::wrap_if_pe(&mut cmd, &mut env, spec.verbose, &spec.name)?;
             if spec.verbose {
                 super::verbose_kv("宿主后端", "linux-native（宿主程序模式，不换根）");
                 super::verbose_kv("工作目录", spec.workdir.display());
