@@ -1253,6 +1253,134 @@ fi
 
 kill "$PSH_PID" 2>/dev/null
 wait "$PSH_PID" 2>/dev/null
+
+# ---- PSH.6/PSH.7：多层镜像的**原样回推**（PRD L5 的判据）----
+#
+# 判据就是 PRD 写死的那条：多层镜像 pull 下来后能原样 push 回去，
+# **manifest digest 不变**且层数不被压平。只断言"push 返回 0"证明不了这一点
+# ——F9.13 的 flatten 路径同样返回 0，却会把多层压成一层。
+PSH2_PORT=5601
+PSH2_REG=127.0.0.1:$PSH2_PORT
+cat > "$WORK/multi_stub.py" <<'PSH2EOF'
+import http.server, hashlib, json, io, tarfile, gzip
+BLOBS = {}
+MANIFESTS = {}
+
+def mklayer(files):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as t:
+        for name, data in files.items():
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            t.addfile(ti, io.BytesIO(data))
+    return gzip.compress(buf.getvalue(), mtime=0)
+
+def dg(b):
+    return "sha256:" + hashlib.sha256(b).hexdigest()
+
+L1 = mklayer({"base.txt": b"from-layer-1\n"})
+L2 = mklayer({"extra.txt": b"from-layer-2\n"})
+CFG = json.dumps({"architecture": "amd64", "os": "linux",
+                  "config": {"Env": ["L=2"], "Cmd": ["/bin/sh"]},
+                  "rootfs": {"type": "layers", "diff_ids": ["sha256:x", "sha256:y"]}},
+                 separators=(",", ":")).encode()
+for b in (L1, L2, CFG):
+    BLOBS[dg(b)] = b
+MT = "application/vnd.oci.image.manifest.v1+json"
+MAN = json.dumps({"schemaVersion": 2, "mediaType": MT,
+                  "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                             "digest": dg(CFG), "size": len(CFG)},
+                  "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                              "digest": dg(L1), "size": len(L1)},
+                             {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                              "digest": dg(L2), "size": len(L2)}]},
+                 separators=(",", ":")).encode()
+MANIFESTS["/v2/library/multi/manifests/v1"] = MAN
+print("ORIGINAL=" + dg(MAN), flush=True)
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def _e(self, c, x=None):
+        self.send_response(c)
+        for k, v in (x or {}).items():
+            self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def do_HEAD(self):
+        d = self.path.rsplit("/", 1)[1]
+        self._e(200 if ("/blobs/" in self.path and d in BLOBS) else 404)
+
+    def do_POST(self):
+        self._e(202, {"Location": "/v2/upload/s"})
+
+    def do_PUT(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(n)
+        a = dg(body)
+        if self.path.startswith("/v2/upload/"):
+            BLOBS[a] = body
+            self._e(201)
+            return
+        MANIFESTS[self.path] = body
+        self._e(201, {"Docker-Content-Digest": a})
+        print("PUSHED=" + a, flush=True)
+        print("LAYERS=%d" % len(json.loads(body)["layers"]), flush=True)
+
+    def do_GET(self):
+        if self.path in MANIFESTS:
+            b = MANIFESTS[self.path]
+            self.send_response(200)
+            self.send_header("Content-Type", MT)
+            self.send_header("Docker-Content-Digest", dg(b))
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        d = self.path.rsplit("/", 1)[1]
+        if "/blobs/" in self.path and d in BLOBS:
+            b = BLOBS[d]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+            return
+        self._e(404)
+
+http.server.HTTPServer(("127.0.0.1", PORT2_PLACEHOLDER), H).serve_forever()
+PSH2EOF
+sed -i "s/PORT2_PLACEHOLDER/$PSH2_PORT/" "$WORK/multi_stub.py"
+python3 "$WORK/multi_stub.py" > "$WORK/multi.log" 2>&1 &
+PSH2_PID=$!
+sleep 1.5
+PSH2HOME=$WORK/multihome
+mkdir -p "$PSH2HOME"
+pout=$(HOME=$PSH2HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" pull "$PSH2_REG/library/multi:v1" 2>&1); prc=$?
+MB=$PSH2HOME/.wbox/images/127.0.0.1_$PSH2_PORT/library_multi/v1
+nblobs=$(ls "$MB/blobs" 2>/dev/null | wc -l)
+if [ "$prc" -eq 0 ] && [ "$nblobs" -eq 2 ] \
+   && [ "$(cat "$MB/rootfs/base.txt" 2>/dev/null)" = "from-layer-1" ] \
+   && [ "$(cat "$MB/rootfs/extra.txt" 2>/dev/null)" = "from-layer-2" ]; then
+  report PASS "PSH.6 pull 多层镜像后原始压缩层留存（$nblobs 层）且内容叠加正确"
+else
+  report FAIL "PSH.6 层留存" "rc=$prc blobs=$nblobs base=$(cat "$MB/rootfs/base.txt" 2>/dev/null)"
+fi
+
+pout=$(HOME=$PSH2HOME WBOX_INSECURE_REGISTRY=$PSH2_REG "$WBOX_ABS" push "$PSH2_REG/library/multi:v1" 2>&1); prc=$?
+sleep 0.5
+orig=$(grep '^ORIGINAL=' "$WORK/multi.log" | head -1 | cut -d= -f2)
+pushed=$(grep '^PUSHED=' "$WORK/multi.log" | head -1 | cut -d= -f2)
+nlayers=$(grep '^LAYERS=' "$WORK/multi.log" | head -1 | cut -d= -f2)
+if [ "$prc" -eq 0 ] && [ -n "$orig" ] && [ "$orig" = "$pushed" ] && [ "$nlayers" = "2" ]; then
+  report PASS "PSH.7 多层镜像原样回推：manifest digest 不变且未被压平（2 层）"
+else
+  report FAIL "PSH.7 原样回推" "rc=$prc 原始=$orig 推上去=$pushed 层数=$nlayers"
+fi
+
+kill "$PSH2_PID" 2>/dev/null
+wait "$PSH2_PID" 2>/dev/null
 fi
 
 echo

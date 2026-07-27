@@ -142,8 +142,8 @@ wbox
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
-| overlay 镜像分层存储 | 无 | `FROM`/pull 仍整份复制；与 F9.12 的运行期可写层是两件事 |
-| 镜像 push | 部分 | F9.13：`wbox push`，**平铺为单层**（门禁 PSH.1–PSH.5）；不保留原始分层 |
+| 镜像分层存储 | 部分 | F9.16：pull 保留原始压缩层（push 已能原样回推）；`FROM` 仍整份复制，未做层复用 |
+| 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
 | compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
 | pod | 不做 | F9.15 之后 net/IPC/UTS 三种共享都能单独取得，再抽一层 pod 只是换个说法；理由见 §4.9 L6 |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
@@ -187,7 +187,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | 镜像**分层**存储 | 要让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push 四条路径 | §4.9 L5 |
+| Q3 Podman | `FROM` 复用基础层 | 存储侧已就绪（F9.16 保留原始层）；剩下的是 build 改成引用基础层而非整份复制 | §4.9 L5b |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
@@ -809,7 +809,8 @@ F9
 ├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
 ├── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
 ├── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
-└── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
+├── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
+└── F9.16 原始层留存与原样回推                 —— [partial] 存储与 push 已成；FROM 复用未做
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -969,6 +970,24 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.16 原始层留存与原样回推** `[partial]`（门禁 PSH.6–PSH.7）。
+
+pull 时**除了解包，还原样留一份压缩层**（`blobs/<digest>`）。多花一份磁盘换来
+解包结果给不了的两件事：`push` 能原样回推、将来 `FROM` 能复用基础层。
+
+原样回推的判定很硬：本地 manifest 必须是真的（不是 build 写的 `{}` 占位），
+它引用的每个层 blob 都还在，且 `config.json` 的 digest 与 manifest 里写的一致
+（不一致说明缓存被动过，那时回推会推出一个自相矛盾的镜像）。任一条不满足就
+**退回 flatten 并打印原因**——不静默改变语义。满足时推上去的 manifest 字节与
+拉下来时一字不差，故 **digest 不变、层与上游共享**，这正是 §4.9 L5 写死的判据
+（PSH.7 直接比对 stub 侧记录的原始与推入 digest，并断言层数仍为 2）。
+
+registry 回报的 digest 若与本地算的不同，说明它改写了 manifest，"原样"就没兑现
+——这时**出声警告**，不能让用户以为分层还在。
+
+**还没做的那半如实记**：`FROM` 仍整份复制 rootfs，没有改成引用基础层。存储侧
+已经就绪（原始层都在），剩下的是 build 侧的改动，见 §4.9 L5b。
 
 **F9.15 IPC/UTS 隔离与共享** `[done]`（门禁 IU.1–IU.7）。
 
@@ -1369,7 +1388,11 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 `--network container:<第一个服务>` 共享 netns（F9.11 已就绪），经 localhost
 互访，这与 docker 的 bridge+DNS 不同但对 sidecar 场景等价，文档要直说。
 
-### L5 镜像分层存储 `[Linux agent]` `[待认领]`
+### L5 镜像分层存储 `[Linux agent]` `[partial]`
+
+**存储与 push 那半已完成，见 F9.16**（门禁 PSH.6–PSH.7）：pull 保留原始压缩层，
+多层镜像能原样回推且 manifest digest 不变——这正是下面写死的第一条判据。
+剩下 `FROM` 复用基础层未做，拆成 L5b。
 
 **先分清它和 F9.12 不是一回事。** F9.12 解决的是**运行期**写入污染共享缓存；
 这一条要的是**存储期**保留镜像的层结构，两者的产物、生命周期、失效条件都不同。
@@ -1383,8 +1406,25 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 - `overlay`（F9.12）：lowerdir 可以从单一 rootfs 变成多层叠加，语义更接近 docker。
 - `push`（F9.13）：现在只能 flatten 成单层，有了原始层才能原样回推、与上游共享层。
 
-**判据**：pull 一个多层镜像后能原样 push 回去且 manifest digest 不变；
-`FROM` 复用基础层时磁盘占用明显低于整份复制。达不到这两条就不算做完。
+**判据**：pull 一个多层镜像后能原样 push 回去且 manifest digest 不变
+（`[done]`，PSH.7）；`FROM` 复用基础层时磁盘占用明显低于整份复制（`[todo]`，见
+L5b）。
+
+### L5b `FROM` 复用基础层 `[Linux agent]` `[待认领]`
+
+存储侧已由 F9.16 就绪：`blobs/<digest>` 里躺着每个基础层的原始压缩字节，
+`manifest.json` 记着它们的顺序。剩下的是 build 侧：
+
+- 现在 `FROM` 把基础镜像的 `rootfs/` **整份复制**到 staging。要改成引用——
+  最自然的落点是复用 F9.12 的 overlay：把基础镜像的 rootfs 当 lowerdir，
+  构建产物落在 upper，`COPY`/`RUN` 只写 upper。
+- 产物的 manifest 要能引用基础层 digest + 新增层，push 时就不必重传基础层
+  （`push_blob` 已经先 `HEAD` 判存在，天然省流量）。
+- **判据**：同一基础镜像上构建两个不同镜像，磁盘占用明显低于两份整份复制；
+  push 第二个镜像时基础层被 `HEAD` 判定已存在而跳过上传。
+
+难点在 overlay 不可用时（内核 <5.11）的退路：那时只能退回整份复制，而**退回
+必须出声**，与 F9.12 的处理一致。
 
 ### L6 pod 抽象是否值得做 `[任一 agent]` `[done：结论是不做]`
 

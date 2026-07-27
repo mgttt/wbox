@@ -268,6 +268,15 @@ pub fn pull_image(
         verify_digest(digest, &blob)
             .context(format!("layer {} digest 校验失败", digest))
             .ctx(ErrKind::Registry)?;
+        // 原样留一份压缩层（F9.15/L5）。解包结果丢失了层结构，只有留着原始
+        // blob，push 才能原样回推、digest 不变。写在解包**之前**：解包失败时
+        // 整个 staging 会被丢弃，不存在半份 blob 留在正式缓存里的可能。
+        std::fs::create_dir_all(staging.path.join(super::BLOBS_DIR))
+            .and_then(|_| {
+                std::fs::write(super::blob_path(&staging.path, digest), &blob)
+            })
+            .context(format!("保存原始层 {} 失败", digest))
+            .ctx(ErrKind::Registry)?;
         unpack_layer_with_state(&blob, &rootfs, media_type, &mut symlinks)
             .context(format!("解包层 {} 失败", digest))
             .ctx(ErrKind::Registry)?;

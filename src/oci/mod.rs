@@ -186,6 +186,24 @@ pub fn image_dir(iref: &ImageRef) -> crate::error::Result<PathBuf> {
         .join(sanitize_segment(&iref.reference)))
 }
 
+/// 原始压缩层 blob 的存放目录（相对镜像缓存目录）。
+///
+/// pull 时**除了解包，还原样留一份压缩层**。多花一份磁盘换来两件解包结果给不了
+/// 的事：`push` 能原样回推（manifest digest 不变，与上游共享层），以及将来
+/// `FROM` 复用基础层。没有它，push 只能把 rootfs 压平成单层（F9.13）。
+pub const BLOBS_DIR: &str = "blobs";
+
+/// digest → blob 文件名。`sha256:abc` → `sha256_abc`：冒号在 Windows
+/// 路径里非法，而缓存布局要跨平台一致。
+pub fn blob_file_name(digest: &str) -> String {
+    digest.replace(':', "_")
+}
+
+/// blob 在某个镜像缓存目录下的路径。
+pub fn blob_path(image_dir: &std::path::Path, digest: &str) -> PathBuf {
+    image_dir.join(BLOBS_DIR).join(blob_file_name(digest))
+}
+
 /// `wbox image pull` 的入口编排。
 pub fn pull(
     image_ref: &str,

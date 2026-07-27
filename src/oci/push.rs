@@ -176,6 +176,57 @@ pub fn build_manifest(
         .ctx(ErrKind::Registry)
 }
 
+/// 原样回推所需的全部材料：原始 manifest 字节 + 它引用的每个 blob。
+struct Verbatim {
+    manifest: Vec<u8>,
+    media_type: String,
+    /// (digest, 字节)，顺序为 layers 在前、config 在后无所谓——都要先于 manifest 推。
+    blobs: Vec<(String, Vec<u8>)>,
+}
+
+/// 判断能否**原样回推**，能就把材料备齐。
+///
+/// 条件很硬：本地存的 manifest 必须是真的 manifest（不是 build 写的 `{}` 占位），
+/// 且它引用的每个 blob 都还在 `blobs/` 里。任一条不满足就退回 flatten——
+/// 退回时会打印原因，不静默改变语义。
+///
+/// 满足时 push 的 manifest 字节与拉下来时**一字不差**，故 digest 不变，
+/// 层也与上游共享。这正是 L5 的判据。
+fn try_verbatim(dir: &std::path::Path) -> Option<Verbatim> {
+    let manifest = std::fs::read(dir.join("manifest.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
+    let config_digest = v.get("config")?.get("digest")?.as_str()?.to_string();
+    let layers = v.get("layers")?.as_array()?;
+    if layers.is_empty() {
+        return None;
+    }
+    let media_type = v
+        .get("mediaType")
+        .and_then(|m| m.as_str())
+        .unwrap_or(MT_MANIFEST)
+        .to_string();
+
+    let mut blobs = Vec::new();
+    for l in layers {
+        let d = l.get("digest")?.as_str()?;
+        let bytes = std::fs::read(super::blob_path(dir, d)).ok()?;
+        blobs.push((d.to_string(), bytes));
+    }
+    // config 的原始字节就是 config.json（pull 时按 blob 原样写下）。
+    // 校验它的 digest 与 manifest 里写的一致——不一致说明缓存被动过，
+    // 那时原样回推会推出一个自相矛盾的镜像。
+    let config = std::fs::read(dir.join("config.json")).ok()?;
+    if sha256_of(&config) != config_digest {
+        return None;
+    }
+    blobs.push((config_digest, config));
+    Some(Verbatim {
+        manifest,
+        media_type,
+        blobs,
+    })
+}
+
 /// `wbox push` 的入口编排。
 pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> Result<()> {
     let iref = super::ImageRef::parse(image_ref, registry_override)?;
@@ -186,11 +237,46 @@ pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> 
             iref.qualified_ref()
         )));
     }
-    // 这句必须打出来：推上去的与本地"看起来一样"，但分层历史没了。
-    // 不说的话，用户会以为推回去的还是原来那个分层镜像。
+    let client = super::registry::RegistryClient::new(&iref.registry);
+
+    // 优先原样回推：本地留着原始压缩层时，推上去的 manifest 与拉下来的一字
+    // 不差，digest 不变、层与上游共享（PRD L5）。
+    if let Some(v) = try_verbatim(&dir) {
+        println!(
+            "wbox: 推送 {} —— **原样回推**（保留原始分层，manifest digest 不变）",
+            iref.qualified_ref()
+        );
+        // 顺序不能反：manifest 引用的 blob 必须先在 registry 上存在。
+        for (digest, bytes) in &v.blobs {
+            if verbose {
+                println!("wbox: 上传 blob {}（{} 字节）", digest, bytes.len());
+            }
+            client.push_blob(&iref.repo, digest, bytes)?;
+        }
+        let reported =
+            client.put_manifest(&iref.repo, &iref.reference, &v.media_type, &v.manifest)?;
+        let local = sha256_of(&v.manifest);
+        println!("wbox: 完成 —— {}", iref.qualified_ref());
+        println!("wbox: manifest digest: {}", reported.clone().unwrap_or_else(|| local.clone()));
+        // registry 回报的 digest 若与本地算的不同，说明它改写了 manifest，
+        // "原样"这个承诺就没兑现——必须说出来，不能让用户以为分层还在。
+        if let Some(r) = reported {
+            if r != local {
+                eprintln!(
+                    "wbox: 警告: registry 回报的 digest（{}）与本地 manifest 的（{}）不同，\
+                     说明它改写了 manifest，原样回推未完全兑现",
+                    r, local
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // 退回 flatten。**打印原因**：推上去的与本地"看起来一样"，但分层历史没了，
+    // 不说的话用户会以为原样回推成功了。
     println!(
-        "wbox: 推送 {} —— rootfs 将平铺为**单层**（本地缓存不保留原始层，\
-         语义等价 docker commit 后 push）",
+        "wbox: 推送 {} —— 本地没有原始压缩层（旧缓存或 build 产物），\
+         rootfs 将平铺为**单层**，语义等价 docker commit 后 push",
         iref.qualified_ref()
     );
 
@@ -213,7 +299,6 @@ pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> 
         layer.gzipped.len(),
     )?;
 
-    let client = super::registry::RegistryClient::new(&iref.registry);
     // 顺序不能反：manifest 引用的 blob 必须**先**在 registry 上存在，
     // 否则符合规范的 registry 会以 MANIFEST_BLOB_UNKNOWN 拒绝。
     client.push_blob(&iref.repo, &layer.digest, &layer.gzipped)?;
@@ -279,6 +364,61 @@ mod tests {
         std::fs::remove_dir_all(d.join("rootfs/.wbox_oldroot")).unwrap();
         let without = flatten_rootfs(&d.join("rootfs")).unwrap().diff_id;
         assert_eq!(with_artifact, without, "暂存目录不该影响层内容");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 原样回推的条件很硬，任一条不满足都要退回 flatten——而不是推出一个
+    /// 自相矛盾的镜像。
+    #[test]
+    fn verbatim_requires_manifest_and_every_blob() {
+        let d = temp("verb");
+        let config = br#"{"architecture":"amd64"}"#.to_vec();
+        let cdig = sha256_of(&config);
+        let l1 = b"layer-one-bytes".to_vec();
+        let l2 = b"layer-two-bytes".to_vec();
+        let (d1, d2) = (sha256_of(&l1), sha256_of(&l2));
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": MT_MANIFEST,
+            "config": {"mediaType": MT_CONFIG, "digest": cdig, "size": config.len()},
+            "layers": [
+                {"mediaType": MT_LAYER, "digest": d1, "size": l1.len()},
+                {"mediaType": MT_LAYER, "digest": d2, "size": l2.len()},
+            ],
+        });
+        let mbytes = serde_json::to_vec(&manifest).unwrap();
+        std::fs::write(d.join("manifest.json"), &mbytes).unwrap();
+        std::fs::write(d.join("config.json"), &config).unwrap();
+        std::fs::create_dir_all(d.join(super::super::BLOBS_DIR)).unwrap();
+        std::fs::write(super::super::blob_path(&d, &d1), &l1).unwrap();
+
+        // 只有一个层 blob 在：不够，必须退回
+        assert!(try_verbatim(&d).is_none(), "缺层 blob 时不该原样回推");
+
+        std::fs::write(super::super::blob_path(&d, &d2), &l2).unwrap();
+        let v = try_verbatim(&d).expect("材料齐了应可原样回推");
+        // manifest 字节必须**一字不差**——digest 不变正是靠这个
+        assert_eq!(v.manifest, mbytes);
+        assert_eq!(v.media_type, MT_MANIFEST);
+        // 两个层 + 一个 config
+        assert_eq!(v.blobs.len(), 3);
+        assert!(v.blobs.iter().any(|(dg, _)| dg == &d1));
+        assert!(v.blobs.iter().any(|(dg, _)| dg == &cdig));
+
+        // config 被动过：digest 对不上，必须退回而不是推个自相矛盾的镜像
+        std::fs::write(d.join("config.json"), br#"{"architecture":"arm64"}"#).unwrap();
+        assert!(try_verbatim(&d).is_none(), "config digest 不符时不该原样回推");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// build 产物的 manifest.json 是 `{}` 占位，没有层可推——必须退回 flatten。
+    #[test]
+    fn placeholder_manifest_falls_back_to_flatten() {
+        let d = temp("plc");
+        std::fs::write(d.join("manifest.json"), b"{}").unwrap();
+        std::fs::write(d.join("config.json"), b"{}").unwrap();
+        assert!(try_verbatim(&d).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 
