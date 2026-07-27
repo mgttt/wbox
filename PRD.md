@@ -533,7 +533,7 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 242 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | F8.1 的 Windows/Linux G3 已绿；F8.2-F8.4 未实现 |
+| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 持续覆盖，Windows 已实机验证 detach/logs/stop/rm，仍缺 Windows 持续门禁；F8.4 未实现 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -575,8 +575,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[planned]` F8 生命周期管理：契约已定（见 F8.a–F8.d），按 F8.1→F8.4 分期
-   推进。F8.1（状态目录 + `ps`）风险最低且是其余三期的前置，应先做。
+4. `[active]` F8.1-F8.3 已落地；补 Windows detach/logs/stop 持续门禁，并完成
+   F8.4 `exec` 的 Windows 可行性取证后再决定是否实现。
 
 ## 8. 验收与发布
 
