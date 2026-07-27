@@ -50,6 +50,19 @@
 剩在 G 组里的就是 symlink 链——rootfs 内指向外部的符号链接仍可被顺出去，
 与旧引擎**同样**的限制（不是新增风险）。
 
+### 基线新增 `@linux` / `@windows` 标注
+
+原先只有运行**模式**标注（`@native` / `@wine`），表达不了**宿主 OS** 差异：
+guest-tests job 在 Windows 上跑 native，本地 Linux 开发也常用 native，
+同为 native 却结果不同。实测有两处这样的差异，都是宿主能力差异而非引擎回归：
+
+| 用例 | 标注 | 原因 |
+|---|---|---|
+| `t_path` | `@windows` | Windows 侧 `stat` 的 `st_nlink` 是合成值（拿不到真实硬链接数）；建 symlink 需要特权，symlink 环路（ELOOP）搭不起来。Linux 宿主上通过。 |
+| `t_sec_linkabs` | `@linux` | Linux 上宿主 symlink 不防护（G 组缺口）。Windows 上因为建不了 symlink，逃逸链搭不起来，该用例反而通过。 |
+
+没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧报"回归"。
+
 ---
 
 ## 历史：blink（C）时代的基线

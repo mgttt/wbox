@@ -72,4 +72,11 @@ t_negative
 
 # G. 宿主 symlink 不防护（越根路径已修，见上）
 t_sec_path
-t_sec_linkabs
+# 只在 Linux 宿主失败：Windows 上建 symlink 需要特权，逃逸链根本搭不起来，
+# 该用例反而通过。标注 @linux 才能让同一份基线在两个宿主上都成立。
+t_sec_linkabs @linux
+
+# H. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
+# st_nlink 在 Windows 侧是合成值（拿不到真实硬链接数），且建 symlink 需要
+# 特权，symlink 环路（ELOOP）测不起来。Linux 宿主上本用例通过，故标 @windows。
+t_path @windows

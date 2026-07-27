@@ -204,11 +204,26 @@ if [ "${WBOX_GUEST_NO_BASELINE:-0}" = 1 ] || [ ! -f "$BASELINE" ]; then
   exit $?
 fi
 
-# 基线条目支持可选的模式标注：`<用例名> [@native|@wine]`。
-# 起因（实测）：t_path 的 path/long-nested 只在**真 Windows** 上失败——
-# 宿主绝对路径超过 MAX_PATH(260)，而 wine 无此限制故通过。没有模式标注时，
-# 把它写进基线会让 wine 下报"基线过期"，不写又会让真机报"回归"，
-# 两种环境无法共用一份基线。带标注的条目只在对应模式下生效。
+# 基线条目支持可选标注：`<用例名> [@native|@wine|@linux|@windows]`。
+#
+# 两类标注解决两种不同的环境差异：
+#
+# ① 运行**模式**（@native / @wine）。起因（实测）：t_path 的 path/long-nested
+#    只在真 Windows 上失败——宿主绝对路径超过 MAX_PATH(260)，wine 无此限制。
+#
+# ② **宿主 OS**（@linux / @windows）。模式标注表达不了这一类：guest-tests job
+#    在 Windows 上跑 native，本地 Linux 开发也常用 native，两者同为 native
+#    却结果不同。实测差异有两处，都是宿主能力差异而非引擎回归：
+#      - t_path   @windows：Windows 侧 stat 的 st_nlink 是合成值（拿不到真实
+#                 硬链接数），且建 symlink 需要特权，symlink 环路测不起来；
+#      - t_sec_linkabs @linux：Linux 上宿主 symlink 不防护（已知缺口）；
+#                 Windows 上因为建不了 symlink，该用例反而通过。
+#    没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧
+#    报"回归"。
+host_os=linux
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) host_os=windows ;;
+esac
 known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' |
   while read -r name tag _rest; do
     [ -n "$name" ] || continue
@@ -216,7 +231,9 @@ known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' |
       "")        printf '%s ' "$name" ;;
       @native)   [ "$MODE" = native ] && printf '%s ' "$name" ;;
       @wine)     [ "$MODE" = wine ]   && printf '%s ' "$name" ;;
-      *) echo "guest-suite: 基线条目 '$name' 的标注 '$tag' 无法识别（仅支持 @native/@wine）" >&2 ;;
+      @linux)    [ "$host_os" = linux ]   && printf '%s ' "$name" ;;
+      @windows)  [ "$host_os" = windows ] && printf '%s ' "$name" ;;
+      *) echo "guest-suite: 基线条目 '$name' 的标注 '$tag' 无法识别（支持 @native/@wine/@linux/@windows）" >&2 ;;
     esac
   done)
 regressions=; fixed=
