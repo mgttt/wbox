@@ -53,17 +53,17 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox import -t <IMAGE[:TAG]> <FILE>              从裸 rootfs tar 造一个镜像
   wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
   wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
-  wbox images                                      `wbox image list` 的兼容别名
-  wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
+  wbox images [-q]                                 `wbox image list` 的兼容别名（-q 只出引用）
+  wbox rmi [-f] <REF>...                           `wbox image rm` 的兼容别名（可给多个）
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
   wbox create [RUN OPTIONS] IMAGE|-- PROGRAM        保存容器配置但不启动
   wbox start <NAME>...                              启动 created/exited 容器
   wbox restart [-t <秒>] <NAME>...                  停掉再按原配置起来（见 PRD F9.26）
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
-  wbox image list | image ls
+  wbox image list [-q] | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image inspect <REF>...                      输出本地镜像的机器可读 JSON
-  wbox image rm [-f] <REF>                         删除已 pull 镜像的本地缓存
+  wbox image rm [-f] <REF>...                      删除已 pull 镜像的本地缓存
   wbox ps [-a] [-q]                                列出已登记的容器（-a 含已退出的残留；-q 只出名字）
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码

@@ -174,6 +174,7 @@ wbox
 | `logs -f` / `--tail` | 有 | F9.28：跟随到容器退出后自行结束；**认日志截断**，否则超上限后跟随会静默哑掉（门禁 LG.1–LG.4）|
 | `ps -q` / `rm -f` | 有 | F9.29：补齐 `wbox rm -f $(wbox ps -aq)` 这条清场惯用法；`-q` 只出名字，`-f` 先停再删（门禁 RMF.1–RMF.5）|
 | 多容器名一致性 | 有 | F9.30：`stop`/`pause`/`unpause` 也收多个名字（此前只有它们收一个，而 `kill`/`rm`/`start` 早就收多个）（门禁 RMF.6–RMF.7）|
+| `images -q` / `rmi` 多引用 | 有 | F9.31：**并修掉 IMAGE 列印缓存目录名、照抄去 rmi 用不了的缺陷**；补齐 `wbox rmi $(wbox images -q)`（门禁 IMQ.1–IMQ.3）|
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
@@ -230,7 +231,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.30 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.31 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -905,7 +906,8 @@ F9
 ├── F9.27 `wbox rename` / `wbox prune`        —— [done]（门禁 RN.1–RN.6）
 ├── F9.28 `logs -f` / `--tail`               —— [done]（门禁 LG.1–LG.4）
 ├── F9.29 `ps -q` / `rm -f`                  —— [done]（门禁 RMF.1–RMF.5）
-└── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
+├── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
+└── F9.31 `images -q` / `rmi` 多引用        —— [done]（门禁 IMQ.1–IMQ.3）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1037,6 +1039,25 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.31 `wbox images -q` / `rmi` 多引用** `[done]`（门禁 IMQ.1–IMQ.3）。
+
+做 `-q` 时先撞上一个**既有缺陷**：`wbox images` 的 IMAGE 列印的是**缓存目录名**
+（`library_lbetest`），而缓存目录名是 `ImageRef::cache_name` 把 `/` 扁平成 `_`
+之后的产物。用户照抄它去 `wbox rmi library_lbetest`，得到的是
+「镜像 'library/library_lbetest' 未 pull」——**列出来的名字喂不回给任何命令**，
+而 `images` 本身表面上是成功的。
+
+修法是从缓存目录三元组**还原**出可用引用。还原本身有歧义（`_` 既可能来自 `/`
+的扁平化，也可能本来就在仓库名里），但这里的做法是可证的：还原出候选引用后
+**再解析回去、算一遍缓存目录**，只有算出来与实际目录一致才采用。既然 `rmi`/`run`
+也都经同一个 `image_dir` 去定位，能这样往返的引用就一定指向这个目录——歧义留下的
+多个候选，操作上等价。往返对不上时（缓存被手工改过、跨版本布局变化）如实标注
+「缓存目录名，引用无法还原」，而不是给一个用不了的引用。
+
+顺带把目录遍历从打印函数里拆出来（`oci::list_refs`）：此前枚举逻辑焊死在
+`list()` 里，`-q` 想复用只能复制一份。`rmi` 同时改成收多个引用，走容器侧
+同一条批处理路径（`args::each_named`），于是 `wbox rmi $(wbox images -q)` 成立。
 
 **F9.30 多容器名一致性** `[done]`（门禁 RMF.6–RMF.7）。
 

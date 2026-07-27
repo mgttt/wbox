@@ -243,15 +243,61 @@ pub fn pull(
     Ok(())
 }
 
-/// `wbox image list`：扫描缓存目录，列出已拉取的镜像。
-pub fn list() -> crate::error::Result<u32> {
+/// 缓存里的一个镜像。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedImage {
+    /// **可直接喂回给别的命令**的引用（`wbox rmi`/`run`/`push` 都收）。
+    pub reference: String,
+    pub registry: String,
+    pub tag: String,
+    /// 层数；读不到时为 "-"。
+    pub layers: String,
+}
+
+/// 从缓存目录三元组还原一个**可用的**镜像引用。
+///
+/// # 为什么要"还原"而不是直接显示目录名
+///
+/// 缓存目录名是 [`ImageRef::cache_name`] 产出的：`library/demo` → `library_demo`。
+/// 此前 `wbox images` 直接把它印在 IMAGE 列里，于是用户看到 `library_demo`、
+/// 照抄去 `wbox rmi library_demo`，得到的是「镜像 'library/library_demo' 未 pull」
+/// ——**列出来的名字喂不回给任何命令**。
+///
+/// # 还原是有歧义的，但这里的做法是可证的
+///
+/// `_` 既可能来自 `/` 的扁平化，也可能本来就在仓库名里，单看目录名分不清。
+/// 但这不影响正确性：还原出候选引用后**再解析回去、算一遍缓存目录**，
+/// 只有算出来与实际目录一致才采用。既然 `rmi`/`run` 也都经同一个
+/// [`image_dir`] 去定位，能这样往返的引用就一定指向这个目录——歧义留下的
+/// 多个候选，操作上是等价的。
+///
+/// 往返对不上（缓存被手工改过、跨版本布局变化等）时返回 `None`，
+/// 调用方退回显示原始目录名并如实标注，而不是给一个用不了的引用。
+fn restore_reference(registry: &str, dir_name: &str, tag: &str) -> Option<String> {
+    let repo = dir_name.replace('_', "/");
+    let candidate = if registry == DEFAULT_REGISTRY {
+        format!("{}:{}", repo, tag)
+    } else {
+        format!("{}/{}:{}", registry, repo, tag)
+    };
+    let parsed = ImageRef::parse(&candidate, None).ok()?;
+    let ok = sanitize_segment(&parsed.registry) == registry
+        && parsed.cache_name() == dir_name
+        && sanitize_segment(&parsed.reference) == tag;
+    ok.then_some(candidate)
+}
+
+/// 枚举缓存里的镜像。
+///
+/// 与打印分开：`wbox images` 要表格、`wbox images -q` 要裸引用、以后若要
+/// 别的用途也不必再抄一遍目录遍历。此前这段逻辑焊死在打印函数里，
+/// 想复用只能复制。
+pub fn list_refs() -> crate::error::Result<Vec<CachedImage>> {
     let root = cache_root()?;
+    let mut out = Vec::new();
     if !root.is_dir() {
-        println!("（缓存为空：{} 不存在）", root.display());
-        return Ok(0);
+        return Ok(out);
     }
-    println!("{:<28} {:<32} {:<20} LAYERS", "REGISTRY", "IMAGE", "TAG");
-    let mut count = 0u32;
     let mut registries: Vec<_> = std::fs::read_dir(&root)
         .context("读取镜像缓存目录失败")
         .ctx(ErrKind::Registry)?
@@ -265,7 +311,7 @@ pub fn list() -> crate::error::Result<u32> {
             .unwrap_or_default();
         names.sort_by_key(|e| e.file_name());
         for name_entry in names {
-            let name = name_entry.file_name().to_string_lossy().into_owned();
+            let dir_name = name_entry.file_name().to_string_lossy().into_owned();
             let mut tags: Vec<_> = std::fs::read_dir(name_entry.path())
                 .map(|rd| rd.filter_map(|e| e.ok()).collect())
                 .unwrap_or_default();
@@ -278,12 +324,35 @@ pub fn list() -> crate::error::Result<u32> {
                     .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                     .and_then(|v| v.as_array().map(|a| a.len().to_string()))
                     .unwrap_or_else(|| "-".to_string());
-                println!("{:<28} {:<32} {:<20} {}", registry, name, tag, layers);
-                count += 1;
+                let reference = restore_reference(&registry, &dir_name, &tag)
+                    // 还原不出来时如实标注，而不是给一个用不了的引用
+                    .unwrap_or_else(|| format!("{}（缓存目录名，引用无法还原）", dir_name));
+                out.push(CachedImage {
+                    reference,
+                    registry: registry.clone(),
+                    tag,
+                    layers,
+                });
             }
         }
     }
-    if count == 0 {
+    Ok(out)
+}
+
+/// `wbox image list`：列出已拉取的镜像。
+pub fn list() -> crate::error::Result<u32> {
+    let root = cache_root()?;
+    if !root.is_dir() {
+        println!("（缓存为空：{} 不存在）", root.display());
+        return Ok(0);
+    }
+    let rows = list_refs()?;
+    // IMAGE 列给的是**能直接照抄去用**的引用，不是缓存目录名
+    println!("{:<28} {:<40} {:<20} LAYERS", "REGISTRY", "IMAGE", "TAG");
+    for r in &rows {
+        println!("{:<28} {:<40} {:<20} {}", r.registry, r.reference, r.tag, r.layers);
+    }
+    if rows.is_empty() {
         println!("（无已缓存镜像）");
     }
     Ok(0)
@@ -491,6 +560,25 @@ mod tests {
         assert_eq!(r.qualified_ref(), "quay.io/acme/app:2");
         let r = ImageRef::parse("localhost:5000/app@sha256:abc", None).unwrap();
         assert_eq!(r.qualified_ref(), "localhost:5000/app@sha256:abc");
+    }
+
+    /// 列出来的引用必须**喂得回去**：还原 → 解析 → 再算缓存目录，必须回到原处。
+    /// 此前 IMAGE 列印的是缓存目录名（`library_demo`），照抄去 rmi 会得到
+    /// 「镜像 'library/library_demo' 未 pull」——列出来的名字谁都用不了。
+    #[test]
+    fn restored_reference_round_trips_to_the_same_cache_dir() {
+        let r = restore_reference(DEFAULT_REGISTRY, "library_demo", "latest").unwrap();
+        assert_eq!(r, "library/demo:latest");
+        let back = ImageRef::parse(&r, None).unwrap();
+        assert_eq!(back.cache_name(), "library_demo");
+
+        // 多级仓库名同样要往返得回来
+        let r = restore_reference("quay.io", "org_team_app", "1").unwrap();
+        assert_eq!(r, "quay.io/org/team/app:1");
+        assert_eq!(ImageRef::parse(&r, None).unwrap().cache_name(), "org_team_app");
+
+        // 往返对不上的（这里用一个空目录名）不许硬给引用
+        assert!(restore_reference(DEFAULT_REGISTRY, "", "latest").is_none());
     }
 
     #[test]

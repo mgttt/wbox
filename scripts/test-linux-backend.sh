@@ -2030,6 +2030,46 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== IMQ images -q / rmi 多引用（PRD F9.31）==="
+
+# 判据是**列出来的名字喂得回去**。此前 IMAGE 列印的是缓存目录名
+# （library_lbetest），照抄去 rmi 会得到「镜像 'library/library_lbetest' 未 pull」
+# ——列出来的名字谁都用不了，而表面上命令是成功的。
+iout=$(HOME=$WORK/home "$WBOX_ABS" images 2>&1)
+if printf '%s' "$iout" | grep -q 'library/lbetest:latest' \
+   && ! printf '%s' "$iout" | awk '$2=="library_lbetest"{f=1} END{exit !f}'; then
+  report PASS "IMQ.1 images 的 IMAGE 列给的是可直接使用的引用（非缓存目录名）"
+else
+  report FAIL "IMQ.1 IMAGE 列" "输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+
+# -q 只出引用：表头、说明行混进去都会被当成镜像引用传下去
+iout=$(HOME=$WORK/home "$WBOX_ABS" images -q 2>&1); irc=$?
+ibad=$(printf '%s\n' "$iout" | grep -vc ':')
+if [ "$irc" -eq 0 ] && printf '%s' "$iout" | grep -qx 'library/lbetest:latest' && [ "$ibad" -eq 0 ]; then
+  report PASS "IMQ.2 images -q 只出引用（无表头、无说明行）"
+else
+  report FAIL "IMQ.2 images -q" "rc=$irc 输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+
+# 端到端：照抄 -q 的输出去 rmi（多引用），在**独立 HOME** 里做，
+# 免得把别的组还要用的 lbetest 镜像删掉。
+IMH=$WORK/imqhome
+rm -rf "$IMH" && mkdir -p "$IMH"
+for n in library_d1 library_d2 org_team_app; do
+  mkdir -p "$IMH/.wbox/images/registry-1.docker.io/$n/latest/rootfs"
+  echo '[]' > "$IMH/.wbox/images/registry-1.docker.io/$n/latest/layers.json"
+done
+iout=$(HOME=$IMH "$WBOX_ABS" rmi $(HOME=$IMH "$WBOX_ABS" images -q) 2>&1); irc=$?
+ileft=$(HOME=$IMH "$WBOX_ABS" images -q 2>&1 | grep -c ':')
+if [ "$irc" -eq 0 ] && [ "$ileft" -eq 0 ]; then
+  report PASS "IMQ.3 wbox rmi \$(wbox images -q) 清空缓存（含多级仓库名 org/team/app）"
+else
+  report FAIL "IMQ.3 rmi 多引用" "rc=$irc 剩余=$ileft 输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+rm -rf "$IMH"
+
+echo
 echo "=== RMF ps -q / rm -f（PRD F9.29）==="
 
 # 这一组只碰状态记录，不需要镜像；用独立 HOME + 宿主程序模式，与别的组无关。
