@@ -785,6 +785,12 @@ error: unsupported executable; we need:\n\
     m->flags = SetFlag(m->flags, FLAGS_IF, 1);
     m->system->cr0 = CR0_PE | CR0_MP | CR0_ET | CR0_PG;
     m->system->cr3 = AllocatePageTable(m->system);
+    if (m->system->cr3 == (u64)-1) {
+      fprintf(stderr,
+              "wbox-linux: initial AllocatePageTable failed: errno=%d (%s)\n",
+              errno, strerror(errno));
+      exit(EXIT_FAILURE_EXEC_FAILED);
+    }
     if (IsBinFile(prog)) {
       elf->base = 0x400000;
       LoadFlatExecutable(m, elf->base, prog, map, mapsize, fd);

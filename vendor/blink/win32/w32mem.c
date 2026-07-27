@@ -585,6 +585,16 @@ static DWORD W32Prot(int prot) {
   return PAGE_NOACCESS;
 }
 
+static void W32ReportMemoryError(const char *api, const char *context,
+                                 const void *addr, size_t len,
+                                 DWORD protection, DWORD error) {
+  fprintf(stderr,
+          "wbox-linux: %s failed in %s: addr=%p len=%#zx protect=%#lx "
+          "GetLastError=%lu\n",
+          api, context, addr, len, (unsigned long)protection,
+          (unsigned long)error);
+}
+
 static int g_vabits;
 int WboxMemVabits(void) {
   return g_vabits;
@@ -1022,7 +1032,11 @@ int WboxMemRecommitIfOurs(void *p) {
 }
 
 static void *W32Commit(uintptr_t a, size_t len, int prot) {
-  if (!VirtualAlloc((LPVOID)a, len, MEM_COMMIT, W32Prot(prot))) {
+  DWORD protection = W32Prot(prot);
+  if (!VirtualAlloc((LPVOID)a, len, MEM_COMMIT, protection)) {
+    DWORD error = GetLastError();
+    W32ReportMemoryError("VirtualAlloc", "guest mapping commit", (void *)a,
+                         len, protection, error);
     return MAP_FAILED;
   }
   if (IvInsert(a, a + len) == -1) {
@@ -1151,7 +1165,14 @@ void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
     // writable, so always drop to RW first and restore afterwards.
     if (!(prot & PROT_WRITE)) {
       DWORD old;
-      VirtualProtect((LPVOID)r, len, PAGE_READWRITE, &old);
+      if (!VirtualProtect((LPVOID)r, len, PAGE_READWRITE, &old)) {
+        DWORD error = GetLastError();
+        W32ReportMemoryError("VirtualProtect", "file mapping populate", r,
+                             len, PAGE_READWRITE, error);
+        munmap(r, len);
+        errno = W32ErrFromHost(error);
+        return MAP_FAILED;
+      }
     }
     while (done < len) {
       ssize_t rc = W32Pread64(fd, p + done, len - done, off + (int64_t)done);
@@ -1160,7 +1181,16 @@ void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
     }
     if (!(prot & PROT_WRITE)) {
       DWORD old;
-      VirtualProtect((LPVOID)r, len, W32Prot(prot), &old);
+      DWORD protection = W32Prot(prot);
+      if (!VirtualProtect((LPVOID)r, len, protection, &old)) {
+        DWORD error = GetLastError();
+        W32ReportMemoryError("VirtualProtect",
+                             "file mapping protection restore", r, len,
+                             protection, error);
+        munmap(r, len);
+        errno = W32ErrFromHost(error);
+        return MAP_FAILED;
+      }
     }
   }
   return r;
