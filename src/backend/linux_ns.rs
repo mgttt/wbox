@@ -462,12 +462,12 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //    namespace 后，宿主 cgroup 文件的写入会因 uid 映射被拒。
     apply_limits(p)?;
 
-    // 1. 建 user + mount + pid (+ net) namespace。user namespace 让非 root 也能
+    // 2. 建 user + mount + pid (+ net) namespace。user namespace 让非 root 也能
     //    获得新 mount/net namespace 内的 CAP_SYS_ADMIN（rootless 的关键）。
     if libc::unshare(p.unshare_flags) != 0 {
         return Err(err());
     }
-    // 2. 身份映射。顺序不能反：gid_map 之前必须 setgroups=deny。
+    // 3. 身份映射。顺序不能反：gid_map 之前必须 setgroups=deny。
     if write_proc_self(p.p_setgroups.as_ptr(), b"deny") != 0 {
         return Err(err());
     }
@@ -478,7 +478,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Err(err());
     }
 
-    // 3. PID namespace 只对**之后**创建的进程生效，故再 fork 一次：
+    // 4. PID namespace 只对**之后**创建的进程生效，故再 fork 一次：
     //    孙进程才是新 namespace 的 PID 1，中间进程只负责转发退出码。
     let pid = libc::fork();
     if pid < 0 {
@@ -515,12 +515,12 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Err(err());
     }
 
-    // 3b. 新 netns 里的 loopback 默认 DOWN，拉起来（见 bring_up_loopback）。
+    // 4b. 新 netns 里的 loopback 默认 DOWN，拉起来（见 bring_up_loopback）。
     if p.new_netns {
         bring_up_loopback();
     }
 
-    // 4. 把根挂载点改成 private，否则后续挂载会传播回宿主。
+    // 5. 把根挂载点改成 private，否则后续挂载会传播回宿主。
     //    宿主程序模式下没有后续挂载，但仍然要做：mount namespace 只有在根被
     //    置为 private 后才真正与宿主解耦（否则 guest 自己的挂载会漏回宿主）。
     if libc::mount(
@@ -539,7 +539,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Ok(());
     };
 
-    // 5. pivot_root 要求新根是一个挂载点，故把 rootfs bind 到自身。
+    // 6. pivot_root 要求新根是一个挂载点，故把 rootfs bind 到自身。
     if libc::mount(
         r.rootfs.as_ptr(),
         r.rootfs.as_ptr(),
@@ -550,7 +550,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     {
         return Err(err());
     }
-    // 5b. 最小设备集：逐个 bind 宿主设备节点到 rootfs/dev/*。
+    // 6b. 最小设备集：逐个 bind 宿主设备节点到 rootfs/dev/*。
     //     必须在 pivot_root **之前**——切根后旧根 detach，宿主 /dev 就没了。
     //     单个设备失败不致命（例如 rootfs 只读时目标文件不存在），
     //     缺哪个由 guest 自己报错，比整个容器起不来好。
@@ -563,7 +563,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
             std::ptr::null(),
         );
     }
-    // 6. 切根。put_old 必须在新根之内。
+    // 7. 切根。put_old 必须在新根之内。
     if libc::chdir(r.rootfs.as_ptr()) != 0 {
         return Err(err());
     }
@@ -573,7 +573,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     if libc::chdir(p.c_root.as_ptr()) != 0 {
         return Err(err());
     }
-    // 7. 挂 /proc（新 PID namespace 的视图；ps/top 之类依赖它）。
+    // 8. 挂 /proc（新 PID namespace 的视图；ps/top 之类依赖它）。
     //    rootfs 里没有 /proc 目录时静默跳过——镜像不含它属正常情况，
     //    不该因此让整个容器起不来。
     libc::mount(
@@ -583,7 +583,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
         0,
         std::ptr::null(),
     );
-    // 8. 卸掉旧根：不 detach 的话宿主整个文件系统仍在容器内可见，隔离就是假的。
+    // 9. 卸掉旧根：不 detach 的话宿主整个文件系统仍在容器内可见，隔离就是假的。
     if libc::umount2(r.c_put_old_in_new.as_ptr(), libc::MNT_DETACH) != 0 {
         return Err(err());
     }
