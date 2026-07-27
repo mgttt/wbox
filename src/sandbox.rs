@@ -48,10 +48,7 @@ pub fn run_container(
     // ---- capability 属性数组（借用，生命周期覆盖整个创建过程）----
     let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
         .iter()
-        .map(|c| SID_AND_ATTRIBUTES {
-            Sid: c.sid,
-            Attributes: 0,
-        })
+        .map(CapabilitySid::enabled_attributes)
         .collect();
 
     let mut sec_caps = SECURITY_CAPABILITIES {
@@ -549,6 +546,15 @@ mod real_windows_tests {
         panic!("Windows 系统目录中未找到 hostname.exe");
     }
 
+    fn curl_exe() -> String {
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        let path = std::path::Path::new(&root)
+            .join("System32")
+            .join("curl.exe");
+        assert!(path.is_file(), "Windows 系统目录中未找到 curl.exe");
+        path.to_string_lossy().into_owned()
+    }
+
     fn unique_name(label: &str) -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -605,6 +611,72 @@ mod real_windows_tests {
         let cmdline = build_cmdline(&[exe]).unwrap();
         let rc = run_container(&profile, &[], &cmdline, &workdir, &job, &env).unwrap();
         assert_eq!(rc, 0);
+    }
+
+    /// Public-network behavior probe. Ignored by default because it deliberately
+    /// depends on a public endpoint; the host preflight separates endpoint or
+    /// policy failures from AppContainer capability wiring failures.
+    #[test]
+    #[ignore = "requires host access to http://1.1.1.1"]
+    fn internet_client_controls_numeric_ip_access() {
+        const URL: &str = "http://1.1.1.1/cdn-cgi/trace";
+        let exe = curl_exe();
+        let args = ["-sS", "--connect-timeout", "8", "--output", "-", URL];
+
+        let host = std::process::Command::new(&exe)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("无法执行宿主 curl.exe");
+        assert!(
+            host.success(),
+            "宿主无法访问测试端点，不能判定 AppContainer 网络策略: {host}"
+        );
+
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+        let cmd = std::iter::once(exe.clone())
+            .chain(args.into_iter().map(str::to_string))
+            .collect::<Vec<_>>();
+        let cmdline = build_cmdline(&cmd).unwrap();
+
+        let denied_caps = Vec::new();
+        let denied_profile = create_profile(&unique_name("net_deny"), &denied_caps);
+        let denied_job = Job::create(Limits::default()).unwrap();
+        let denied = run_container(
+            &denied_profile,
+            &denied_caps,
+            &cmdline,
+            &workdir,
+            &denied_job,
+            &env,
+        )
+        .unwrap();
+        assert_ne!(
+            denied, 0,
+            "默认 AppContainer 不应访问公网数值 IP；curl rc={denied}"
+        );
+
+        let allowed_caps = vec![CapabilitySid::internet_client().unwrap()];
+        let allowed_profile = create_profile(&unique_name("net_allow"), &allowed_caps);
+        let allowed_job = Job::create(Limits::default()).unwrap();
+        let allowed = run_container(
+            &allowed_profile,
+            &allowed_caps,
+            &cmdline,
+            &workdir,
+            &allowed_job,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            allowed, 0,
+            "INTERNET_CLIENT 应允许访问宿主已证实可达的公网数值 IP；curl rc={allowed}"
+        );
     }
 
     /// 命令行为空 → build_cmdline 报 args 错误（不调 CreateProcess）。

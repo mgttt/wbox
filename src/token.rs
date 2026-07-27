@@ -20,6 +20,10 @@ use windows_sys::Win32::Security::{
 
 use crate::error::{ErrKind, KindExt, Result};
 
+// winnt.h: an enabled SID participates in access checks. windows-sys 0.59
+// exposes this under an optional SystemServices feature that wbox does not need.
+const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+
 /// RAII 包装：AppContainer profile（命名内核隔离配置）。
 ///
 /// 除非调用 `keep()`（对应 --keep-profile），Drop 时自动删除 profile。
@@ -46,10 +50,7 @@ impl AppContainerProfile {
         let description_wide = to_wide(&format!("wbox 进程容器：{}", name));
         let mut attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
             .iter()
-            .map(|c| SID_AND_ATTRIBUTES {
-                Sid: c.sid,
-                Attributes: 0, // capability 组不附带 attribute 标志
-            })
+            .map(CapabilitySid::enabled_attributes)
             .collect();
         let mut sid: PSID = std::ptr::null_mut();
 
@@ -193,6 +194,14 @@ impl CapabilitySid {
     pub fn desc(&self) -> &'static str {
         self.desc
     }
+
+    /// Return the enabled form required for capability access checks.
+    pub fn enabled_attributes(&self) -> SID_AND_ATTRIBUTES {
+        SID_AND_ATTRIBUTES {
+            Sid: self.sid,
+            Attributes: SE_GROUP_ENABLED,
+        }
+    }
 }
 
 /// 把 SID 转成字符串形式（S-1-15-2-...）。
@@ -329,6 +338,11 @@ mod real_windows_tests {
             s
         );
         assert_eq!(cap.desc(), "INTERNET_CLIENT");
+        assert_eq!(
+            cap.enabled_attributes().Attributes,
+            SE_GROUP_ENABLED,
+            "capability SID 必须启用后才参与访问检查"
+        );
     }
 
     /// profile 名超长（>64 字符）应在 create 阶段报错（如果上游加了前置校验），
