@@ -23,6 +23,10 @@
 use crate::error::{Result, WboxError};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const OPERATION_LOCK: &str = ".operations.lock";
+const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 状态根目录：`~/.wbox/run`（与镜像缓存同在 `~/.wbox` 下，便于统一清理）。
 pub fn run_root() -> Result<PathBuf> {
@@ -121,6 +125,28 @@ fn try_lock_exclusive(path: &Path) -> Option<File> {
     }
 }
 
+/// 串行化状态树的复合变更。单个容器的 `lock` 证明 owner 是否存活，但不能保护
+/// “检查存活状态 → 删除旧目录/创建新目录”这一整段操作；没有根锁时，`rm`
+/// 可以在 `register` 刚取得容器锁后删掉它的目录。
+fn lock_operations(root: &Path) -> Result<File> {
+    std::fs::create_dir_all(root)
+        .map_err(|e| WboxError::args(format!("创建状态根目录 '{}' 失败：{}", root.display(), e)))?;
+    let path = root.join(OPERATION_LOCK);
+    let started = Instant::now();
+    loop {
+        if let Some(lock) = try_lock_exclusive(&path) {
+            return Ok(lock);
+        }
+        if started.elapsed() >= OPERATION_LOCK_TIMEOUT {
+            return Err(WboxError::args(format!(
+                "等待状态操作锁 '{}' 超时（是否有卡住的 wbox？）",
+                path.display()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Windows：`share_mode(0)` 表示打开期间不允许他人共享访问，
 /// 别的进程再开就会拿到共享冲突——与 flock 等效。
 #[cfg(windows)]
@@ -185,9 +211,19 @@ fn purge_dir(dir: &Path) {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        // Windows 不允许删除仍被打开的锁文件，因此必须先显式关闭句柄。
+        let root = self.dir.parent().map(Path::to_path_buf);
+        // 先持有根操作锁、再释放 owner 锁：rm 若先取得根锁会看到 Running 并退出；
+        // 本路径若先取得根锁，则没有 register/rm 能插入“释放 → 删除”的窗口。
+        if let Some(root) = root {
+            if let Ok(_operation_lock) = lock_operations(&root) {
+                // Windows 不允许删除仍被打开的锁文件，必须先显式关闭句柄。
+                drop(self.lock.take());
+                purge_dir(&self.dir);
+                return;
+            }
+        }
+        // 取根锁失败时宁可留下可识别的 Exited 记录，也不能无锁删除并发登记。
         drop(self.lock.take());
-        purge_dir(&self.dir);
     }
 }
 
@@ -195,6 +231,10 @@ impl Drop for Registration {
 /// "以为还在跑的那个"悄无声息地从列表里消失（PRD F8.c）。
 pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration> {
     let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
     if dir.exists() {
         match liveness(&dir) {
             Liveness::Running => {
@@ -204,7 +244,7 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
                     // 运行中的容器——那样等于指使用户去撞一堵墙。
                     "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
                     name
-                )))
+                )));
             }
             // 已亡的残留：可以安全复用，直接清掉重来
             Liveness::Exited => purge_dir(&dir),
@@ -238,8 +278,30 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
 /// **运行中的一律拒绝**：`rm` 只是删记录，并不会停掉容器；真删了只会让一个
 /// 还在跑的容器从 `ps` 里消失，等于把它变成没人管得到的孤儿。要停容器是
 /// F8.3 `stop` 的事，两件事不能混。
+#[cfg(test)]
+fn pause_remove_after_liveness_for_test() {
+    let Some(sync) = std::env::var_os("WBOX_RUNSTATE_PAUSE_REMOVE").map(PathBuf::from) else {
+        return;
+    };
+    std::fs::write(sync.join("remove-checked"), b"").unwrap();
+    let release = sync.join("release-remove");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !release.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "等待 remove 测试同步信号超时：{}",
+            release.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 pub fn remove(name: &str) -> Result<()> {
     let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
     if !dir.exists() {
         return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
     }
@@ -249,6 +311,8 @@ pub fn remove(name: &str) -> Result<()> {
             name
         ))),
         Liveness::Exited => {
+            #[cfg(test)]
+            pause_remove_after_liveness_for_test();
             purge_dir(&dir);
             if dir.exists() {
                 return Err(WboxError::args(format!(
@@ -302,6 +366,7 @@ pub fn list() -> Result<Vec<(Entry, Liveness)>> {
 mod tests {
     use super::*;
     use crate::testenv::EnvGuard;
+    use std::process::{Child, Command};
 
     fn tmp_home(tag: &str) -> (PathBuf, EnvGuard) {
         let d = std::env::temp_dir().join(format!("wbox-rs-{}-{}", std::process::id(), tag));
@@ -416,5 +481,94 @@ mod tests {
         assert_eq!(Entry::from_json(&e.to_json()).unwrap(), e);
         assert!(Entry::from_json("{}").is_none());
         assert!(Entry::from_json("nonsense").is_none());
+    }
+
+    fn wait_for_path(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "等待子进程信号超时：{}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_child(mut child: Child, label: &str) {
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{} 子进程失败：{}", label, status);
+    }
+
+    /// 只由 `cross_process_remove_register_is_atomic` 启动。使用真实测试子进程，
+    /// 避免同进程文件锁语义掩盖 Windows/Linux 的跨进程差异。
+    #[test]
+    fn cross_process_actor() {
+        let Ok(mode) = std::env::var("WBOX_RUNSTATE_ACTOR") else {
+            return;
+        };
+        let sync = PathBuf::from(std::env::var_os("WBOX_RUNSTATE_SYNC").unwrap());
+        match mode.as_str() {
+            "remove" => {
+                remove("race").unwrap();
+            }
+            "register" => {
+                let reg = register("race", &["cmd".into()], "(native)").unwrap();
+                std::fs::write(sync.join("registered"), b"").unwrap();
+                wait_for_path(&sync.join("release-register"));
+                drop(reg);
+            }
+            other => panic!("未知 actor：{}", other),
+        }
+    }
+
+    #[test]
+    fn cross_process_remove_register_is_atomic() {
+        let (home, _g) = tmp_home("cross-process-race");
+        let sync = home.join("sync");
+        std::fs::create_dir_all(&sync).unwrap();
+        let stale = dir_for("race").unwrap();
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("lock"), b"").unwrap();
+
+        let exe = std::env::current_exe().unwrap();
+        let spawn_actor = |mode: &str| {
+            let mut command = Command::new(&exe);
+            command
+                .arg("--exact")
+                .arg("runstate::tests::cross_process_actor")
+                .arg("--nocapture")
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("WBOX_RUNSTATE_ACTOR", mode)
+                .env("WBOX_RUNSTATE_SYNC", &sync);
+            if mode == "remove" {
+                command.env("WBOX_RUNSTATE_PAUSE_REMOVE", &sync);
+            }
+            command.spawn().unwrap()
+        };
+
+        let remover = spawn_actor("remove");
+        wait_for_path(&sync.join("remove-checked"));
+        let registrar = spawn_actor("register");
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !sync.join("registered").exists(),
+            "register 必须等待 remove 的复合状态变更完成"
+        );
+
+        std::fs::write(sync.join("release-remove"), b"").unwrap();
+        wait_child(remover, "remove");
+        wait_for_path(&sync.join("registered"));
+        assert_eq!(liveness(&stale), Liveness::Running);
+        assert!(
+            stale.join("meta.json").is_file(),
+            "remove 不得删除随后完成的 register 记录"
+        );
+
+        std::fs::write(sync.join("release-register"), b"").unwrap();
+        wait_child(registrar, "register");
+        assert!(!stale.exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
