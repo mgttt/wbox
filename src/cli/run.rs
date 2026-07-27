@@ -33,6 +33,8 @@ pub struct RunOptions {
     pub auto_remove: bool,
     /// `-v host:guest[:ro]` 卷挂载（PRD F9.1）
     pub volumes: Vec<backend::VolumeMount>,
+    /// `-p host:guest` 端口转发（PRD F9.2，仅 Linux）
+    pub ports: Vec<crate::portfwd::PortMap>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -55,6 +57,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         detach: false,
         auto_remove: false,
         volumes: Vec::new(),
+        ports: Vec::new(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -153,11 +156,16 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             // `-v/--volume` 已实现（见上）。这里留下的是**仍未实现**的几个：
             // 明确报错而不是静默忽略——静默忽略会让用户以为端口已经映射好了。
             // `--mount` 是另一套语法，即使 `-v` 能用也不代表它能用。
-            "-p" | "--publish" | "-P" => {
-                return Err(WboxError::args(format!(
-                    "选项 '{}' 不支持：端口映射尚未实现（PRD F9.2，需先取证 rootless 网络方案）",
-                    a
-                )));
+            "-p" | "--publish" => {
+                let v = super::args::take_value(args, &mut i, "--publish")?;
+                opts.ports.push(crate::portfwd::parse_port(&v)?);
+            }
+            // -P 是"发布镜像声明的所有端口"，需要读 config 的 ExposedPorts，
+            // 与显式 -p 是两件事，尚未实现——明确报错而不是当成 -p 的别名。
+            "-P" => {
+                return Err(WboxError::args(
+                    "选项 '-P' 不支持：自动发布镜像声明的全部端口尚未实现；请用 -p HOST:GUEST",
+                ));
             }
             "--mount" => {
                 return Err(WboxError::args(
@@ -198,6 +206,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         cmd,
         env,
         volumes: opts.volumes.clone(),
+        ports: opts.ports.clone(),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -205,6 +214,10 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
 
 pub fn cmd_run(args: &[String]) -> Result<u32> {
     let opts = parse_run_args(args)?;
+    // 这两条必须在 --detach 分叉**之前**：否则父进程照常返回容器名，真正的
+    // 拒绝只会写进 supervisor 的日志里，用户还以为起成功了。
+    crate::portfwd::reject_if_unsupported(&opts.ports)?;
+    crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)?;
 
     // --detach：把自己再拉起一份作为 supervisor，父进程立刻返回。
     // 容器的存活由 supervisor 持有（Job kill-on-close / PDEATHSIG 都绑在它身上），
@@ -379,6 +392,7 @@ fn spawn_registered(
     // 前台容器同样可以被另一个终端 exec 进去。
     #[cfg(target_os = "linux")]
     crate::runstate::spawn_container_pid_recorder(spec.name.clone());
+    crate::portfwd::spawn_forwarders(spec.name.clone(), spec.ports.clone());
     let rc = b.spawn(spec, prepared);
     if supervised {
         // 退出后再收一次尾。这条不是冗余：看门狗每 500ms 才看一眼，而一个
@@ -600,10 +614,10 @@ mod tests {
     #[test]
     fn parse_rejects_unimplemented_docker_capabilities() {
         for args in [
-            &["-p", "8080:80", "alpine"][..],
-            &["--publish", "8080:80", "alpine"][..],
+            // -v/--volume（F9.1）与 -p/--publish（F9.2）已实现，不再在此列。
+            // 仍未实现的是：-P 要读镜像 config 的 ExposedPorts，与显式 -p 是两件事；
+            // --mount 是另一套语法，-p/-v 能用不代表它能用。
             &["-P", "alpine"][..],
-            // -v/--volume 已实现（F9.1），不再在此列；--mount 是另一套语法，仍不支持
             &["--mount", "type=bind,src=/host,dst=/guest", "alpine"][..],
         ] {
             let err = parse(args).unwrap_err();

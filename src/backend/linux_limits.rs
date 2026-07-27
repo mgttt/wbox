@@ -405,6 +405,7 @@ mod tests {
             cmd: vec!["/bin/true".to_string()],
             env: vec![],
             volumes: Vec::new(),
+            ports: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

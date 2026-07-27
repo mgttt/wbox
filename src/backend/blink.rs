@@ -354,6 +354,7 @@ mod tests {
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
             volumes: Vec::new(),
+            ports: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

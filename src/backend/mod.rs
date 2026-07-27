@@ -109,6 +109,8 @@ pub struct RunSpec {
     pub env: Vec<(String, String)>,
     /// 卷 / 绑定挂载（PRD F9.1）
     pub volumes: Vec<VolumeMount>,
+    /// 端口转发（PRD F9.2，仅 Linux 宿主）
+    pub ports: Vec<crate::portfwd::PortMap>,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；

@@ -207,6 +207,7 @@ mod tests {
                 ("WBOX_VA_BITS".to_string(), "43".to_string()),
             ],
             volumes: Vec::new(),
+            ports: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

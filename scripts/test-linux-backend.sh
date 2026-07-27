@@ -483,6 +483,69 @@ else
 fi
 
 echo
+echo "=== N2 端口转发（PRD F9.2）==="
+
+# 判据说明：容器内起一个 TCP 监听，宿主侧连 -p 指定的端口。用 python3 起监听
+# ——busybox 的 nc 各版本行为不一，而这条要测的是转发链路，不该被 applet 差异
+# 干扰。没有 python3 就整组 SKIP。
+if ! command -v python3 >/dev/null 2>&1; then
+  absent "N2 端口转发" "缺 python3（容器内监听夹具）"
+else
+LISTEN_PY='
+import socket
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",9099)); s.listen(5)
+while True:
+    c,_=s.accept(); c.sendall(b"HELLO_FROM_CONTAINER\n"); c.close()
+'
+HOME=$WORK/home "$WBOX_ABS" run -d --name netfwd -p 18099:9099 \
+  -- python3 -c "$LISTEN_PY" >/dev/null 2>&1
+sleep 3
+got=$(timeout 6 python3 -c "
+import socket
+try:
+    s=socket.create_connection(('127.0.0.1',18099),timeout=4)
+    print(s.recv(100).decode().strip())
+except Exception as e:
+    print('ERR:%s' % type(e).__name__)
+" 2>&1)
+if printf '%s' "$got" | grep -q HELLO_FROM_CONTAINER; then
+  report PASS "N2.1 -p 把宿主端口转发进容器 netns"
+else
+  report FAIL "N2.1 -p 转发" "宿主侧收到: $(printf '%s' "$got" | head -c 120)"
+fi
+HOME=$WORK/home "$WBOX_ABS" stop netfwd >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm netfwd >/dev/null 2>&1
+
+# N2.2 **安全断言**：不给 -p 时容器端口不得从宿主可达。转发能用不等于隔离还在，
+# 这条要确认默认仍是隔离的——否则 -p 就成了"顺手把容器网络暴露出去"。
+HOME=$WORK/home "$WBOX_ABS" run -d --name noport \
+  -- python3 -c "$LISTEN_PY" >/dev/null 2>&1
+sleep 2
+leak=$(timeout 5 python3 -c "
+import socket
+try:
+    s=socket.create_connection(('127.0.0.1',9099),timeout=2); print('LEAK')
+except Exception: print('ISOLATED')
+" 2>&1)
+if printf '%s' "$leak" | grep -q ISOLATED; then
+  report PASS "N2.2 未给 -p 时容器端口不从宿主可达（默认仍隔离）"
+else
+  report FAIL "N2.2 默认隔离" "宿主竟能连到容器端口：$leak"
+fi
+HOME=$WORK/home "$WBOX_ABS" stop noport >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm noport >/dev/null 2>&1
+fi
+
+# N2.3 -p 与 --allow-network 语义冲突，必须报错而不是静默二选一
+cout=$(HOME=$WORK/home "$WBOX_ABS" run -p 1:1 --allow-network -- /bin/true 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "不能同时使用"; then
+  report PASS "N2.3 -p 与 --allow-network 冲突时报错"
+else
+  report FAIL "N2.3 冲突检测" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 150)"
+fi
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

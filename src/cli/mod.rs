@@ -46,6 +46,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --max-procs <N>   最大进程数，默认 0 = 不限
   -w, --workdir <DIR>
                      容器工作目录（"镜像根"），默认当前目录（仅原生模式）
+  -p, --publish <HOST:GUEST>
+                     把宿主端口转发到容器内端口（**仅 TCP**，仅 Linux 宿主）
   -v, --volume <HOST:GUEST[:ro|:rw]>
                      Linux 宿主 bind volume；宿主路径必须存在，禁止覆盖容器根
   --network <MODE>  兼容模式：none = 默认断网；host = 等价 --allow-network
@@ -235,6 +237,7 @@ mod tests {
             cmd: merged,
             env: cfg.env.clone(),
             volumes: Vec::new(),
+            ports: Vec::new(),
             verbose: false,
             env_pass_all: false,
         };
