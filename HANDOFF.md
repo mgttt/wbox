@@ -195,12 +195,16 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
 - 源码与脚本里的 `TODO`/`FIXME`/`XXX`/`HACK`/`todo!`/`unimplemented!`：
   **0 个**（唯一命中是 `mktemp` 模板里的 `XXXXXX`，假阳性）。
   复现：`grep -rnE "TODO|FIXME|XXX|HACK|unimplemented!|todo!" src/ scripts/`
-- `PRD.md` §4.9 `[TODO-PLAN]` 十二项：**十一项已完成**，只剩 **W3**
-  （Windows 文件系统写重定向取证，`[Windows agent]`，需真 Windows 机器）。
+- `PRD.md` §4.9 `[TODO-PLAN]`：原十二项**十一项已完成**，只剩 **W3**
+  （Windows 文件系统写重定向取证，需真 Windows 机器）。
+  另新立 **W6/W7/W8** 三条 Q1 可做项（临时目录私有化 / 只读授权粒度 /
+  capability 粒度），它们由 Linux 侧提出、**可行性未经实测**，标着「待验证」——
+  接手的 Windows agent 先验证再实现，验证不成立就改成「不做」并写明原因。
 - PRD 里的 `[partial]` 共 6 处（F9.1/F9.7/F9.9/F9.13/F9.14/F9.21），
   **都是已论证的取舍而非待办**，各自条目里写明了为什么只做到这一步。
 
-结论：**除 W3 外没有未结的待办**。W3 无法在纯 Linux 环境推进，取证步骤与判据
+结论：**Linux 侧没有未结的待办**；未结项全在 Windows 侧（W3 取证 + W6/W7/W8
+三条待验证的可做项），都需要真 Windows 机器。W3 无法在纯 Linux 环境推进，取证步骤与判据
 已写进 §4.9，照跑即可。
 
 ### 当前基线（接手时应能复现）
