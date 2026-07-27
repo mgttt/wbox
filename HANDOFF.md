@@ -92,6 +92,15 @@ F9.1–F9.18 全部落地并有持续门禁。近期这一串是本轮做的：
 Q2 的 `-v` 由 Windows agent 在推进（broker 打开对象 HANDLE + Blink VFS 数据面，
 **不走** OS 路径重定向），别去碰那块。
 
+**Q2 的 `-p` 已结案（§4.9 W5），别再当待办**：读 vendored 的 blink 源码就能定
+——`HostfsSocket/Bind/Listen` 全部直落宿主 socket，仓库里没有自建网络栈，
+所以 guest 绑的端口**就是**宿主端口，"映射进容器"这件事不成立。
+顺带澄清了一个容易搞错的点：**Q2 的网络隔离模型与 Q3 不是一回事**——
+Q3 靠 netns，Q2 靠 AppContainer 不授 `INTERNET_CLIENT`（能力开关，不是独立网络栈）。
+
+这也说明一件事：**有些"要 Windows 才能查"的问题，其实读仓库里的 vendored 源码
+就能定**。动手前先看看答案在不在本地。
+
 ### ~~L3 `wbox push`~~ —— 已完成（F9.13，门禁 PSH.1–PSH.5）
 
 保留下面的结论，因为"缓存里没有原始层 blob"这条仍然约束着**镜像分层存储**那一格：

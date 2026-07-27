@@ -81,7 +81,11 @@ pub fn reject_if_unsupported(ports: &[PortMap]) -> Result<()> {
     WboxError::require_linux(
         !ports.is_empty(),
         "-p 端口转发",
-        "转发线程要 setns 进容器 netns，Windows 侧没有对应原语（PRD F9.2）",
+        // 措辞按 §4.9 W5 的取证结果修正：Windows 上 guest 的 socket 就是宿主
+        // socket（blink 无自建网络栈），guest 绑的端口即宿主端口——不是"没有
+        // 原语"，而是没有可映射的东西。说错原因会让人以为换个实现就能做。
+        "Linux 侧靠 setns 进容器 netns；Windows 侧 guest 的 socket 就是宿主 socket，\
+         guest 绑的端口即宿主端口，没有可映射的东西（PRD §4.9 W5）",
     )
 }
 

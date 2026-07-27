@@ -117,7 +117,8 @@ wbox
 | 可写 rootfs 层 | 有 | 私有可写层（远端已实现） |
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
 | 卷挂载 `-v` | 进行中 | **不走 OS 路径重定向**（那撞天花板一），而是 broker 逐项打开对象 HANDLE + Blink VFS 做数据面：`MS_RDONLY` 全局写门禁与挂起期 HANDLE 注入均已有门禁（F9.1、§4.9），CLI 尚未开放 |
-| 端口映射 `-p` | 无 | Linux 侧的用户态转发依赖 `setns`，Windows 无对应原语 |
+| 端口映射 `-p` | 不做（语义不适用）| **guest 的 socket 就是宿主 socket**（blink 无自建网络栈，见 §4.9 W5），guest 绑的端口即宿主端口，没有可映射的东西 |
+| 网络隔离模型 | 部分 | 与 Q3 **不同**：Q3 靠 netns，Q2 靠 AppContainer 不授 `INTERNET_CLIENT`——是能力开关而非独立网络栈 |
 | 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | `--cap-*` / seccomp / healthcheck | 不做 | 同 Q1：均为 Linux 原语，明确报错 |
 | compose 多服务 | 不做 | 同 Q1：依赖共享 netns |
@@ -185,7 +186,7 @@ wbox
 | Q1 Sandboxie | 文件/注册表写重定向 | **取证而非实现**：用户态能逼近到什么程度，结论允许是"只能拒绝、不能重定向" | §4.9 W3，Windows agent |
 | Q1 Sandboxie | 命名沙箱内容、Forced Programs | 随 W3 结论而定；若 W3 判定用户态只能拒绝，这两项一并转为**不做** | 同上 |
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
-| Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
+| Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
 | Q3 Podman | —— | Q3 的 F9 序列已全部完成 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
@@ -1361,6 +1362,7 @@ TODO-PLAN
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
+├── W5 Q2 端口映射 -p 的可行性取证           [Linux agent] 已完成：语义不适用
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
@@ -1380,6 +1382,32 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 测试编排限制，并绕成只等待短命父 wbox 进程。后续 `create/start` 门禁复现后
 确认这是产品脚本兼容缺口：supervisor 继承了调用方管道句柄。F8.f 已在 spawn
 边界收紧标准句柄继承，WP.22 改为直接重定向并等待 EOF，不再绕开问题。
+
+### W5 Q2 的端口映射 `-p` 取证 `[Linux agent]` `[done：结论是语义不适用]`
+
+**结论：Windows 宿主上 `-p` 没有可兑现的语义，应保持明确拒绝。**
+
+取证靠读本仓库里 vendored 的 blink 源码即可，不需要 Windows 机器：
+
+- `blink/hostfs.c` 的 `HostfsSocket` 直接调宿主 `socket()`；
+  `HostfsBind` 对非 `AF_UNIX` 直接调宿主 `bind()`；
+  `HostfsListen` 直接 `listen(hostinfo->filefd, backlog)`。
+- 仓库里没有任何自建网络栈（无 slirp / usermode TCP 之类）。
+
+于是 **guest 的 socket 就是宿主的 socket**：Linux guest 在 Windows 上
+`bind(0.0.0.0:80)` 绑的就是 Windows 的 80 端口。既然容器端口本来就是宿主端口，
+"把宿主 8080 映射到容器 80"在这一格里不成立——它退化成同一台机器上的 8080→80
+转发，与容器无关，用户自己起个转发器即可。
+
+**由此还澄清了一件更要紧的事**：Q2 的网络隔离模型与 Q3 **根本不同**。
+Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 靠 AppContainer
+不授 `INTERNET_CLIENT` 能力——是能力开关，不是独立网络栈。两者默认都断网，
+但强度与形态不一样，§2.4 Q2 已补上这一行。想在 Q2 得到 netns 级隔离，只能给
+blink 加一层用户态网络栈，那是另一个数量级的工作。
+
+保持现状（Windows 上 `-p` 明确报错）是对的，但报错文案已按这个结论修正：
+不是"Windows 没有对应原语"，而是"guest 端口即宿主端口，没有可映射的东西"。
+说错原因会让人以为换个实现就能做。
 
 ### W3 F9.4 Windows 文件系统写重定向的可行性取证 `[Windows agent]`
 
