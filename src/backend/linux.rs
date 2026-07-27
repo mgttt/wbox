@@ -166,6 +166,7 @@ mod tests {
             workdir: rootfs.to_path_buf(),
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env,
+            volumes: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

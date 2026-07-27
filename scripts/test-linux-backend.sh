@@ -441,6 +441,48 @@ CEOF
 fi
 
 echo
+echo "=== V 卷挂载（PRD F9.1）==="
+
+VOLSRC=$WORK/volsrc
+mkdir -p "$VOLSRC"
+printf 'FROM_HOST\n' > "$VOLSRC/marker.txt"
+
+# V.1 读写挂载：容器要能读到宿主文件，写回也要在宿主侧可见
+run -v "$VOLSRC:/data" lbetest -- /bin/sh -c 'cat /data/marker.txt && echo BACK > /data/back.txt'
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q FROM_HOST && [ -f "$VOLSRC/back.txt" ]; then
+  report PASS "V.1 -v 读写挂载（宿主↔容器双向可见）"
+else
+  report FAIL "V.1 -v 读写挂载" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 150) back.txt=$([ -f "$VOLSRC/back.txt" ] && echo yes || echo no)"
+fi
+
+# V.2 只读挂载必须真的只读。这条专盯 mount(2) 的一个坑：首次 bind 会**忽略**
+# MS_RDONLY，必须再 remount 一次才生效——漏了这步 :ro 会静默变成可写，
+# 那比不支持只读更糟（用户以为数据受保护）。
+run -v "$VOLSRC:/ro:ro" lbetest -- /bin/sh -c 'echo X > /ro/should-fail.txt'
+if [ "$rc" -ne 0 ] && [ ! -f "$VOLSRC/should-fail.txt" ]; then
+  report PASS "V.2 -v :ro 真的只读（写被拒且宿主无新文件）"
+else
+  report FAIL "V.2 :ro 只读" "rc=$rc（期望非 0）；宿主是否被写入=$([ -f "$VOLSRC/should-fail.txt" ] && echo 是 || echo 否)"
+fi
+
+# V.3 安全断言：挂到容器根会让隔离作废，必须拒绝
+vout=$(HOME=$WORK/home "$WBOX_ABS" run -v "$VOLSRC:/" lbetest -- /bin/true 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] && printf '%s' "$vout" | grep -q "隔离失效"; then
+  report PASS "V.3 拒绝 -v 挂载到容器根 '/'"
+else
+  report FAIL "V.3 拒绝挂载到根" "rc=$vrc 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+# V.4 宿主路径不存在要报错，**不能**替用户创建——拼错的路径会变成空目录，
+# 等发现数据"不见了"才知道挂错了。
+vout=$(HOME=$WORK/home "$WBOX_ABS" run -v "$WORK/definitely-absent:/d" lbetest -- /bin/true 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] && [ ! -e "$WORK/definitely-absent" ]; then
+  report PASS "V.4 宿主路径不存在时报错且不自动创建"
+else
+  report FAIL "V.4 不存在的宿主路径" "rc=$vrc；是否被创建=$([ -e "$WORK/definitely-absent" ] && echo 是 || echo 否)"
+fi
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

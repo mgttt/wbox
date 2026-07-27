@@ -28,6 +28,8 @@ pub struct RunOptions {
     pub env: Vec<(String, String)>,
     /// 后台运行：立即返回，容器由脱离的 supervisor 进程持有（PRD F8.2）
     pub detach: bool,
+    /// `-v host:guest[:ro]` 卷挂载（PRD F9.1）
+    pub volumes: Vec<backend::VolumeMount>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -48,6 +50,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         env_pass_all: false,
         env: Vec::new(),
         detach: false,
+        volumes: Vec::new(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -103,6 +106,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--rm" => opts.keep_profile = false,
             "--interactive" => opts.detach = false, // 显式前台（默认）
             "--detach" | "-d" => opts.detach = true,
+            "--volume" | "-v" => {
+                let v = super::args::take_value(args, &mut i, "--volume")?;
+                opts.volumes.push(backend::parse_volume(&v)?);
+            }
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
             "-e" | "--env" => {
@@ -128,11 +135,19 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
                 opts.workdir = Some(super::args::take_value(args, &mut i, a)?);
             }
             "-V" | "--verbose" => opts.verbose = true,
-            "-p" | "--publish" | "-P" | "-v" | "--volume" | "--mount" => {
+            // `-v/--volume` 已实现（见上）。这里留下的是**仍未实现**的几个：
+            // 明确报错而不是静默忽略——静默忽略会让用户以为端口已经映射好了。
+            // `--mount` 是另一套语法，即使 `-v` 能用也不代表它能用。
+            "-p" | "--publish" | "-P" => {
                 return Err(WboxError::args(format!(
-                    "选项 '{}' 不支持：wbox 当前不实现端口发布或 volume/bind mount",
+                    "选项 '{}' 不支持：端口映射尚未实现（PRD F9.2，需先取证 rootless 网络方案）",
                     a
                 )));
+            }
+            "--mount" => {
+                return Err(WboxError::args(
+                    "选项 '--mount' 不支持：请改用 -v host:guest[:ro]（PRD F9.1）",
+                ));
             }
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!("未知选项 '{}'", other)));
@@ -174,6 +189,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         workdir,
         cmd,
         env,
+        volumes: opts.volumes.clone(),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -500,8 +516,7 @@ mod tests {
             &["-p", "8080:80", "alpine"][..],
             &["--publish", "8080:80", "alpine"][..],
             &["-P", "alpine"][..],
-            &["-v", "/host:/guest", "alpine"][..],
-            &["--volume", "/host:/guest", "alpine"][..],
+            // -v/--volume 已实现（F9.1），不再在此列；--mount 是另一套语法，仍不支持
             &["--mount", "type=bind,src=/host,dst=/guest", "alpine"][..],
         ] {
             let err = parse(args).unwrap_err();

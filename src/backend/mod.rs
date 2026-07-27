@@ -105,6 +105,8 @@ pub struct RunSpec {
     pub cmd: Vec<String>,
     /// 注入子进程的环境变量（镜像 config Env；原生模式为空）
     pub env: Vec<(String, String)>,
+    /// 卷 / 绑定挂载（PRD F9.1）
+    pub volumes: Vec<VolumeMount>,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
@@ -566,5 +568,161 @@ mod tests {
         g.set("WBOX_TEST_SECRET", "hunter2");
         let env = build_sanitized_env(&[], &[], true, false, env::GuestFlavor::Windows);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_TEST_SECRET"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 卷 / 绑定挂载（PRD F9.1）
+// ---------------------------------------------------------------------------
+
+/// 卷挂载在**当前宿主**是否可用；不可用时给出明确理由。
+///
+/// Linux 走 mount namespace 里的 bind mount（`linux_ns` 已实现）。Windows 侧
+/// 没有等价的用户态手段——AppContainer 不提供路径重定向，那需要 minifilter
+/// 驱动，而 wbox 明确不装驱动（PRD §2.3 / §2.4 天花板一）。**静默忽略 `-v`
+/// 比不支持更糟**：用户会以为目录已经挂进去了。
+pub fn reject_volumes_if_unsupported(volumes: &[VolumeMount]) -> Result<()> {
+    if volumes.is_empty() || cfg!(target_os = "linux") {
+        return Ok(());
+    }
+    Err(crate::error::WboxError::args(
+        "-v 卷挂载目前只在 Linux 宿主可用：Windows 侧需要文件系统重定向，         而那要 minifilter 驱动（PRD §2.4 天花板一，取证见 §4.9 W3）",
+    ))
+}
+
+/// 一条 `-v host:guest[:ro]` 挂载。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeMount {
+    /// 宿主侧路径（必须已存在——自动创建会把拼错的路径变成一个空目录，
+    /// 用户直到发现数据"不见了"才知道挂错了）
+    pub host: PathBuf,
+    /// 容器内挂载点（绝对路径）
+    pub guest: String,
+    pub read_only: bool,
+}
+
+/// 解析 `-v` 取值。
+///
+/// 形如 `host:guest`、`host:guest:ro`、`host:guest:rw`。**只按最多三段切分**，
+/// 因为宿主路径本身可能含冒号；多余的冒号归给宿主段是错的，所以从右往左认
+/// 模式段与容器段。
+pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
+    use crate::error::WboxError;
+    let bad = |why: &str| {
+        WboxError::args(format!(
+            "-v '{}' 无效：{}（用法 host:guest[:ro|:rw]）",
+            spec, why
+        ))
+    };
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (host, guest, mode) = match parts.len() {
+        2 => (parts[0], parts[1], None),
+        3 => (parts[0], parts[1], Some(parts[2])),
+        _ => return Err(bad("段数不对")),
+    };
+    let read_only = match mode {
+        None | Some("rw") => false,
+        Some("ro") => true,
+        Some(m) => return Err(bad(&format!("未知模式 '{}'", m))),
+    };
+    if host.is_empty() || guest.is_empty() {
+        return Err(bad("宿主路径与容器路径都不能为空"));
+    }
+    if !guest.starts_with('/') {
+        return Err(bad("容器路径必须是绝对路径"));
+    }
+    // 安全断言：`-v /somewhere:/` 会把宿主目录盖在容器根上，等于把隔离作废。
+    // 这条不是防手滑，是防"一条命令就让沙箱失效"。
+    if guest == "/" {
+        return Err(bad("不允许挂载到容器根 '/'——那会让隔离失效"));
+    }
+    let host_path = PathBuf::from(host);
+    if !host_path.exists() {
+        return Err(bad("宿主路径不存在（wbox 不会替你创建：拼错的路径会变成一个\
+                        空目录，等你发现数据不见了才知道挂错了）"));
+    }
+    let host_path = host_path.canonicalize().map_err(|e| {
+        WboxError::args(format!("-v '{}'：解析宿主路径失败：{}", spec, e))
+    })?;
+    Ok(VolumeMount {
+        host: host_path,
+        guest: guest.to_string(),
+        read_only,
+    })
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn parses_basic_and_modes() {
+        let tmp = std::env::temp_dir();
+        let t = tmp.to_str().unwrap();
+        let v = parse_volume(&format!("{}:/data", t)).unwrap();
+        assert_eq!(v.guest, "/data");
+        assert!(!v.read_only);
+        assert!(parse_volume(&format!("{}:/data:ro", t)).unwrap().read_only);
+        assert!(!parse_volume(&format!("{}:/data:rw", t)).unwrap().read_only);
+    }
+
+    /// 挂到容器根上等于把隔离作废——必须拒绝。
+    #[test]
+    fn rejects_mount_over_container_root() {
+        let t = std::env::temp_dir();
+        let e = parse_volume(&format!("{}:/", t.to_str().unwrap())).unwrap_err();
+        assert!(format!("{}", e).contains("隔离失效"), "{}", e);
+    }
+
+    #[test]
+    fn rejects_malformed_specs() {
+        let t = std::env::temp_dir();
+        let t = t.to_str().unwrap();
+        assert!(parse_volume("nocolon").is_err(), "缺冒号");
+        assert!(parse_volume(&format!("{}:relative", t)).is_err(), "容器路径须绝对");
+        assert!(parse_volume(&format!("{}:/d:bogus", t)).is_err(), "未知模式");
+        assert!(parse_volume(&format!("{}:/d:ro:extra", t)).is_err(), "段数过多");
+        assert!(parse_volume(":/d").is_err(), "空宿主路径");
+    }
+
+    /// 宿主路径不存在要**报错而不是自动创建**，且错误要说明为什么。
+    #[test]
+    fn missing_host_path_explains_why_not_created() {
+        let e = parse_volume("/definitely/not/here/xyz:/d").unwrap_err();
+        let m = format!("{}", e);
+        assert!(m.contains("不存在"), "{}", m);
+        assert!(m.contains("不会替你创建"), "要解释为什么不自动创建：{}", m);
+    }
+}
+
+#[cfg(test)]
+mod volume_support_tests {
+    use super::*;
+
+    /// 不带 `-v` 时任何宿主都不该报错。
+    #[test]
+    fn no_volumes_is_always_ok() {
+        assert!(reject_volumes_if_unsupported(&[]).is_ok());
+    }
+
+    /// 带 `-v` 时：Linux 放行，其余宿主必须**明确报错**而不是静默忽略
+    /// ——静默忽略会让用户以为目录已经挂进去了。这条在两个平台都跑，
+    /// Windows 那半由 CI 的 windows runner 真实执行。
+    #[test]
+    fn volumes_rejected_off_linux_and_reason_is_actionable() {
+        let v = vec![VolumeMount {
+            host: PathBuf::from("/tmp"),
+            guest: "/data".to_string(),
+            read_only: false,
+        }];
+        let r = reject_volumes_if_unsupported(&v);
+        if cfg!(target_os = "linux") {
+            assert!(r.is_ok(), "Linux 应支持卷挂载");
+        } else {
+            let e = r.unwrap_err();
+            let m = format!("{}", e);
+            assert!(m.contains("只在 Linux"), "要说清哪个宿主可用：{}", m);
+            assert!(m.contains("驱动"), "要说清为什么做不到：{}", m);
+        }
     }
 }

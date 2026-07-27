@@ -171,6 +171,7 @@ mod tests {
             workdir: dir.join("rootfs"),
             cmd: merged,
             env: cfg.env.clone(),
+            volumes: Vec::new(),
             verbose: false,
             env_pass_all: false,
         };

@@ -404,6 +404,7 @@ mod tests {
             workdir: std::env::temp_dir(),
             cmd: vec!["/bin/true".to_string()],
             env: vec![],
+            volumes: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

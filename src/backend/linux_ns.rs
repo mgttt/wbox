@@ -55,6 +55,10 @@ pub(super) unsafe fn write_proc_self(path: *const libc::c_char, data: &[u8]) -> 
 
 /// fork 前备好的全部参数（闭包按值捕获，内部零分配）。
 struct NsPlan {
+    /// 卷挂载：(宿主源, 容器内目标的**宿主可见路径**, 只读)。
+    /// 目标在 fork 前就解析成宿主视角的绝对路径——镜像模式是 `rootfs/<guest>`，
+    /// 宿主模式就是 `<guest>`；闭包内不再拼字符串（不能分配）。
+    vol_binds: Vec<(CString, CString, bool)>,
     /// `/proc/self/setgroups` / `uid_map` / `gid_map`
     p_setgroups: CString,
     p_uid_map: CString,
@@ -132,7 +136,27 @@ pub(super) fn spawn_isolated(
     };
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
+    // 卷挂载目标解析成宿主视角路径：镜像模式挂进 rootfs 内，宿主模式直接用
+    // guest 路径（宿主模式不换根，两者本就同一命名空间）。
+    let mut vol_binds = Vec::new();
+    for v in &spec.volumes {
+        let target = match new_root.as_ref() {
+            // guest 以 '/' 开头，join 会当成绝对路径覆盖掉 rootfs，故去掉前导 '/'
+            Some(_) => prepared.workdir.join(v.guest.trim_start_matches('/')),
+            None => std::path::PathBuf::from(&v.guest),
+        };
+        // 挂载点必须先存在。镜像里没有这个目录是常态（例如挂 /data），
+        // 这里替用户建**容器内**的挂载点是安全的：它在 rootfs 里，不是宿主。
+        let _ = std::fs::create_dir_all(&target);
+        vol_binds.push((
+            cstr(&v.host.to_string_lossy())?,
+            cstr(&target.to_string_lossy())?,
+            v.read_only,
+        ));
+    }
+
     let plan = NsPlan {
+        vol_binds,
         p_setgroups: cstr("/proc/self/setgroups")?,
         p_uid_map: cstr("/proc/self/uid_map")?,
         p_gid_map: cstr("/proc/self/gid_map")?,
@@ -488,6 +512,38 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     ) != 0
     {
         return Err(err());
+    }
+
+    // 5b. 卷挂载（PRD F9.1）。必须在 pivot_root **之前**：切根后旧根被 detach，
+    //     宿主源路径就没了。目标已在 fork 前解析成宿主视角路径，这里只做 mount。
+    //     两种模式都执行——宿主模式虽不换根，但已在独立 mount namespace 里，
+    //     bind 只对容器可见。
+    for (src, dst, read_only) in &p.vol_binds {
+        if libc::mount(
+            src.as_ptr(),
+            dst.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND | libc::MS_REC,
+            std::ptr::null(),
+        ) != 0
+        {
+            return Err(err());
+        }
+        if *read_only {
+            // 只读要**第二次** remount 才生效：首次 bind 会忽略 MS_RDONLY，
+            // 这是 mount(2) 的既定行为。少了这步 :ro 会静默变成可写——
+            // 那比不支持只读更糟。
+            if libc::mount(
+                std::ptr::null(),
+                dst.as_ptr(),
+                std::ptr::null(),
+                libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                std::ptr::null(),
+            ) != 0
+            {
+                return Err(err());
+            }
+        }
     }
 
     // 宿主程序模式（LinuxMode::Host）：不换根，到此为止。

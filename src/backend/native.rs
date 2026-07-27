@@ -76,6 +76,7 @@ impl NativeBackend {
 impl Backend for NativeBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
         super::require_cmd(&spec.cmd)?;
+        super::reject_volumes_if_unsupported(&spec.volumes)?;
         if !spec.workdir.is_dir() {
             return Err(WboxError::args(format!(
                 "工作目录 '{}' 不存在或不是目录",
@@ -205,6 +206,7 @@ mod tests {
                 ("LANG".to_string(), "C".to_string()),
                 ("WBOX_VA_BITS".to_string(), "43".to_string()),
             ],
+            volumes: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }

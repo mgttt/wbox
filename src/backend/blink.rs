@@ -124,6 +124,7 @@ fn build_blink_command(exe: &Path, guest_cmd: &[String]) -> Vec<String> {
 
 impl Backend for BlinkBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
+        super::reject_volumes_if_unsupported(&spec.volumes)?;
         super::require_cmd(&spec.cmd)?;
         let (exe, src) = locate_linux_exe()?;
         let rootfs = &spec.workdir; // 镜像模式下 workdir = rootfs 目录
@@ -198,6 +199,7 @@ mod tests {
             workdir: std::env::temp_dir(), // 已存在的目录充当 rootfs
             cmd: cmd.iter().map(|s| s.to_string()).collect(),
             env: vec![("PATH".to_string(), "/usr/bin".to_string())],
+            volumes: Vec::new(),
             verbose: false,
             env_pass_all: false,
         }
