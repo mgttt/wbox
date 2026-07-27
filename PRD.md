@@ -2,7 +2,7 @@
 
 > 本文是项目需求、范围和进度的唯一总入口，主要读者是维护代码的 LLM agents。
 > 用户用法见 `README.md`，实现原理见 `docs/architecture.md`，验证命令见
-> `docs/testing.md`。最后更新：2026-07-27。
+> `docs/testing.md`。最后更新：2026-07-28。
 
 ## 1. Agent 读取协议
 
@@ -60,6 +60,24 @@ wbox
    必须明确报错，不允许静默裸跑。
 3. **统一入口**：宿主程序和 OCI 镜像共用 `wbox run`、资源参数与退出码语义。
 4. **可验证**：Windows 真机、Linux、Wine 和 guest syscall 行为均有自动门禁。
+5. **纯 Rust**：wbox 的 CLI、沙箱、镜像管理和跨平台执行运行时全部使用 Rust
+   实现。仓库与发布物不得编译、链接、打包或运行 C/C++ 实现。
+
+### 2.2.1 Rust-only 架构硬约束
+
+这是一条发布验收条件，不是代码风格偏好：
+
+- 第一方代码和承载产品能力的第三方组件必须是 Rust；不得以 FFI、辅助进程、
+  vendored 源码或预编译动态/静态库绕过。
+- 允许通过 Rust bindings 调用宿主操作系统提供的 Windows API、Linux syscall
+  和系统动态加载器；这些是平台 ABI，不等于引入第三方 C/C++ 实现。
+- Rust crate 依赖必须审计其传递依赖和 `build.rs`，不得在构建时编译 C/C++，
+  也不得链接项目自带或第三方 native runtime。
+- 当前 `vendor/blink` 和 `wbox-linux.exe` 是不符合目标架构的历史实现，只能作为
+  行为基线；必须由纯 Rust Linux ELF/OCI 执行引擎替换并最终从仓库、CI 和发布物
+  删除。在迁移完成前，不得把 Windows Linux guest 标为 Rust-only 完成。
+- 新功能不得继续修改或扩展 Blink/C 层。迁移期只允许删除旧 C/C++ 代码，或读取
+  其测试作为行为参考。
 
 ### 2.3 非目标
 
@@ -111,12 +129,12 @@ wbox
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Linux OCI 镜像 | 有 | `wbox-linux` 用户态执行；已实机跑通 Alpine/Ubuntu |
+| 运行 Linux OCI 镜像 | **迁移中** | 历史 Blink 路径跑通过 Alpine/Ubuntu，但违反 §2.2.1；纯 Rust 运行时通过产品门禁前不算目标架构完成 |
 | 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 私有可写层（远端已实现） |
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
-| 卷挂载 `-v` | 进行中 | **不走 OS 路径重定向**（那撞天花板一），而是 broker 逐项打开对象 HANDLE + Blink VFS 做数据面：`MS_RDONLY` 全局写门禁与挂起期 HANDLE 注入均已有门禁（F9.1、§4.9），CLI 尚未开放 |
+| 卷挂载 `-v` | 计划重做 | 由纯 Rust guest VFS 和 Rust supervisor 实现；已撤回 Blink/C brokerfs 实验，CLI 继续明确拒绝 |
 | 端口映射 `-p` | 不做（语义不适用）| **guest 的 socket 就是宿主 socket**（blink 无自建网络栈，见 §4.9 W5），guest 绑的端口即宿主端口，没有可映射的东西 |
 | 网络隔离模型 | 部分 | 与 Q3 **不同**：Q3 靠 netns，Q2 靠 AppContainer 不授 `INTERNET_CLIENT`——是能力开关而非独立网络栈 |
 | 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
@@ -283,9 +301,9 @@ S4 在 Linux 上运行 Windows CLI
 | F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
-| F4.1 静态 `wbox-linux.exe` | build script | G1 | CI 构建后直跑；G4 两文件 bundle 由 `WP.3` 裁决 |
-| F4.2-F4.7 ELF/syscall/fork/network/fd | `vendor/blink` | G1 | `test-matrix.sh`、guest C 套件均直接跑模拟器 |
-| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | G3 | `WP.3`：portable artifact 在 AppContainer 内执行静态 BusyBox |
+| F4.R0 移除 C/C++ runtime | 全仓、CI、发布脚本 | G0 pending | native 源、Cargo native 依赖和发布物导入表门禁 |
+| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `src/runtime` | G0 planned | 纯 Rust 单元测试与预构建 ELF fixtures |
+| F4 Windows 完整 Linux guest 路径 | Rust runtime + F2/F3 | blocked | `WP.3` 改由单一 `wbox.exe` 在 AppContainer 内执行 Alpine/Ubuntu |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
 | F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
 | F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
@@ -466,21 +484,22 @@ F3
 - 网络不可达可在网络型测试中记 SKIP，但本地构造的严格错误路径必须通过。
 - 缓存目录按 registry/repository/reference 隔离，重复 pull 不混入旧 rootfs。
 
-### F4 Windows 上执行 Linux ELF `[active]`
+### F4 Windows 上执行 Linux ELF `[active: Rust runtime replacement]`
 
 ```text
 F4
-├── F4.1 wbox-linux.exe 可静态分发
-├── F4.2 x86-64 指令解释/JIT 与 Linux syscall 翻译
-├── F4.3 rootfs 前缀、路径边界和 /proc、/dev 兼容
-├── F4.4 文件、目录、mmap、epoll、socket、timer/event/signal fd
-├── F4.5 快照式 fork、exec、管道、shell 作业
-├── F4.6 DNS、TCP/UDP、AF_UNIX 和 apt/wget 基础链路
-├── F4.7 guest fd/VFS fd 在 fork 后保持命名空间一致
-└── F4.8 `[done]` 每容器临时可写层，退出清理且不修改共享镜像缓存
+├── F4.R0 `[active]` 删除 Blink/C 产品依赖与构建链
+├── F4.R1 `[planned]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈
+├── F4.R2 `[planned]` 纯 Rust x86-64 解释执行器；JIT 只能使用纯 Rust backend
+├── F4.R3 `[planned]` 纯 Rust Linux syscall、fd、信号和进程模型
+├── F4.R4 `[planned]` 纯 Rust guest VFS、rootfs、/proc、/dev 和只读卷
+├── F4.R5 `[planned]` 动态 glibc、线程、fork/exec、epoll、socket
+├── F4.R6 `[planned]` Alpine/Ubuntu 24.04 产品门禁
+└── F4.R7 `[planned]` 从仓库、CI、文档和发布物删除 vendor/blink
 ```
 
-直接运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
+以下 Blink 结果仅作为纯 Rust 迁移的行为基线，不再证明目标架构完成。历史上直接
+运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
 程序、shell 管道/命令替换/后台任务、fork 子 DNS 和 `apt-get update`。这些
 结果不再表述为 Windows 产品路径已完成；`BlinkBackend` 经 AppContainer 的 G3
 仍由 WP.3 裁决。组件层仍有限制：
@@ -836,86 +855,15 @@ F9
 **Windows 原生程序侧**仍不支持且明确报错：AppContainer 无通用路径重定向，
 完整 bind/写重定向需要 minifilter 驱动，撞 §2.4 天花板一。
 
-**Windows OCI/Blink 侧存在不装驱动的可行路径，但尚未实现，不能提前放开 `-v`**：
+**Windows OCI 侧必须由纯 Rust guest VFS 实现，不能提前放开 `-v`**：
 
-1. `BLINK_OVERLAYS` 只是冒号分隔的候选根，不表达 `host -> guest`，Windows
-   盘符还会被误拆；数据面必须走 `VfsMount(source,target,"hostfs",flags)`。
-2. 不得递归修改用户目录 ACL。`sandbox.rs` 已支持
-   `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 精确继承并用 RAII 恢复原继承位；真机测试
-   `inherited_directory_handle_does_not_bypass_child_dacl` 同时证明：AppContainer
-   成功继承目录根 HANDLE 后，`NtCreateFile(RootDirectory=...)` 打开无 profile
-   ACE 的子文件仍返回 `STATUS_ACCESS_DENIED`。因此“只传根 HANDLE”不是数据面，
-   也不能靠递归 ACL 破坏用户目录；必须由非 AppContainer broker 逐项校验并打开，
-   再向 Blink 复制精确对象 HANDLE。mount manifest 只记录 broker 通道、guest
-   target、对象类型与 `read_only`，不泄漏宿主路径。
-3. `[done: lifecycle gate]` `sandbox.rs` 提供“已入 Job、主线程仍挂起”的
-   `on_created` 回调；真机测试
-   `created_hook_can_duplicate_handle_into_suspended_child` 已将事件 HANDLE 动态
-   复制进目标 AppContainer 进程并取回，证明 broker 可在 guest 执行前注入逐项
-   打开的对象。回调失败会终止并等待挂起子进程退出，
-   `created_hook_failure_reaps_suspended_child` 要求 Job 中不残留进程。
-4. Win32 hostfs 必须以 broker 返回的对象 HANDLE 为数据面，逐组件拒绝 reparse
-   越界；不能把 volume 加进单一文本 `WBOX_ROOT` allowlist。
-5. `[done: component gate]` `VfsDevice.flags` 的 `MS_RDONLY` 已在
-   open/create、write/pwrite/writev、
-   truncate、共享可写 mmap、unlink/rename/link、mkdir、chmod/chown/utime 等
-   修改入口统一返回 `EROFS`；跨 device rename/link 返回 `EXDEV`。
-   `tests/guest/t_mount_ro.c` 在同一 guest 进程内创建 hostfs 只读挂载并验证读、
-   open-write、create、truncate、unlink、mkdir、chmod、rename 与 link。该门禁
-   只证明 VFS 语义，不代表 Windows `-v` 已开放。
-6. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
-   文件 bind 在真正实现前必须明确拒绝，不能把文件悄悄当目录。
-
-**Windows OCI filesystem broker 契约**（实现时不得弱化）：
-
-```text
-supervisor
-├── 持有 volume 根 HANDLE、命名 Job 与 owner-only broker server HANDLE
-├── 启动前在宿主侧预连接 client HANDLE，只把它精确继承给 guest
-├── on_created 校验仍挂起进程的 Job + AppContainer SID，成功后才恢复 guest
-└── guest 断线时 fail closed；禁止回退到绝对宿主路径或临时 ACL
-
-request header
-├── magic:u32 / version:u16 / opcode:u16
-├── request_id:u64 / payload_len:u32 / flags:u32
-└── payload_len、连接数、并发请求数均有固定硬上限
-```
-
-- `[done: transport component gate]` 采用 message-mode named pipe 并启用
-  `PIPE_REJECT_REMOTE_CLIENTS`，但 **guest 不按名称连接**。Microsoft 文档明确指出
-  AppContainer named pipe 只支持同一 app 内通信；真机探针也得到
-  `CreateFileW -> ERROR_FILE_NOT_FOUND`。因此 supervisor 先以当前用户专属 DACL
-  创建并预连接 server/client pair，再用 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只把
-  connected client HANDLE 继承给 guest。不得授予 `Everyone`、
-  `ALL APPLICATION PACKAGES` 或递归 volume ACL。参考：
-  <https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-createnamedpipea>
-- `on_created` 在 guest 恢复前用 `IsProcessInJob` 验证目标命名 Job，并读取
-  `TokenAppContainerSid` 与 profile 精确比对；随后复制 broker 自有 process
-  HANDLE。因为 pipe 是 supervisor 预连接的，`GetNamedPipeClientProcessId`
-  只会看到宿主连接者，不能当 guest 身份证据。身份绑定来自精确继承的 connected
-  HANDLE、挂起期 Job/SID 注册和 generation + 随机 nonce，request 中 PID 一律不可信。
-- 真机门禁 `appcontainer_hello_ping_is_pid_sid_and_job_bound` 已完成继承通道上的
-  `HELLO/PING`；`register_rejects_process_outside_target_job` 与
-  `register_rejects_different_appcontainer_sid` 分别裁决 rogue Job 与错误 profile。
-  codec 同时拒绝错误版本、长度不一致和超过 4096 字节的 payload。
-- 当前 transport 已实现 `HELLO`、`PING`；`OPEN` 帧解析组件也已落地，只接受非零
-  mount id、Linux flags/mode 与 UTF-8 相对路径，并在任何宿主 open 前拒绝绝对路径、
-  空组件、`.`/`..`、反斜杠、冒号、非法 UTF-8 和超过 1024 字节的路径。首个数据面
-  仅允许 `O_RDONLY` 既有文件；Win32 access mask 由 broker allowlist 映射，不接收
-  guest 原始 access mask。`[done: readonly OPEN component gate]` mount 初始化只保留
-  owner 进程打开的根目录 HANDLE；每个组件都以 `NtCreateFile(RootDirectory=...)`
-  加 `FILE_OPEN_REPARSE_POINT` 打开并再次查询属性，任何中间 junction/reparse 均拒绝。
-  最终普通文件 HANDLE 通过 `DuplicateHandle` 注入已注册 AppContainer；
-  `appcontainer_hello_ping_is_pid_sid_and_job_bound` 已从无 AppContainer ACE 的独立
-  volume 读取 canary，`readonly_mount_rejects_intermediate_junction_escape` 证明
-  junction 外部 canary 不可达。Blink fd-backed hostfs 尚未消费该 HANDLE，不能据此
-  宣称 Windows `-v` 可用。只读 mount 最终在 broker 与 VFS 两层都拒绝写/创建/截断。
-- broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
-  restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
-  host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，
-  不能另起第二个 broker。
-- `on_created` 只能做快速 session 注册，不能等 guest 发出请求，否则主线程仍挂起
-  会死锁。`HELLO/OPEN` 都在恢复后由 broker 线程处理。
+1. Rust supervisor 持有宿主目录能力；Rust guest runtime 只接收 mount id、
+   guest target、对象类型与 `read_only`，不得接收可逃逸的宿主绝对路径。
+2. 路径解析逐组件拒绝 reparse/junction/symlink 越界，不得递归修改用户目录 ACL。
+3. `:ro` 在 Rust VFS 的所有修改入口统一返回 `EROFS`；`:rw` 的修改实时回到宿主。
+4. 首版只承诺目录 bind；文件 bind 在实现前明确拒绝。
+5. 不得通过修改 Blink、编译 C broker client 或引入其他 native filesystem library
+   实现。此前 brokerfs/C 实验已撤回。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
@@ -1729,9 +1677,9 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 ### N1 可移植性
 
 - Rust stable；Windows 主目标 `x86_64-pc-windows-msvc`。
-- `wbox-linux.exe` 使用 UCRT64 MinGW 构建并静态链接运行库。
+- Windows 发布物为单一 Rust `wbox.exe`；Linux guest runtime 内置于同一二进制。
 - 不引入后台服务、驱动、tokio 或 clap。
-- release 保持单文件可复制；完整 Windows 包仅含两个 exe 及校验文件。
+- release 保持单文件可复制；完整 Windows 包仅含 `wbox.exe` 及校验文件。
 
 ### N2 失败语义
 
@@ -1749,6 +1697,8 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 
 ### N4 可维护性
 
+- Rust-only 门禁扫描仓库源码、构建脚本、Cargo native 依赖和发布物导入表；发现
+  C/C++ 编译、链接或随包分发即失败。
 - Win32 unsafe 调用集中在平台模块，并说明 Safety 前提。
 - CLI 帮助、错误码、功能状态和测试基线各有唯一事实源。
 - 行为修复必须带最小回归；共享 fd、进程、映射或路径逻辑需覆盖 fork/失败回滚。
@@ -1756,14 +1706,14 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 
 ## 6. 当前状态
 
-状态日期：2026-07-27，分支：`main`，版本：`1.0.0-rc2` 后续滚动开发。
+状态日期：2026-07-28，分支：`main`，版本：`1.0.0-rc2` 后续滚动开发。
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地与 CI 30250676453 通过；资源超限仍缺行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
-| Windows Linux guest | active | CI 30253571295 全通过；同一 artifact 实机运行 Alpine 3.20 与 Ubuntu 24.04，Ubuntu 的 shell/Bash/APT/架构/隔离/退出码均通过 |
-| Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
+| Windows Linux guest | blocked on Rust runtime | Blink artifact 曾实机运行 Alpine 3.20 与 Ubuntu 24.04，但违反 §2.2.1，只作为迁移基线 |
+| Windows shell 矩阵 | legacy baseline | 46 pass、0 fail、1 skip；目标是由纯 Rust runtime 逐项接管 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
@@ -1772,10 +1722,8 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
 
-Windows Linux guest 的两项阻断均已修复：`BlinkBackend` 在降权前预建
-`/dev`、`/proc`；Win32 私有匿名页不再通过只读 rootfs 中的临时文件分配。
-WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink 回归都会
-直接使 Windows 产品 job 失败。
+Windows Linux guest 现有 Blink 门禁保留为迁移期间的行为基线，但不能作为
+Rust-only 发布门禁。纯 Rust runtime 接管 WP.3 前，Windows OCI 能力不得标记完成。
 
 ## 7. 里程碑与时间线
 
@@ -1802,18 +1750,19 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 ├── Linux cgroup v2 委派布局取证
 ├── Docker/Podman 生命周期兼容补齐 kill/top
 └── 文档收敛为 PRD + 技术参考
+
+2026-07-28
+├── Rust-only 成为产品与发布硬约束
+├── 撤回 Windows volume 的 Blink/C brokerfs 实验
+└── 启动纯 Rust Linux ELF/OCI runtime 替换
 ```
 
 下一里程碑不使用虚构日期，按验收条件推进：
 
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
-2. `[active]` 完成 Windows OCI bind volume broker、逐组件 reparse 逃逸门禁与
-   fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证、挂起期动态 HANDLE 注入和
-   VFS `MS_RDONLY` 组件门禁已落地；owner-only 预连接通道的 `HELLO/PING`、Job 与
-   AppContainer SID 身份门禁也已通过真机测试；broker 只读文件 `OPEN`、逐组件
-   junction 拒绝与 HANDLE 注入已取得真机证据。CLI 在 Blink fd-backed hostfs
-   消费该 HANDLE 并通过产品门禁前继续明确拒绝。
+2. `[active]` 完成 F4.R0–F4.R2：清点并移除 C/C++ 构建依赖，建立纯 Rust ELF64
+   loader、进程初始栈和首批 x86-64 指令执行门禁。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
@@ -1828,15 +1777,15 @@ release gate
 ├── test-windows               Rust/Windows 真机
 ├── check-windows-msvc         双目标 clippy/check
 ├── smoke-windows              AppContainer + Job 启动链
-├── build-wbox-linux           UCRT64 构建 + Windows shell 矩阵
-├── guest-tests                guest C 回归及已知失败基线
-├── test-windows-product       最终双 exe 的 Windows/OCI 产品路径
+├── rust-runtime               纯 Rust ELF loader/CPU/syscall 组件门禁
+├── guest-tests                预构建 ELF fixtures 的 Rust runtime 行为门禁
+├── test-windows-product       wbox.exe 内置 Rust runtime 的 Windows/OCI 产品路径
 ├── test-linux-backend         namespace/network/resource/lifecycle
 └── test-wine-backend          Linux 隔离层内运行 PE
 ```
 
-Tag 发布必须等待所有 required jobs 成功，并产出 `wbox.exe`、
-`wbox-linux.exe`、portable zip 和 `SHA256SUMS.txt`。完整命令和 SKIP 规则见
+Tag 发布必须等待所有 required jobs 成功，并产出不含 C/C++ runtime 的
+`wbox.exe`、portable zip 和 `SHA256SUMS.txt`。完整命令和 SKIP 规则见
 `docs/testing.md`。
 
 ## 9. 需求变更规则

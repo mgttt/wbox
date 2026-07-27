@@ -91,8 +91,8 @@ F9.1–F9.20 全部落地并有持续门禁。近期这一串是本轮做的：
 - ~~**L6 pod**~~：**已评估，结论是不做**。评估过程发现 IPC/UTS 根本没隔离，
   于是先补了 F9.15；补齐后 pod 的三样共享都能单独取得，再抽一层只是换个说法。
 
-Q2 的 `-v` 由 Windows agent 在推进（broker 打开对象 HANDLE + Blink VFS 数据面，
-**不走** OS 路径重定向），别去碰那块。
+Q2 当前最高优先级是 PRD §2.2.1/F4 的 Rust-only runtime 替换。不得继续修改
+Blink/C 层，也不得恢复已撤回的 brokerfs 实验；卷数据面等待纯 Rust guest VFS。
 
 **Q2 的 `-p` 已结案（§4.9 W5），别再当待办**：读 vendored 的 blink 源码就能定
 ——`HostfsSocket/Bind/Listen` 全部直落宿主 socket，仓库里没有自建网络栈，
