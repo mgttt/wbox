@@ -137,6 +137,7 @@ pub(crate) fn create_private_rootfs(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
     std::fs::create_dir(destination).map_err(|e| {
         WboxError::spawn(format!(
@@ -201,7 +202,7 @@ fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
     })
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
     let target = std::fs::read_link(source).map_err(|e| {
         WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))

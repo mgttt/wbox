@@ -473,7 +473,9 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         }
     }
 
-    let mut spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    let spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    #[cfg(windows)]
+    let mut spec = spec;
     // 按宿主分派（docs/architecture.md §3）：Windows 上 guest 是跑不了的
     // Linux ELF，必须经 wbox-linux 模拟；Linux 上宿主自己就能执行，走原生
     // namespace 隔离，省掉一整层模拟开销。规则本体在 backend::image_backend_kind

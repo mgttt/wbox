@@ -232,6 +232,7 @@ pub struct Registration {
 impl Registration {
     /// 状态目录路径。Windows OCI 的私有可写 rootfs 也放在这里，使前台退出、
     /// `--rm` 和显式 `wbox rm` 都复用同一生命周期清理路径。
+    #[cfg(any(windows, test))]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
