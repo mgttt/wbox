@@ -487,6 +487,43 @@ else
   report SKIP "P.3/P.4 崩溃残留" "取不到 pstest 的 pid"
 fi
 
+# P.6 rm 必须拒绝运行中的容器。rm 只删记录、停不掉容器，真删了等于把一个
+# 还在跑的容器变成 ps 看不见的孤儿。
+HOME=$PSHOME setsid "$WBOX_ABS" run --name rmlive -- /bin/sleep 30 >/dev/null 2>&1 &
+sleep 2
+rmout=$(HOME=$PSHOME "$WBOX_ABS" rm rmlive 2>&1); rmrc=$?
+if [ "$rmrc" -ne 0 ] && printf '%s' "$rmout" | grep -q "仍在运行"; then
+  report PASS "P.6 rm 拒绝删除运行中的容器"
+else
+  report FAIL "P.6 rm 拒绝运行中" "rc=$rmrc 输出: $(printf '%s' "$rmout" | head -c 150)"
+fi
+
+# P.7 已退出的记录能被 rm 掉——这是 ps -a 里那些残留的唯一清理手段
+rmp=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/rmlive/meta.json'))['pid'])" 2>/dev/null)
+if [ -n "$rmp" ]; then
+  kill -9 "$rmp" 2>/dev/null; sleep 1
+  if HOME=$PSHOME "$WBOX_ABS" rm rmlive >/dev/null 2>&1 && [ ! -d "$PSHOME/.wbox/run/rmlive" ]; then
+    report PASS "P.7 rm 清掉已退出的残留记录"
+  else
+    report FAIL "P.7 rm 清理残留" "目录仍在或 rm 失败"
+  fi
+else
+  report SKIP "P.7 rm 清理残留" "取不到 rmlive 的 pid"
+fi
+
+# P.8 重名报错必须给出**可行**的解法。此处容器还在跑，而 rm 明确拒绝运行中的
+# 容器，所以文案里不该出现 `wbox rm`——那是指使用户去撞墙。
+HOME=$PSHOME setsid "$WBOX_ABS" run --name advice -- /bin/sleep 20 >/dev/null 2>&1 &
+sleep 2
+adv=$(HOME=$PSHOME "$WBOX_ABS" run --name advice -- /bin/true 2>&1)
+if printf '%s' "$adv" | grep -q "换个 --name" && ! printf '%s' "$adv" | grep -q "wbox rm"; then
+  report PASS "P.8 重名报错给的是可行解法（不指向必被拒的 rm）"
+else
+  report FAIL "P.8 重名报错文案" "$(printf '%s' "$adv" | head -c 200)"
+fi
+advp=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/advice/meta.json'))['pid'])" 2>/dev/null)
+[ -n "$advp" ] && kill -9 "$advp" 2>/dev/null
+
 # P.5 正常退出不留残留：RAII 应当把状态目录删干净
 HOME=$PSHOME "$WBOX_ABS" run --name psclean -- /bin/true >/dev/null 2>&1
 if [ ! -d "$PSHOME/.wbox/run/psclean" ]; then

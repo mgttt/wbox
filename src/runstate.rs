@@ -172,14 +172,22 @@ impl Registration {
     }
 }
 
+/// 删掉一个状态目录的全部内容。**调用前必须确认没有 owner 持锁**
+/// （Drop 里是自己刚放的手，其余路径靠 [`liveness`] 判定）。
+///
+/// 尽力而为、不报错：清理失败顶多留下一条 `Exited` 记录，比 panic 或让
+/// 调用方多一条错误分支都好。
+fn purge_dir(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join("meta.json"));
+    let _ = std::fs::remove_file(dir.join("lock"));
+    let _ = std::fs::remove_dir(dir);
+}
+
 impl Drop for Registration {
     fn drop(&mut self) {
         // Windows 不允许删除仍被打开的锁文件，因此必须先显式关闭句柄。
-        // 任何一步失败都不 panic——清理失败顶多留下一条 Exited 记录。
         drop(self.lock.take());
-        let _ = std::fs::remove_file(self.dir.join("meta.json"));
-        let _ = std::fs::remove_file(self.dir.join("lock"));
-        let _ = std::fs::remove_dir(&self.dir);
+        purge_dir(&self.dir);
     }
 }
 
@@ -191,16 +199,15 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
         match liveness(&dir) {
             Liveness::Running => {
                 return Err(WboxError::args(format!(
-                    "容器名 '{}' 正在使用中。换个 --name，或先 `wbox rm {}`",
-                    name, name
+                    // 别在这里建议 `wbox rm`：已退出的残留在上面就被自动复用了，
+                    // 所以能走到这条分支的**一定是运行中的**，而 rm 明确拒绝
+                    // 运行中的容器——那样等于指使用户去撞一堵墙。
+                    "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
+                    name
                 )))
             }
             // 已亡的残留：可以安全复用，直接清掉重来
-            Liveness::Exited => {
-                let _ = std::fs::remove_file(dir.join("meta.json"));
-                let _ = std::fs::remove_file(dir.join("lock"));
-                let _ = std::fs::remove_dir(&dir);
-            }
+            Liveness::Exited => purge_dir(&dir),
         }
     }
     std::fs::create_dir_all(&dir)
@@ -224,6 +231,34 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
         dir,
         lock: Some(lock),
     })
+}
+
+/// 删除一条已退出的容器记录（`wbox rm`）。
+///
+/// **运行中的一律拒绝**：`rm` 只是删记录，并不会停掉容器；真删了只会让一个
+/// 还在跑的容器从 `ps` 里消失，等于把它变成没人管得到的孤儿。要停容器是
+/// F8.3 `stop` 的事，两件事不能混。
+pub fn remove(name: &str) -> Result<()> {
+    let dir = dir_for(name)?;
+    if !dir.exists() {
+        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+    }
+    match liveness(&dir) {
+        Liveness::Running => Err(WboxError::args(format!(
+            "容器 '{}' 仍在运行，拒绝删除记录（rm 不会停掉它）",
+            name
+        ))),
+        Liveness::Exited => {
+            purge_dir(&dir);
+            if dir.exists() {
+                return Err(WboxError::args(format!(
+                    "删除状态目录 '{}' 失败（检查权限或是否有进程占用）",
+                    dir.display()
+                )));
+            }
+            Ok(())
+        }
+    }
 }
 
 fn now_unix() -> u64 {
@@ -318,7 +353,10 @@ mod tests {
         let err = register("dup", &["/bin/true".into()], "(native)").unwrap_err();
         let m = format!("{}", err);
         assert!(m.contains("正在使用中"), "{}", m);
-        assert!(m.contains("wbox rm"), "报错要给出解法：{}", m);
+        // 解法必须是**真能用的**那条：此时 `wbox rm` 会拒绝（容器还在跑），
+        // 所以文案不该提它。
+        assert!(m.contains("换个 --name"), "报错要给出可行解法：{}", m);
+        assert!(!m.contains("wbox rm"), "不该建议一条必然被拒的命令：{}", m);
         let _ = std::fs::remove_dir_all(&home);
     }
 
