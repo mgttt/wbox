@@ -306,67 +306,89 @@ fn busybox() -> Option<PathBuf> {
     }
 }
 
+/// 搭一个只含 busybox 的临时 rootfs，返回该目录。
+///
+/// busybox 系列用例一律走**容器语义**（`WBOX_PREFIX` 指向这个目录，
+/// guest 用 `/busybox`），原因有两条：
+///
+/// 1. 这就是产品路径 —— `EmuBackend` 总会设前缀；
+/// 2. **必须**这么做才能跨平台。busybox 靠 `basename(argv[0])` 选 applet，
+///    而 basename 是按 `/` 切的。直接把宿主路径传进去，在 Windows 上
+///    argv[0] 是 `D:\a\wbox\wbox\busybox`（没有 `/`），busybox 会把整串
+///    当成 applet 名，报 "applet not found"——CI 上实测踩到过。
+///    容器语义下 argv[0] 是 `/busybox`，两个平台都对。
+///
+/// 另外用临时目录而不是仓库根：guest 会在 cwd 下建文件，指向仓库根会污染
+/// 工作区（这一点也实测踩到过）。
+fn busybox_rootfs(tag: &str) -> Option<PathBuf> {
+    let bb = busybox()?;
+    let d = tmpdir(tag);
+    std::fs::copy(&bb, d.join("busybox")).expect("复制 busybox 失败");
+    Some(d)
+}
+
+/// 在 busybox rootfs 里跑一条 busybox 命令。
+fn bb_run(root: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Out {
+    let mut argv = vec!["/busybox"];
+    argv.extend_from_slice(args);
+    let mut env: Vec<(&str, &str)> = vec![("WBOX_PREFIX", root.to_str().unwrap())];
+    env.extend_from_slice(extra_env);
+    emulate(&argv, &env)
+}
+
 #[test]
 fn busybox_basic_applets() {
-    let Some(bb) = busybox() else { return };
-    let bb = bb.to_str().unwrap().to_string();
+    let Some(root) = busybox_rootfs("bbapplets") else { return };
 
-    let o = emulate(&[&bb, "echo", "hello", "busybox"], &[]);
+    let o = bb_run(&root, &["echo", "hello", "busybox"], &[]);
     assert_ok(&o, 0, "busybox echo");
     assert_eq!(o.stdout, "hello busybox\n");
 
     // uname 的内容来自我们的 sys_uname，必须自洽
-    let o = emulate(&[&bb, "uname", "-a"], &[]);
+    let o = bb_run(&root, &["uname", "-a"], &[]);
     assert_ok(&o, 0, "busybox uname");
     assert!(o.stdout.contains("Linux"), "{}", o.stdout);
     assert!(o.stdout.contains("x86_64"), "{}", o.stdout);
 
     // 退出码：true/false 必须分得清
-    assert_ok(&emulate(&[&bb, "true"], &[]), 0, "busybox true");
-    assert_ok(&emulate(&[&bb, "false"], &[]), 1, "busybox false");
+    assert_ok(&bb_run(&root, &["true"], &[]), 0, "busybox true");
+    assert_ok(&bb_run(&root, &["false"], &[]), 1, "busybox false");
 }
 
 #[test]
 fn busybox_reads_files_and_directories() {
-    let Some(bb) = busybox() else { return };
-    let bb = bb.to_str().unwrap().to_string();
-    let d = tmpdir("bbfs");
-    std::fs::write(d.join("a.txt"), "alpha\n").unwrap();
-    std::fs::write(d.join("b.txt"), "beta\n").unwrap();
-    std::fs::create_dir(d.join("sub")).unwrap();
+    let Some(root) = busybox_rootfs("bbfs") else { return };
+    std::fs::write(root.join("a.txt"), "alpha\n").unwrap();
+    std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
 
     // cat：走 openat/read/write
-    let o = emulate(&[&bb, "cat", d.join("a.txt").to_str().unwrap()], &[]);
+    let o = bb_run(&root, &["cat", "/a.txt"], &[]);
     assert_ok(&o, 0, "busybox cat");
     assert_eq!(o.stdout, "alpha\n");
 
     // ls：走 getdents64
-    let o = emulate(&[&bb, "ls", d.to_str().unwrap()], &[]);
+    let o = bb_run(&root, &["ls", "/"], &[]);
     assert_ok(&o, 0, "busybox ls");
     for want in ["a.txt", "b.txt", "sub"] {
         assert!(o.stdout.contains(want), "ls 少了 {want}：{}", o.stdout);
     }
 
     // wc -c：走 stat/read，验证字节数正确
-    let o = emulate(&[&bb, "wc", "-c", d.join("a.txt").to_str().unwrap()], &[]);
+    let o = bb_run(&root, &["wc", "-c", "/a.txt"], &[]);
     assert_ok(&o, 0, "busybox wc");
     assert!(o.stdout.starts_with('6'), "{}", o.stdout);
 
     // 不存在的文件要报错并给非零退出码
-    let o = emulate(&[&bb, "cat", d.join("nope").to_str().unwrap()], &[]);
+    let o = bb_run(&root, &["cat", "/nope"], &[]);
     assert_ne!(o.code, 0, "读不存在的文件必须非零退出");
 }
 
 #[test]
 fn busybox_sha256_matches_known_value() {
-    let Some(bb) = busybox() else { return };
-    let d = tmpdir("bbsha");
-    let f = d.join("x");
-    std::fs::write(&f, "abc").unwrap();
-    let o = emulate(
-        &[bb.to_str().unwrap(), "sha256sum", f.to_str().unwrap()],
-        &[],
-    );
+    let Some(root) = busybox_rootfs("bbsha") else { return };
+    std::fs::write(root.join("x"), "abc").unwrap();
+    let o = bb_run(&root, &["sha256sum", "/x"], &[]);
     assert_ok(&o, 0, "busybox sha256sum");
     // "abc" 的 SHA-256 是已知常量：算错一位就说明整数/移位路径有问题
     assert!(
@@ -422,10 +444,11 @@ fn wbox_prefix_confines_the_guest_to_the_rootfs() {
 
 #[test]
 fn internal_control_env_is_not_leaked_to_the_guest() {
-    let Some(bb) = busybox() else { return };
+    let Some(root) = busybox_rootfs("bbenv") else { return };
     // WBOX_*/BLINK_* 是内部控制键，按 PRD §F7.2 不得透传给 guest
-    let o = emulate(
-        &[bb.to_str().unwrap(), "env"],
+    let o = bb_run(
+        &root,
+        &["env"],
         &[("WBOX_SECRET_KNOB", "1"), ("BLINK_SECRET_KNOB", "1"), ("VISIBLE", "yes")],
     );
     assert_ok(&o, 0, "busybox env");
@@ -439,12 +462,9 @@ fn internal_control_env_is_not_leaked_to_the_guest() {
 
 #[test]
 fn instruction_budget_env_stops_a_runaway_guest() {
-    let Some(bb) = busybox() else { return };
+    let Some(root) = busybox_rootfs("bbbudget") else { return };
     // 给一个极小的指令预算：guest 一定跑不完，必须被终止而不是挂住
-    let o = emulate(
-        &[bb.to_str().unwrap(), "echo", "hi"],
-        &[("WBOX_MAX_INSNS", "1000")],
-    );
+    let o = bb_run(&root, &["echo", "hi"], &[("WBOX_MAX_INSNS", "1000")]);
     assert_ne!(o.code, 0, "预算耗尽应非零退出");
     assert!(
         o.stderr.contains("signal") || o.stderr.contains("fatal"),
@@ -455,18 +475,16 @@ fn instruction_budget_env_stops_a_runaway_guest() {
 
 #[test]
 fn shebang_script_runs_through_its_interpreter() {
-    let Some(bb) = busybox() else { return };
-    let d = tmpdir("shebang");
-    let script = d.join("s");
-    // 用 busybox 的 echo applet 当解释器：#! <busybox> echo
-    std::fs::write(
-        &script,
-        format!("#!{} echo\n", bb.to_str().unwrap()),
-    )
-    .unwrap();
-    let o = emulate(&[script.to_str().unwrap(), "tail"], &[]);
+    let Some(root) = busybox_rootfs("shebang") else { return };
+    // 用 busybox 的 echo applet 当解释器：#!/busybox echo
+    // 解释器路径必须是 **guest** 路径，否则容器里找不到它。
+    std::fs::write(root.join("s"), "#!/busybox echo\n").unwrap();
+    let o = emulate(
+        &["/s", "tail"],
+        &[("WBOX_PREFIX", root.to_str().unwrap())],
+    );
     assert_ok(&o, 0, "#! 脚本");
     // echo 会把 [echo] <脚本路径> tail 都打出来
     assert!(o.stdout.contains("tail"), "{}", o.stdout);
-    assert!(o.stdout.contains(script.to_str().unwrap()), "{}", o.stdout);
+    assert!(o.stdout.contains("/s"), "{}", o.stdout);
 }
