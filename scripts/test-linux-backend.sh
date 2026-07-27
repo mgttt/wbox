@@ -7,6 +7,8 @@
 #   L2  --memory 超限失败 / --max-procs 挡 fork 炸弹 / --cpu-pct 语义
 #   H   台阶①宿主程序模式（`wbox run -- <本机程序>`，harness 环境控制用）
 #   N   网络默认断开（与 Windows 侧默认无 INTERNET_CLIENT 对齐）
+#   L3  进程树收割（SIGKILL wbox 后无残留，对齐 KILL_ON_JOB_CLOSE）
+#   W   台阶③经 wine 跑 Windows 程序（需 wine + mingw，缺则 SKIP）
 #
 # 用法：
 #   scripts/test-linux-backend.sh [wbox 二进制] [静态 busybox]
@@ -131,11 +133,6 @@ else
   report FAIL "L2.1 --memory" "限额下仍成功（rc=$rc）"
 fi
 
-# --max-procs 有两种正确结局，取决于宿主能力：
-#   有 cgroup v2            → pids.max 生效，fork 炸弹被挡；
-#   无 cgroup v2 且非 root  → RLIMIT_NPROC 生效，同样被挡；
-#   无 cgroup v2 且是 root  → RLIMIT_NPROC 对特权进程无效，故必须**明确拒绝**
-#                             （实测 root 下 40 个子进程全能起来，限不住）。
 # --max-procs 有两种可接受结局，**按实际发生的事判定，不按宿主特征猜**：
 # 早先这里用 `[ -f /sys/fs/cgroup/cgroup.controllers ]` 当"有 cgroup v2"的
 # 判据，但那个文件存在**不代表能用**——GitHub runner 上委派没开，实际走的是
@@ -386,6 +383,17 @@ CEOF
       fi
     else
       report SKIP "W.3 PE 网络语义" "net.exe 编译失败（缺 winsock 头？）"
+    fi
+
+    # 镜像模式下的 PE 暂未接线，必须**明确拒绝**而不是让容器内的 shell
+    # 去解释它。不拦的话 execvp 遇 ENOEXEC 会回退 /bin/sh，busybox 把 PE 当
+    # 脚本读，吐 "MZ...: not found" 加一串语法错误（实测 rc=2，毫无线索）。
+    cp "$WORK/hi.exe" "$CACHE/rootfs/bin/hi.exe" 2>/dev/null
+    OUT=$(HOME=$WORK/home "$WBOX_ABS" run lbetest -- /bin/hi.exe 2>&1); rc=$?
+    if [ "$rc" -eq 1 ] && printf '%s' "$OUT" | grep -q 'PE'; then
+      report PASS "W.5 镜像模式下的 PE 明确拒绝（不让 shell 去解释它）"
+    else
+      report FAIL "W.5 镜像模式 PE 拒绝" "rc=$rc（期望 1）：$(printf '%s' "$OUT" | head -c 200)"
     fi
 
     # ELF 不能被误塞 wine：误判的代价是拿 wine 去跑 Linux 程序，报错极难懂

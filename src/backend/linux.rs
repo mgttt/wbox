@@ -119,6 +119,23 @@ impl Backend for LinuxNativeBackend {
             super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose, super::env::GuestFlavor::Linux);
         // 宿主即 Linux，guest 命令直接就是最终命令行（无模拟器前缀）。
         let cmd = spec.cmd.clone();
+        // 镜像模式下的 PE 暂未接线（台阶③ 目前只覆盖宿主模式）。这里必须**明确
+        // 拒绝**：不拦的话 `execvp` 遇到 ENOEXEC 会按 POSIX 回退去用 /bin/sh
+        // 解释这个文件，于是 busybox sh 把 PE 当 shell 脚本读，吐出
+        // "MZ....: not found" 加一串语法错误——用户完全看不出发生了什么
+        // （实测如此，rc=2）。宁可给一句能懂的话。
+        #[cfg(target_os = "linux")]
+        {
+            let guest = cmd[0].strip_prefix('/').unwrap_or(&cmd[0]);
+            if super::wine::is_pe(&rootfs.join(guest)) {
+                return Err(WboxError::args(format!(
+                    "'{}' 是 Windows 程序（PE），但镜像模式暂不支持经 wine 执行。\
+                     目前台阶③ 只覆盖宿主模式：`wbox run -- <你的.exe>`（不带镜像引用）。\
+                     不拦下来的话，容器内的 shell 会把这个 PE 当脚本解释，报错难以理解",
+                    cmd[0]
+                )));
+            }
+        }
         if spec.verbose {
             super::verbose_kv("宿主后端", "linux-native（镜像模式，pivot_root 进 rootfs）");
             super::verbose_kv("rootfs", rootfs.display());
