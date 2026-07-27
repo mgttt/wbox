@@ -308,7 +308,9 @@ F1
     ├── F1.7.5 `run --name/-w/--workdir/--rm/-v` 接受常见参数拼法
     ├── F1.7.6 `run --network none|host` 映射 wbox 的默认断网与网络放行
     ├── F1.7.7 `exec NAME COMMAND [ARG...]` 不强制要求 `--` 分隔
-    └── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
+    ├── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
+    ├── F1.7.9 `kill [-s KILL] NAME...` 立即终止，不经过 stop 宽限期
+    └── F1.7.10 `top NAME` 列出隔离单元成员，不混入 wbox supervisor
 ```
 
 验收：
@@ -341,6 +343,11 @@ wbox
 │   └── rm IMAGE
 ├── ps [-a|--all]
 ├── exec NAME [--] COMMAND [ARG...]
+├── inspect|wait|logs|stop NAME...
+├── kill [-s KILL|SIGKILL|9] NAME...
+├── top NAME
+├── container
+│   └── ls|inspect|wait|logs|exec|rm|stop|kill|top
 └── rm NAME...
 ```
 
@@ -658,8 +665,20 @@ Linux 先 `SIGTERM` 后 `SIGKILL`（默认给 10 秒，`--timeout` 可调）。
 `stop` 对已停止的容器**幂等**（不报错），否则 `wbox stop x` 在脚本里没法用；
 但停一个**不存在**的容器仍然报错——那是"没这个东西"，与"已经停了"是两回事。
 
-**F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.22 覆盖完整生命周期；
-Windows 由 WP.6–WP.17 覆盖 detach、ps、logs、stop、rm 与原生 exec，其中
+`kill` 与 `stop` 必须保持不同契约：`kill` 不等待 guest 自行清理，默认立即清空
+Linux 进程树或 Windows 命名 Job；跨平台子集只接受 `KILL/SIGKILL/9`，其他信号
+在实现前明确拒绝。`top` 只列隔离边界内的成员：Linux 从 `container.pid` 枚举
+`/proc` 后代并隐藏 PID namespace 中间进程，Windows 直接查询命名 Job；两侧都
+不得把宿主侧 supervisor 当作 guest。当前不接受 Docker/Podman 可追加的任意
+宿主 `ps` 参数，避免参数看似成功但输出语义漂移。
+
+`--restart` 每次拉起新 guest 前必须覆盖 `container.pid`（Linux R.5）；`exec/top` 读取当前值，
+端口转发也必须在每条新连接建立时重新读取，而不能永久绑定第一次运行的
+namespace owner PID。否则重启策略表面成功，管理面与网络面却仍指向已经退出的
+上一代容器。
+
+**F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.24 覆盖完整生命周期；
+Windows 由 WP.6–WP.20 覆盖 detach、ps、logs、stop、rm、kill/top 与原生 exec，其中
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
 OCI/Blink exec 不在承诺范围，必须明确拒绝。
 
@@ -685,6 +704,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
 | F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
+| F8.6 `[done]` | `kill` + `top` | Linux P.23/P.24；Windows WP.19/WP.20；Windows `top` 查询 Job 成员，`kill` 清空三层进程树 |
 
 ### F9 对标能力补齐 `[planned]`
 
@@ -1038,6 +1058,7 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 ├── fork 后 guest/VFS fd 命名空间继续收敛
 ├── Linux Wine 执行路径落地
 ├── Linux cgroup v2 委派布局取证
+├── Docker/Podman 生命周期兼容补齐 kill/top
 └── 文档收敛为 PRD + 技术参考
 ```
 

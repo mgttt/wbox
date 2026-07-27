@@ -12,11 +12,13 @@ pub mod build;
 pub mod exec;
 pub mod image;
 pub mod inspect;
+pub mod kill;
 pub mod logs;
 pub mod ps;
 pub mod rm;
 pub mod stop;
 pub mod run;
+pub mod top;
 pub mod wait;
 
 use crate::error::{Result, WboxError};
@@ -40,6 +42,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
   wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
+  wbox kill [-s KILL] <NAME>...                    立即强制终止运行中的容器
+  wbox top <NAME>                                  列出容器隔离单元内的进程
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
   wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
   wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
@@ -96,8 +100,22 @@ fn is_help_arg(arg: Option<&String>) -> bool {
 fn is_known_command(command: &str) -> bool {
     matches!(
         command,
-        "run" | "pull" | "images" | "rmi" | "image" | "container" | "ps" | "inspect"
-            | "wait" | "logs" | "exec" | "rm" | "stop"
+        "run"
+            | "build"
+            | "pull"
+            | "images"
+            | "rmi"
+            | "image"
+            | "container"
+            | "ps"
+            | "inspect"
+            | "wait"
+            | "logs"
+            | "exec"
+            | "rm"
+            | "stop"
+            | "kill"
+            | "top"
     )
 }
 
@@ -110,12 +128,14 @@ fn cmd_container(args: &[String]) -> Result<u32> {
         Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
         Some("stop") => stop::cmd_stop(&args[1..]),
+        Some("kill") => kill::cmd_kill(&args[1..]),
+        Some("top") => top::cmd_top(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 container 子命令 '{}'（支持 ls / inspect / wait / logs / exec / rm / stop）",
+            "未知 container 子命令 '{}'（支持 ls / inspect / wait / logs / exec / rm / stop / kill / top）",
             other
         ))),
         None => Err(WboxError::args(
-            "container 缺少子命令（ls / inspect / wait / logs / exec / rm / stop）",
+            "container 缺少子命令（ls / inspect / wait / logs / exec / rm / stop / kill / top）",
         )),
     }
 }
@@ -172,6 +192,8 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
         Some("stop") => stop::cmd_stop(&args[1..]),
+        Some("kill") => kill::cmd_kill(&args[1..]),
+        Some("top") => top::cmd_top(&args[1..]),
         #[cfg(target_os = "linux")]
         Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),
         Some("--help") | Some("-h") => {
@@ -189,7 +211,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         None => {
             print!("{}", USAGE);
             Err(WboxError::args(
-                "缺少子命令（run / image / container / ps / inspect / wait / rm / stop / logs / exec）",
+                "缺少子命令（run / image / container / ps / inspect / wait / rm / stop / kill / top / logs / exec）",
             ))
         }
     }
@@ -215,6 +237,7 @@ mod tests {
     fn dispatch_accepts_docker_style_command_help() {
         for args in [
             vec!["run", "--help"],
+            vec!["build", "--help"],
             vec!["pull", "-h"],
             vec!["image", "pull", "--help"],
             vec!["container", "inspect", "--help"],

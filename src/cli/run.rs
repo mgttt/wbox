@@ -403,6 +403,13 @@ fn spawn_with_restart(
 ) -> Result<u32> {
     let mut restarts = 0u32;
     loop {
+        // 每次拉起都刷新：restart 后 namespace owner 的宿主 PID 会变化，
+        // exec/top/端口转发不能继续使用上一代的 container.pid。
+        #[cfg(target_os = "linux")]
+        {
+            crate::runstate::clear_container_pid(&spec.name);
+            crate::runstate::spawn_container_pid_recorder(spec.name.clone());
+        }
         let rc = b.spawn(spec, prepared)?;
         if !spec.restart.should_restart(rc, restarts) {
             return Ok(rc);
@@ -429,10 +436,6 @@ fn spawn_registered(
     if supervised {
         spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
     }
-    // 容器内 pid 的记录对前台/后台都要做：`exec` 附着的是运行中的容器，
-    // 前台容器同样可以被另一个终端 exec 进去。
-    #[cfg(target_os = "linux")]
-    crate::runstate::spawn_container_pid_recorder(spec.name.clone());
     crate::portfwd::spawn_forwarders(spec.name.clone(), spec.ports.clone());
     let rc = spawn_with_restart(b, spec, prepared);
     if supervised {

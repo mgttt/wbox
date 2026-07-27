@@ -141,11 +141,18 @@ mod imp {
 
     /// 为一条映射起监听。绑定 **127.0.0.1** 而不是 0.0.0.0：
     /// 默认只对本机开放，避免一条 `-p` 就把容器端口暴露到局域网。
-    pub fn serve(container_pid: u32, map: PortMap) -> std::io::Result<()> {
+    pub fn serve(state_dir: std::path::PathBuf, map: PortMap) -> std::io::Result<()> {
         let listener = TcpListener::bind(("127.0.0.1", map.host))?;
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(host_stream) = stream else { continue };
+                let Some(container_pid) = crate::runstate::container_pid(&state_dir) else {
+                    eprintln!(
+                        "wbox: 端口 {}->{} 连接失败：容器 PID 尚未记录",
+                        map.host, map.guest
+                    );
+                    continue;
+                };
                 if let Err(error) = spawn_relay(container_pid, map.guest, host_stream) {
                     eprintln!(
                         "wbox: 端口 {}->{} 连接失败：{}",
@@ -206,7 +213,8 @@ pub fn cmd_internal_relay(args: &[String]) -> Result<u32> {
     Ok(0)
 }
 
-/// 起转发。容器 pid 尚未记录时先等——它由 `runstate` 的记录线程异步写入。
+/// 起转发。每条连接建立时读取当前 container.pid，使 --restart 后的新 namespace
+/// 无需重绑宿主监听端口。
 #[cfg(target_os = "linux")]
 pub fn spawn_forwarders(name: String, ports: Vec<PortMap>) {
     if ports.is_empty() {
@@ -216,21 +224,8 @@ pub fn spawn_forwarders(name: String, ports: Vec<PortMap>) {
         let Ok(dir) = crate::runstate::dir_for(&name) else {
             return;
         };
-        // 与 pid 记录线程赛跑：等它写出 container.pid
-        let mut pid = None;
-        for _ in 0..200 {
-            if let Some(p) = crate::runstate::container_pid(&dir) {
-                pid = Some(p);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let Some(pid) = pid else {
-            eprintln!("wbox: 端口转发未启动——容器 pid 未记录");
-            return;
-        };
         for m in ports {
-            if let Err(e) = imp::serve(pid, m) {
+            if let Err(e) = imp::serve(dir.clone(), m) {
                 eprintln!("wbox: 端口 {}->{} 转发启动失败：{}", m.host, m.guest, e);
             }
         }

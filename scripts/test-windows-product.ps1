@@ -78,6 +78,8 @@ $savedMarker = $env:HOST_ONLY_MARKER
 $portableWbox = $null
 $stopName = "product-stop"
 $stopPids = @()
+$killName = "product-kill"
+$killPids = @()
 $execName = "product-exec"
 $crashName = "product-crash"
 $writeBgName = "product-write-bg"
@@ -398,6 +400,15 @@ while ($true) {
     }
     Write-Host "PASS WP.8 detached Windows supervisor -> guest -> child tree"
 
+    $topOutput = & $portableWbox top $stopName 2>&1 | Out-String
+    Assert-Exit 0 "WP.19 top running Windows workload" $topOutput
+    if ($topOutput -notmatch "(?m)^$guestPid\s+" -or
+        $topOutput -notmatch "(?m)^$childPid\s+" -or
+        $topOutput -match "(?m)^$supervisorPid\s+") {
+        throw "WP.19 top must list Job members but not the supervisor: $topOutput"
+    }
+    Write-Host "PASS WP.19 top lists Windows Job members without leaking the supervisor"
+
     $stopped = & $portableWbox stop $stopName 2>&1 | Out-String
     Assert-Exit 0 "WP.9 stop running Windows workload" $stopped
     if (-not (Wait-ProcessesExited $stopPids 15)) {
@@ -614,6 +625,52 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     }
     Write-Host "PASS WP.18 Windows OCI build/cache persists COPY/RUN without mutating the base"
 
+    # WP.20 independently gates immediate kill. Reuse the proven tree workload,
+    # but publish fresh PID files so stale data cannot make the assertion pass.
+    $killGuestPidFile = Join-Path $stopWork "kill-guest.pid"
+    $killChildPidFile = Join-Path $stopWork "kill-child.pid"
+    $killInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $killInfo.FileName = $portableWbox
+    $killInfo.UseShellExecute = $false
+    $killInfo.CreateNoWindow = $true
+    $killInfo.Arguments = @(
+        "run", "-d", "--name", $killName, "--workdir", $stopWork, "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-File", $workloadScript,
+        "-GuestPidFile", $killGuestPidFile,
+        "-ChildPidFile", $killChildPidFile
+    ) -join " "
+    $killLauncher = [System.Diagnostics.Process]::Start($killInfo)
+    if (-not $killLauncher.WaitForExit(15000)) {
+        $killLauncher.Kill()
+        throw "WP.20 detached kill workload parent did not exit within 15 seconds"
+    }
+    if ($killLauncher.ExitCode -ne 0) {
+        throw "WP.20 detached kill workload launch failed: rc=$($killLauncher.ExitCode)"
+    }
+    $killGuestPid = Wait-PidFile $killGuestPidFile 15
+    $killChildPid = Wait-PidFile $killChildPidFile 15
+    $killMetaFile = Join-Path $testHome ".wbox\run\$killName\meta.json"
+    if ($null -eq $killGuestPid -or $null -eq $killChildPid -or
+        -not (Test-Path -LiteralPath $killMetaFile -PathType Leaf)) {
+        throw "WP.20 timed out waiting for kill workload PID markers"
+    }
+    $killSupervisorPid = [int]((Get-Content -LiteralPath $killMetaFile -Raw | ConvertFrom-Json).pid)
+    $killPids = @($killSupervisorPid, $killGuestPid, $killChildPid)
+    $killed = & $portableWbox container kill -s 9 $killName 2>&1 | Out-String
+    Assert-Exit 0 "WP.20 immediate container kill" $killed
+    if (-not (Wait-ProcessesExited $killPids 15)) {
+        throw "WP.20 kill left process PID(s) alive: $($killPids -join ', ')"
+    }
+    $killedState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($killedState -notmatch "(?m)^$([regex]::Escape($killName))\s+exited\s+") {
+        throw "WP.20 killed container was not recorded as exited: $killedState"
+    }
+    & $portableWbox rm $killName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.20 rm killed record"
+    $killPids = @()
+    Write-Host "PASS WP.20 kill immediately removes the complete Windows Job tree"
+
     if ($null -ne $guestFailure) {
         throw $guestFailure
     }
@@ -630,8 +687,15 @@ finally {
         & $portableWbox rm $writeBgName 2>&1 | Out-Null
         & $portableWbox stop $waitName 2>&1 | Out-Null
         & $portableWbox rm $waitName 2>&1 | Out-Null
+        & $portableWbox kill $killName 2>&1 | Out-Null
+        & $portableWbox rm $killName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
+        if (Test-ProcessAlive $processId) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($processId in $killPids) {
         if (Test-ProcessAlive $processId) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }

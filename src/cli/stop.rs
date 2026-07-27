@@ -141,7 +141,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
 
 /// 轮询锁直到容器退出。**以锁为准而不是以 pid 为准**：pid 会被复用，
 /// 而锁被释放才真正等价于"持有它的那个 wbox 没了"。
-fn wait_exit(dir: &std::path::Path, secs: u64) -> bool {
+pub(crate) fn wait_exit(dir: &std::path::Path, secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         if runstate::liveness(dir) == Liveness::Exited {

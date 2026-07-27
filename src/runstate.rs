@@ -1165,6 +1165,14 @@ pub fn record_container_pid(name: &str, pid: u32) {
     let _ = std::fs::write(dir.join(CONTAINER_PID), pid.to_string());
 }
 
+/// 在 restart 拉起下一代前移除旧 PID，避免短暂窗口内把新连接送进已退出甚至已
+/// 被复用的宿主 PID。
+#[cfg(target_os = "linux")]
+pub fn clear_container_pid(name: &str) {
+    let Ok(dir) = dir_for(name) else { return };
+    let _ = std::fs::remove_file(dir.join(CONTAINER_PID));
+}
+
 /// 读回 [`record_container_pid`] 写下的 pid。
 #[cfg(target_os = "linux")]
 /// 与 [`record_container_pid`] 同为 Linux 专有：两个调用方（`exec` 的

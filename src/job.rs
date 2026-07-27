@@ -7,13 +7,14 @@
 
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
-    JobObjectExtendedLimitInformation, OpenJobObjectW, SetInformationJobObject,
-    TerminateJobObject,
-    JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_CPU_RATE_CONTROL_ENABLE,
-    JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+    JobObjectCpuRateControlInformation, JobObjectExtendedLimitInformation, OpenJobObjectW,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+    JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
 };
 use windows_sys::Win32::System::SystemServices::{
     JOB_OBJECT_ASSIGN_PROCESS, JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE,
@@ -70,7 +71,10 @@ impl Job {
         };
         if h.is_null() {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::job(format!("CreateJobObjectW 失败，GetLastError={}", err)));
+            return Err(crate::error::WboxError::job(format!(
+                "CreateJobObjectW 失败，GetLastError={}",
+                err
+            )));
         }
         let create_error = unsafe { GetLastError() };
         if name.is_some() && create_error == 183 {
@@ -97,10 +101,7 @@ impl Job {
     /// 等待 detached supervisor 完成“写入运行记录 → 创建命名 Job”之间的短暂
     /// 启动窗口。仅 ERROR_FILE_NOT_FOUND 可重试，权限等其他错误必须立即暴露。
     pub fn wait_for_container(container_name: &str, timeout: std::time::Duration) -> Result<Self> {
-        Self::open_for_container_until(
-            container_name,
-            Some(std::time::Instant::now() + timeout),
-        )
+        Self::open_for_container_until(container_name, Some(std::time::Instant::now() + timeout))
     }
 
     fn open_for_container_until(
@@ -173,8 +174,8 @@ impl Job {
         // CpuRate 语义（百分比 × 100）在 backend::Limits::cpu_rate，跨平台可测。
         if let Some(rate) = self.limits.cpu_rate() {
             let mut cpu: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION = unsafe { std::mem::zeroed() };
-            cpu.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
-                | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+            cpu.ControlFlags =
+                JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
             // windows-sys 的 union 字段为 Copy 类型，写字段是安全操作；写入后不再读取其它变体。
             cpu.Anonymous.CpuRate = rate;
             // # Safety: 结构体已初始化，句柄有效。
@@ -225,6 +226,65 @@ impl Job {
         Ok(())
     }
 
+    /// 返回当前 Job 中的全部进程 ID。查询结果可能在两次调用之间增长，因此按
+    /// `ERROR_MORE_DATA` 重试，而不是假定一个固定的最大进程数。
+    pub fn process_ids(&self) -> Result<Vec<u32>> {
+        const ERROR_MORE_DATA: u32 = 234;
+        let offset = std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList);
+        let word = std::mem::size_of::<usize>();
+        let header_words = offset.div_ceil(word);
+        let mut capacity = 16usize;
+
+        loop {
+            let mut storage = vec![0usize; header_words + capacity];
+            let info = storage.as_mut_ptr() as *mut JOBOBJECT_BASIC_PROCESS_ID_LIST;
+            let bytes = storage
+                .len()
+                .checked_mul(word)
+                .and_then(|size| u32::try_from(size).ok())
+                .ok_or_else(|| crate::error::WboxError::job("Job 进程列表缓冲区过大"))?;
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    self.raw(),
+                    JobObjectBasicProcessIdList,
+                    info.cast(),
+                    bytes,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok != 0 {
+                let count = unsafe { (*info).NumberOfProcessIdsInList as usize };
+                let ids = unsafe {
+                    std::slice::from_raw_parts(
+                        (info as *const u8).add(offset) as *const usize,
+                        count,
+                    )
+                };
+                return ids
+                    .iter()
+                    .map(|pid| {
+                        u32::try_from(*pid).map_err(|_| {
+                            crate::error::WboxError::job(format!(
+                                "Job 返回了超出 u32 范围的进程 ID：{}",
+                                pid
+                            ))
+                        })
+                    })
+                    .collect();
+            }
+
+            let err = unsafe { GetLastError() };
+            if err != ERROR_MORE_DATA {
+                return Err(crate::error::WboxError::job(format!(
+                    "QueryInformationJobObject(ProcessIdList) 失败，GetLastError={}",
+                    err
+                )));
+            }
+            let assigned = unsafe { (*info).NumberOfAssignedProcesses as usize };
+            capacity = assigned.max(capacity.saturating_mul(2));
+        }
+    }
+
     /// 关闭当前控制器持有的 Job handle。已经加入 Job 的进程仍留在 Job 中；
     /// `exec` 在恢复 guest 后立即调用，使 supervisor 始终是生命周期 owner。
     pub fn close(&mut self) {
@@ -273,6 +333,10 @@ mod real_windows_tests {
             .unwrap();
         job.assign(child.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE)
             .unwrap();
+        assert!(
+            reopened.process_ids().unwrap().contains(&child.id()),
+            "Job 查询应列出刚加入的进程"
+        );
         reopened.terminate(1).unwrap();
         let status = child.wait().unwrap();
         assert!(!status.success(), "TerminateJobObject 应终止 Job 内进程");

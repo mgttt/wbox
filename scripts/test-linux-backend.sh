@@ -494,6 +494,23 @@ else
   report FAIL "R.4 冲突检测" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 150)"
 fi
 
+# R.5 管理面必须跟随第二代 PID。第一代写 marker 后失败，第二代保持运行；
+# 若 container.pid 仍是第一代，top 会拿不到 /proc 子树。
+rm -f "$CACHE/rootfs/restart-ready"
+HOME=$WORK/home "$WBOX_ABS" run -d --name rmanage --restart on-failure:1 \
+  -- /bin/sh -c 'if [ -f /restart-ready ]; then sleep 20; else touch /restart-ready; exit 7; fi' \
+  >/dev/null 2>&1
+sleep 3
+rmtop=$(HOME=$WORK/home "$WBOX_ABS" top rmanage 2>&1); rmrc=$?
+if [ "$rmrc" -eq 0 ] && printf '%s' "$rmtop" | grep -q 'sleep 20'; then
+  report PASS "R.5 restart 后 top 跟随新一代 container.pid"
+else
+  report FAIL "R.5 restart 管理面 PID 刷新" "rc=$rmrc 输出: $(printf '%s' "$rmtop" | head -c 180)"
+fi
+HOME=$WORK/home "$WBOX_ABS" kill rmanage >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm rmanage >/dev/null 2>&1
+rm -f "$CACHE/rootfs/restart-ready"
+
 echo
 echo "=== B 镜像构建（PRD F9.3）==="
 
@@ -890,9 +907,27 @@ else
   report FAIL "P.21 exec 退出码" "得到 $?（期望 7）"
 fi
 
+# P.23 top 必须列出隔离单元里的 guest，而不是宿主侧 supervisor。
+etop=$(HOME=$PSHOME "$WBOX_ABS" container top ebox 2>&1); etoprc=$?
+esupervisor=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/ebox/meta.json'))['pid'])" 2>/dev/null)
+if [ "$etoprc" -eq 0 ] && printf '%s' "$etop" | grep -q '/bin/sleep 40' \
+   && ! printf '%s' "$etop" | grep -q "^$esupervisor "; then
+  report PASS "P.23 top 列出容器 guest 且不混入 supervisor"
+else
+  report FAIL "P.23 top 进程视图" "rc=$etoprc supervisor=$esupervisor 输出: $(printf '%s' "$etop" | head -c 200)"
+fi
+
+# P.24 kill 默认立即强制终止；这里同时走 container 子命令别名。
+HOME=$PSHOME "$WBOX_ABS" container kill ebox >/dev/null 2>&1; ekillrc=$?
+sleep 1
+if [ "$ekillrc" -eq 0 ] && HOME=$PSHOME "$WBOX_ABS" ps -a | grep -q "ebox.*exited"; then
+  report PASS "P.24 kill 立即终止并保留 exited 记录"
+else
+  report FAIL "P.24 kill" "rc=$ekillrc 状态: $(HOME=$PSHOME "$WBOX_ABS" ps -a | tr '\n' ' ' | head -c 150)"
+fi
+
 # P.22 容器已退出时必须**明确拒绝**。放行的后果不是报错而是更糟：命令会跑在
 # 宿主上，而用户以为它在容器里。
-HOME=$PSHOME "$WBOX_ABS" stop ebox >/dev/null 2>&1
 eout=$(HOME=$PSHOME "$WBOX_ABS" exec ebox -- /bin/true 2>&1); erc=$?
 if [ "$erc" -ne 0 ] && printf '%s' "$eout" | grep -q "已退出"; then
   report PASS "P.22 exec 对已退出容器明确拒绝"
