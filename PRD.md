@@ -693,7 +693,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 ```text
 F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
-├── F9.2 端口映射 `-p`                        —— [verify]（Linux 侧，仅 TCP；relay 修复待 CI）
+├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
 ├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux 侧）
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
@@ -734,7 +734,7 @@ F9
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
 `--rm`、stop、启动失败与 supervisor 强杀都不能泄漏句柄、状态目录或宿主权限。
 
-**F9.2 端口映射** `[verify]`（Linux 宿主，**仅 TCP**；门禁 N2.1–N2.3）。
+**F9.2 端口映射** `[done]`（Linux 宿主，**仅 TCP**；门禁 N2.1–N2.3）。
 
 选了"wbox 自己做用户态转发"这条路：veth 要 `CAP_NET_ADMIN`（rootless 拿不到），
 slirp4netns/pasta 要用户先装（与 §2.2「免安装」冲突，只能当可选加速路径）。
@@ -748,7 +748,7 @@ slirp4netns/pasta 要用户先装（与 §2.2「免安装」冲突，只能当�
 作为 relay 的 stdin/stdout；`Command::pre_exec` 在 fork 后的单线程阶段按
 `user -> net` 调用 `setns`，relay 随后连接容器的 `127.0.0.1:GUEST` 并双向复制。
 guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试，不把正常启动竞态
-暴露为随机失败。该修复须由 Linux N2.1 门禁确认后才恢复 `[done]`。
+暴露为随机失败。修复已由 Linux 与 Wine 两个原生 Ubuntu 后端门禁共同确认。
 
 几处刻意的取舍：
 
