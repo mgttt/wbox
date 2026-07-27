@@ -54,6 +54,7 @@ const AT_FDCWD: i32 = -100;
 /// `newfstatat` 的 `AT_EMPTY_PATH`：路径为空时对 fd 本身取状态。
 const AT_EMPTY_PATH: i32 = 0x1000;
 const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+const AT_REMOVEDIR: i32 = 0x200;
 
 const PATH_MAX: usize = 4096;
 
@@ -69,6 +70,8 @@ pub struct Os {
     pub strace: bool,
     /// `uname` 报的内核版本。
     pub release: String,
+    /// `umask` 的当前值。只记录不生效，见分派表里的说明。
+    pub umask: u32,
 }
 
 impl Default for Os {
@@ -88,6 +91,7 @@ impl Os {
             // 报一个足够新的版本：glibc 会检查内核版本下限，报太老会直接
             // "FATAL: kernel too old" 退出。
             release: "6.1.0-wbox".to_string(),
+            umask: 0o022,
         }
     }
 }
@@ -197,6 +201,42 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // set_robust_list / rseq：线程相关的登记，单线程下无副作用
         273 | 334 => 0,
         318 => sys_getrandom(m, a[0], a[1], a[2] as u32),
+        // ---- 文件系统写操作与 fd 杂项 ----
+        7 => sys_poll(m, a[0], a[1], a[2] as i32),
+        18 => sys_pwrite(m, a[0] as i32, a[1], a[2], a[3] as i64),
+        22 => sys_pipe(m, a[0], 0),
+        293 => sys_pipe(m, a[0], a[1] as i32),
+        26 => sys_msync(m, a[0], a[1], a[2] as i32),
+        40 => sys_sendfile(m, a[0] as i32, a[1] as i32, a[2], a[3]),
+        74 | 75 => sys_fsync(m, a[0] as i32),
+        76 => sys_truncate(m, a[0], a[1] as i64),
+        77 => sys_ftruncate(m, a[0] as i32, a[1] as i64),
+        81 => sys_fchdir(m, a[0] as i32),
+        82 => sys_rename(m, AT_FDCWD, a[0], AT_FDCWD, a[1]),
+        264 | 316 => sys_rename(m, a[0] as i32, a[1], a[2] as i32, a[3]),
+        83 => sys_mkdir(m, AT_FDCWD, a[0]),
+        258 => sys_mkdir(m, a[0] as i32, a[1]),
+        84 => sys_unlinkat(m, AT_FDCWD, a[0], AT_REMOVEDIR),
+        85 => sys_openat(m, AT_FDCWD, a[0], O_WRONLY | O_CREAT | O_TRUNC, a[1] as u32),
+        86 => sys_link(m, a[0], a[1]),
+        265 => sys_link(m, a[1], a[3]),
+        88 => sys_symlink(m, a[0], a[1]),
+        266 => sys_symlink(m, a[0], a[2]),
+        // chmod/chown 族：容器内一律 root，且 Windows 没有对应语义。
+        // 报成功而不是 ENOSYS——guest 的 install/cp 会因为 chmod 失败而整体失败，
+        // 而这里的"失败"并不代表任何真实的权限问题。
+        90 | 91 | 92 | 93 | 260 | 268 => 0,
+        // utimensat 族：时间戳设置暂不落到宿主，报成功。
+        132 | 235 | 280 => 0,
+        95 => {
+            // umask：只记住值并返回旧值，不参与实际创建权限（同上）
+            let old = m.os.umask;
+            m.os.umask = a[0] as u32 & 0o777;
+            old as i64
+        }
+        269 => sys_access(m, a[1], a[2] as i32),
+        292 => sys_dup3(m, a[0] as i32, a[1] as i32, a[2] as i32),
+        332 => sys_statx(m, a[0] as i32, a[1], a[2] as i32, a[4]),
         _ => {
             if m.os.strace {
                 eprintln!("wbox-linux: syscall {nr} 未实现 -> ENOSYS");
@@ -229,10 +269,33 @@ fn guest_path(m: &Machine, ptr: u64) -> Result<String, i64> {
 /// 把 `dirfd` + 路径解析成宿主路径。只支持 `AT_FDCWD` 与已打开的目录 fd。
 fn resolve_at(m: &Machine, dirfd: i32, path: &str) -> Result<std::path::PathBuf, i64> {
     if path.starts_with('/') || dirfd == AT_FDCWD {
-        return Ok(m.os.vfs.host_path(path));
+        // 越根尝试直接拒绝（不是"夹到根"），见 Vfs::normalize_checked
+        return m.os.vfs.host_path_confined(path).ok_or(-EACCES);
     }
     match m.os.fds.get(dirfd).map(|f| &f.kind) {
-        Some(FdKind::Dir { path: dir, .. }) => Ok(dir.join(path)),
+        Some(FdKind::Dir { path: dir, .. }) => {
+            // 相对 dirfd 的路径同样不许用 `..` 弹到 prefix 之上。
+            // dir 是宿主路径，先算出拼接结果再确认它仍在 prefix 内。
+            // 相对 dirfd 的路径同样不许用 `..` 弹到 dirfd 之上。
+            // 保守做法：只看路径本身的组件深度，不去比较解析后的真实路径
+            // （那要 canonicalize，带 TOCTOU）。正常程序不会弹出 dirfd。
+            if m.os.vfs.prefix.is_some() {
+                let mut depth = 0i32;
+                for c in std::path::Path::new(path).components() {
+                    match c {
+                        std::path::Component::ParentDir => {
+                            depth -= 1;
+                            if depth < 0 {
+                                return Err(-EACCES);
+                            }
+                        }
+                        std::path::Component::Normal(_) => depth += 1,
+                        _ => {}
+                    }
+                }
+            }
+            Ok(dir.join(path))
+        }
         Some(_) => Err(-ENOTDIR),
         None => Err(-EBADF),
     }
@@ -247,6 +310,22 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
         Some(FdKind::Stdin) => std::io::stdin().read(&mut tmp),
         Some(FdKind::File(f)) => f.read(&mut tmp),
         Some(FdKind::Dir { .. }) => return -EISDIR,
+        Some(FdKind::Pipe { buf, write_end }) => {
+            if *write_end {
+                return -EBADF; // 写端不可读
+            }
+            let mut q = buf.borrow_mut();
+            if q.is_empty() {
+                // 单线程下没人能在我们阻塞期间写入，阻塞必然死锁。
+                // 报 EAGAIN 把决定权交回 guest，而不是挂住整个进程。
+                return -EAGAIN;
+            }
+            let k = n.min(q.len());
+            for (i, b) in q.drain(..k).enumerate() {
+                tmp[i] = b;
+            }
+            Ok(k)
+        }
         Some(_) => return -EBADF,
         None => return -EBADF,
     };
@@ -312,6 +391,13 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         }
         Some(FdKind::File(f)) => f.write(data),
         Some(FdKind::Dir { .. }) => return -EBADF,
+        Some(FdKind::Pipe { buf, write_end }) => {
+            if !*write_end {
+                return -EBADF; // 读端不可写
+            }
+            buf.borrow_mut().extend(data.iter().copied());
+            Ok(data.len())
+        }
         _ => return -EBADF,
     };
     match r {
@@ -417,6 +503,11 @@ fn sys_dup2(m: &mut Machine, old: i32, new: i32) -> i64 {
 /// `dup` 的实现受限于「宿主 fd 无法平台无关地复制」。
 /// 文件走 `try_clone`（std 有跨平台实现），标准流按种类复制。
 fn dup_impl(m: &mut Machine, fd: i32, at: Option<i32>) -> i64 {
+    dup_impl_min(m, fd, at, 3)
+}
+
+/// `dup` 系列的实现。`min` 是新 fd 的下界（`F_DUPFD` 要求"不小于 arg 的最小空号"）。
+fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
     let kind = match m.os.fds.get(fd).map(|f| &f.kind) {
         Some(FdKind::Stdin) => FdKind::Stdin,
         Some(FdKind::Stdout) => FdKind::Stdout,
@@ -436,7 +527,7 @@ fn dup_impl(m: &mut Machine, fd: i32, at: Option<i32>) -> i64 {
     // dup/dup2 产生的新 fd **不继承** O_CLOEXEC，这是 POSIX 明确规定的。
     let nf = Fd { kind, cloexec: false, flags };
     match at {
-        None => m.os.fds.alloc(nf) as i64,
+        None => m.os.fds.alloc_min(nf, min) as i64,
         Some(n) => {
             if n < 0 {
                 return -EBADF;
@@ -459,7 +550,14 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
     }
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            let r = dup_impl(m, fd, None);
+            // arg 是新 fd 的**下界**，不是要忽略的东西。负值或超过
+            // RLIMIT_NOFILE 上限都必须 EINVAL——否则 guest 拿到一个
+            // 它明确要求"不小于 N"却更小的 fd，后续逻辑会以很难查的方式错。
+            let min = arg as i64;
+            if min < 0 || min > MAX_FD as i64 {
+                return -EINVAL;
+            }
+            let r = dup_impl_min(m, fd, None, min as i32);
             if r >= 0 && cmd == F_DUPFD_CLOEXEC {
                 if let Some(f) = m.os.fds.get_mut(r as i32) {
                     f.cloexec = true;
@@ -505,7 +603,7 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
 
 // ------------------------------------------------------------- open/stat
 
-fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, _mode: u32) -> i64 {
+fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32) -> i64 {
     let path = match guest_path(m, path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -558,6 +656,18 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, _mode: u32
             opt.create_new(true);
         } else {
             opt.create(true);
+        }
+        // O_CREAT 的 mode 必须真的生效：guest 用 0604 之类的位创建文件后会
+        // fstat 回来检查。忽略它会让 mode 断言以"权限位不对"的形式失败。
+        // Windows 没有 Unix 权限位，只能忽略（已知差异）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opt.mode(mode & 0o777);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = mode;
         }
     }
     match opt.open(&host) {
@@ -764,7 +874,10 @@ fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let host = m.os.vfs.host_path(&path);
+    let host = match m.os.vfs.host_path_confined(&path) {
+        Some(p) => p,
+        None => return -EACCES,
+    };
     // 只做存在性判断。真实的 X_OK/W_OK 要看宿主权限位，Windows 上没有
     // 对应语义；容器内一律 root，存在即可访问是可接受的近似。
     if host.exists() {
@@ -775,7 +888,6 @@ fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
 }
 
 fn sys_unlinkat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32) -> i64 {
-    const AT_REMOVEDIR: i32 = 0x200;
     let path = match guest_path(m, path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -846,12 +958,14 @@ fn sys_chdir(m: &mut Machine, path_ptr: u64) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let norm = m.os.vfs.normalize(&path);
+    // cwd 的记法随模式不同（容器模式记 guest 视角，直通模式记宿主路径），
+    // 必须走 cwd_for 而不是直接 normalize——否则 Windows 直通模式下盘符会丢。
+    let next = m.os.vfs.cwd_for(&path);
     let host = m.os.vfs.host_path(&path);
     if !host.is_dir() {
         return if host.exists() { -ENOTDIR } else { -ENOENT };
     }
-    m.os.vfs.cwd = norm;
+    m.os.vfs.cwd = next;
     0
 }
 
@@ -979,6 +1093,15 @@ const MREMAP_FIXED: i32 = 2;
 
 fn sys_mremap(m: &mut Machine, old: u64, old_len: u64, new_len: u64, flags: i32, new_addr: u64) -> i64 {
     if old & PAGE_MASK != 0 || new_len == 0 {
+        return -EINVAL;
+    }
+    // 只认这两个 flag；其余位（guest 会拿 0x40000000 之类来探边界）必须 EINVAL，
+    // 不能当成 0 悄悄接受。MREMAP_FIXED 还要求同时给 MAYMOVE。
+    const KNOWN: i32 = MREMAP_MAYMOVE | MREMAP_FIXED;
+    if flags & !KNOWN != 0 {
+        return -EINVAL;
+    }
+    if flags & MREMAP_FIXED != 0 && flags & MREMAP_MAYMOVE == 0 {
         return -EINVAL;
     }
     let old_len = (old_len + PAGE_MASK) & !PAGE_MASK;
@@ -1206,3 +1329,411 @@ fn host_random(_out: &mut [u8]) -> Result<(), i64> {
 
 #[cfg(test)]
 mod tests;
+
+// ------------------------------------------------- 文件系统写操作补齐
+//
+// 这一批是 guest 侧最常用、实现成本又最低的一组。缺了它们的表现很误导：
+// `mkdir` 返回 ENOSYS 后，后续所有对该目录的写入都报 ENOENT，看起来像
+// 路径解析坏了，实际只是目录压根没建起来（guest C 套件当初 20/21 红就是这样）。
+
+fn sys_mkdir(m: &mut Machine, dirfd: i32, path_ptr: u64) -> i64 {
+    let path = match guest_path(m, path_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let host = match resolve_at(m, dirfd, &path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // 只建最后一级：`mkdir` 的语义是父目录必须已存在，
+    // 用 create_dir_all 会把 guest 的错误处理路径悄悄抹掉。
+    match std::fs::create_dir(&host) {
+        Ok(()) => 0,
+        Err(e) => host_err(&e),
+    }
+}
+
+fn sys_rename(m: &mut Machine, odirfd: i32, old_ptr: u64, ndirfd: i32, new_ptr: u64) -> i64 {
+    let (old, new) = match (guest_path(m, old_ptr), guest_path(m, new_ptr)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let (oh, nh) = match (resolve_at(m, odirfd, &old), resolve_at(m, ndirfd, &new)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    match std::fs::rename(&oh, &nh) {
+        Ok(()) => 0,
+        Err(e) => host_err(&e),
+    }
+}
+
+fn sys_link(m: &mut Machine, old_ptr: u64, new_ptr: u64) -> i64 {
+    let (old, new) = match (guest_path(m, old_ptr), guest_path(m, new_ptr)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let (oh, nh) = (m.os.vfs.host_path(&old), m.os.vfs.host_path(&new));
+    match std::fs::hard_link(&oh, &nh) {
+        Ok(()) => 0,
+        Err(e) => host_err(&e),
+    }
+}
+
+/// `symlink`。目标字符串**原样**写入，不做 VFS 翻译——guest 视角的
+/// symlink 目标就该是 guest 路径，翻译了反而会把宿主路径漏进 rootfs。
+fn sys_symlink(m: &mut Machine, target_ptr: u64, link_ptr: u64) -> i64 {
+    let (target, link) = match (guest_path(m, target_ptr), guest_path(m, link_ptr)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let link_host = m.os.vfs.host_path(&link);
+    #[cfg(unix)]
+    {
+        match std::os::unix::fs::symlink(&target, &link_host) {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows 建 symlink 默认要开发者模式或管理员权限。失败时如实报
+        // EPERM，不要伪造成功——guest 随后读这个链接会得到更难查的错误。
+        let r = if m.os.vfs.host_path(&target).is_dir() {
+            std::os::windows::fs::symlink_dir(&target, &link_host)
+        } else {
+            std::os::windows::fs::symlink_file(&target, &link_host)
+        };
+        match r {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        }
+    }
+}
+
+fn sys_truncate(m: &mut Machine, path_ptr: u64, len: i64) -> i64 {
+    let path = match guest_path(m, path_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if len < 0 {
+        return -EINVAL;
+    }
+    let host = m.os.vfs.host_path(&path);
+    match std::fs::OpenOptions::new().write(true).open(&host) {
+        Ok(f) => match f.set_len(len as u64) {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        },
+        Err(e) => host_err(&e),
+    }
+}
+
+fn sys_ftruncate(m: &mut Machine, fd: i32, len: i64) -> i64 {
+    if len < 0 {
+        return -EINVAL;
+    }
+    match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::File(f)) => match f.set_len(len as u64) {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        },
+        Some(_) => -EINVAL,
+        None => -EBADF,
+    }
+}
+
+fn sys_fsync(m: &mut Machine, fd: i32) -> i64 {
+    match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::File(f)) => match f.sync_all() {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        },
+        // 标准流与管道没有"落盘"这回事，报成功
+        Some(_) => 0,
+        None => -EBADF,
+    }
+}
+
+fn sys_fchdir(m: &mut Machine, fd: i32) -> i64 {
+    match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::Dir { path, .. }) => {
+            let p = path.clone();
+            m.os.vfs.cwd = p;
+            0
+        }
+        Some(_) => -ENOTDIR,
+        None => -EBADF,
+    }
+}
+
+fn sys_pwrite(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
+    let n = count.min(1 << 20) as usize;
+    let mut tmp = vec![0u8; n];
+    if m.mem.read(buf, &mut tmp).is_err() {
+        return -EFAULT;
+    }
+    match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
+        Some(FdKind::File(f)) => {
+            // pwrite 不得改变文件位置
+            let cur = match f.stream_position() {
+                Ok(c) => c,
+                Err(e) => return host_err(&e),
+            };
+            let r = f
+                .seek(SeekFrom::Start(off as u64))
+                .and_then(|_| f.write(&tmp));
+            let _ = f.seek(SeekFrom::Start(cur));
+            match r {
+                Ok(k) => k as i64,
+                Err(e) => host_err(&e),
+            }
+        }
+        Some(_) => -EBADF,
+        None => -EBADF,
+    }
+}
+
+fn sys_sendfile(m: &mut Machine, out_fd: i32, in_fd: i32, off_ptr: u64, count: u64) -> i64 {
+    let n = count.min(1 << 20) as usize;
+    let mut tmp = vec![0u8; n];
+    // 带 offset 指针时从该偏移读且不动文件位置；否则按当前位置读。
+    let explicit_off = if off_ptr != 0 {
+        match m.mem.read_u64(off_ptr) {
+            Ok(v) => Some(v),
+            Err(_) => return -EFAULT,
+        }
+    } else {
+        None
+    };
+    let got = match m.os.fds.get_mut(in_fd).map(|f| &mut f.kind) {
+        Some(FdKind::File(f)) => match explicit_off {
+            Some(o) => {
+                let cur = f.stream_position().ok();
+                let r = f.seek(SeekFrom::Start(o)).and_then(|_| f.read(&mut tmp));
+                if let Some(c) = cur {
+                    let _ = f.seek(SeekFrom::Start(c));
+                }
+                r
+            }
+            None => f.read(&mut tmp),
+        },
+        Some(_) => return -EINVAL,
+        None => return -EBADF,
+    };
+    let k = match got {
+        Ok(k) => k,
+        Err(e) => return host_err(&e),
+    };
+    let written = write_bytes(m, out_fd, &tmp[..k]);
+    if written > 0 {
+        if let Some(o) = explicit_off {
+            if m.mem.write_u64(off_ptr, o + written as u64).is_err() {
+                return -EFAULT;
+            }
+        }
+    }
+    written
+}
+
+fn sys_dup3(m: &mut Machine, old: i32, new: i32, flags: i32) -> i64 {
+    // dup3 与 dup2 的唯一差别：old == new 是错误，且可以带 O_CLOEXEC
+    if old == new {
+        return -EINVAL;
+    }
+    let r = sys_dup2(m, old, new);
+    if r >= 0 && flags & O_CLOEXEC != 0 {
+        if let Some(f) = m.os.fds.get_mut(new) {
+            f.cloexec = true;
+        }
+    }
+    r
+}
+
+/// `pipe` / `pipe2`。进程内缓冲，见 `FdKind::Pipe` 的说明。
+fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    let buf = Rc::new(RefCell::new(VecDeque::new()));
+    let cloexec = flags & O_CLOEXEC != 0;
+    let rd = m.os.fds.alloc(Fd {
+        kind: FdKind::Pipe { buf: Rc::clone(&buf), write_end: false },
+        cloexec,
+        flags: flags & !O_CLOEXEC,
+    });
+    let wr = m.os.fds.alloc(Fd {
+        kind: FdKind::Pipe { buf, write_end: true },
+        cloexec,
+        flags: flags & !O_CLOEXEC,
+    });
+    if m.mem.write_u32(fds_ptr, rd as u32).is_err()
+        || m.mem.write_u32(fds_ptr + 4, wr as u32).is_err()
+    {
+        return -EFAULT;
+    }
+    0
+}
+
+/// `poll`。`struct pollfd { int fd; short events; short revents; }`（8 字节）。
+///
+/// 单线程模拟器里没有"等待"可言：普通文件与标准流永远就绪，管道按缓冲区
+/// 是否有数据判断。**不实现阻塞**——真去阻塞在单线程里必然死锁。
+fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
+    const POLLIN: u16 = 0x001;
+    const POLLOUT: u16 = 0x004;
+    const POLLNVAL: u16 = 0x020;
+    if nfds > 1024 {
+        return -EINVAL;
+    }
+    let mut ready = 0i64;
+    for i in 0..nfds {
+        let base = fds_ptr + i * 8;
+        let fd = match m.mem.read_u32(base) {
+            Ok(v) => v as i32,
+            Err(_) => return -EFAULT,
+        };
+        let events = match m.mem.read_u16(base + 4) {
+            Ok(v) => v,
+            Err(_) => return -EFAULT,
+        };
+        let revents = match m.os.fds.get(fd).map(|f| &f.kind) {
+            None => POLLNVAL,
+            Some(FdKind::Pipe { buf, write_end }) => {
+                if *write_end {
+                    POLLOUT & events
+                } else if !buf.borrow().is_empty() {
+                    POLLIN & events
+                } else {
+                    0
+                }
+            }
+            Some(_) => (POLLIN | POLLOUT) & events,
+        };
+        if m.mem.write_u16(base + 6, revents).is_err() {
+            return -EFAULT;
+        }
+        if revents != 0 {
+            ready += 1;
+        }
+    }
+    ready
+}
+
+/// `statx`。只填 guest 常用的字段；`stx_mask` 如实回报我们填了哪些。
+/// 布局见 `struct statx`（256 字节）。
+fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -> i64 {
+    const STATX_BASIC_STATS: u32 = 0x07ff;
+    // 先借 stat 拿到宿主元数据（复用同一套 dirfd/AT_EMPTY_PATH 语义）
+    let mut st = [0u8; 144];
+    let scratch = 0u64; // 不写 guest 内存，直接在宿主侧取
+    let _ = scratch;
+    let md = {
+        let path = match guest_path(m, path_ptr) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
+            match m.os.fds.get(dirfd).map(|f| &f.kind) {
+                Some(FdKind::File(f)) => f.metadata(),
+                Some(FdKind::Dir { path, .. }) => std::fs::metadata(path),
+                Some(_) => return -EBADF,
+                None => return -EBADF,
+            }
+        } else {
+            let host = match resolve_at(m, dirfd, &path) {
+                Ok(p) => p,
+                Err(e) => return e,
+            };
+            if flags & AT_SYMLINK_NOFOLLOW != 0 {
+                std::fs::symlink_metadata(&host)
+            } else {
+                std::fs::metadata(&host)
+            }
+        }
+    };
+    let md = match md {
+        Ok(v) => v,
+        Err(e) => return host_err(&e),
+    };
+    let _ = &mut st;
+
+    let size = md.len();
+    let mode: u16 = if md.is_dir() {
+        0o040755
+    } else if md.file_type().is_symlink() {
+        0o120777
+    } else {
+        0o100644
+    };
+    let (nlink, ino, blksize, blocks, uid, gid) = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            (
+                md.nlink() as u32,
+                md.ino(),
+                md.blksize() as u32,
+                md.blocks(),
+                md.uid(),
+                md.gid(),
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            (1u32, 1u64, 4096u32, size.div_ceil(512), 0u32, 0u32)
+        }
+    };
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| (d.as_secs() as i64, d.subsec_nanos()))
+        .unwrap_or((0, 0));
+
+    let mut b = [0u8; 256];
+    b[0..4].copy_from_slice(&STATX_BASIC_STATS.to_le_bytes()); // stx_mask
+    b[4..8].copy_from_slice(&blksize.to_le_bytes()); // stx_blksize
+    b[16..20].copy_from_slice(&nlink.to_le_bytes()); // stx_nlink
+    b[20..24].copy_from_slice(&uid.to_le_bytes());
+    b[24..28].copy_from_slice(&gid.to_le_bytes());
+    b[28..30].copy_from_slice(&mode.to_le_bytes()); // stx_mode
+    b[32..40].copy_from_slice(&ino.to_le_bytes());
+    b[40..48].copy_from_slice(&size.to_le_bytes());
+    b[48..56].copy_from_slice(&blocks.to_le_bytes());
+    // atime/btime/ctime/mtime 各 16 字节，从 offset 64 起
+    for off in [64usize, 80, 96, 112] {
+        b[off..off + 8].copy_from_slice(&mtime.0.to_le_bytes());
+        b[off + 8..off + 12].copy_from_slice(&mtime.1.to_le_bytes());
+    }
+    if m.mem.write(out, &b).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+/// fd 号上界，与 `getrlimit(RLIMIT_NOFILE)` 报的硬上限一致。
+const MAX_FD: i32 = 4096;
+
+/// `msync`。我们的文件映射是快照式的（见 `sys_mmap`），没有脏页要回写，
+/// 所以成功路径是空操作——但**参数校验不能省**：guest 会用未对齐地址和
+/// 非法 flags 来探边界，无条件返回 0 会让那些断言反向失败。
+fn sys_msync(m: &mut Machine, addr: u64, len: u64, flags: i32) -> i64 {
+    const MS_ASYNC: i32 = 1;
+    const MS_INVALIDATE: i32 = 2;
+    const MS_SYNC: i32 = 4;
+    if addr & PAGE_MASK != 0 {
+        return -EINVAL;
+    }
+    if flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC) != 0 {
+        return -EINVAL;
+    }
+    // MS_SYNC 与 MS_ASYNC 互斥
+    if flags & MS_SYNC != 0 && flags & MS_ASYNC != 0 {
+        return -EINVAL;
+    }
+    if !m.mem.is_mapped(addr, (len + PAGE_MASK) & !PAGE_MASK) {
+        return -ENOMEM;
+    }
+    0
+}

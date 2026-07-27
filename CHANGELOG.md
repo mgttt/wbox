@@ -39,6 +39,12 @@ busybox。`cargo check --target x86_64-pc-windows-msvc` 通过。
 `fork`/`clone`/`execve`（多进程）、x87 浮点、线程、信号投递、socket/epoll、
 JIT 均未实现，一律明确报错而不静默跑错。逐条见 `docs/rust-rewrite.md` §4。
 
+**guest C 套件真实回退**：4 通过 / 17 失败（旧引擎除 `t_net_sockopt@wine`
+外全通）。基线已如实重定并按根因分组（`tests/known-failures.txt`），新回归
+照样让门禁变红。同时收紧了两处：runner 改按容器语义跑（这套用例本就是这么
+设计的），越根路径由"夹到根"改成直接拒绝——安全相关的
+`t_sec_path_abshost` / `t_sec_path_relesc` 因此全通且不在基线内。
+
 ## [未发布] —— 真机 CI 首次打通（2026-07-26）
 
 **里程碑：`build-wbox-linux` 在真 Windows 上首次转绿。** 此前该 job 从仓库

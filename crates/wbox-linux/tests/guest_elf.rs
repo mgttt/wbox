@@ -1,8 +1,9 @@
 //! 端到端：用真实的 Linux x86-64 静态 ELF 跑模拟器。
 //!
-//! 需要工具链的用例在缺 `gcc` 时**跳过并说明原因**，不让本地环境差异把
-//! 门禁搞成红的；`busybox` 用例读仓库里自带的静态二进制，所以任何有那个
-//! 文件的环境都会真跑。
+//! 需要现场编译 guest 的用例只在 **Linux 宿主**上跑（见 `can_build_linux_elf`），
+//! 其他平台跳过并说明原因，不让环境差异把门禁搞成红的。
+//! `busybox` 系列读仓库里自带的静态 Linux ELF，**任何平台都真跑**——
+//! Windows CI 的端到端覆盖靠的就是这一组。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +18,26 @@ fn repo_root() -> PathBuf {
         .and_then(|p| p.parent())
         .unwrap()
         .to_path_buf()
+}
+
+/// 能否在本机构建**Linux** x86-64 ELF。
+///
+/// 只看 `gcc` 存在是不够的：Windows runner 上的 gcc 产出的是 PE，不是 Linux
+/// ELF，拿去喂模拟器只会得到"不是 ELF"。所以这些用例限定在 Linux 宿主上跑；
+/// 其余平台跳过并说明原因，而不是假装通过、也不是红。
+///
+/// 注意这**不会**让 Windows CI 失去覆盖：`busybox` 系列用例读的是仓库里
+/// 自带的静态 Linux ELF，任何平台都真跑；指令语义那 61 项也与工具链无关。
+fn can_build_linux_elf() -> bool {
+    if !cfg!(target_os = "linux") {
+        eprintln!("跳过：本宿主的 gcc 不产出 Linux ELF（只在 Linux 宿主上构建 guest）");
+        return false;
+    }
+    if !have("gcc") {
+        eprintln!("跳过：环境里没有 gcc");
+        return false;
+    }
+    true
 }
 
 fn have(tool: &str) -> bool {
@@ -96,8 +117,7 @@ fn non_elf_input_is_rejected_not_silently_run() {
 
 #[test]
 fn raw_syscall_asm_guest_writes_and_exits() {
-    if !have("gcc") {
-        eprintln!("跳过：环境里没有 gcc");
+    if !can_build_linux_elf() {
         return;
     }
     let d = tmpdir("asm");
@@ -138,8 +158,7 @@ _start:
 
 #[test]
 fn static_libc_guest_runs_printf_malloc_and_string_functions() {
-    if !have("gcc") {
-        eprintln!("跳过：环境里没有 gcc");
+    if !can_build_linux_elf() {
         return;
     }
     let d = tmpdir("libc");
@@ -194,8 +213,7 @@ int main(int argc, char **argv) {
 
 #[test]
 fn dynamically_linked_guest_runs_through_its_interpreter() {
-    if !have("gcc") {
-        eprintln!("跳过：环境里没有 gcc");
+    if !can_build_linux_elf() {
         return;
     }
     let d = tmpdir("dynamic");
@@ -226,8 +244,7 @@ int main(void) { puts("dynamic ok"); return 0; }
 
 #[test]
 fn file_io_roundtrip_through_the_guest() {
-    if !have("gcc") {
-        eprintln!("跳过：环境里没有 gcc");
+    if !can_build_linux_elf() {
         return;
     }
     let d = tmpdir("fileio");

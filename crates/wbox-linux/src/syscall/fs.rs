@@ -7,9 +7,11 @@
 //! 环境变量：`WBOX_PREFIX` 是首选；`BLINK_PREFIX` 作为兼容名保留，
 //! 因为 `src/backend/blink.rs` 目前还在设它。
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 pub const PREFIX_ENV: &str = "WBOX_PREFIX";
 pub const PREFIX_ENV_COMPAT: &str = "BLINK_PREFIX";
@@ -29,6 +31,13 @@ pub enum FdKind {
         entries: Vec<(Vec<u8>, u8)>,
         pos: usize,
     },
+    /// 匿名管道的一端。缓冲区是**进程内**共享的（`Rc<RefCell<..>>`）。
+    ///
+    /// 单进程模拟器里管道只有一种用法：同一个 guest 自己写再自己读
+    /// （典型是 `pipe2` + `poll` 的自唤醒模式）。因此不需要跨进程共享，
+    /// 也不需要阻塞——读空管道时若写端仍开着，本该阻塞的语义在单线程下
+    /// 必然死锁，所以返回 `EAGAIN` 让 guest 自己决定怎么办，而不是挂住。
+    Pipe { buf: Rc<RefCell<VecDeque<u8>>>, write_end: bool },
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
     Closed,
 }
@@ -70,7 +79,12 @@ impl FdTable {
 
     /// 分配最小可用 fd（Linux 保证的语义：总是最小的空号）。
     pub fn alloc(&mut self, fd: Fd) -> i32 {
-        let mut n = 3;
+        self.alloc_min(fd, 3)
+    }
+
+    /// 分配**不小于 `min`** 的最小可用 fd。`F_DUPFD` 要的正是这个语义。
+    pub fn alloc_min(&mut self, fd: Fd, min: i32) -> i32 {
+        let mut n = min.max(0);
         while self.map.contains_key(&n) {
             n += 1;
         }
@@ -130,12 +144,26 @@ impl Vfs {
         Vfs { prefix, cwd }
     }
 
-    /// 把 guest 路径规范化成 guest 视角的绝对路径。
+    /// 把 guest 路径规范化成 **guest 视角**的绝对路径。
     ///
     /// 纯字符串运算，**不碰宿主文件系统**：`..` 在这里就地消掉，这样
     /// `/a/../../etc/passwd` 会归约到 `/etc/passwd` 而不是逃到 prefix 之外。
     /// 根之上的 `..` 被吃掉（和 Linux 对 `/..` 的处理一致）。
+    ///
+    /// 只对**容器模式**（设了 prefix）有意义：结果一律以 `/` 开头，
+    /// Windows 的盘符前缀会被丢掉。直通模式不要用它，见 `host_path`。
     pub fn normalize(&self, p: &str) -> PathBuf {
+        self.normalize_checked(p).0
+    }
+
+    /// 同 `normalize`，另外报告这条路径**是否试图越过根**。
+    ///
+    /// 为什么要单独报告：`/..` 这类路径按内核语义会被"夹"到 `/`，于是
+    /// 打开成功。夹住本身不会逃出 rootfs（这一点有 `host_path` 的测试保证），
+    /// 但项目的安全审计（`tests/guest/t_sec_path.c`）要的是**更严**的一档：
+    /// 越根的尝试要直接拒绝，而不是悄悄当成根。多一层拒绝没有代价——
+    /// 正常程序里的 `..` 从不会弹出根之上。
+    pub fn normalize_checked(&self, p: &str) -> (PathBuf, bool) {
         let raw = Path::new(p);
         let joined: PathBuf = if raw.is_absolute() {
             raw.to_path_buf()
@@ -143,12 +171,16 @@ impl Vfs {
             self.cwd.join(raw)
         };
         let mut out: Vec<std::ffi::OsString> = Vec::new();
+        let mut escaped = false;
         for c in joined.components() {
             match c {
                 Component::RootDir | Component::Prefix(_) => out.clear(),
                 Component::CurDir => {}
                 Component::ParentDir => {
-                    out.pop();
+                    if out.pop().is_none() {
+                        // 已经在根上还要往上：这就是越根尝试
+                        escaped = true;
+                    }
                 }
                 Component::Normal(s) => out.push(s.to_os_string()),
             }
@@ -157,24 +189,58 @@ impl Vfs {
         for s in out {
             res.push(s);
         }
-        res
+        (res, escaped)
     }
 
-    /// guest 路径 -> 宿主路径。
+    /// guest 路径 -> 宿主路径。两种模式语义不同：
     ///
-    /// 因为 `normalize` 已经把 `..` 全部消掉，拼接结果必然在 prefix 之内，
-    /// 不需要再做 `canonicalize` 检查（那还会引入 TOCTOU）。
+    /// **容器模式**（设了 prefix）：先 `normalize` 消掉 `..`，再拼到 prefix 下。
+    /// 因为 `..` 已经消完，结果必然落在 prefix 之内，不需要再
+    /// `canonicalize`（那还会引入 TOCTOU）。
+    ///
+    /// **直通模式**（未设 prefix，guest `/` 就是宿主 `/`）：路径**原样**交给
+    /// 宿主 OS 解析，只补相对路径的 cwd。这里绝不能走 `normalize`——
+    /// `Path::components()` 在 Windows 上会把 `C:\x` 的盘符归成
+    /// `Component::Prefix` 并被 `normalize` 丢掉，结果变成 `\x`，于是
+    /// "找不到路径"。这个 bug 在 Windows CI 上实测踩到过，见下方回归测试。
     ///
     /// **已知缺口**：宿主侧的 symlink 不做防护——rootfs 里若存在指向外部的
     /// 符号链接，guest 能顺着它出去。与 blink 的限制相同，见 crate 文档。
     pub fn host_path(&self, guest: &str) -> PathBuf {
-        let norm = self.normalize(guest);
         match &self.prefix {
-            None => norm,
+            None => {
+                let p = Path::new(guest);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.cwd.join(p)
+                }
+            }
             Some(pre) => {
+                let norm = self.normalize(guest);
                 let rel = norm.strip_prefix("/").unwrap_or(&norm);
                 pre.join(rel)
             }
+        }
+    }
+
+    /// 带越根检查的 guest -> 宿主翻译。
+    ///
+    /// 容器模式下越根尝试返回 `None`，调用方据此回 `EACCES`；
+    /// 直通模式没有"根"可越，一律放行。
+    pub fn host_path_confined(&self, guest: &str) -> Option<PathBuf> {
+        if self.prefix.is_some() && self.normalize_checked(guest).1 {
+            return None;
+        }
+        Some(self.host_path(guest))
+    }
+
+    /// `chdir` 的目标：容器模式记 guest 视角路径，直通模式记宿主路径。
+    /// 两者都必须和 `host_path` 的同模式解释保持一致。
+    pub fn cwd_for(&self, guest: &str) -> PathBuf {
+        match &self.prefix {
+            None => self.host_path(guest),
+            Some(_) => self.normalize(guest),
         }
     }
 }
@@ -233,6 +299,104 @@ mod tests {
     fn no_prefix_means_passthrough() {
         let v = vfs(None);
         assert_eq!(v.host_path("/etc/hosts"), PathBuf::from("/etc/hosts"));
+    }
+
+    /// 回归：直通模式必须把宿主绝对路径**原样**交给 OS。
+    ///
+    /// 曾经这里统一走 `normalize`，而 `Path::components()` 在 Windows 上把盘符
+    /// 归成 `Component::Prefix`、被 `normalize` 的 `out.clear()` 丢掉，于是
+    /// `C:\Users\foo` 变成 `\Users\foo`，guest 一律"找不到路径"。
+    /// Windows CI 上 10 个端到端用例因此全红——Linux 上则完全看不出来。
+    #[test]
+    fn passthrough_keeps_host_absolute_path_intact() {
+        let v = vfs(None);
+        let native_abs = if cfg!(windows) {
+            r"C:\Users\runner\tmp\prog"
+        } else {
+            "/home/runner/tmp/prog"
+        };
+        assert_eq!(v.host_path(native_abs), PathBuf::from(native_abs));
+        // 与平台无关的不变量：直通模式不得丢掉任何前导组件
+        let got = v.host_path(native_abs);
+        assert!(
+            got.to_string_lossy().contains("runner"),
+            "路径组件被吃掉了：{got:?}"
+        );
+        #[cfg(windows)]
+        assert!(
+            got.to_string_lossy().starts_with("C:"),
+            "盘符必须保留：{got:?}"
+        );
+    }
+
+    /// 直通模式下相对路径按 cwd 解析，cwd 本身可能是宿主风格路径。
+    #[test]
+    fn passthrough_resolves_relative_against_host_cwd() {
+        let mut v = vfs(None);
+        v.cwd = if cfg!(windows) {
+            PathBuf::from(r"C:\work")
+        } else {
+            PathBuf::from("/work")
+        };
+        assert_eq!(v.host_path("sub/prog"), v.cwd.join("sub/prog"));
+    }
+
+    /// 容器模式的 cwd 是 guest 视角路径；直通模式的 cwd 是宿主路径。
+    #[test]
+    fn cwd_for_matches_the_mode() {
+        let v = vfs(Some("/srv/rootfs"));
+        assert_eq!(v.cwd_for("/a/b/../c"), PathBuf::from("/a/c"));
+
+        let v = vfs(None);
+        let abs = if cfg!(windows) { r"C:\a\b" } else { "/a/b" };
+        assert_eq!(v.cwd_for(abs), PathBuf::from(abs));
+    }
+
+    /// 越根尝试必须被**拒绝**，而不是夹到根。
+    ///
+    /// 这是项目安全审计（`tests/guest/t_sec_path.c`）要求的更严一档：
+    /// 内核语义会把 `/..` 夹成 `/` 于是 open 成功；夹住本身不会逃出 rootfs，
+    /// 但审计要求越根的尝试直接失败。正常程序里的 `..` 从不弹出根之上，
+    /// 所以这层拒绝没有误伤。
+    #[test]
+    fn above_root_attempts_are_rejected_not_clamped() {
+        let v = vfs(Some("/srv/rootfs"));
+        for probe in ["/..", "/../../..", "/tmp/../../..", "../../../.."] {
+            assert!(
+                v.host_path_confined(probe).is_none(),
+                "{probe} 应被拒绝，而不是夹到根"
+            );
+            assert!(v.normalize_checked(probe).1, "{probe} 应被判定为越根");
+        }
+        // 合法的 `..`（不弹出根）必须照常放行
+        for ok in ["/usr/lib/../bin/sh", "/a/b/../c", "/."] {
+            assert!(v.host_path_confined(ok).is_some(), "{ok} 被误拒");
+            assert!(!v.normalize_checked(ok).1, "{ok} 被误判越根");
+        }
+        // 即使被拒绝，夹住的结果本身也仍在 prefix 内（双保险）
+        assert!(v.host_path("/../../..").starts_with("/srv/rootfs"));
+    }
+
+    /// 直通模式没有"根"可越，不做这层拒绝——否则 `wbox-linux /bin/cat ..`
+    /// 这类正常用法会莫名 EACCES。
+    #[test]
+    fn passthrough_does_not_apply_above_root_rejection() {
+        let v = vfs(None);
+        assert!(v.host_path_confined("/..").is_some());
+    }
+
+    /// 容器模式**不受**直通改动影响：盘符风格的输入仍被当作 guest 路径收进
+    /// prefix 内，绝不能因为"原样透传"而逃出去。
+    #[test]
+    fn prefix_mode_still_confines_windows_style_input() {
+        let v = vfs(Some("/srv/rootfs"));
+        for probe in [r"C:\Windows\System32", r"..\..\Windows", "/../../etc/shadow"] {
+            let got = v.host_path(probe);
+            assert!(
+                got.starts_with("/srv/rootfs"),
+                "{probe} 逃出了 prefix：{got:?}"
+            );
+        }
     }
 
     #[test]

@@ -98,6 +98,18 @@ for b in "${built[@]}"; do cp "$b" "$WORK/"; done
 WBOX_ABS=$(cd "$(dirname "$WBOX_LINUX")" && pwd)/$(basename "$WBOX_LINUX")
 cd "$WORK" || die "cannot cd $WORK"
 
+# 这套用例是**按容器语义**写的：t_sec_path.c 开头就写明"wbox-linux confines
+# guest paths to the rootfs (BLINK_PREFIX)"，它断言的越根拒绝只有在设了
+# rootfs 前缀时才有意义。历史上这里不设前缀也能过，是因为旧引擎（blink）
+# 在默认模式下也一律走 VFS 收敛；新引擎默认是直通（guest / == 宿主 /），
+# 不设前缀就等于"没有沙箱"，那些安全断言自然全红——测的东西都不对了。
+#
+# 所以把 workdir 本身当 rootfs：guest 看到的 / 就是 $WORK，用例二进制在
+# / 下，越根尝试可被如实拒绝。WBOX_GUEST_NO_PREFIX=1 可回到直通模式。
+if [ "${WBOX_GUEST_NO_PREFIX:-0}" != 1 ]; then
+  export WBOX_PREFIX="$WORK"
+fi
+
 TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
 [ "$LIST" = 1 ] || {
   echo "[mode] $MODE"
@@ -107,7 +119,8 @@ TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
 
 for b in "$WORK"/t_*; do
   name=$(basename "$b")
-  rel=./$name
+  # 容器模式下 guest 的 cwd 是 /，用例二进制就在 / 下
+  if [ -n "${WBOX_PREFIX:-}" ]; then rel=/$name; else rel=./$name; fi
   case $name in
     t_stress*) [ "$SKIP_SLOW" = 1 ] && { report SKIP "$name" "slow (--skip-slow)"; continue; } ;;
   esac

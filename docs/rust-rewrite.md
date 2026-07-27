@@ -116,7 +116,20 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 6. **JIT**。当前纯解释执行，见 §2 的性能说明。
 7. `MAP_SHARED` 文件映射的写回（当前是快照式映射）、pty。
 8. 宿主 symlink 不防护——rootfs 里若有指向外部的符号链接，guest 能顺着出去。
-   与 blink 的限制相同。
+   与 blink 的限制相同（不是新增风险）。
+   **越根路径已收紧**：`/..`、`../../..`、绝对宿主路径一律拒绝（`EACCES`），
+   不再"夹到根"后成功。内核语义是夹住，夹住也逃不出 rootfs，但本仓的安全
+   审计（`tests/guest/t_sec_path.c`）要求更严的一档。
+
+### guest C 套件的现状
+
+`tests/run-guest-tests.sh` 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）
+——这套用例本就是这么设计的，见 `tests/KNOWN-FAILURES.md` 的说明。
+
+当前 **4 通过 / 17 失败**（旧引擎除 `t_net_sockopt@wine` 外全通）。
+这是一次真实的 ABI 覆盖回退，逐条根因与分组见
+`tests/known-failures.txt`；门禁靠基线判定，新回归照样变红。
+安全相关的 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通且不在基线内**。
 
 ## 5. TLS 依赖的取舍（需要复核）
 
