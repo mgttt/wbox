@@ -69,7 +69,7 @@ pub fn run_container_with_handles(
     env: &[(String, String)],
     handles: &[HANDLE],
 ) -> Result<u32> {
-    run_container_with_start_hook_and_handles(
+    run_container_with_handles_and_created_hook(
         profile,
         capabilities,
         cmdline,
@@ -77,6 +77,35 @@ pub fn run_container_with_handles(
         job,
         env,
         handles,
+        |_| Ok(()),
+    )
+}
+
+/// 与 [`run_container_with_handles`] 相同，并在子进程已加入 Job、但主线程仍挂起时
+/// 调用一次 `on_created`。回调失败会终止并等待尚未执行用户代码的子进程。
+#[allow(clippy::too_many_arguments)] // 与 run_container_with_handles 参数保持一致，另加一个 hook
+pub fn run_container_with_handles_and_created_hook<F>(
+    profile: &AppContainerProfile,
+    capabilities: &[CapabilitySid],
+    cmdline: &str,
+    workdir: &str,
+    job: &mut crate::job::Job,
+    env: &[(String, String)],
+    handles: &[HANDLE],
+    on_created: F,
+) -> Result<u32>
+where
+    F: FnOnce(HANDLE) -> Result<()>,
+{
+    run_container_with_lifecycle_hooks_and_handles(
+        profile,
+        capabilities,
+        cmdline,
+        workdir,
+        job,
+        env,
+        handles,
+        on_created,
         |_| {},
     )
 }
@@ -96,7 +125,7 @@ pub fn run_container_with_start_hook<F>(
 where
     F: FnOnce(&mut crate::job::Job),
 {
-    run_container_with_start_hook_and_handles(
+    run_container_with_lifecycle_hooks_and_handles(
         profile,
         capabilities,
         cmdline,
@@ -104,12 +133,13 @@ where
         job,
         env,
         &[],
+        |_| Ok(()),
         on_started,
     )
 }
 
 #[allow(clippy::too_many_arguments)] // 保持两个公开启动入口的参数顺序一致
-fn run_container_with_start_hook_and_handles<F>(
+fn run_container_with_lifecycle_hooks_and_handles<C, S>(
     profile: &AppContainerProfile,
     capabilities: &[CapabilitySid],
     cmdline: &str,
@@ -117,10 +147,12 @@ fn run_container_with_start_hook_and_handles<F>(
     job: &mut crate::job::Job,
     env: &[(String, String)],
     handles: &[HANDLE],
-    on_started: F,
+    on_created: C,
+    on_started: S,
 ) -> Result<u32>
 where
-    F: FnOnce(&mut crate::job::Job),
+    C: FnOnce(HANDLE) -> Result<()>,
+    S: FnOnce(&mut crate::job::Job),
 {
     let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
     let workdir_wide = to_wide(workdir);
@@ -279,6 +311,12 @@ where
         // 收割不到它，会留下一个永久挂起的孤儿进程。先主动终止再返回错误。
         // # Safety: 进程句柄有效；子进程尚未执行用户代码，终止是安全的。
         unsafe { TerminateProcess(process.raw(), 1) };
+        return Err(e);
+    }
+    if let Err(e) = on_created(process.raw()) {
+        // 子进程仍挂起；等待终止完成，避免 broker 初始化失败后留下孤儿。
+        unsafe { TerminateProcess(process.raw(), 1) };
+        unsafe { WaitForSingleObject(process.raw(), u32::MAX) };
         return Err(e);
     }
     // # Safety: 线程句柄有效，线程处于挂起状态（CREATE_SUSPENDED）。
@@ -684,9 +722,15 @@ mod real_windows_tests {
     use crate::backend::Limits;
     use crate::job::Job;
     use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
+    use windows_sys::Win32::Foundation::{
+        DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, SetEvent,
     };
 
     fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
@@ -927,6 +971,106 @@ mod real_windows_tests {
         let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
         let rc = run_container(&profile, &caps, &cmdline, &workdir, &mut job, &env).unwrap();
         assert_eq!(rc, 0, "hostname.exe 在 AppContainer 内应返回 0");
+    }
+
+    /// broker 接入探针：在 guest 恢复前向目标进程动态复制内核对象。
+    #[test]
+    fn created_hook_can_duplicate_handle_into_suspended_child() {
+        let exe = hostname_exe();
+        let profile = create_profile(&unique_name("created_hook"), &[]);
+        let mut job = Job::create(Limits::default()).unwrap();
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+        let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
+        let source = unsafe {
+            OwnedHandle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()))
+        };
+        assert!(!source.raw().is_null(), "CreateEventW 失败");
+        let mut roundtrip = None;
+
+        let rc = run_container_with_handles_and_created_hook(
+            &profile,
+            &[],
+            &cmdline,
+            &workdir,
+            &mut job,
+            &env,
+            &[],
+            |child_process| {
+                let current = unsafe { GetCurrentProcess() };
+                let mut child_handle = std::ptr::null_mut();
+                if unsafe {
+                    DuplicateHandle(
+                        current, source.raw(), child_process, &mut child_handle,
+                        0, 0, DUPLICATE_SAME_ACCESS,
+                    )
+                } == 0 {
+                    return Err(crate::error::WboxError::spawn(format!(
+                        "DuplicateHandle(注入子进程) 失败，GetLastError={}",
+                        unsafe { GetLastError() }
+                    )));
+                }
+                let mut copied_back = std::ptr::null_mut();
+                if unsafe {
+                    DuplicateHandle(
+                        child_process, child_handle, current, &mut copied_back,
+                        0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
+                    )
+                } == 0 {
+                    return Err(crate::error::WboxError::spawn(format!(
+                        "DuplicateHandle(从子进程取回) 失败，GetLastError={}",
+                        unsafe { GetLastError() }
+                    )));
+                }
+                roundtrip = Some(OwnedHandle(copied_back));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "动态 HANDLE 注入不应影响 guest 启动");
+
+        let roundtrip = roundtrip.expect("created hook 必须返回事件 HANDLE");
+        assert_ne!(unsafe { SetEvent(source.raw()) }, 0, "SetEvent 失败");
+        assert_eq!(
+            unsafe { WaitForSingleObject(roundtrip.raw(), 0) },
+            0,
+            "复制往返后的 HANDLE 应引用同一个事件对象"
+        );
+    }
+
+    #[test]
+    fn created_hook_failure_reaps_suspended_child() {
+        let exe = hostname_exe();
+        let profile = create_profile(&unique_name("created_hook_fail"), &[]);
+        let mut job = Job::create(Limits::default()).unwrap();
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+        let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
+
+        let err = run_container_with_handles_and_created_hook(
+            &profile,
+            &[],
+            &cmdline,
+            &workdir,
+            &mut job,
+            &env,
+            &[],
+            |_| Err(crate::error::WboxError::spawn("broker setup probe failed")),
+        )
+        .unwrap_err();
+        assert!(format!("{}", err).contains("broker setup probe failed"), "{}", err);
+        assert!(
+            job.process_ids().unwrap().is_empty(),
+            "created hook 失败后不能在 Job 内留下挂起进程"
+        );
     }
 
     /// 缺省（空 capabilities）状态下子进程无 INTERNET_CLIENT，AppContainer

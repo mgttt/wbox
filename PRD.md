@@ -800,16 +800,22 @@ F9
    也不能靠递归 ACL 破坏用户目录；必须由非 AppContainer broker 逐项校验并打开，
    再向 Blink 复制精确对象 HANDLE。mount manifest 只记录 broker 通道、guest
    target、对象类型与 `read_only`，不泄漏宿主路径。
-3. Win32 hostfs 必须以继承根 HANDLE 为锚做相对打开，逐组件拒绝 reparse
+3. `[done: lifecycle gate]` `sandbox.rs` 提供“已入 Job、主线程仍挂起”的
+   `on_created` 回调；真机测试
+   `created_hook_can_duplicate_handle_into_suspended_child` 已将事件 HANDLE 动态
+   复制进目标 AppContainer 进程并取回，证明 broker 可在 guest 执行前注入逐项
+   打开的对象。回调失败会终止并等待挂起子进程退出，
+   `created_hook_failure_reaps_suspended_child` 要求 Job 中不残留进程。
+4. Win32 hostfs 必须以 broker 返回的对象 HANDLE 为数据面，逐组件拒绝 reparse
    越界；不能把 volume 加进单一文本 `WBOX_ROOT` allowlist。
-4. `[done: component gate]` `VfsDevice.flags` 的 `MS_RDONLY` 已在
+5. `[done: component gate]` `VfsDevice.flags` 的 `MS_RDONLY` 已在
    open/create、write/pwrite/writev、
    truncate、共享可写 mmap、unlink/rename/link、mkdir、chmod/chown/utime 等
    修改入口统一返回 `EROFS`；跨 device rename/link 返回 `EXDEV`。
    `tests/guest/t_mount_ro.c` 在同一 guest 进程内创建 hostfs 只读挂载并验证读、
    open-write、create、truncate、unlink、mkdir、chmod、rename 与 link。该门禁
    只证明 VFS 语义，不代表 Windows `-v` 已开放。
-5. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
+6. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
    文件 bind 在真正实现前必须明确拒绝，不能把文件悄悄当目录。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
@@ -1361,8 +1367,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 完成 Windows OCI bind volume broker、逐组件 reparse 逃逸门禁与
-   fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证和 VFS `MS_RDONLY` 组件门禁
-   已落地，CLI 在 broker 数据面完成前继续明确拒绝。
+   fd-backed hostfs；精确 HANDLE 继承、DACL 真机取证、挂起期动态 HANDLE 注入和
+   VFS `MS_RDONLY` 组件门禁已落地，CLI 在 broker 数据面完成前继续明确拒绝。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
