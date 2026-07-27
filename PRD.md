@@ -152,8 +152,8 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；Windows 本地通过，待 main CI |
-| F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17 本地通过，待 main CI |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；CI 30250676453 通过 |
+| F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -503,10 +503,10 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 
 | 期 | 范围 | 验收 |
 |---|---|---|
-| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态已有 G0 回归，待 main CI |
+| F8.1 `[done]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态 G0 与 CI 30250676453 通过 |
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
-| F8.4 `[active]` | `exec` | Linux P.19-P.22 已完成；Windows 原生可对齐子集 WP.13-WP.17 本地通过，待 main CI；Windows OCI/Blink 明确拒绝 |
+| F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
 
 ## 4.9 [TODO-PLAN] 跨宿主协作交接点
 
@@ -521,24 +521,24 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 
 ```text
 TODO-PLAN
-├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已实现，待 CI
-├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已实现，待 CI
+├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
+├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 └── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ```
 
-### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[implemented]`
+### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
 
 `WP.8-WP.12` 已加入 `test-windows-product.ps1` 并在 Windows 实机通过：
 detached workload 用专属 PID 文件证明 supervisor、guest、child 三层在 stop
 前全部存活；stop 后三个 PID 全部消失，记录转 exited，重复 stop 幂等，未知
-名称失败，rm 清理记录。待 main CI 通过后按完成定义改为 `[done]`。
+名称失败，rm 清理记录。CI 30250676453 已通过。
 
 门禁实现暴露了一个测试编排坑：不能用 PowerShell 的 `2>&1 | Out-String` 捕获
 长命 detached 启动输出。supervisor 可能继承 native-command 管道句柄，调用方
 会等待 EOF 直到容器退出。门禁改为按短命父 wbox 的进程句柄等待退出，不捕获
 该管道；这条约束属于测试基础设施，不改变产品 detach 语义。
 
-### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[implemented]`
+### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[done]`
 
 **结论：只能部分对齐，原生目标可实现，OCI/Blink 目标不可可靠实现。**
 
@@ -565,7 +565,7 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 4. CLI 接受 `wbox exec NAME COMMAND [ARG...]` 与可选 `--`；COMMAND 开始后
    `-` 开头参数全部原样透传，贴近 Docker/Podman 的基础位置语义。
 
-`WP.13-WP.17` 已在 Windows 实机通过，待 main CI 后改为 `[done]`。
+`WP.13-WP.17` 已在 Windows 实机与 CI 30250676453 通过。
 
 首次 main CI 中 WP.1–WP.17 全部打印 PASS，但 job 仍返回 1：`finally` 为兜底清理
 已删除的记录，最后一次 `wbox rm` 的预期非零码残留成整个 PowerShell 脚本的退出
@@ -637,14 +637,14 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地通过；资源超限仍缺行为门禁，WP.8-WP.17 待 main CI |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地与 CI 30250676453 通过；资源超限仍缺行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | Linux P.6-P.22 持续覆盖；Windows WP.6-WP.17 本地通过待 CI；F8.4 原生 exec 已实现，Windows OCI/Blink exec 明确不支持 |
+| 后台生命周期管理 | complete | Linux P.6-P.22 与 Windows WP.6-WP.17 在 CI 30250676453 通过；Windows OCI/Blink exec 明确不支持 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -686,8 +686,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[active]` Windows stop 与原生 exec 门禁已实现待 CI；下一步补资源超限
-   workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
+4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
+   超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
 
 ## 8. 验收与发布
 
