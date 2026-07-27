@@ -59,10 +59,18 @@ F9.1–F9.24 全部落地并有持续门禁。近期这一串是本轮做的：
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
+另一次收敛在 CLI 分发层：顶层分发、`container` 分发、`wbox help` 的主题判定、
+给用户看的动词清单，四份清单原本各写各的，**已经漂开了**——`diff`/`commit`/
+`cp`/`stats`/`pause` 能跑却不是"已知帮助主题"，`wbox help diff` 报错。收敛成
+一张 `VERBS` 表（名字 + 作用域 + handler），另外三份全部由它派生；
+`verb_table_is_the_only_source_of_truth` 把派生关系钉死。
+**教训**：需要"每加一处要记得同步改 N 个地方"的设计，漂移只是时间问题，
+而且不会有任何东西提醒你——发现时它已经错了很久了。
+
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **373 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **157 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **375 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **160 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净

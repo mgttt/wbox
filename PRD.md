@@ -121,6 +121,9 @@ wbox
 | 卷挂载 `-v` | 不做 | 原生程序走宿主文件系统，本就没有"挂载"这一层；隔离靠 ACL 授权 |
 | `--user` / `--cap-*` / seccomp / healthcheck | 不做 | 均为 Linux 原语（uid 映射 / capability / seccomp-bpf / setns 探针），AppContainer 无对应语义，一律明确报错 |
 | compose 多服务 | 不做 | 服务间靠共享 network namespace 互通（F9.11），Windows 无对应原语；单服务 compose 文件可用 |
+| `diff` / `commit` / `cp` | 不做 | 三者都读 overlay 可写层（F9.12），Windows 侧没有那一层；一律明确报错并说清原因 |
+| `stats` | 不做 | 占用数据取自 cgroup / `/proc`，Windows 要另走 Job object 的记账接口，尚未实现（F9.24）|
+| `pause` / `unpause` | 不做 | 靠向容器内每个进程发信号实现（F9.21），Windows 进程组语义不同，需另行设计 |
 
 **这一格是四象限里差距最大的**，且差距的主因不是工作量而是架构前提：
 不装驱动就做不到驱动级别的重定向完整性。
@@ -144,6 +147,8 @@ wbox
 | restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
 | `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
+| `diff` / `commit` / `cp` / `stats` / `pause` | 不做 | 同 Q1：分别依赖 overlay 可写层、cgroup·`/proc`、信号语义，Windows 侧均无对应原语，一律明确报错 |
+| `save` / `load` | 有 | F9.22 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | systemd / 服务 | 不做 | 非目标 |
 
 #### Q3 Linux 宿主 × Linux 镜像 —— 对标 Podman / Docker
@@ -199,6 +204,9 @@ wbox
 | GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
 | 隔离/限额/身份/capability/seccomp/健康检查 | 有 | **复用 Q3 同一条 Linux 链路**：wine 目标走宿主程序模式（`wrap_if_pe` 只替换最终 argv，隔离链路一字不差），故 `--user`/`--cap-*`/`--seccomp-deny`/`--restart` 一并生效。门禁 H.6–H.9 在宿主模式上取证（不依赖装 wine，故任何机器都真的会跑）|
 | overlay 可写层 | 不适用 | F9.12 只对镜像模式（换根）有意义；wine 目标不换根 |
+| `stats` | 有 | 走 `/proc` 那条路，不依赖换根也不依赖 cgroup；已实测宿主模式容器能取到 CPU/内存/进程数（F9.24）|
+| `pause` / `unpause` | 有 | 同样只需进程树，与 Q3 同一实现（F9.21）|
+| `diff` / `commit` / `cp` | 不适用 | 三者都要 overlay 可写层，而 wine 目标不换根——没有"相对镜像改了什么"这个问题；命令会明确报错说明是宿主程序模式，不是静默给空结果 |
 
 ### 2.4.1 每格的下一步
 
@@ -212,7 +220,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | Q3 的 F9 序列已全部完成 | — |
+| Q3 Podman | —— | F9.1–F9.24 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |

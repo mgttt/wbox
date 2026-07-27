@@ -266,6 +266,48 @@ else
   report FAIL "H.9 宿主模式 capability 行为判据" "丢掉 SYS_ADMIN 后仍挂载成功"
 fi
 
+# ---- H.10–H.12：PRD §2.4 Q4 表里"宿主模式下也能用"的三条声称 ----
+#
+# stats / pause 只需要进程树，不换根也不需要 cgroup，所以在 wine 那一格照样能用；
+# diff / commit / cp 都读 overlay 可写层，宿主模式没有那层，属**不适用**。
+# 三条都写进了 PRD 的 Q4 表——写了就要有门禁，否则只是听着合理的话。
+HH=$WORK/hostq4
+rm -rf "$HH" && mkdir -p "$HH/home"
+HOME=$HH/home "$WBOX_ABS" run -d --name hq4 -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+
+hout=$(HOME=$HH/home "$WBOX_ABS" stats hq4 2>&1); hrc=$?
+hmem=$(printf '%s\n' "$hout" | awk '$1=="hq4"{print $3}')
+if [ "$hrc" -eq 0 ] && printf '%s' "$hmem" | grep -qE '^[0-9.]+(B|KiB|MiB|GiB|TiB)$'; then
+  report PASS "H.10 宿主模式下 stats 可用（Q4 表的声称，内存 $hmem）"
+else
+  report FAIL "H.10 宿主模式 stats" "rc=$hrc 输出: $(printf '%s' "$hout" | tr '\n' '|' | head -c 160)"
+fi
+
+hout=$(HOME=$HH/home "$WBOX_ABS" pause hq4 2>&1); hrc=$?
+hout2=$(HOME=$HH/home "$WBOX_ABS" unpause hq4 2>&1); hrc2=$?
+if [ "$hrc" -eq 0 ] && [ "$hrc2" -eq 0 ]; then
+  report PASS "H.11 宿主模式下 pause/unpause 可用（Q4 表的声称）"
+else
+  report FAIL "H.11 宿主模式 pause/unpause" "pause rc=$hrc unpause rc=$hrc2"
+fi
+
+# 不适用的三个要**说清为什么**。静默给空结果会被读成"没有改动"，
+# 那是把"这个问题在这条路径上不存在"说成了"答案是空"。
+hd=$(HOME=$HH/home "$WBOX_ABS" diff hq4 2>&1); hdrc=$?
+hc=$(HOME=$HH/home "$WBOX_ABS" cp hq4:/etc/hostname "$HH/x" 2>&1); hcrc=$?
+if [ "$hdrc" -ne 0 ] && [ "$hcrc" -ne 0 ] \
+   && printf '%s' "$hd" | grep -q '宿主程序模式' \
+   && printf '%s' "$hc" | grep -q '宿主程序模式'; then
+  report PASS "H.12 宿主模式下 diff/cp 明确报'不换根'而非静默给空结果"
+else
+  report FAIL "H.12 宿主模式 diff/cp 的不适用说明" "diff rc=$hdrc cp rc=$hcrc 输出: $(printf '%s|%s' "$hd" "$hc" | head -c 200)"
+fi
+
+HOME=$HH/home "$WBOX_ABS" kill hq4 >/dev/null 2>&1
+HOME=$HH/home "$WBOX_ABS" rm hq4 >/dev/null 2>&1
+rm -rf "$HH"
+
 if command -v python3 >/dev/null 2>&1; then
   probe="import socket
 s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
