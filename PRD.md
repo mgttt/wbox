@@ -152,8 +152,8 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G3 Windows/Linux | P.6-P.18、WP.6-WP.7；Windows stop 仍只有人工产品路径证据 |
-| F8.4 exec | 未实现 | 无 | 先完成 Windows 可行性取证 |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；Windows stop 门禁本地通过，待 main CI |
+| F8.4 exec | `src/cli/exec.rs` | G3 Linux | P.19-P.22；Windows W2 取证/实现进行中 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -164,6 +164,11 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.5`：前台正常退出后状态目录无运行记录。
 - `WP.6`：Windows detach 后可由 `ps` 观察，并可通过 `logs` 读取输出。
 - `WP.7`：`rm` 删除已退出的 detached 记录。
+- `WP.8`：detached Windows workload 建立 supervisor、guest、child 三层进程树。
+- `WP.9`：`stop` 后三层专属 PID 全部消失，记录转为 exited。
+- `WP.10`：重复 `stop` 已退出容器保持幂等。
+- `WP.11`：`stop` 未知名称明确失败。
+- `WP.12`：`rm` 删除 stopped 记录。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -333,7 +338,7 @@ rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` �
 修复后，Win32 私有匿名映射直接由 `W32Mmap64` 在 guest 虚拟地址窗口内 commit，
 只有需要 snapshot-fork 文件身份的共享匿名映射保留临时文件路径；页表与映射
 保护失败也会明确报错，不再进入未定义行为。CI `30238223406` 的
-`WP.1-WP.7` 全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
+`WP.1-WP.12` 本地全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
 Alpine 3.20 的 `/bin/sh`，执行 `uname` 与读取 `/etc/alpine-release` 均为 rc0。
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
@@ -510,27 +515,22 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 
 ```text
 TODO-PLAN
-├── W1 Windows 侧 stop 的持续门禁              [Windows agent]
+├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已实现，待 CI
 ├── W2 F8.4 exec 的 Windows 可行性取证        [Windows agent]
 └── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ```
 
-### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]`
+### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[implemented]`
 
-**已解决的部分**。`--detach → ps → logs → rm` 这条链路的 Windows 门禁
-（`WP.6/WP.7`）已随 `f821e05` 落地并在 CI 真实通过。顺带证实了两件此前只是
-推理的事：非 Linux 上 `detach_from_terminal` 的空实现是成立的（父进程退出
-不会带走 supervisor），且 supervisor 持有的 Job 在父进程退出后仍绑着容器树。
+`WP.8-WP.12` 已加入 `test-windows-product.ps1` 并在 Windows 实机通过：
+detached workload 用专属 PID 文件证明 supervisor、guest、child 三层在 stop
+前全部存活；stop 后三个 PID 全部消失，记录转 exited，重复 stop 幂等，未知
+名称失败，rm 清理记录。待 main CI 通过后按完成定义改为 `[done]`。
 
-**剩下的缺口**：`stop` 在 Windows 上只有人工实测证据，**没有持续门禁**。
-
-**要判定的真问题**：`stop` 走 `OpenProcess + TerminateProcess` 终止 supervisor
-后，Job 的 `KILL_ON_JOB_CLOSE` 是否如期收走**整棵树**——包括孙进程。Linux 侧
-由 P.15 用"3 个孙进程 → 0"验证，Windows 需要一条等价断言（例如 guest 起几个
-`ping -t` 之类的长命子孙，`stop` 后按映像名计数必须归零）。
-
-**做完的标准**：Windows 上有等价于 P.15–P.18 的断言且真实通过；若语义与
-Linux 不同（例如没有 SIGTERM 的优雅阶段），在 F8.d 写明差异而不是让门禁将就。
+门禁实现暴露了一个测试编排坑：不能用 PowerShell 的 `2>&1 | Out-String` 捕获
+长命 detached 启动输出。supervisor 可能继承 native-command 管道句柄，调用方
+会等待 EOF 直到容器退出。门禁改为按短命父 wbox 的进程句柄等待退出，不捕获
+该管道；这条约束属于测试基础设施，不改变产品 detach 语义。
 
 ### W2 F8.4 `exec` 的 Windows 可行性取证 `[Windows agent]`
 
@@ -614,14 +614,14 @@ Linux 不同（例如没有 SIGTERM 的优雅阶段），在 F8.d 写明差异�
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.12 本地通过；资源超限仍缺行为门禁，WP.8-WP.12 待 main CI |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 242 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 与 Windows WP.6-WP.7 持续覆盖，Windows stop 已人工实测但仍缺持续门禁；F8.4 未实现 |
+| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 持续覆盖，Windows WP.6-WP.12 本地通过待 CI；F8.4 Linux 已完成、Windows 进行中 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -663,8 +663,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[active]` F8.1-F8.3 已落地；补 Windows stop 持续门禁，并完成 F8.4
-   `exec` 的 Windows 可行性取证后再决定是否实现。
+4. `[active]` Windows stop 门禁已实现待 CI；继续完成 F8.4 `exec` 的 Windows
+   可行性取证与可对齐子集。
 
 ## 8. 验收与发布
 
