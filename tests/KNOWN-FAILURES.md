@@ -160,6 +160,7 @@ guest-suite: PASS=12 FAIL=4 SKIP=0
 | F22 | O_TMPFILE 仿真复制到返回槽位后未关闭 source VFS fd，循环约 4092 次耗尽为 `EMFILE` | ✅ t_stress 连续 5000 次 open/close 验证无隐藏 VFS/host fd 泄漏 |
 | F23 | snapshot fork 子进程重用目录 guest fd 后，`*at()` 仍按同号全局 VFS fd 锚定到父进程旧目录 | ✅ t_fd_open 强制 guest/VFS 编号分离，覆盖 openat/fstatat/faccessat/mkdirat/linkat/renameat/unlinkat |
 | F24 | 未跟踪 guest fd 回退到同号全局 VFS fd，使 fork 子进程关闭 fd 后仍可操作父进程资源 | ✅ t_fd_open 在父进程保持 VFS 槽位时验证子进程 fchdir/fsync 均返回 EBADF |
+| F25 | Win32 `F_GETLK` 返回成功却不回写 `struct flock`，SQLite 将未加锁文件永久误判为冲突 | ✅ t_fd_open 验证无冲突时回写 `F_UNLCK` 与 pid 0；完整跨进程记录锁仍属后续能力 |
 
 ## P1 进程 —— ✅ 已全部修复并复测通过（fix/mem-proc 系列）
 

@@ -2113,11 +2113,15 @@ int pipe2(int fds[2], int flags) {
 
 int fcntl(int fd, int cmd, ...) {
   int arg = 0;
+  struct flock *lock = NULL;
   va_list ap;
   va_start(ap, cmd);
-  if (cmd == F_SETFL || cmd == F_SETFD || cmd == F_SETLK || cmd == F_SETLKW ||
-      cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC || cmd == F_SETPIPE_SZ)
+  if (cmd == F_SETFL || cmd == F_SETFD || cmd == F_DUPFD ||
+      cmd == F_DUPFD_CLOEXEC || cmd == F_SETPIPE_SZ) {
     arg = va_arg(ap, int);
+  } else if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW) {
+    lock = va_arg(ap, struct flock *);
+  }
   va_end(ap);
   // feat/net: socket fds get real O_NONBLOCK (FIONBIO) semantics
   if (cmd == F_GETFL || cmd == F_SETFL || cmd == F_GETFD || cmd == F_SETFD) {
@@ -2167,9 +2171,30 @@ int fcntl(int fd, int cmd, ...) {
       // NOTE: does not honor min-fd argument; L1 acceptable
       return nfd;
     }
-    case F_GETLK:
     case F_SETLK:
     case F_SETLKW:
+      if (W32FdClassify(fd, NULL) == W32FD_BAD) {
+        errno = EBADF;
+        return -1;
+      }
+      if (!lock) {
+        errno = EINVAL;
+        return -1;
+      }
+      return 0;
+    case F_GETLK:
+      if (W32FdClassify(fd, NULL) == W32FD_BAD) {
+        errno = EBADF;
+        return -1;
+      }
+      if (!lock) {
+        errno = EINVAL;
+        return -1;
+      }
+      // Win32 record locks are not yet tracked. Report no conflicting lock
+      // rather than leaving the caller's requested lock type unchanged.
+      lock->l_type = F_UNLCK;
+      lock->l_pid = 0;
       return 0;
     default:
       errno = EINVAL;

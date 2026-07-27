@@ -133,6 +133,22 @@ int main(void) {
   }
   close(fd);
 
+  T_BEGIN("fcntl/getlk-unlocked");
+  fd = open("t_fo_b", O_RDWR);
+  T_ASSERT(fd >= 0);
+  {
+    struct flock lock = {
+        .l_type = F_WRLCK,
+        .l_whence = SEEK_SET,
+        .l_start = 128,
+        .l_len = 1,
+    };
+    T_ASSERT_OK(fcntl(fd, F_GETLK, &lock));
+    T_ASSERT_EQ(lock.l_type, F_UNLCK);
+    T_ASSERT_EQ(lock.l_pid, 0);
+  }
+  close(fd);
+
   T_BEGIN("dup2/replaces-open-directory");
   {
     char dents[512];

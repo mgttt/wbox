@@ -421,7 +421,10 @@ dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部
 Blink/Linux ABI、线程或同步原语兼容缺口，必须以有界超时门禁继续定位，当前
 不得标记为通过。5 秒 `LD_DEBUG`/内存诊断证明动态链接已完成，进程进入 RPM
 SQLite 初始化后反复打开 `rpmdb.sqlite-shm`，CPU 时间约 1.1 秒；下一步优先
-核对 Win32 SQLite 共享内存、文件锁与 mmap 语义。此前 Win32 release 的
+核对 Win32 SQLite 共享内存、文件锁与 mmap 语义。恢复 syscall trace 后确认
+循环为 `F_GETLK` 返回成功却未把查询结构改写为 `F_UNLCK`，SQLite 因而永久
+误判写锁冲突；实现现已补齐回写、坏 fd 与空指针校验，并加入 guest 回归。
+此前 Win32 release 的
 `-s/-sss` 会被 `NDEBUG` 连带编译为空操作，现将 syscall trace 与普通 debug
 日志解耦，并由 `WP.4S` 保证 release artifact 能输出 syscall 记录。
 
