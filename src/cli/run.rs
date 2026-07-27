@@ -350,7 +350,13 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
 }
 
 /// 由 RunOptions 组装 RunSpec 的公共部分。
-fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, env: Vec<(String, String)>) -> RunSpec {
+fn make_spec(
+    opts: &RunOptions,
+    workdir: std::path::PathBuf,
+    guest_workdir: Option<String>,
+    cmd: Vec<String>,
+    env: Vec<(String, String)>,
+) -> RunSpec {
     RunSpec {
         name: opts
             .name
@@ -360,6 +366,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         allow_network: opts.allow_network,
         keep_profile: opts.keep_profile,
         workdir,
+        guest_workdir,
         cmd,
         env,
         volumes: opts.volumes.clone(),
@@ -897,7 +904,8 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
         None => std::env::current_dir()
             .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
-    let spec = make_spec(opts, workdir, cmd, opts.env.clone());
+    // 宿主程序模式不换根，`workdir` 就是真正的工作目录，没有「容器内 cwd」这一层
+    let spec = make_spec(opts, workdir, None, cmd, opts.env.clone());
     match backend::host_program_backend_kind() {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
@@ -972,7 +980,15 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         }
     }
 
-    let spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    // 容器内 cwd：`-w` 优先，其次镜像 config 的 WorkingDir。
+    // 补这一条之前两者都被静默丢掉——镜像声明了 WorkingDir 也照样起在 `/`，
+    // 用户写了 `-w` 更是毫无反应（F9.37）。
+    let guest_workdir = opts
+        .workdir
+        .clone()
+        .or_else(|| img_cfg.as_ref().and_then(|c| c.working_dir.clone()))
+        .filter(|w| !w.is_empty());
+    let spec = make_spec(opts, dir.join("rootfs"), guest_workdir, merged, env);
     #[cfg(windows)]
     let mut spec = spec;
     // 按宿主分派（docs/architecture.md §3）：Windows 上 guest 是跑不了的

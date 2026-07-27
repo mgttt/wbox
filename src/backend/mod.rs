@@ -111,7 +111,19 @@ pub struct RunSpec {
     /// 退出后保留 AppContainer profile
     pub keep_profile: bool,
     /// 容器工作目录（原生模式）/ rootfs 目录（镜像模式）
+    /// 镜像模式下是**镜像 rootfs 的宿主路径**；宿主程序模式下才是工作目录。
+    /// 容器**内部**的 cwd 见 [`RunSpec::guest_workdir`]——两者是不同的东西，
+    /// 曾经只有这一个字段，于是镜像模式下 `-w` 与镜像的 `WorkingDir` 都无处安放，
+    /// 被静默丢掉了（F9.37 修的就是这个）。
     pub workdir: PathBuf,
+    /// 容器**内**的工作目录（绝对路径）。`None` = 不指定，落在 `/`。
+    ///
+    /// 来源按优先级：`-w/--workdir` > 镜像 config 的 `WorkingDir`。
+    ///
+    /// 目前只有 Linux 镜像后端读它（换根后 `chdir`）。Q2 的 Windows 镜像路径
+    /// 等纯 Rust guest VFS 落地后同样该读——那时它已经在 spec 里，不必再改结构。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub guest_workdir: Option<String>,
     /// 最终命令行（镜像模式下已按 docker 规则合并 Entrypoint/Cmd）
     pub cmd: Vec<String>,
     /// 注入子进程的环境变量（镜像 config Env；原生模式为空）

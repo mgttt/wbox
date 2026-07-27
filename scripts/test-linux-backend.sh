@@ -2061,6 +2061,58 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== WD 容器内工作目录（PRD F9.37）==="
+
+# 此前**镜像声明的 WorkingDir 与 -w 都被静默丢掉**：容器一律起在 /。
+# 判据是容器里 pwd 打出来的东西，不是命令返回码。
+WDD=$WORK/home/.wbox/images/registry-1.docker.io/library_wdtest/latest
+mkdir -p "$WDD/rootfs/bin" "$WDD/rootfs/imgwd" "$WDD/rootfs/other"
+cp "$BUSYBOX" "$WDD/rootfs/bin/busybox"
+for a in sh pwd echo; do ln -sf busybox "$WDD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":"/imgwd"}}' > "$WDD/config.json"
+echo '[]' > "$WDD/layers.json"; echo '{}' > "$WDD/manifest.json"
+
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/imgwd" ]; then
+  report PASS "WD.1 镜像声明的 WorkingDir 生效"
+else
+  report FAIL "WD.1 镜像 WorkingDir" "容器内 pwd='$wout'（期望 /imgwd）"
+fi
+
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /other wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/other" ]; then
+  report PASS "WD.2 -w 覆盖镜像声明的 WorkingDir"
+else
+  report FAIL "WD.2 -w 覆盖" "容器内 pwd='$wout'（期望 /other）"
+fi
+
+# 目录不存在时逐级建出来（docker 同此行为）
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /a/b/c wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/a/b/c" ]; then
+  report PASS "WD.3 工作目录不存在时逐级创建"
+else
+  report FAIL "WD.3 自动创建工作目录" "容器内 pwd='$wout'（期望 /a/b/c）"
+fi
+
+# **建在哪**是关键：必须落在容器自己的 overlay upper，不能写进共享的镜像缓存。
+# 换根前建就会写进 rootfs，那正是 F9.12 花力气避免的污染。
+if [ ! -e "$WDD/rootfs/a" ]; then
+  report PASS "WD.4 自动创建的工作目录落在容器可写层，未污染共享镜像缓存"
+else
+  report FAIL "WD.4 镜像缓存污染" "$WDD/rootfs/a 被创建了（应只在容器 upper 里）"
+fi
+
+# 宿主程序模式不换根，-w 仍是宿主工作目录，行为不能被这次改动带歪
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /etc -- /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/etc" ]; then
+  report PASS "WD.5 宿主程序模式的 -w 语义未受影响"
+else
+  report FAIL "WD.5 宿主模式 -w" "pwd='$wout'（期望 /etc）"
+fi
+
+rm -rf "$WDD"
+
+echo
 echo "=== EP --entrypoint / --env-file / Dockerfile 新指令（PRD F9.36）==="
 
 # 造一个带 Entrypoint+Cmd 的镜像，才能验"覆盖"确实换掉了东西

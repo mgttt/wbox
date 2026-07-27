@@ -161,6 +161,7 @@ wbox
 | `ps -q` / `rm -f` / 多容器名 / `images -q` | 有 | F9.29–F9.31 是纯 CLI 层与镜像缓存操作，两平台同一实现 |
 | 命名卷 | 部分 | 卷管理可用；挂载要等 Q2 的 `-v` 重做（纯 Rust guest VFS），届时命名卷自动适用——它只是给 `-v` 提供一个源 |
 | `inspect` 的 `Mounts` / `PortBindings` | 部分 | F9.33 的机制是通用的；但 Q2 的 `-v` 尚未重做（等纯 Rust guest VFS）、`-p` 语义不适用（§4.9 W5），故当前恒为空——**这是上游能力的缺口，不是 inspect 的缺陷** |
+| 容器内工作目录 | 计划自动获得 | F9.37 已把 `guest_workdir` 放进 `RunSpec`；Q2 的镜像路径等纯 Rust guest VFS 落地后读它即可，不必再改结构 |
 | `save` / `load` | 有 | F9.22 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | systemd / 服务 | 不做 | 非目标 |
 
@@ -195,6 +196,7 @@ wbox
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | **命名卷** `volume create/ls/rm/inspect` | 有 | F9.35：`-v NAME:/path` 数据活得比容器久；卷就是 `~/.wbox/volumes/<名字>`，rootless 可用（门禁 VOL.1–VOL.6）|
 | `--entrypoint` / `--env-file` | 有 | F9.36：覆盖镜像 Entrypoint（空串=清空）；env-file 让密钥不必进命令行（门禁 EP.1–EP.5）|
+| 容器内工作目录 | 有 | F9.37：**修掉镜像 `WorkingDir` 与 `-w` 双双被静默丢掉的缺陷**；不存在时逐级创建，且建在容器可写层（门禁 WD.1–WD.5）|
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`（门禁 EP.6–EP.7）；仍不做多阶段构建与 `ADD` 的远程取回 |
@@ -393,7 +395,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.36 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.37 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -1074,7 +1076,8 @@ F9
 ├── F9.33 inspect 如实反映挂载与端口       —— [done]（门禁 INS.1–INS.3）
 ├── F9.34 状态口径收敛与网络模式三态      —— [done]（门禁 INS.4–INS.5）
 ├── F9.35 命名卷（`wbox volume`）           —— [done]（门禁 VOL.1–VOL.6）
-└── F9.36 `--entrypoint`/`--env-file`/四条 Dockerfile 指令 —— [done]（门禁 EP.1–EP.7）
+├── F9.36 `--entrypoint`/`--env-file`/四条 Dockerfile 指令 —— [done]（门禁 EP.1–EP.7）
+└── F9.37 容器内工作目录（WorkingDir / `-w`）—— [done]（仅 Linux 镜像模式，门禁 WD.1–WD.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1213,6 +1216,29 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.37 容器内工作目录** `[done]`（仅 Linux 镜像模式，门禁 WD.1–WD.5）。
+
+**这是一个静默丢弃的缺陷，不是缺功能**：镜像 config 里声明了 `WorkingDir: /app`，
+容器照样起在 `/`；用户写了 `-w /other`，同样毫无反应。两者都**没有任何提示**，
+而 `WORKDIR /app` 是 Dockerfile 里最常见的指令之一——相对路径全部指错地方，
+症状离原因很远。
+
+**根因是一个被重载的字段**：`RunSpec.workdir` 在镜像模式下是**镜像 rootfs 的宿主
+路径**，在宿主程序模式下才是工作目录。同一个名字担了两件事，于是「容器内的 cwd」
+这个概念根本无处表达，`-w` 解析出来后就没人接。补 `guest_workdir` 把两者分开，
+并在两个字段的文档里互相点明——重载字段最容易在下一次扩展时再咬一口。
+
+**目录不存在时逐级创建**（docker 同此行为，WD.3），但**建在哪是关键**（WD.4）：
+必须换根之后再建。换根前 `/` 还是宿主视角，往 `rootfs/<w>` 里建会写进**共享的
+镜像缓存**——那正是 F9.12 花力气避免的污染。换根后 `/` 已是 overlay 合并视图，
+写入自然落在本容器的 upper 里。路径前缀在 fork 前算好：`pre_exec` 里不能分配内存。
+
+**工作目录里的 `..` 直接拒绝**，不做消解：消解出来的路径与用户写的不是同一个，
+出问题时对不上。
+
+宿主程序模式不换根，`-w` 仍是宿主工作目录，语义一个字没改（WD.5 专门盯住这条，
+免得改动把另一半带歪）。
 
 **F9.36 `--entrypoint` / `--env-file` / 四条 Dockerfile 指令** `[done]`（门禁 EP.1–EP.7）。
 
