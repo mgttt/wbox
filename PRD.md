@@ -100,7 +100,63 @@ S4 在 Linux 上运行 Windows CLI
 
 ## 4. 功能需求树
 
-### F1 CLI 与运行目标分派 `[done]`
+### 4.0 完成定义与需求追踪
+
+测试证据分五级。级别描述的是**实际经过的调用链**，不是测试文件叫什么：
+
+| 级别 | 含义 | 可以证明 | 不能证明 |
+|---|---|---|---|
+| G0 | 静态检查或单元测试 | 解析、换算、局部错误路径 | OS API、进程和产品链路 |
+| G1 | 组件可执行文件直测 | 单个后端/模拟器行为 | `wbox` 编排及外层隔离 |
+| G2 | 后端集成测试 | 一个后端经过真实 OS 原语 | 用户公开 CLI 的跨模块组合 |
+| G3 | 产品路径测试 | 从 `wbox` 公开 CLI 到最终 workload | 发布包可复制性 |
+| G4 | 发布形态测试 | 仅使用最终打包文件完成 G3 | 无 |
+
+状态规则：
+
+1. 用户可见功能节点只有具备持续执行的 G3 证据才能标 `[done]`；可移植发布要求
+   G4。内部算法节点可由 G0/G1 裁决，但其父级仍需产品路径证据。
+2. 每条 `[done]` 必须能同时指向实现入口、测试 ID、CI job 和最近一次成功提交。
+   缺任一项、允许确定性 SKIP、或当前 `main` 对应 job 为红，状态就是 `[active]`。
+3. 父节点只有在全部子节点满足完成定义时才能 `[done]`。历史人工记录和通过数量
+   是诊断材料，不是状态依据。
+4. 核心 G3/G4 使用仓库内离线夹具，不依赖 registry 或公网。公网测试只补充网络
+   兼容性，失败可以注明环境原因，但不能替代离线产品门禁。
+
+当前追踪矩阵：
+
+| 需求 | 实现入口 | 已有最高证据 | 持续门禁 / 缺口 |
+|---|---|---|---|
+| F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`smoke-windows`、L/H；退出码已有行为断言 |
+| F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | pull=G2，run=缺 G3 | 新 `WP.3` 必须覆盖离线缓存到 Linux guest |
+| F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WP.1` |
+| F2.3 Windows 网络放行 | `token.rs` | G0 | 只有 SID 构造；缺默认拒绝与 `--allow-network` 实际连接对照 |
+| F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
+| F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G2 | 缺杀死 wbox 后后代 PID 消失的 Windows 门禁 |
+| F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
+| F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 测试通过；真实 Alpine `/bin/sh` 缺失，仍缺真实 rootfs 不变量 |
+| F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
+| F4.1 静态 `wbox-linux.exe` | build script | G1 | CI 构建后直跑；G4 两文件 bundle 由 `WP.3` 裁决 |
+| F4.2-F4.7 ELF/syscall/fork/network/fd | `vendor/blink` | G1 | `test-matrix.sh`、guest C 套件均直接跑模拟器 |
+| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | 缺 G3 | `WP.3`: `wbox run local.test/...`，当前人工实测未通过 |
+| F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
+| F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
+| F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
+| F6.1-F6.3/F6.5 PE/Wine 分派 | `wine.rs` | G3 | W.1/W.2/W.4/W.5 |
+| F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
+| F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
+| F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 Linux | P.1-P.5；Windows 清理修复待 CI 验证，`WP.5` 检查 `ps --all` 无残留 |
+| F8.2-F8.4 detach/logs/stop/rm/exec | 未实现 | 无 | planned |
+
+`WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
+
+- `WP.1`：最终 bundle 中的 `wbox.exe` 运行 Windows 原生程序。
+- `WP.2`：公开 CLI 的环境边界及正常退出状态清理。
+- `WP.3`：只用最终两个 exe 和仓库内静态 ELF，从本地缓存执行 Linux guest。
+- `WP.4`：bundle 中不存在运行时 DLL 或仓库路径依赖。
+- `WP.5`：前台正常退出后状态目录无运行记录。
+
+### F1 CLI 与运行目标分派 `[active]`
 
 ```text
 F1
@@ -118,7 +174,7 @@ F1
 - 子进程退出码原样返回；参数/profile/job/spawn/image 错误有固定分类。
 - `--memory`、`--cpu-pct`、`--max-procs`、网络和环境参数跨后端语义一致。
 
-### F2 Windows 原生进程容器 `[done]`
+### F2 Windows 原生进程容器 `[active]`
 
 ```text
 F2
@@ -137,7 +193,7 @@ F2
 - profile、capability SID、Job 限额、命令行保真及完整启动链在 Windows CI
   运行，不以权限理由静默跳过。
 
-### F3 OCI Distribution 与本地镜像缓存 `[done]`
+### F3 OCI Distribution 与本地镜像缓存 `[active]`
 
 ```text
 F3
@@ -171,8 +227,10 @@ F4
 └── F4.7 guest fd/VFS fd 在 fork 后保持命名空间一致
 ```
 
-已完成主流单线程 CLI、动态 glibc 程序、shell 管道/命令替换/后台任务、
-fork 子 DNS 和 `apt-get update`。仍有限制：
+直接运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
+程序、shell 管道/命令替换/后台任务、fork 子 DNS 和 `apt-get update`。这些
+结果不再表述为 Windows 产品路径已完成；`BlinkBackend` 经 AppContainer 的 G3
+仍由 WP.3 裁决。组件层仍有限制：
 
 - 宿主异步信号语义不完整。
 - glibc pthread/通用 clone 尚未支持。
@@ -181,7 +239,7 @@ fork 子 DNS 和 `apt-get update`。仍有限制：
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
 
-### F5 Linux 原生后端 `[done]`
+### F5 Linux 原生后端 `[active]`
 
 ```text
 F5
@@ -208,8 +266,10 @@ F5
 | F5.7 rlimit 回退 | L2.1 / L2.2 / L2.3 |
 | F5.8 清理后代 | L3.1（宿主）/ L3.2（镜像）|
 
-F5 转 `[done]` 的依据是这张表：八项各有一条持续执行的断言，而不是"实现过
-一次"。此前 cgroup v2 一项长期零覆盖，正是因为把"跑通过"当成了"有覆盖"。
+这张表证明了 F5 的正常主路径，但 2026-07-27 的追踪审计发现它没有覆盖限额
+换算溢出、`spawn`/`wait` 失败后的 cgroup 清理，以及 Windows 每进程内存与
+Linux 整组内存的语义差异。因此 F5 回到 `[active]`；补齐这些反例后才能重新
+按 §4.0 的完成定义评为 `[done]`。
 
 namespace、网络默认、两种文件系统模式、生命周期、rlimit 兜底与 **cgroup v2
 首选路径**均已实现并进入 CI 门禁。
@@ -227,7 +287,7 @@ shell 留在同一 cgroup"影响）；父级不可写时退回 supervisor/target
 是门禁抓出来的。任何回退必须打印原因；`--cpu-pct` 等无法等价回退的限制应
 拒绝，不能忽略。
 
-### F6 Linux 上执行 Windows CLI `[done]`
+### F6 Linux 上执行 Windows CLI `[active]`
 
 ```text
 F6
@@ -240,14 +300,14 @@ F6
 
 验收由 `scripts/test-linux-backend.sh` 的 W 段及独立 Wine CI job 完成。
 
-### F7 环境与凭证边界 `[done]`
+### F7 环境与凭证边界 `[active]`
 
-- 默认只继承运行所需白名单。
-- `--env-pass-all` 仍不得透传 `WBOX_*`、`BLINK_*` 等内部控制键。
-- 镜像 Env、宿主 Env 和强制 Env 有明确优先级，`BLINK_PREFIX` 必须由 wbox
+- F7.1 默认只继承运行所需白名单。
+- F7.2 `--env-pass-all` 仍不得透传 `WBOX_*`、`BLINK_*` 等内部控制键。
+- F7.3 镜像 Env、宿主 Env 和强制 Env 有明确优先级，`BLINK_PREFIX` 必须由 wbox
   覆盖。
-- verbose/show 输出对密码、token、secret 等值脱敏。
-- registry 凭证只发送给获准的认证端点。
+- F7.4 verbose/show 输出对密码、token、secret 等值脱敏。
+- F7.5 registry 凭证只发送给获准的认证端点。
 
 ### F8 运维型容器生命周期 `[active]`
 
@@ -292,7 +352,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 期 | 范围 | 验收 |
 |---|---|---|
-| F8.1 `[done]` | 状态目录 + `wbox ps`（只读） | **已完成**：门禁 P.1–P.5 覆盖跨进程发现、重名拒绝、崩溃残留标注、默认视图过滤、正常退出清理 |
+| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5 已覆盖 Linux；Windows 清理修复待 CI 验证，且 WP.5 尚未进入成功门禁 |
 | F8.2 | `--detach` + `logs` | detach 后前台立即返回且容器仍在跑；`logs` 拿到完整输出；超上限时截断可见 |
 | F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器 |
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
@@ -331,14 +391,14 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | done | AppContainer、Job、启动链进入 Windows CI |
-| OCI pull/cache/config | done | Rust 单测与 Windows pull 冒烟 |
-| Windows Linux guest | active | 20/20 guest 文件；1217 pass、0 fail、9 skip |
-| Windows shell 矩阵 | done | 43 pass、0 fail、1 skip |
-| Rust 主机逻辑 | done | 最近记录 198 pass、0 fail |
-| Linux 原生后端 | done | namespace/rlimit/cgroup v2 三条路径均已门禁；cgroup 改为兄弟 leaf 后实测生效 |
-| Linux Wine 路径 | done | 独立 CI job 覆盖 PE、参数、退出码和网络语义 |
-| 后台生命周期管理 | planned | 尚未设计 |
+| Windows 原生容器 | active | 原生启动 G3 通过；网络放行、资源超限和进程树回收缺行为门禁 |
+| OCI pull/cache/config | active | Rust 单测与 Windows pull 通过；真实 rootfs 链接和原子缓存存在缺口 |
+| Windows Linux guest | active | G1 guest 组件覆盖充分；公开 `wbox run <image>` G3 尚未通过 |
+| Windows shell 矩阵 | component-only | 43 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
+| Rust 主机逻辑 | G0 complete | 最近记录 198 pass、0 fail；不能外推产品状态 |
+| Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
+| Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
+| 后台生命周期管理 | active | F8.1 已实现但当前 Windows job 未绿；F8.2-F8.4 未实现 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -390,6 +450,7 @@ release gate
 ├── smoke-windows              AppContainer + Job 启动链
 ├── build-wbox-linux           UCRT64 构建 + Windows shell 矩阵
 ├── guest-tests                guest C 回归及已知失败基线
+├── test-windows-product       最终双 exe 的 Windows/OCI 产品路径
 ├── test-linux-backend         namespace/network/resource/lifecycle
 └── test-wine-backend          Linux 隔离层内运行 PE
 ```

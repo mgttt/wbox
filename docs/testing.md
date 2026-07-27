@@ -5,22 +5,26 @@
 ## 1. 测试分层
 
 ```text
-Rust tests
+G0 Rust tests
 ├── CLI、目标分类、环境合并
 ├── OCI 引用/认证/digest/解包/config
 ├── Linux 后端纯逻辑
 └── Windows profile/Job/启动链（仅 Windows 编译与运行）
 
-guest C tests (`tests/run.sh`)
+G1 guest C tests (`tests/run.sh`)
 └── wbox-linux 内的 Linux syscall 与 fork/exec 行为
 
-shell matrices
+G1/G3 shell matrices
 ├── `scripts/test-matrix.sh`: Windows/wine 上的 wbox-linux 场景
 └── `scripts/test-linux-backend.sh`: Linux namespace、资源、网络、Wine
+
+G3/G4 product paths
+└── `scripts/test-windows-product.ps1`: 最终双 exe + 离线 OCI fixture
 ```
 
-测试覆盖要与改动风险匹配。纯解析改动运行相关 Rust 测试；公共 fd、进程、内存、
-路径、OCI 解包或后端行为改动应运行完整相关层，并依赖 CI 补齐其他宿主。
+G0/G1 通过不能推导 G3/G4 通过。测试层级、完成定义和逐需求追踪矩阵见
+`PRD.md` §4.0。纯解析改动运行相关 Rust 测试；公共 fd、进程、内存、路径、
+OCI 解包或后端行为改动应运行完整相关层，并依赖 CI 补齐其他宿主。
 
 ## 2. 常用命令
 
@@ -83,6 +87,22 @@ cgroup v2 的存在不等于当前进程获得委派。诊断时同时记录：
 
 `scripts/probe-cgroup2.sh` 是取证脚本，不替代产品验收。
 
+### 2.5 Windows 产品路径
+
+该门禁不访问 registry，使用仓库内静态 `busybox` 构造本地镜像缓存，并只复制
+`wbox.exe` 与 `wbox-linux.exe` 到临时 bundle：
+
+```powershell
+scripts/test-windows-product.ps1 `
+  -Wbox target/debug/wbox.exe `
+  -WboxLinux vendor/blink/build-win32/wbox-linux.exe `
+  -Busybox busybox
+```
+
+它覆盖 Windows 原生 workload、环境过滤、正常退出状态清理，以及从
+`wbox run <image>` 到 AppContainer、Blink 和 Linux ELF 的完整路径。任何前置
+缺失或执行失败都直接 FAIL，不允许 SKIP。
+
 ## 3. 已知失败基线
 
 机器可读基线是 `tests/known-failures.txt`，说明与修复历史在
@@ -121,6 +141,7 @@ runner 规则：
 | `smoke-windows` | CLI、AppContainer、Job 和可选 pull 冒烟 |
 | `build-wbox-linux` | UCRT64 构建及 Windows 场景矩阵 |
 | `guest-tests` | guest C 回归与基线裁决 |
+| `test-windows-product` | 最终双 exe 的 Windows 原生与 OCI Linux guest 产品路径 |
 | `test-linux-backend` | Linux 原生后端 |
 | `test-wine-backend` | Linux 隔离层内的 Windows CLI |
 | `release` | tag 全绿后打包与发布 |

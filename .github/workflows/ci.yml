@@ -14,11 +14,12 @@ env:
   CARGO_TERM_COLOR: always
 
 # 发布门禁说明（详见 docs/testing.md §发布门禁）：
-#   tag v* 的 release job needs 全部八个门禁 job——
+#   tag v* 的 release job needs 全部九个门禁 job——
 #   test-linux（Rust 单测）+ test-windows（同一套单测在 windows 上跑，
 #   覆盖 cfg(windows) 模块）+ check-windows-msvc（Win32 编译门禁）+
 #   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
-#   guest-tests（guest 测试，前置未就绪时 SKIP 标黄不阻塞）+
+#   guest-tests（guest 测试，前置缺失也按失败处理）+
+#   test-windows-product（最终双 exe 的公开 CLI 产品路径）+
 #   test-linux-backend（Linux 原生后端 rootless/cgroup 验收，见 §10）+
 #   test-wine-backend（台阶③：Linux 上经 wine 跑 Windows 程序）——
 #   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
@@ -196,9 +197,9 @@ jobs:
           retention-days: 30
 
   # ⑤ guest 测试：tests/ 目录下的 guest 级测试。
-  #    契约：入口 tests/run.sh 存在**且运行前置就绪**才执行（退出码即测试结果）；
-  #    前置缺失时记 ::notice:: SKIP 并成功退出——不阻塞发布门禁，但门禁 needs
-  #    列表包含本 job（前置补齐后自动生效）。
+  #    契约：入口 tests/run.sh 与运行前置必须就绪，退出码即测试结果。
+  #    本 job 是 required gate；artifact 或编译器缺失必须 FAIL，不能把零覆盖
+  #    包装成成功。
   #
   #    运行前置有两项，缺一不可：
   #      ① wbox-linux.exe——本 job 不构建它（由 build-wbox-linux 产出）；
@@ -243,13 +244,12 @@ jobs:
       # 退出码即测试结果。判定经 tests/known-failures.txt 基线：
       #   失败 ⊆ 基线 → 0；出现基线外新失败 → 1（回归）；
       #   基线内用例变通过 → 1（基线过期，强制同步收紧）。
-      # 前置缺失时仍按契约 SKIP 不阻塞（见 docs/testing.md §一.2）。
       - name: guest C 回归套件（基线判定）
         run: |
           exe=vendor/blink/build-win32/wbox-linux.exe
           if [ ! -f "$exe" ]; then
-            echo "::notice::未取到 $exe —— guest 测试 SKIP，不阻塞门禁"
-            exit 0
+            echo "::error::未取到 $exe —— required guest gate 无法执行"
+            exit 1
           fi
           chmod +x "$exe" || true
           # zig：直接取官方 Windows 二进制，不走包管理器。
@@ -258,8 +258,7 @@ jobs:
           #     `pip install ziglang` 会装到 **1.0 kB 的 0.0.0 占位包**上
           #     （日志显示 Successfully installed，实际 python3 -m ziglang
           #     并不存在）——是个会骗过"安装成功"判断的坑。
-          # 下载失败时按契约 SKIP（docs/testing.md §一.2）：交叉编译器缺失
-          # 不等于测试失败，不该把门禁判红。
+          # 下载失败时 required gate 必须失败；否则会再次出现全绿但零覆盖。
           ZVER=0.13.0
           ZDIR="$RUNNER_TEMP/zig-windows-x86_64-$ZVER"
           if ! command -v zig >/dev/null 2>&1 && [ ! -x "$ZDIR/zig.exe" ]; then
@@ -270,11 +269,35 @@ jobs:
           fi
           [ -x "$ZDIR/zig.exe" ] && export PATH="$ZDIR:$PATH"
           if ! command -v zig >/dev/null 2>&1; then
-            echo "::notice::未找到 zig —— guest 测试 SKIP，不阻塞门禁"
-            exit 0
+            echo "::error::未找到 zig —— required guest gate 无法编译用例"
+            exit 1
           fi
           zig version
           WBOX_LINUX=$exe bash tests/run.sh
+
+  # Product-path gate: exercise the public wbox CLI with the same two-file
+  # bundle that release publishes. The fixture is assembled from the tracked
+  # static Linux busybox, so registry and public-network failures cannot SKIP it.
+  test-windows-product:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    needs: build-wbox-linux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - uses: actions/download-artifact@v4
+        with:
+          name: wbox-linux.exe
+          path: target/product
+      - name: Windows product path (native + cached OCI Linux guest)
+        shell: pwsh
+        run: |
+          scripts/test-windows-product.ps1 `
+            -Wbox target/debug/wbox.exe `
+            -WboxLinux target/product/wbox-linux.exe `
+            -Busybox busybox
 
   # ⑦ Linux 原生后端（多宿主 §10）：rootless namespace + cgroup v2 限额。
   #    ubuntu runner 满足两个本地开发容器满足不了的前置——
@@ -411,7 +434,7 @@ jobs:
   release:
     timeout-minutes: 30  # 构建 release + 打包 + 上传
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-linux-backend, test-wine-backend]
+    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-windows-product, test-linux-backend, test-wine-backend]
     runs-on: windows-latest
     permissions:
       contents: write
