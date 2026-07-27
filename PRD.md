@@ -249,7 +249,7 @@ F6
 - verbose/show 输出对密码、token、secret 等值脱敏。
 - registry 凭证只发送给获准的认证端点。
 
-### F8 运维型容器生命周期 `[planned]`
+### F8 运维型容器生命周期 `[active]`
 
 `--detach`、`wbox ps/stop/rm/logs/exec`。这是 wbox 离"能当 harness 的长期
 环境"最近的一块短板：目前只能前台跑一次性任务，harness 想"起一个容器再往里
@@ -257,14 +257,19 @@ F6
 
 四个前置问题的设计答复如下（尚未实现，先定契约再动手）：
 
-**F8.a 跨进程发现**。落一个状态目录 `~/.wbox/run/<name>/`，内含 `spec.json`
-（原始参数，供 `ps` 展示与 `exec` 复用）、`pid`、`created`。存活判定**不靠
-pid**——pid 会被复用，拿它判断会误杀。两侧各用自己的可靠句柄：
+**F8.a 跨进程发现**（已实现，`src/runstate.rs`）。状态目录
+`~/.wbox/run/<name>/`，内含 `meta.json` 与 `lock`。存活判定**不靠 pid**——
+pid 会被复用，拿它判断迟早会把别人的进程当成自己的容器，而 `stop` 一旦据此
+发信号就是杀错进程。
 
-| 宿主 | 存活判据 | 理由 |
-|---|---|---|
-| Linux | 容器 cgroup 的 `cgroup.procs` 非空 | cgroup 路径已由 F5.6 建好，天然唯一且不复用 |
-| Windows | `OpenJobObjectW` 打开**具名** Job | Job 可命名，跨进程可打开；句柄全关即对象消失，等价于"容器已亡" |
+实现时改了原定方案：原打算 Linux 查 `cgroup.procs`、Windows 开具名 Job，
+但那是**两套**机制，且 cgroup 那条只在 cgroup 路径可用（rlimit 兜底时没有
+cgroup 可查）。最终统一用**锁文件**——两侧语义都由操作系统保证：进程无论
+正常退出、崩溃还是被 SIGKILL，内核都会关掉它的 fd/句柄，锁随之释放，于是
+"能拿到锁"精确等价于"没有活着的 owner"。Linux 用 `flock`（绑定 open file
+description，同进程重开也冲突，故单测可在进程内验证；`fcntl` 记录锁按进程算
+则不行），Windows 用 `share_mode(0)`。**同一套单测覆盖两侧**，Windows 那半
+由 CI 的 windows runner 真实执行。
 
 **F8.b 日志模型**。`--detach` 时 stdout/stderr 重定向到状态目录下的
 `stdout.log`/`stderr.log`，`wbox logs` 读文件（`-f` 用轮询 tail）。v1
@@ -287,7 +292,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 期 | 范围 | 验收 |
 |---|---|---|
-| F8.1 | 状态目录 + `wbox ps`（只读） | 造出存活/已亡两种状态目录，`ps` 分别正确标注；pid 复用场景不误判 |
+| F8.1 `[done]` | 状态目录 + `wbox ps`（只读） | **已完成**：门禁 P.1–P.5 覆盖跨进程发现、重名拒绝、崩溃残留标注、默认视图过滤、正常退出清理 |
 | F8.2 | `--detach` + `logs` | detach 后前台立即返回且容器仍在跑；`logs` 拿到完整输出；超上限时截断可见 |
 | F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器 |
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |

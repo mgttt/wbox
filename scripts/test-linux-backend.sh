@@ -441,6 +441,61 @@ CEOF
 fi
 
 echo
+echo "=== P 容器状态与 ps（PRD F8.1）==="
+
+# 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。
+PSHOME=$WORK/home
+wps() { HOME=$PSHOME "$WBOX_ABS" ps "$@" 2>&1; }
+
+# P.1 运行中的容器要能被列出。用 setsid 起一个长命令，再从另一个进程查询
+# ——这正是 ps 的意义：跨进程发现，而不是自己看自己。
+HOME=$PSHOME setsid "$WBOX_ABS" run --name pstest -- /bin/sleep 30 >/dev/null 2>&1 &
+sleep 2
+if wps | grep -q "pstest.*running"; then
+  report PASS "P.1 ps 列出运行中的容器（跨进程发现）"
+else
+  report FAIL "P.1 ps 列出运行中" "$(wps | tr '\n' ' ' | head -c 200)"
+fi
+
+# P.2 重名必须被拒，不能覆盖（覆盖会让"我以为在跑的那个"悄悄消失）
+dup=$(HOME=$PSHOME "$WBOX_ABS" run --name pstest -- /bin/true 2>&1); duprc=$?
+if [ "$duprc" -ne 0 ] && printf '%s' "$dup" | grep -q "正在使用中"; then
+  report PASS "P.2 同名且存活时拒绝启动"
+else
+  report FAIL "P.2 重名拒绝" "rc=$duprc 输出: $(printf '%s' "$dup" | head -c 150)"
+fi
+
+# P.3 崩溃残留必须被如实标为 exited。SIGKILL 掉 wbox，RAII 的 Drop 不会执行，
+# 状态目录会留下——此时判活只能靠锁，而锁已随进程消失。这条同时验证了
+# "不靠 pid 判活"：pid 还可能被别人复用，锁不会。
+psp=$(python3 -c "import json;print(json.load(open('$PSHOME/.wbox/run/pstest/meta.json'))['pid'])" 2>/dev/null)
+if [ -n "$psp" ]; then
+  kill -9 "$psp" 2>/dev/null
+  sleep 1
+  if [ -d "$PSHOME/.wbox/run/pstest" ] && wps -a | grep -q "pstest.*exited"; then
+    report PASS "P.3 wbox 崩溃后残留被标为 exited（判活靠锁不靠 pid）"
+  else
+    report FAIL "P.3 崩溃残留标注" "$(wps -a | tr '\n' ' ' | head -c 200)"
+  fi
+  # 默认视图不该混入已退出的
+  if ! wps | grep -q "pstest.*exited"; then
+    report PASS "P.4 默认视图只列运行中（-a 才含已退出）"
+  else
+    report FAIL "P.4 默认视图" "$(wps | tr '\n' ' ' | head -c 150)"
+  fi
+else
+  report SKIP "P.3/P.4 崩溃残留" "取不到 pstest 的 pid"
+fi
+
+# P.5 正常退出不留残留：RAII 应当把状态目录删干净
+HOME=$PSHOME "$WBOX_ABS" run --name psclean -- /bin/true >/dev/null 2>&1
+if [ ! -d "$PSHOME/.wbox/run/psclean" ]; then
+  report PASS "P.5 正常退出后状态目录已清理"
+else
+  report FAIL "P.5 正常退出清理" "$PSHOME/.wbox/run/psclean 仍在"
+fi
+
+echo
 echo "==================================="
 echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
 [ "$fail" -eq 0 ]

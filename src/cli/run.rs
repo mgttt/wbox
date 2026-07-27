@@ -1,6 +1,9 @@
 //! `wbox run` 子命令：参数结构、手写解析与目标分派（原生 / 镜像）。
 
 use crate::backend::{self, Backend, BlinkBackend, Limits, RunSpec, RunTarget};
+
+/// `ps` 里表示"非镜像目标"的占位串。
+const NATIVE_TARGET: &str = "(native)";
 use crate::error::{Result, WboxError};
 use crate::oci;
 
@@ -150,6 +153,26 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     }
 }
 
+/// 登记状态目录后再 spawn（PRD F8.1）。
+///
+/// 状态目录只在容器**运行期间**存在：`Registration` 是 RAII，spawn 返回即 drop
+/// 并删目录。因此 `wbox ps` 看到的就是真在跑的东西，不需要额外的清理时机。
+/// 崩溃时目录会残留，但锁随进程消失，`ps` 会如实标为 exited。
+///
+/// 收成一个函数而不是在四个 spawn 点各写一遍：漏掉任何一处都会让那条路径的
+/// 容器在 `ps` 里隐身，而"少列了一个"比"多列了一个"难发现得多。
+fn spawn_with_state(
+    b: &dyn Backend,
+    spec: &backend::RunSpec,
+    prepared: &backend::Prepared,
+    target: &str,
+) -> Result<u32> {
+    // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
+    // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
+    let _reg = crate::runstate::register(&spec.name, &spec.cmd, target)?;
+    b.spawn(spec, prepared)
+}
+
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
 /// Linux 上是 namespace+cgroup 但**不换根**（linux.rs 的 `LinuxMode::Host`）
 /// ——即 PRD.md F5 的宿主程序模式，供 harness 做环境控制。
@@ -165,14 +188,14 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
             let prepared = backend.prepare(&spec)?;
-            backend.spawn(&spec, &prepared)
+            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET)
         }
         // Unsupported 也走 NativeBackend：它的 spawn 已经会给出明确的
         // "只能在 Windows 宿主上执行"错误，不必再重复一份文案。
         _ => {
             let backend = backend::NativeBackend;
             let prepared = backend.prepare(&spec)?;
-            backend.spawn(&spec, &prepared)
+            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET)
         }
     }
 }
@@ -221,12 +244,12 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         backend::ImageBackendKind::Blink => {
             let backend = BlinkBackend;
             let prepared = backend.prepare(&spec)?;
-            backend.spawn(&spec, &prepared)
+            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag())
         }
         backend::ImageBackendKind::LinuxNative => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);
             let prepared = backend.prepare(&spec)?;
-            backend.spawn(&spec, &prepared)
+            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag())
         }
     }
 }

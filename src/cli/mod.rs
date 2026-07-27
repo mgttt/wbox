@@ -9,6 +9,7 @@
 
 pub mod args;
 pub mod image;
+pub mod ps;
 pub mod run;
 
 use crate::error::{Result, WboxError};
@@ -23,6 +24,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox image list
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image rm <REF> [--yes]                      删除已 pull 镜像的本地缓存（默认交互确认）
+  wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
   wbox --help | -h
   wbox --version
 
@@ -59,6 +61,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("run") => run::cmd_run(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
+        Some("ps") => ps::cmd_ps(&args[1..]),
         Some("--help") | Some("-h") | Some("help") => {
             print!("{}", USAGE);
             Ok(0)
@@ -73,7 +76,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         ))),
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args("缺少子命令（run / image）"))
+            Err(WboxError::args("缺少子命令（run / image / ps）"))
         }
     }
 }
