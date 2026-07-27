@@ -115,8 +115,26 @@ own/                 委派根：不放进程，控制器由此下发
 ```
 
 任一步失败（挪不动自己、下发不了控制器、写不了 `*.max`）都退回 rlimit 并清理
-已创建的目录，而不是硬报错。**产品级覆盖仍缺**：runner 上没有可委派的
-cgroup，改造后的路径目前只有 `scripts/probe-cgroup2.sh` 的取证环境走过。
+已创建的目录，而不是硬报错。
+
+改造后已实测生效（`scripts/probe-cgroup2.sh` 取证环境）：
+
+```
+wbox: 限额（cgroup v2） = memory.max=16777216
+wbox: cgroup（guest） = .../run/supervisor/wbox-2705
+wbox: cgroup（wbox 自身） = .../run/supervisor/wbox-supervisor
+==> wbox 走了 cgroup v2 首选路径
+```
+
+这是该路径**第一次在任何环境下真正执行**。两个细节印证实现符合设计：
+一是 wbox 在探针搭好的 leaf 里又自建了一层 supervisor/target，说明算法自足
+——只要它待在任一可写 cgroup 里就能自行完成布局，不依赖外部先摆好架子；
+二是运行结束后 `wbox-<pid>` 已被删除、`wbox-supervisor` 仍在，正是预期的
+清理语义（后者内有 wbox 自身，删不掉）。
+
+**仍未进门禁**：runner 自身没有可委派的 cgroup，这条路径只有取证步骤
+（`continue-on-error`）走得到，`test-linux-backend` 主门禁跑的仍是 rlimit
+兜底。要变成真门禁，需要在 CI 里把委派子树的搭建做成前置步骤。
 
 改造同时修掉了一个既有缺陷：旧实现只在失败路径删除创建的 cgroup 目录，
 成功路径从不清理，即每成功执行一次 `wbox run` 就在宿主留下一个空的
