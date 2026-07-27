@@ -552,9 +552,8 @@ pub struct VolumeMount {
 
 /// 解析 `-v` 取值。
 ///
-/// 形如 `host:guest`、`host:guest:ro`、`host:guest:rw`。**只按最多三段切分**，
-/// 因为宿主路径本身可能含冒号；多余的冒号归给宿主段是错的，所以从右往左认
-/// 模式段与容器段。
+/// 形如 `host:guest`、`host:guest:ro`、`host:guest:rw`。从右往左先剥离
+/// 模式，再识别容器路径，因此 Windows 宿主路径的盘符冒号不会被误当分隔符。
 pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     use crate::error::WboxError;
     let bad = |why: &str| {
@@ -563,12 +562,12 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
             spec, why
         ))
     };
-    let parts: Vec<&str> = spec.split(':').collect();
-    let (host, guest, mode) = match parts.len() {
-        2 => (parts[0], parts[1], None),
-        3 => (parts[0], parts[1], Some(parts[2])),
-        _ => return Err(bad("段数不对")),
+    let (body, mode) = match spec.rsplit_once(':') {
+        Some((body, "ro")) => (body, Some("ro")),
+        Some((body, "rw")) => (body, Some("rw")),
+        _ => (spec, None),
     };
+    let (host, guest) = body.rsplit_once(':').ok_or_else(|| bad("缺少容器路径分隔符"))?;
     let read_only = match mode {
         None | Some("rw") => false,
         Some("ro") => true,
