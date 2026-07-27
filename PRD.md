@@ -252,6 +252,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 | F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
+| F8.8 detached 管道 EOF | `src/cli/run.rs` | 待本批 G4 | WP.22：`run -d`、`container start`、`start` 的重定向输出及时 EOF，workload 继续运行 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -279,6 +280,8 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.19/WP.20`：`top` 只列 Job 内 guest，`kill` 立即回收完整 Job 进程树。
 - `WP.21`：`container create` 不执行 Windows workload；`container start` 启动，
   退出后再次 `start` 必须产生一代全新的 supervisor/guest/child 进程树。
+- `WP.22`：长命 workload 运行期间，`run -d`、`container start` 与顶层 `start`
+  的重定向 stdout/stderr 必须及时 EOF，调用方不得等到容器退出。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -320,7 +323,8 @@ F1
     ├── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
     ├── F1.7.9 `kill [-s KILL] NAME...` 立即终止，不经过 stop 宽限期
     ├── F1.7.10 `top NAME` 列出隔离单元成员，不混入 wbox supervisor
-    └── F1.7.11 `create [RUN OPTIONS]` 保存配置但不运行，`start NAME...` 启动或重启
+    ├── F1.7.11 `create [RUN OPTIONS]` 保存配置但不运行，`start NAME...` 启动或重启
+    └── F1.7.12 detached 父命令可安全用于管道/命令替换，不被 supervisor 拖住 EOF
 ```
 
 验收：
@@ -700,8 +704,19 @@ supervisor 登记前失败必须恢复 `created`，不得留下假 running。登
 `create.json` 会持久化显式 `-e` 参数，Linux 权限必须为 0600；不得把宿主隐式环境
 或 registry 凭证写入 `meta.json`。使用者不应把长期凭证直接放在命令参数中。
 
+**F8.f detached 父命令的标准句柄边界**。Windows 上 `std::process::Command`
+即使把 supervisor 的 stdout/stderr 显式指向日志，仍可能顺带继承父 wbox 当前
+标准句柄。PowerShell native-command pipeline 的管道句柄若被长命 supervisor
+持有，`wbox run -d ... | Out-String` 或命令替换就会一直等不到 EOF。
+
+启动 supervisor 前必须在进程级互斥区内暂时清除 stdin/stdout/stderr 的
+`HANDLE_FLAG_INHERIT`，spawn 后由 RAII 原样恢复；`Command` 为日志文件准备的
+显式 stdio 句柄不受影响。修改标准句柄属性是进程全局操作，因此不允许两个
+内部 spawn 窗口并发交错。WP.22 同时等待短命父进程退出和两个重定向流 EOF，
+并在随后确认 workload 仍存活，防止以“容器也提前退出”伪造通过。
+
 **F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.25 覆盖完整生命周期；
-Windows 由 WP.6–WP.21 覆盖 detach、ps、logs、stop、rm、kill/top、create/start 与原生 exec，其中
+Windows 由 WP.6–WP.22 覆盖 detach、ps、logs、stop、rm、kill/top、create/start、管道 EOF 与原生 exec，其中
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
 OCI/Blink exec 不在承诺范围，必须明确拒绝。
 
@@ -729,6 +744,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
 | F8.6 `[done]` | `kill` + `top` | Linux P.23/P.24；Windows WP.19/WP.20；Windows `top` 查询 Job 成员，`kill` 清空三层进程树 |
 | F8.7 `[done]` | `create` + `start` | Rust 原子状态机与 CLI 测试、Linux P.25、Windows WP.21 均通过；提交 `1caada0`、CI 30271007552 |
+| F8.8 `[active]` | detached 管道 EOF | Windows 本机 WP.22 已通过；待本批 main CI 裁决后标 done |
 
 ### F9 对标能力补齐 `[planned]`
 
@@ -1029,10 +1045,10 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 前全部存活；stop 后三个 PID 全部消失，记录转 exited，重复 stop 幂等，未知
 名称失败，rm 清理记录。CI 30250676453 已通过。
 
-门禁实现暴露了一个测试编排坑：不能用 PowerShell 的 `2>&1 | Out-String` 捕获
-长命 detached 启动输出。supervisor 可能继承 native-command 管道句柄，调用方
-会等待 EOF 直到容器退出。门禁改为按短命父 wbox 的进程句柄等待退出，不捕获
-该管道；这条约束属于测试基础设施，不改变产品 detach 语义。
+门禁最初把 PowerShell `2>&1 | Out-String` 等待长命 supervisor 的现象误判为
+测试编排限制，并绕成只等待短命父 wbox 进程。后续 `create/start` 门禁复现后
+确认这是产品脚本兼容缺口：supervisor 继承了调用方管道句柄。F8.f 已在 spawn
+边界收紧标准句柄继承，WP.22 改为直接重定向并等待 EOF，不再绕开问题。
 
 ### W3 F9.4 Windows 文件系统写重定向的可行性取证 `[Windows agent]`
 

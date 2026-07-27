@@ -41,6 +41,8 @@ features = [
     "Win32_Security_Authorization",
     # 进程创建、attribute list、等待、退出码
     "Win32_System_Threading",
+    # detached supervisor 启动前收紧标准句柄继承
+    "Win32_System_Console",
     # Job Object API
     "Win32_System_JobObjects",
     # JOB_OBJECT_ASSIGN_PROCESS / QUERY / TERMINATE access masks

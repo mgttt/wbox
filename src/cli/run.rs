@@ -493,8 +493,7 @@ pub(crate) fn spawn_reserved(
         .stderr(err);
     detach_from_terminal(&mut cmd);
 
-    let child = cmd
-        .spawn()
+    let child = spawn_supervisor(&mut cmd)
         .map_err(|e| WboxError::spawn(format!("启动后台 wbox 失败：{}", e)))?;
     reservation.disarm();
     // 只打名字，方便脚本 `NAME=$(wbox run -d ...)` 直接取用
@@ -520,8 +519,94 @@ fn detach_from_terminal(cmd: &mut std::process::Command) {
 
 #[cfg(not(target_os = "linux"))]
 fn detach_from_terminal(_cmd: &mut std::process::Command) {
-    // Windows 侧：stdio 已重定向到文件、且父进程不等待，控制台关闭不会波及
-    // 子进程（它没有继承控制台的交互句柄）。此处无需额外处理。
+    // Windows 侧的控制台与标准句柄继承由 `spawn_supervisor` 收口。
+}
+
+#[cfg(not(windows))]
+fn spawn_supervisor(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    cmd.spawn()
+}
+
+#[cfg(windows)]
+fn spawn_supervisor(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    let _guard = StandardHandleInheritanceGuard::new()?;
+    cmd.spawn()
+}
+
+/// `Command` 会为显式配置的日志 stdio 准备可继承句柄，但 Windows 进程创建还可能
+/// 顺带继承当前 wbox 的标准句柄。PowerShell 为 native-command pipeline 创建的
+/// stdout/stderr 正属于后者；supervisor 长期持有它会让 `wbox start | Out-String`
+/// 永远等不到 EOF。spawn 窗口内清掉这三个旧句柄的 inherit 位，随后原样恢复。
+#[cfg(windows)]
+struct StandardHandleInheritanceGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    handles: Vec<(windows_sys::Win32::Foundation::HANDLE, u32)>,
+}
+
+#[cfg(windows)]
+impl StandardHandleInheritanceGuard {
+    fn new() -> std::io::Result<Self> {
+        use std::sync::{Mutex, OnceLock};
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, SetHandleInformation, ERROR_INVALID_HANDLE,
+            HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = Self {
+            _lock: lock,
+            handles: Vec::new(),
+        };
+
+        for std_handle in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: std_handle 只取 Win32 定义的三个标准句柄常量。
+            let handle = unsafe { GetStdHandle(std_handle) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            let mut flags = 0_u32;
+            // SAFETY: handle 来自 GetStdHandle，flags 是有效输出地址。
+            if unsafe { GetHandleInformation(handle, &mut flags) } == 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(ERROR_INVALID_HANDLE as i32) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if flags & HANDLE_FLAG_INHERIT != 0 {
+                // SAFETY: 只清除有效标准句柄的 inherit 位，Drop 会恢复原值。
+                if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                guard.handles.push((handle, flags));
+            }
+        }
+        Ok(guard)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StandardHandleInheritanceGuard {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+        for (handle, flags) in self.handles.drain(..) {
+            // SAFETY: 列表只含 new 中成功修改的句柄；析构期间尽力恢复 inherit 位。
+            let _ = unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT)
+            };
+        }
+    }
 }
 
 /// supervisor 侧的日志限流：后台跑着的容器可能输出无止境，必须有界。

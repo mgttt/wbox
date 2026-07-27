@@ -31,24 +31,36 @@ function Remove-Ansi([string]$Text) {
     return [regex]::Replace($Text, $pattern, "")
 }
 
-function Invoke-WboxParent(
+function Invoke-WboxCaptured(
     [string]$FilePath,
-    [string]$Arguments,
+    [string[]]$Arguments,
     [string]$Label
 ) {
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $FilePath
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
-    $startInfo.Arguments = $Arguments
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
     $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     if (-not $process.WaitForExit(15000)) {
         $process.Kill()
         throw "$Label parent did not exit within 15 seconds"
     }
-    if ($process.ExitCode -ne 0) {
-        throw "$Label failed: rc=$($process.ExitCode)"
+    if (-not $stdoutTask.Wait(15000) -or -not $stderrTask.Wait(15000)) {
+        throw "$Label inherited the caller's output pipe; redirected streams did not reach EOF"
     }
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
+    if ($process.ExitCode -ne 0) {
+        throw "$Label failed: rc=$($process.ExitCode)`n$stderr"
+    }
+    return $stdout
 }
 
 function Test-ProcessAlive([int]$ProcessId) {
@@ -387,28 +399,15 @@ while ($true) {
 }
 '@
 
-    # Do not capture stdout here. A long-lived detached supervisor can inherit
-    # PowerShell's native-command pipe handle, making `... | Out-String` wait
-    # for EOF until the container exits. Wait on the short-lived parent wbox
-    # process handle instead; its exit code is the contract under test.
-    $launchInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $launchInfo.FileName = $portableWbox
-    $launchInfo.UseShellExecute = $false
-    $launchInfo.CreateNoWindow = $true
-    $launchInfo.Arguments = @(
+    $launchOutput = Invoke-WboxCaptured -FilePath $portableWbox -Arguments @(
         "run", "-d", "--name", $stopName, "--workdir", $stopWork, "--",
         "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
         "-File", $workloadScript,
         "-GuestPidFile", $guestPidFile,
         "-ChildPidFile", $childPidFile
-    ) -join " "
-    $launcher = [System.Diagnostics.Process]::Start($launchInfo)
-    if (-not $launcher.WaitForExit(15000)) {
-        $launcher.Kill()
-        throw "WP.8 detached launch parent did not exit within 15 seconds"
-    }
-    if ($launcher.ExitCode -ne 0) {
-        throw "WP.8 detached stop workload launch failed: rc=$($launcher.ExitCode)"
+    ) -Label "WP.22 detached run pipeline capture"
+    if ($launchOutput.Trim() -ne $stopName) {
+        throw "WP.22 detached run emitted unexpected output: $launchOutput"
     }
 
     $metaFile = Join-Path $testHome ".wbox\run\$stopName\meta.json"
@@ -721,7 +720,12 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     }
     Write-Host "PASS WP.21A create persists configuration without executing the workload"
 
-    Invoke-WboxParent $portableWbox "container start $createName" "WP.21 first start"
+    $firstStartOutput = Invoke-WboxCaptured -FilePath $portableWbox `
+        -Arguments @("container", "start", $createName) `
+        -Label "WP.22 container start pipeline capture"
+    if ($firstStartOutput.Trim() -ne $createName) {
+        throw "WP.22 container start emitted unexpected output: $firstStartOutput"
+    }
     Write-Host "INFO WP.21 first start returned"
     $createGuestPid = Wait-PidFile $createGuestPidFile 15
     $createChildPid = Wait-PidFile $createChildPidFile 15
@@ -741,7 +745,12 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     Write-Host "PASS WP.21B first started process generation was fully reclaimed"
 
     Remove-Item -LiteralPath $createGuestPidFile, $createChildPidFile -Force
-    Invoke-WboxParent $portableWbox "start $createName" "WP.21 second start"
+    $secondStartOutput = Invoke-WboxCaptured -FilePath $portableWbox `
+        -Arguments @("start", $createName) `
+        -Label "WP.22 top-level start pipeline capture"
+    if ($secondStartOutput.Trim() -ne $createName) {
+        throw "WP.22 top-level start emitted unexpected output: $secondStartOutput"
+    }
     Write-Host "INFO WP.21 second start returned"
     $createGuestPid2 = Wait-PidFile $createGuestPidFile 15
     $createChildPid2 = Wait-PidFile $createChildPidFile 15
@@ -763,6 +772,7 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     Assert-Exit 0 "WP.21 rm created record"
     $createPids = @()
     Write-Host "PASS WP.21 create does not execute; start runs and reruns saved configuration"
+    Write-Host "PASS WP.22 detached run/start close redirected pipelines while workloads remain alive"
 
     if ($null -ne $guestFailure) {
         throw $guestFailure
