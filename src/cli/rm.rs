@@ -70,7 +70,8 @@ mod tests {
         let _home = TempHome::new("running");
         let reg = runstate::register("live", &["/bin/true".into()], "(native)").unwrap();
         let err = cmd_rm(&["live".to_string()]).unwrap_err();
-        assert!(format!("{}", err).contains("失败"), "{}", err);
+        // 单个容器时错误要直接说明原因，而不是"1 个容器未成功"这种汇总
+        assert!(format!("{}", err).contains("仍在运行"), "{}", err);
         // 真正要钉的是**记录还在**：措辞可以变，"运行中的容器没被删掉"不能变
         assert!(
             runstate::dir_for("live").unwrap().exists(),

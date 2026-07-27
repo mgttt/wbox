@@ -46,7 +46,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox compose [-f FILE] [-p NAME] up -d|down|ps    多容器编排子集（仅 Linux，见 PRD F9.14）
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
   wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
-  wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
+  wbox pause|unpause <NAME>...                     暂停/恢复容器（仅 Linux，见 PRD F9.21）
   wbox cp <NAME>:<路径> <宿主路径>                 容器与宿主间拷贝（反向亦可，见 PRD F9.23）
   wbox stats [NAME...]                             容器实时资源占用（仅 Linux，见 PRD F9.24）
   wbox export -o <FILE> <NAME>                     把容器当前文件系统打成裸 tar（见 PRD F9.25）
@@ -67,7 +67,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox ps [-a] [-q]                                列出已登记的容器（-a 含已退出的残留；-q 只出名字）
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
-  wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
+  wbox stop [--timeout <秒>] <NAME>...             停掉运行中的容器（先请求退出，超时则强制）
   wbox kill [-s KILL] <NAME>...                    立即强制终止运行中的容器
   wbox top <NAME>                                  列出容器隔离单元内的进程
   wbox rm [-f] <NAME>...                           删除容器记录（默认拒绝运行中的；-f 先停再删）

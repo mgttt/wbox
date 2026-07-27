@@ -173,6 +173,7 @@ wbox
 | `rename` / `prune` | 有 | F9.27：改名只对未运行容器开放（名字被用在可写层路径等处）；prune 不加 `-f` 只列清单（门禁 RN.1–RN.6）|
 | `logs -f` / `--tail` | 有 | F9.28：跟随到容器退出后自行结束；**认日志截断**，否则超上限后跟随会静默哑掉（门禁 LG.1–LG.4）|
 | `ps -q` / `rm -f` | 有 | F9.29：补齐 `wbox rm -f $(wbox ps -aq)` 这条清场惯用法；`-q` 只出名字，`-f` 先停再删（门禁 RMF.1–RMF.5）|
+| 多容器名一致性 | 有 | F9.30：`stop`/`pause`/`unpause` 也收多个名字（此前只有它们收一个，而 `kill`/`rm`/`start` 早就收多个）（门禁 RMF.6–RMF.7）|
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
@@ -229,7 +230,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.29 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.30 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -903,7 +904,8 @@ F9
 ├── F9.26 `wbox restart` 与可重启的 run -d    —— [done]（门禁 RT.1–RT.7）
 ├── F9.27 `wbox rename` / `wbox prune`        —— [done]（门禁 RN.1–RN.6）
 ├── F9.28 `logs -f` / `--tail`               —— [done]（门禁 LG.1–LG.4）
-└── F9.29 `ps -q` / `rm -f`                  —— [done]（门禁 RMF.1–RMF.5）
+├── F9.29 `ps -q` / `rm -f`                  —— [done]（门禁 RMF.1–RMF.5）
+└── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1035,6 +1037,22 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.30 多容器名一致性** `[done]`（门禁 RMF.6–RMF.7）。
+
+`kill`/`rm`/`start`/`wait`/`restart` 早就收多个容器名，唯独 `stop`/`pause`/
+`unpause` 只收一个。**这是纯粹的不一致**：同一批容器能一起 `kill` 却不能一起
+`stop`，用户没法从别的命令推断出这条例外。三个都改成收多个，走 `args::each_named`
+那条共用路径（一个失败不中断后面的）。
+
+顺带修了两处这次才暴露出来的错误信息问题：
+
+- **单个容器失败时不套汇总**。`each_named` 原本一律返回「N 个容器未成功（共 M 个）」，
+  可当 M=1 时这句话毫无信息量，真正的原因被挤到 stderr 上另起一行——用户看到的
+  主错误什么都没说。改成：只有一个名字时把原始错误原样返回。
+- **共用措辞里不能塞某个调用方专属的动词**。`runstate::already_exited` 写死了
+  「无法 exec」，于是 `wbox pause` 一个已退出的容器会得到「已退出，无法 exec」
+  ——答非所问。改成由调用方传入它要做的那件事。
 
 **F9.29 `wbox ps -q` / `wbox rm -f`** `[done]`（门禁 RMF.1–RMF.5）。补齐清场惯用法。
 

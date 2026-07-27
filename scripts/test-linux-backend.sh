@@ -2097,6 +2097,33 @@ if [ -z "$(printf '%s' "$fout" | tr -d '[:space:]')" ]; then
 else
   report FAIL "RMF.5 清场惯用法" "残留: $(printf '%s' "$fout" | tr '\n' '|' | head -c 120)"
 fi
+
+# stop / pause 也要收多个名字：`kill`/`rm`/`start` 早就收多个，唯独它俩只收一个
+# 是纯粹的不一致——同一批容器能一起 kill 却不能一起 stop，用户没法从别的命令
+# 推断出这条例外（F9.30）。
+for n in mn1 mn2 mn3; do
+  HOME=$RFH "$WBOX_ABS" run -d --name $n -- /bin/sleep 30 >/dev/null 2>&1
+done
+sleep 2
+fout=$(HOME=$RFH "$WBOX_ABS" stop mn1 mn2 mn3 2>&1); frc=$?
+sleep 1
+fleft=$(HOME=$RFH "$WBOX_ABS" ps -q 2>&1 | grep -c '^mn')
+if [ "$frc" -eq 0 ] && [ "$fleft" -eq 0 ]; then
+  report PASS "RMF.6 stop 一次收多个容器名（三个全停下）"
+else
+  report FAIL "RMF.6 stop 多名" "rc=$frc 仍在运行=$fleft 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 单个容器失败时，主错误要给**真正的原因**，而不是"1 个容器未成功"这种汇总
+fout=$(HOME=$RFH "$WBOX_ABS" pause mn1 2>&1); frc=$?
+if [ "$frc" -ne 0 ] && printf '%s' "$fout" | grep -q '已退出' \
+   && ! printf '%s' "$fout" | grep -q '共 1 个'; then
+  report PASS "RMF.7 单个容器失败时直接给原因（不套无信息量的汇总）"
+else
+  report FAIL "RMF.7 单容器错误信息" "rc=$frc 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+HOME=$RFH "$WBOX_ABS" rm -f $(HOME=$RFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
 rm -rf "$RFH"
 
 echo

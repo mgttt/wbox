@@ -39,27 +39,12 @@ impl Action {
     }
 }
 
-fn parse<'a>(args: &'a [String], verb: &str) -> Result<&'a str> {
-    let mut name: Option<&str> = None;
-    for a in args {
-        match a.as_str() {
-            other if other.starts_with('-') => {
-                return Err(WboxError::args(format!(
-                    "{}: 未知参数 '{}'（用法：wbox {} <NAME>）",
-                    verb, other, verb
-                )))
-            }
-            other => {
-                if name.is_some() {
-                    return Err(WboxError::args(format!("{}: 一次只能操作一个容器", verb)));
-                }
-                name = Some(other);
-            }
-        }
-    }
-    name.ok_or_else(|| {
-        WboxError::args(format!("{}: 缺少容器名（用法：wbox {} <NAME>）", verb, verb))
-    })
+/// 收**一个或多个**容器名，与 `kill`/`stop`/`rm` 一致。
+///
+/// 一批容器要一起暂停时，逐个敲命令中间会有可观的时间差；能一次给全，
+/// 至少把这个差压到最小。
+fn parse<'a>(args: &'a [String], verb: &str) -> Result<Vec<&'a str>> {
+    super::args::take_container_names(args, verb)
 }
 
 pub fn cmd_pause(args: &[String]) -> Result<u32> {
@@ -71,14 +56,18 @@ pub fn cmd_unpause(args: &[String]) -> Result<u32> {
 }
 
 fn run(args: &[String], action: Action) -> Result<u32> {
-    let name = parse(args, action.verb())?;
-    let dir = runstate::resolve_existing(name)?;
-    // 已退出的容器没有可停的进程。明确报错而不是静默成功——静默成功会让
-    // 脚本以为容器还在、还能 unpause 回来。
-    if runstate::liveness(&dir) == Liveness::Exited {
-        return Err(runstate::already_exited(name));
-    }
-    apply(name, &dir, action)
+    let names = parse(args, action.verb())?;
+    let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    // 回显在 `apply` 里（Linux 分支成功时打名字），故这里 Echo::Nothing。
+    super::args::each_named(&owned, action.verb(), super::args::Echo::Nothing, |name| {
+        let dir = runstate::resolve_existing(name)?;
+        // 已退出的容器没有可停的进程。明确报错而不是静默成功——静默成功会让
+        // 脚本以为容器还在、还能 unpause 回来。
+        if runstate::liveness(&dir) == Liveness::Exited {
+            return Err(runstate::already_exited_for(name, action.verb()));
+        }
+        apply(name, &dir, action).map(|_| ())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -128,11 +117,16 @@ mod tests {
     use super::*;
     use crate::testenv::TempHome;
 
+    /// 收一个或多个名字——与 `kill`/`stop`/`rm` 一致。一批容器要一起暂停时，
+    /// 逐个敲命令中间会有可观的时间差。
     #[test]
-    fn parse_requires_exactly_one_name() {
-        assert_eq!(parse(&["c".to_string()], "pause").unwrap(), "c");
+    fn parse_takes_one_or_more_names() {
+        assert_eq!(parse(&["c".to_string()], "pause").unwrap(), vec!["c"]);
+        assert_eq!(
+            parse(&["a".to_string(), "b".to_string()], "pause").unwrap(),
+            vec!["a", "b"]
+        );
         assert!(parse(&[], "pause").is_err());
-        assert!(parse(&["a".to_string(), "b".to_string()], "pause").is_err());
         assert!(parse(&["-x".to_string()], "pause").is_err());
     }
 

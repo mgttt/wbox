@@ -858,8 +858,13 @@ pub(crate) fn missing_record(name: &str) -> WboxError {
 /// Linux 与 Windows 的 `exec` 走完全不同的实现，但用户看到的这句话必须一致：
 /// 它描述的是**容器状态**，与实现无关。此前两侧各写一份，已经分叉成
 /// "已退出，无法 exec（namespace 已随之消失）"和"已退出，无法 exec"。
-pub(crate) fn already_exited(name: &str) -> WboxError {
-    WboxError::args(format!("容器 '{}' 已退出，无法 exec", name))
+/// "这个容器已经退出了，所以你要做的事做不了"。
+///
+/// `what` 是**调用方要做的那件事**。原先这里写死了 "无法 exec"，于是
+/// `wbox pause` 一个已退出的容器会得到"无法 exec"——答非所问。
+/// 共用的措辞里不能塞某一个调用方专属的动词。
+pub(crate) fn already_exited_for(name: &str, what: &str) -> WboxError {
+    WboxError::args(format!("容器 '{}' 已退出，无法{}", name, what))
 }
 
 /// 持有状态根的操作锁，并返回同一代运行记录。调用方应只在核对实例并取得

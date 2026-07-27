@@ -87,6 +87,12 @@ where
     F: FnMut(&str) -> Result<()>,
 {
     let mut failed = 0usize;
+    // 只给了一个名字时，把**原始错误**原样返回，不套一层"1 个容器未成功"的汇总。
+    // 汇总只有在"有些成功有些失败"时才有信息量；对单个容器它纯属噪音，
+    // 而且会把真正的原因（为什么失败）挤到 stderr 上另起一行——用户看到的
+    // 主错误反而什么都没说。
+    let single = names.len() == 1;
+    let mut only_err = None;
     for name in names {
         match f(name) {
             Ok(()) => {
@@ -95,10 +101,17 @@ where
                 }
             }
             Err(e) => {
-                eprintln!("wbox: {} '{}' 失败：{}", verb, name, e);
                 failed += 1;
+                if single {
+                    only_err = Some(e);
+                } else {
+                    eprintln!("wbox: {} '{}' 失败：{}", verb, name, e);
+                }
             }
         }
+    }
+    if let Some(e) = only_err {
+        return Err(e);
     }
     if failed > 0 {
         return Err(WboxError::args(format!(
@@ -171,6 +184,18 @@ mod tests {
             each_named(&v(&["a"]), "删除", Echo::Nothing, |_| Ok(())).unwrap(),
             0
         );
+    }
+
+    /// 只给一个名字时要把**原始错误**原样返回。套一层"1 个容器未成功"的汇总，
+    /// 等于把真正的原因挤到 stderr 上，用户看到的主错误什么都没说。
+    #[test]
+    fn a_single_name_surfaces_the_real_reason_not_a_tally() {
+        let r = each_named(&v(&["only"]), "删除", Echo::Nothing, |_| {
+            Err(WboxError::args("因为它还在运行"))
+        });
+        let m = format!("{}", r.unwrap_err());
+        assert!(m.contains("因为它还在运行"), "要给出真正的原因：{}", m);
+        assert!(!m.contains("共 1 个"), "单个容器不该套汇总：{}", m);
     }
 
     #[test]
