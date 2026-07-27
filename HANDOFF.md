@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.21 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.22 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -52,14 +52,15 @@ F9.1–F9.21 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.19 `wbox diff` | DF.1–DF.3 | 直接读 overlay upper 得出 A/C/D，不扫全树；无 overlay 层时报错而非打印空清单 |
 | F9.20 `wbox commit` | CM.1–CM.4 | **纯编排**：复用 F9.18 的硬链接+合并、F9.17 的分层 manifest，没加新机制 |
 | F9.21 `pause`/`unpause` | PZ.1–PZ.3 | 信号而非 freezer（cgroup 只在设了限额时存在）；进程清单复用 `top` 的枚举 |
+| F9.22 `save`/`load` | SL.1–SL.6 | 打整个缓存目录（含 blobs，故搬过去仍可原样 push）；load 按白名单限定顶层条目防穿越 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **356 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **140 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **360 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **146 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -217,7 +218,17 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
   `EIO`。只测文件的话这个缺陷完全看不出来——它在 F9.12 里潜伏了好几轮，
   是做 L5b 可行性实验时才撞出来的。判据要覆盖"删目录"。
 
-### 4.6 起了服务当夹具时，必须确认**是你自己**绑上了端口
+### 4.6 断言要数**对的对象**：源码 ≠ 磁盘上的文件
+
+`runtime` 的"原生代码欠债"棘轮走文件系统统计 C/H 文件，于是把构建产物也算了
+进去——`vendor/blink/config.h`（被 .gitignore 忽略）与 `build-win32/version.h`
+都是生成的，**在任何编译过 blink 的机器上这条断言都会红**，而欠债一点没变。
+改成数 `git ls-files` 的输出。
+
+同一个道理：要断言"仓库里有多少源码"，就去问版本库，别去问磁盘——
+磁盘上还有别人（编译器、configure）放的东西。
+
+### 4.7 起了服务当夹具时，必须确认**是你自己**绑上了端口
 
 门禁里用 python3 起 registry stub 时踩过：先前手工测试遗留的进程还占着端口，
 门禁自己的 stub **bind 失败**，用例照样连上了"那一个"服务器并得到看似合理的
@@ -227,7 +238,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 可能被占。**另外：`ss -ltnp` 在这台机器上看不到监听项**，判断端口是否空闲要
 用"真去 bind 一下"，别信 `ss` 的输出。
 
-### 4.7 CI 与跨宿主
+### 4.8 CI 与跨宿主
 
 - **推之前等 CI**：曾因为 Windows 侧 `Drop` 顺序（删了还开着句柄的锁文件）
   在 CI 才暴露。
@@ -237,7 +248,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - msys 会改写命令行里的 guest 路径（`/busybox` → `D:/a/_temp/msys64/busybox`），
   造出纯自伤的假失败。Windows 侧脚本注意 `MSYS2_ARG_CONV_EXCL='*'` + `cygpath`。
 
-### 4.8 内核/平台细节（踩过的）
+### 4.9 内核/平台细节（踩过的）
 
 - `unshare`/`setns` 带 `CLONE_NEWPID` **只影响之后创建的子进程** → 必须再 fork 一次。
   用 `/proc/<pid>/ns/pid_for_children`，不是 `ns/pid`。
@@ -247,7 +258,7 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - netns 是**每线程**的；线程共享 fd 表，不需要 SCM_RIGHTS。
 - 判活**以锁为准不以 pid 为准**：pid 会复用，`stop` 据此发信号就是杀错进程。
 
-### 4.9 Python 生成 shell 脚本时
+### 4.10 Python 生成 shell 脚本时
 
 替换串以 `"` 结尾又紧挨 `"""` 时会多吐一个引号进脚本，`bash -n` 检查不出来，
 只有运行时才炸。生成后**看一眼实际写进去的内容**。

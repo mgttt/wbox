@@ -1844,6 +1844,63 @@ else
 fi
 
 echo
+echo "=== SL save / load（PRD F9.22）==="
+
+SLTAR=$WORK/saved.tar
+sout=$(HOME=$WORK/home "$WBOX_ABS" save -o "$SLTAR" lbetest 2>&1); src=$?
+if [ "$src" -eq 0 ] && [ -s "$SLTAR" ]; then
+  report PASS "SL.1 save 产出非空归档"
+else
+  report FAIL "SL.1 save" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# 载入到**干净的 HOME**：这才证明归档自带全部内容，而不是靠原机器的缓存
+SLHOME=$WORK/loadhome
+mkdir -p "$SLHOME"
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$SLTAR" 2>&1); src=$?
+SLD=$SLHOME/.wbox/images/registry-1.docker.io/library_lbetest/latest
+if [ "$src" -eq 0 ] && [ -x "$SLD/rootfs/bin/busybox" ] && [ -L "$SLD/rootfs/bin/sh" ] \
+   && [ -f "$SLD/config.json" ]; then
+  report PASS "SL.2 load 到干净 HOME 后内容与符号链接均还原"
+else
+  report FAIL "SL.2 load 还原" "rc=$src busybox=$([ -x "$SLD/rootfs/bin/busybox" ] && echo 有 || echo 无) sh软链=$([ -L "$SLD/rootfs/bin/sh" ] && echo 有 || echo 无)"
+fi
+
+# 还原出来的镜像必须**真能跑**——文件都在不等于镜像可用
+sout=$(HOME=$SLHOME "$WBOX_ABS" run --rm --name slrun lbetest -- /bin/echo LOADED_OK 2>&1); src=$?
+if [ "$src" -eq 0 ] && printf '%s' "$sout" | grep -q LOADED_OK; then
+  report PASS "SL.3 载入的镜像可直接运行"
+else
+  report FAIL "SL.3 载入后可运行" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# -t 改名落地
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$SLTAR" -t slrenamed:v9 2>&1); src=$?
+if [ "$src" -eq 0 ] && [ -d "$SLHOME/.wbox/images/registry-1.docker.io/library_slrenamed/v9/rootfs" ]; then
+  report PASS "SL.4 load -t 改名落地"
+else
+  report FAIL "SL.4 -t 改名" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# 不是 wbox 产的归档要明确报错，并指出逃生口
+tar cf "$WORK/bogus.tar" -C "$WORK" saved.tar 2>/dev/null
+sout=$(HOME=$SLHOME "$WBOX_ABS" load -i "$WORK/bogus.tar" 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "wbox save"; then
+  report PASS "SL.5 拒绝非 wbox save 产出的归档"
+else
+  report FAIL "SL.5 非法归档" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+
+# save 不写 stdout：镜像很大，误写进终端代价太高，要明确要求 -o
+sout=$(HOME=$WORK/home "$WBOX_ABS" save lbetest 2>&1); src=$?
+if [ "$src" -ne 0 ] && printf '%s' "$sout" | grep -q "\-o"; then
+  report PASS "SL.6 save 缺 -o 时报错（不默认写 stdout）"
+else
+  report FAIL "SL.6 缺 -o" "rc=$src 输出: $(printf '%s' "$sout" | head -c 150)"
+fi
+rm -f "$SLTAR" "$WORK/bogus.tar"
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

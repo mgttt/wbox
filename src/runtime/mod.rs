@@ -96,44 +96,52 @@ mod tests {
         assert!(err.to_string().contains("header"));
     }
 
+    /// 原生代码欠债只能减不能增，且不得逸出既有的两个根目录。
+    ///
+    /// **数的是 git 跟踪的文件，不是磁盘上的文件。** 早先版本走文件系统，
+    /// 于是把构建产物也算了进去——`vendor/blink/config.h`（被 .gitignore 忽略）
+    /// 与 `build-win32/version.h` 都是 configure/构建生成的，在任何编译过 blink
+    /// 的机器上都会让这条断言变红，而欠债本身一点没变。判据数错了对象，
+    /// 报出来的却像是回归。
+    ///
+    /// 拿不到 git 时跳过：这是一条治理性断言，没有它产品照样正确，
+    /// 而在没有版本库的环境里硬凑一个近似答案只会重新引入同类误判。
     #[test]
     fn native_source_debt_cannot_expand_or_escape_legacy_roots() {
-        fn visit(root: &Path, dir: &Path, counts: &mut [usize; 2], unexpected: &mut Vec<String>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let entry = entry.unwrap();
-                let path = entry.path();
-                if entry.file_type().unwrap().is_dir() {
-                    if entry.file_name() != "target" && entry.file_name() != ".git" {
-                        visit(root, &path, counts, unexpected);
-                    }
-                    continue;
-                }
-                let extension = path
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if !matches!(
-                    extension.as_str(),
-                    "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "s" | "asm"
-                ) {
-                    continue;
-                }
-                let relative = path.strip_prefix(root).unwrap();
-                if relative.starts_with("vendor/blink") {
-                    counts[0] += 1;
-                } else if relative.starts_with("tests/guest") {
-                    counts[1] += 1;
-                } else {
-                    unexpected.push(relative.display().to_string());
-                }
-            }
-        }
+        const NATIVE_EXT: &[&str] = &["c", "cc", "cpp", "cxx", "h", "hpp", "s", "asm"];
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut counts = [0; 2];
+        let Ok(out) = std::process::Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "ls-files"])
+            .output()
+        else {
+            eprintln!("跳过原生欠债断言：本环境没有 git");
+            return;
+        };
+        if !out.status.success() {
+            eprintln!("跳过原生欠债断言：这里不是 git 工作区");
+            return;
+        }
+
+        let mut counts = [0usize; 2];
         let mut unexpected = Vec::new();
-        visit(root, root, &mut counts, &mut unexpected);
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let ext = Path::new(line)
+                .extension()
+                .and_then(|v| v.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !NATIVE_EXT.contains(&ext.as_str()) {
+                continue;
+            }
+            if line.starts_with("vendor/blink") {
+                counts[0] += 1;
+            } else if line.starts_with("tests/guest") {
+                counts[1] += 1;
+            } else {
+                unexpected.push(line.to_string());
+            }
+        }
         assert!(
             unexpected.is_empty(),
             "native source escaped legacy roots: {unexpected:?}"

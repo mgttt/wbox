@@ -9,16 +9,18 @@ pub fn cmd_image(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("pull") => cmd_image_pull(&args[1..]),
         Some("push") => cmd_image_push(&args[1..]),
+        Some("save") => cmd_image_save(&args[1..]),
+        Some("load") => cmd_image_load(&args[1..]),
         Some("list") | Some("ls") => cmd_image_list(&args[1..]),
         Some("show") => cmd_image_show(&args[1..]),
         Some("inspect") => super::inspect::cmd_image_inspect(&args[1..]),
         Some("rm") => cmd_image_rm(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 image 子命令 '{}'（支持 pull / push / list / show / inspect / rm）",
+            "未知 image 子命令 '{}'（支持 pull / push / save / load / list / show / inspect / rm）",
             other
         ))),
         None => Err(WboxError::args(
-            "image 缺少子命令（pull / push / list / show / inspect / rm）",
+            "image 缺少子命令（pull / push / save / load / list / show / inspect / rm）",
         )),
     }
 }
@@ -194,6 +196,64 @@ pub(super) fn cmd_image_push(args: &[String]) -> Result<u32> {
     }
     let image_ref = image_ref.ok_or_else(|| WboxError::args("push 缺少镜像引用"))?;
     oci::push::push(&image_ref, registry.as_deref(), verbose)?;
+    Ok(0)
+}
+
+/// `wbox save -o <FILE> <IMAGE>`（PRD F9.22）。
+pub(super) fn cmd_image_save(args: &[String]) -> Result<u32> {
+    let mut image_ref: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut registry: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => out = Some(super::args::take_value(args, &mut i, "--output")?),
+            "--registry" => registry = Some(super::args::take_value(args, &mut i, "--registry")?),
+            other if other.starts_with('-') => {
+                return Err(WboxError::args(format!("未知选项 '{}'", other)));
+            }
+            other => {
+                if image_ref.is_some() {
+                    return Err(WboxError::args(format!("多余的参数 '{}'", other)));
+                }
+                image_ref = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let image_ref = image_ref.ok_or_else(|| WboxError::args("save 缺少镜像引用"))?;
+    // 不默认写 stdout：镜像动辄几十 MB，误写进终端是灾难性的体验，
+    // 而 docker 那个默认在管道场景之外几乎只会伤人。
+    let out = out.ok_or_else(|| {
+        WboxError::args("save 需要 -o <文件>（不支持写到 stdout：镜像很大，误写进终端代价太高）")
+    })?;
+    oci::archive::save(&image_ref, std::path::Path::new(&out), registry.as_deref())?;
+    Ok(0)
+}
+
+/// `wbox load -i <FILE> [-t <IMAGE>]`（PRD F9.22）。
+pub(super) fn cmd_image_load(args: &[String]) -> Result<u32> {
+    let mut input: Option<String> = None;
+    let mut tag: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-i" | "--input" => input = Some(super::args::take_value(args, &mut i, "--input")?),
+            "-t" | "--tag" => tag = Some(super::args::take_value(args, &mut i, "--tag")?),
+            other if other.starts_with('-') => {
+                return Err(WboxError::args(format!("未知选项 '{}'", other)));
+            }
+            other => {
+                if input.is_some() {
+                    return Err(WboxError::args(format!("多余的参数 '{}'", other)));
+                }
+                input = Some(other.to_string());
+            }
+        }
+        i += 1;
+    }
+    let input = input.ok_or_else(|| WboxError::args("load 需要 -i <文件>"))?;
+    oci::archive::load(std::path::Path::new(&input), tag.as_deref())?;
     Ok(0)
 }
 

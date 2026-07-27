@@ -216,7 +216,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// 递归把目录内容加进 tar，路径相对 `base`。
-fn append_dir<W: Write>(b: &mut tar::Builder<W>, base: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn append_dir<W: Write>(b: &mut tar::Builder<W>, base: &Path, dir: &Path) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("读取目录 '{}' 失败", dir.display()))
         .ctx(ErrKind::Registry)?;

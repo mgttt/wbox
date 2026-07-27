@@ -158,6 +158,7 @@ wbox
 | `diff` | 有 | F9.19：A/C/D 与 docker 对齐；直接读 overlay upper，不扫全树（门禁 DF.1–DF.3）|
 | `commit` | 有 | F9.20：容器改动固化成新镜像，与基础镜像共享磁盘（门禁 CM.1–CM.4）|
 | `pause` / `unpause` | 部分 | F9.21：用 SIGSTOP/SIGCONT 而非 cgroup freezer（后者要求设了限额才存在），语义不完全等价（门禁 PZ.1–PZ.3）|
+| `save` / `load` | 有 | F9.22：镜像打包成 tar 离线搬运，含原始层故搬过去仍可原样 push（门禁 SL.1–SL.6）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -873,7 +874,8 @@ F9
 ├── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
 ├── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
 ├── F9.20 `wbox commit` 固化容器改动           —— [done]（仅 Linux，门禁 CM.1–CM.4）
-└── F9.21 `pause` / `unpause`                  —— [partial] 信号实现，非 freezer
+├── F9.21 `pause` / `unpause`                  —— [partial] 信号实现，非 freezer
+└── F9.22 `save` / `load` 离线搬运镜像          —— [done]（门禁 SL.1–SL.6）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -962,6 +964,26 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.22 `save` / `load`** `[done]`（门禁 SL.1–SL.6）。把镜像打包成 tar 搬到别处。
+
+**为什么值得做**：目标用户里有"受管 Windows 机器上的开发者"（§3.1），那种环境
+常常连不上 registry 或出网要审批。用一个文件搬镜像，不必架 registry。
+
+**打的是整个缓存目录，不是 rootfs**：归档含 `rootfs/`、三个 json，以及 F9.16
+留下的 `blobs/`（原始压缩层）。带上 blobs，搬过去的镜像才仍然能**原样 push**
+（digest 不变）；只打 rootfs 的话，load 出来的会退化成"只能 flatten 推送"。
+
+归档里写一个 `wbox-image.json` 记录镜像身份，load 端不必靠文件名或调用方记忆
+去猜这是哪个镜像；`-t` 可覆盖落地名。
+
+**load 的安全约束**：tar 是外部输入，路径穿越是这里唯一真正危险的东西。
+除了逐条拒绝绝对路径与 `..`，还**按白名单**限定顶层条目（只收本模块自己写出去
+的那几个名字）——与其事后判断"这个路径安全吗"，不如一开始就只认识我们自己产的
+结构。非 wbox 归档明确报错并指出 `-t` 这个逃生口（SL.5）。
+
+`save` **不默认写 stdout**（docker 会）。镜像动辄几十 MB，误写进终端是灾难性的
+体验，而那个默认在管道场景之外几乎只会伤人，故要求显式 `-o`（SL.6）。
 
 **F9.21 `pause` / `unpause`** `[partial]`（门禁 PZ.1–PZ.3）。
 

@@ -41,6 +41,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
   wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
   wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
+  wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
+  wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
@@ -218,6 +220,8 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("compose") => compose::cmd_compose(&args[1..]),
         Some("pull") => image::cmd_image_pull(&args[1..]),
         Some("push") => image::cmd_image_push(&args[1..]),
+        Some("save") => image::cmd_image_save(&args[1..]),
+        Some("load") => image::cmd_image_load(&args[1..]),
         Some("images") => image::cmd_image_list(&args[1..]),
         Some("rmi") => image::cmd_image_rm(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
