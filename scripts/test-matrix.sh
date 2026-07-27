@@ -249,9 +249,24 @@ mkdir -p "$PFX/dev" "$PFX/proc" "$PFX/etc"
 cp "$WORK/busybox" "$PFX/busybox"
 printf 'nameserver %s\n' "${WBOX_MATRIX_DNS:-223.5.5.5}" > "$PFX/etc/resolv.conf"
 
-# pbb <args...> —— 与 bb 同形，但设 BLINK_PREFIX 且以 guest 绝对路径调用
+# BLINK_PREFIX 要喂给一个**原生 Windows** 二进制，必须是 Windows 形式的路径；
+# msys 下 $WORK 形如 /tmp/xxx，直接传过去 blink 解析不了。native 模式用
+# cygpath 转换，其余模式（Linux/wine）原样。
+if [ "$MODE" = native ] && command -v cygpath >/dev/null 2>&1; then
+  PFX_ARG=$(cygpath -w "$PFX")
+else
+  PFX_ARG=$PFX
+fi
+
+# pbb <args...> —— 与 bb 同形，但设 BLINK_PREFIX 且以 **guest 绝对路径** 调用。
+#
+# MSYS2_ARG_CONV_EXCL='*' 是必需的，别删：msys 会把形如 /busybox 的参数当成
+# unix 路径**自动改写**成 D:\...\msys64\busybox 再交给原生 exe。脚本开头那句
+# "相对路径在两种模式下都安全"说的就是这件事。A–F 组用相对路径绕开了它，而本
+# 组必须验证 guest 绝对路径（产品路径就是这么调的），所以只能显式关掉转换。
+# 少了这一行，G 组测的是宿主路径而不是 guest 路径，会以 rc=127 假失败。
 pbb() {
-  OUT=$(BLINK_PREFIX="$PFX" "${TMO[@]}" "${RUN[@]}" "$WBOX_ABS" /busybox "$@" 2>&1)
+  OUT=$(MSYS2_ARG_CONV_EXCL='*' BLINK_PREFIX="$PFX_ARG" "${TMO[@]}" "${RUN[@]}" "$WBOX_ABS" /busybox "$@" 2>&1)
   rc=$?
   [ "$rc" -eq 124 ] && OUT="（超时 ${MATRIX_TIMEOUT}s 被终止）$OUT"
   OUT=$(printf '%s' "$OUT" | tr -d '\r')
