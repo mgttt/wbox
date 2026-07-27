@@ -63,6 +63,13 @@ F9.1–F9.28 全部落地并有持续门禁。近期这一串是本轮做的：
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
+CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器名、不收选项"的
+解析各写过一遍、措辞互不相同（同一件事用户能看到好几种说法）；
+`rm`/`prune`/`restart`/`compose down` 里"一个失败不中断后面的"这条取舍也各实现了
+一遍。收敛成 `args::take_container_names` 与 `args::each_named`。
+**收敛时踩到一条**：`rm` 有个测试断言的是旧措辞（"未能删除"），换共享措辞后红了
+——那条断言本该盯行为而不是文案，已改成断言"运行中的容器记录确实还在"。
+
 另一次收敛在 CLI 分发层：顶层分发、`container` 分发、`wbox help` 的主题判定、
 给用户看的动词清单，四份清单原本各写各的，**已经漂开了**——`diff`/`commit`/
 `cp`/`stats`/`pause` 能跑却不是"已知帮助主题"，`wbox help diff` 报错。收敛成
@@ -97,7 +104,7 @@ F9.1–F9.28 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **393 passed / 0 failed**
+- `cargo test --locked` → **395 passed / 0 failed**
 - `scripts/test-linux-backend.sh` → **184 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净

@@ -61,25 +61,12 @@ fn parse<'a>(args: &'a [String]) -> Result<Options<'a>> {
 
 pub fn cmd_restart(args: &[String]) -> Result<u32> {
     let o = parse(args)?;
-    // 多个名字时不一遇错就中断（与 `rm` 同一取舍）：后面的名字可能是好的，
-    // 中断会让用户以为全都没重启。逐个执行、逐个报告，最后用退出码汇总。
-    let mut failed = 0usize;
-    for name in &o.names {
-        if let Err(e) = restart_one(name, o.timeout) {
-            eprintln!("wbox: 重启 '{}' 失败：{}", name, e);
-            failed += 1;
-            continue;
-        }
-        println!("{}", name);
-    }
-    if failed > 0 {
-        return Err(crate::error::WboxError::args(format!(
-            "{} 个容器未能重启（共 {} 个）",
-            failed,
-            o.names.len()
-        )));
-    }
-    Ok(0)
+    // 多个名字时不一遇错就中断——与 `rm`/`prune` 共用 `args::each_named`：
+    // 后面的名字可能是好的，中断会让用户以为全都没重启。
+    let owned: Vec<String> = o.names.iter().map(|n| n.to_string()).collect();
+    super::args::each_named(&owned, "重启", super::args::Echo::Name, |name| {
+        restart_one(name, o.timeout)
+    })
 }
 
 fn restart_one(name: &str, timeout: Option<&str>) -> Result<()> {

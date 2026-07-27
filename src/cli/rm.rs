@@ -4,44 +4,17 @@
 //! 容器，真删了只会让它从 `ps` 里消失、变成没人管得到的孤儿。停容器是 F8.3
 //! `stop` 的事。
 
-use crate::error::{Result, WboxError};
+use crate::error::Result;
 use crate::runstate;
 
 pub fn cmd_rm(args: &[String]) -> Result<u32> {
-    let mut names: Vec<&str> = Vec::new();
-    for a in args {
-        if a.starts_with('-') {
-            return Err(WboxError::args(format!(
-                "rm: 未知参数 '{}'（用法：wbox rm <NAME>...）",
-                a
-            )));
-        }
-        names.push(a);
-    }
-    if names.is_empty() {
-        return Err(WboxError::args("rm: 缺少容器名（用法：wbox rm <NAME>...）"));
-    }
-
-    // 多个名字时不要一遇错就中断：后面的名字可能是好的，中断会让用户以为
-    // 全都没删。逐个执行、逐个报告，最后用退出码汇总。
-    let mut failed = 0;
-    for name in &names {
-        match runstate::remove(name) {
-            Ok(()) => println!("{}", name),
-            Err(e) => {
-                eprintln!("wbox: {}", e);
-                failed += 1;
-            }
-        }
-    }
-    if failed > 0 {
-        return Err(WboxError::args(format!(
-            "{} 个容器记录未能删除（共 {} 个）",
-            failed,
-            names.len()
-        )));
-    }
-    Ok(0)
+    let names = super::args::take_container_names(args, "rm")?;
+    let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    // "一个失败不中断后面的"这条取舍在 rm/prune/restart/compose down 各有一份，
+    // 已收敛到 args::each_named（含逐条报错与末尾汇总）。
+    super::args::each_named(&owned, "删除", super::args::Echo::Name, |name| {
+        runstate::remove(name)
+    })
 }
 
 #[cfg(test)]
@@ -80,7 +53,12 @@ mod tests {
         let _home = TempHome::new("running");
         let reg = runstate::register("live", &["/bin/true".into()], "(native)").unwrap();
         let err = cmd_rm(&["live".to_string()]).unwrap_err();
-        assert!(format!("{}", err).contains("未能删除"), "{}", err);
+        assert!(format!("{}", err).contains("失败"), "{}", err);
+        // 真正要钉的是**记录还在**：措辞可以变，"运行中的容器没被删掉"不能变
+        assert!(
+            runstate::dir_for("live").unwrap().exists(),
+            "运行中的容器记录不该被删掉"
+        );
         drop(reg);
     }
 
