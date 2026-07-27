@@ -70,11 +70,11 @@ BB_ABS=$(cd "$(dirname "$BUSYBOX")" && pwd)/$(basename "$BUSYBOX")
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wbox-lbe.XXXXXX") || die "mktemp 失败"
 trap 'rm -rf "$WORK"' EXIT
 CACHE=$WORK/home/.wbox/images/registry-1.docker.io/library_lbetest/latest
-mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc"
+mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/rootfs/mnt"
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat"
+APPLETS="sh id ls dd sleep echo cat grep mount"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -675,6 +675,61 @@ if [ "$urc" -ne 0 ] && printf '%s' "$uout" | grep -q '/etc/passwd'; then
   report PASS "U.4 拒绝用户名并解释原因"
 else
   report FAIL "U.4 拒绝用户名" "rc=$urc 输出: $(printf '%s' "$uout" | head -c 150)"
+fi
+
+echo
+echo "=== CAP capability 裁剪（PRD F9.8）==="
+
+# CAP.1 默认保留全部——引入这个开关不能悄悄收紧既有容器。
+run lbetest -- /bin/sh -c 'grep "^CapEff" /proc/self/status'
+capdefault=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ -n "$capdefault" ] && [ "$capdefault" != "0000000000000000" ]; then
+  report PASS "CAP.1 默认保留全部 capability（CapEff=$capdefault）"
+else
+  report FAIL "CAP.1 默认 capability" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 150)"
+fi
+
+# CAP.2 --cap-drop ALL 后 CapEff 与 CapBnd 都必须清零。两个都要看：只清
+# CapEff 不动 bounding set 的话，execve 之后还能重新拿回来，等于没丢。
+run --cap-drop ALL lbetest -- /bin/sh -c 'grep -E "^Cap(Eff|Bnd)" /proc/self/status'
+capeff=$(printf '%s' "$OUT" | awk '/CapEff/{print $2}')
+capbnd=$(printf '%s' "$OUT" | awk '/CapBnd/{print $2}')
+if [ "$rc" -eq 0 ] && [ "$capeff" = "0000000000000000" ] && [ "$capbnd" = "0000000000000000" ]; then
+  report PASS "CAP.2 --cap-drop ALL 清空 CapEff 与 CapBnd"
+else
+  report FAIL "CAP.2 --cap-drop ALL" "rc=$rc CapEff=$capeff CapBnd=$capbnd（都应为全 0）"
+fi
+
+# CAP.3 先 drop 后 add（docker 的顺序）：只应剩下 NET_RAW（位 13 = 0x2000）。
+run --cap-drop ALL --cap-add NET_RAW lbetest -- /bin/sh -c 'grep "^CapEff" /proc/self/status'
+capeff=$(printf '%s' "$OUT" | awk '{print $2}')
+if [ "$rc" -eq 0 ] && [ "$capeff" = "0000000000002000" ]; then
+  report PASS "CAP.3 --cap-drop ALL --cap-add NET_RAW 只保留 NET_RAW"
+else
+  report FAIL "CAP.3 drop ALL + add NET_RAW" "rc=$rc CapEff=$capeff（期望 0000000000002000）"
+fi
+
+# CAP.4 **行为**判据，不只看位图。位图对了不代表内核真的按它执法；
+# 这条直接验证丢掉 CAP_SYS_ADMIN 之后容器内确实挂不了 tmpfs，
+# 且不带该选项时同一操作是成功的（否则这条断言毫无意义）。
+run lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt && echo MOUNT_OK'
+mount_base=$rc
+run --cap-drop SYS_ADMIN lbetest -- /bin/sh -c 'mount -t tmpfs none /mnt && echo MOUNT_OK'
+if [ "$mount_base" -eq 0 ] && [ "$rc" -ne 0 ]; then
+  report PASS "CAP.4 丢掉 SYS_ADMIN 后容器内挂载被拒（无该选项时同操作成功）"
+elif [ "$mount_base" -ne 0 ]; then
+  report SKIP "CAP.4 SYS_ADMIN 行为判据" "基线挂载本身就失败（rc=$mount_base），无法判定"
+else
+  report FAIL "CAP.4 SYS_ADMIN 行为判据" "丢掉 SYS_ADMIN 后仍挂载成功（rc=$rc）"
+fi
+
+# CAP.5 拼错的名字必须报错。静默忽略会让用户以为已经收紧了，
+# 那比不支持这个选项更危险。
+cout=$(HOME=$WORK/home "$WBOX_ABS" run --cap-drop NOPE lbetest -- /bin/true 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "未知 capability"; then
+  report PASS "CAP.5 未知 capability 名报错而非静默忽略"
+else
+  report FAIL "CAP.5 未知名字" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 150)"
 fi
 
 echo

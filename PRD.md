@@ -138,7 +138,8 @@ wbox
 | healthcheck | 无 | |
 | 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
 | `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
-| `--cap-add` / seccomp 剖面 | 无 | rootless 下语义与 docker 不同，需先定契约 |
+| `--cap-add` / `--cap-drop` | 有 | F9.8：先 drop 后 add，含 `ALL`（门禁 CAP.1–CAP.5）|
+| seccomp 剖面 | 无 | 尚未定契约 |
 | Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
 
 #### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
@@ -738,7 +739,11 @@ F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
 ├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux + Windows）
-└── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
+├── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
+├── F9.5 构建分层缓存                         —— [done]（Linux + Windows，WP.18）
+├── F9.6 重启策略 `--restart`                 —— [done]（门禁 R.1–R.5）
+├── F9.7 `--user UID[:GID]`                   —— [partial] 仅 Linux，只映射一个 id
+└── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -833,6 +838,33 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.8 `--cap-add` / `--cap-drop`** `[done]`（门禁 CAP.1–CAP.5）。
+
+与 F9.7 是同一条线的两半：`--user` 换的是**身份号**，`--cap-*` 改的才是
+**权限面**。二者常被混为一谈——rootless 下进程在自己的 userns 里始终持有全部
+capability（创建者身份使然），所以 `--user 1000` 并不降权，真要收窄只能动
+capability 集合本身。
+
+**这些 capability 管的是容器自己的命名空间**，不是宿主。userns 里的
+`CAP_SYS_ADMIN` 换不来对宿主的任何权力，所以这不是"多加一道宿主防线"，
+而是限制 guest 在它自己的沙箱内还能做什么。门禁 CAP.4 用行为而非位图取证：
+丢掉 `SYS_ADMIN` 后容器内挂 tmpfs 被拒，而不带该选项时同一操作成功。
+
+落地细节里有三处不做就等于没做的：
+
+- **必须削 bounding set**，不能只清 `CapEff`。只清 effective 的话 execve
+  之后还能重新拿回来。削 bounding set 又要求 effective 里还留着 `CAP_SETPCAP`，
+  所以顺序是"先 `PR_CAPBSET_DROP` 循环，后 `capset`"，反了就只削掉一部分。
+- **要清 ambient 集**，否则 execve 后它会把 capability 重新抬进 permitted。
+- **编译期的名字表会落后于内核**。未写 `drop ALL` 时，表外位号一律保留，
+  否则升级内核就会静默丢掉新 capability。要丢多少由运行时的
+  `/proc/sys/kernel/cap_last_cap` 决定，不靠编译期常数。
+
+默认**保留全部**，与既有行为一致。docker 的默认是一份精选白名单，那是它多年
+生产经验的产物；照抄名单却不具备同等验证，只会造出"看着像 docker、行为不一样"
+的坑。要收紧的人写 `--cap-drop ALL`，语义明确且可验证。非 Linux 宿主明确拒绝：
+Windows 的 AppContainer 是另一套 SID 模型，逐条对应不了。
 
 **F9.7 `--user UID[:GID]`** `[done]`（门禁 U.1–U.4）。
 

@@ -39,6 +39,9 @@ pub struct RunOptions {
     pub restart: crate::restart::RestartPolicy,
     /// `-u/--user UID[:GID]`（PRD F9.7，仅 Linux）
     pub user: Option<backend::UserSpec>,
+    /// `--cap-drop` / `--cap-add`（PRD F9.8，仅 Linux）。先 drop 后 add。
+    pub cap_drop: Vec<crate::caps::CapSelector>,
+    pub cap_add: Vec<crate::caps::CapSelector>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -64,6 +67,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         ports: Vec::new(),
         restart: Default::default(),
         user: None,
+        cap_drop: Vec::new(),
+        cap_add: Vec::new(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -133,6 +138,14 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--restart" => {
                 let v = super::args::take_value(args, &mut i, "--restart")?;
                 opts.restart = crate::restart::parse_restart(&v)?;
+            }
+            "--cap-drop" => {
+                let v = super::args::take_value(args, &mut i, "--cap-drop")?;
+                opts.cap_drop.push(crate::caps::parse_cap(&v)?);
+            }
+            "--cap-add" => {
+                let v = super::args::take_value(args, &mut i, "--cap-add")?;
+                opts.cap_add.push(crate::caps::parse_cap(&v)?);
             }
             "--user" | "-u" => {
                 let v = super::args::take_value(args, &mut i, "--user")?;
@@ -223,6 +236,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         ports: opts.ports.clone(),
         restart: opts.restart,
         user: opts.user,
+        caps: crate::caps::CapPolicy::resolve(&opts.cap_drop, &opts.cap_add),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -278,6 +292,10 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
     crate::portfwd::reject_if_unsupported(&opts.ports)?;
     crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
     backend::reject_user_if_unsupported(opts.user)?;
+    crate::caps::reject_if_unsupported(&crate::caps::CapPolicy::resolve(
+        &opts.cap_drop,
+        &opts.cap_add,
+    ))?;
     crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)
 }
 

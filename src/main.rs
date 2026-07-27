@@ -17,10 +17,13 @@ mod cli;
 mod error;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod oci;
-// 运行中容器的状态目录与发现（PRD F8.a）。跨平台：锁语义由 OS 保证。
 mod build;
+// capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；
+// 落地在 backend/linux_ns.rs。
+mod caps;
 mod portfwd;
 mod restart;
+// 运行中容器的状态目录与发现（PRD F8.a）。跨平台：锁语义由 OS 保证。
 mod runstate;
 // 测试脚手架：环境变量互斥 + 自动还原（进程级全局状态在并行用例下必须串行化）。
 #[cfg(test)]

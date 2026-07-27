@@ -81,6 +81,118 @@ struct NsPlan {
     new_root: Option<NewRoot>,
     /// 资源限额落地方式（cgroup v2 或 rlimit 兜底）
     limits: LimitPlan,
+    /// capability 裁剪计划（PRD F9.8），fork 前算好
+    caps: CapPlan,
+}
+
+/// capability 裁剪的**预算好**形式。fork 后的子进程不能分配、不能读文件，
+/// 所以 `/proc/sys/kernel/cap_last_cap` 与要丢弃的位号清单都在这里备齐。
+struct CapPlan {
+    /// 用户没动过 capability 时为 false，落地层整段跳过——不为"什么都不改"
+    /// 付出任何行为变化的风险。
+    active: bool,
+    /// 要从 **bounding set** 移除的位号。移除 bounding set 才是持久保证：
+    /// 它决定 execve 之后还能不能重新拿到这个 capability。
+    bounding_drop: Vec<u32>,
+    /// capset 的保留掩码（低 32 位 / 高 32 位）
+    keep_low: u32,
+    keep_high: u32,
+}
+
+/// `capset(2)` 的头部。libc crate 没有导出这两个结构，故按
+/// `include/uapi/linux/capability.h` 就地声明。
+#[repr(C)]
+struct CapUserHeader {
+    version: u32,
+    pid: libc::c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapUserData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// `_LINUX_CAPABILITY_VERSION_3`：64 位 capability 集合，两组 32 位。
+const CAP_VERSION_3: u32 = 0x2008_0522;
+
+/// 内核认识的最高 capability 位号。读不到就退回本地表的上界——宁可少丢，
+/// 也不要凭猜测丢掉用户没要求丢的东西。
+fn kernel_last_cap() -> u32 {
+    std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(crate::caps::CAP_NAMES.len() as u32 - 1)
+        .min(63)
+}
+
+/// 由策略算出落地计划。
+fn build_cap_plan(policy: &crate::caps::CapPolicy) -> CapPlan {
+    if policy.is_default() {
+        return CapPlan {
+            active: false,
+            bounding_drop: Vec::new(),
+            keep_low: 0,
+            keep_high: 0,
+        };
+    }
+    let last = kernel_last_cap();
+    let bounding_drop = (0..=last).filter(|i| !policy.keeps(*i)).collect();
+    CapPlan {
+        active: true,
+        bounding_drop,
+        keep_low: policy.mask_low(),
+        keep_high: policy.mask_high(last),
+    }
+}
+
+/// 丢弃 capability。**必须在所有特权操作之后**：前面的 mount / pivot_root
+/// 都要 userns 内的 `CAP_SYS_ADMIN`，先丢就起不来了。
+///
+/// # Safety
+/// 仅在 fork 后的子进程中调用；只做裸 syscall，不分配。
+unsafe fn apply_caps(p: &CapPlan) -> std::io::Result<()> {
+    if !p.active {
+        return Ok(());
+    }
+    // 1. 先削 bounding set。这一步需要 effective 集里还有 CAP_SETPCAP，
+    //    所以必须排在 capset 之前——顺序反了就只削掉一部分然后失败。
+    //    单个位号失败不致命：内核不认识的位返回 EINVAL，跳过即可。
+    for bit in &p.bounding_drop {
+        libc::prctl(libc::PR_CAPBSET_DROP, *bit as libc::c_ulong, 0, 0, 0);
+    }
+    // 2. 清空 ambient 集，否则 execve 后它会把 capability 重新抬进 permitted。
+    libc::prctl(
+        libc::PR_CAP_AMBIENT,
+        libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong,
+        0,
+        0,
+        0,
+    );
+    // 3. 真正收窄当前进程的三个集合。只削 bounding set 是不够的——那只挡住
+    //    "execve 之后重新获得"，当前进程手里的 effective 仍然在。
+    let hdr = CapUserHeader {
+        version: CAP_VERSION_3,
+        pid: 0,
+    };
+    let data = [
+        CapUserData {
+            effective: p.keep_low,
+            permitted: p.keep_low,
+            inheritable: p.keep_low,
+        },
+        CapUserData {
+            effective: p.keep_high,
+            permitted: p.keep_high,
+            inheritable: p.keep_high,
+        },
+    ];
+    if libc::syscall(libc::SYS_capset, &hdr as *const _, data.as_ptr()) != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// 镜像模式的换根参数（[`LinuxMode::Image`] 才有）。
@@ -178,6 +290,7 @@ pub(super) fn spawn_isolated(
         expect_ppid: unsafe { libc::getpid() },
         new_root,
         limits,
+        caps: build_cap_plan(&spec.caps),
     };
 
     if spec.verbose {
@@ -187,7 +300,11 @@ pub(super) fn spawn_isolated(
             "user+mount+pid namespace（rootless，共享宿主网络）"
         };
         verbose_kv("隔离", ns_list);
-        verbose_kv("uid 映射", format!("容器 0 ← 宿主 {}", uid));
+        verbose_kv(
+            "uid 映射",
+            format!("容器 {} ← 宿主 {}（gid {} ← {}）", target_uid, uid, target_gid, gid),
+        );
+        verbose_kv("capability", spec.caps.summary());
         verbose_kv(
             "网络",
             if new_netns {
@@ -438,6 +555,18 @@ unsafe fn die_with_parent(expect_ppid: Option<libc::pid_t>) -> libc::c_int {
 /// # Safety
 /// 仅在 fork 后的子进程中调用；内部只做裸 syscall。
 unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
+    setup_namespaces(p)?;
+    // capability 放在**最后**丢：上面每一步 mount/pivot_root 都要 CAP_SYS_ADMIN。
+    // 收在这个包装里而不是散在两个 return 分支上——宿主模式与镜像模式各有一个
+    // 出口，逐个补调用迟早会漏掉一个，而漏掉的那次是"以为收紧了其实没有"。
+    apply_caps(&p.caps)
+}
+
+/// [`enter_namespaces`] 的主体：建立命名空间并切根（不含 capability 裁剪）。
+///
+/// # Safety
+/// 同 [`enter_namespaces`]。
+unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
     let err = || std::io::Error::last_os_error();
 
     // 0. 生命周期绑定（L3）：把整棵进程树的存活挂在 wbox 身上，对齐 Windows
