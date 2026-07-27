@@ -15,7 +15,7 @@
 
 mod blink;
 pub mod env;
-// Linux 原生后端（多宿主扩展 L0，见 docs-architecture.md §10）。
+// Linux 原生后端（见 PRD.md F5 / docs/architecture.md §3）。
 // prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
 mod linux;
 /// 台阶③：Linux 上跑 Windows 程序的执行器变体（集成 wine，非新后端）。
@@ -192,7 +192,7 @@ pub(crate) fn build_sanitized_env(
 /// Windows 宿主：guest 是 Linux ELF，宿主跑不了，必须经 wbox-linux 模拟
 /// （BlinkBackend），外层再套 AppContainer+Job。
 /// Linux 宿主：宿主本身就能执行 Linux ELF，走原生 namespace 隔离
-/// （LinuxNativeBackend），无需模拟器——见 docs-architecture.md §10.2。
+/// （LinuxNativeBackend），无需模拟器——见 docs/architecture.md §3。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageBackendKind {
     /// 模拟执行（wbox-linux / blink）
@@ -216,7 +216,7 @@ pub const fn image_backend_kind() -> ImageBackendKind {
 /// 与 [`ImageBackendKind`] 是两条独立的分派：那条决定"Linux ELF 怎么跑"，
 /// 这条决定"本机程序用哪套隔离原语包起来"。
 /// Windows：AppContainer + Job Object；Linux：user/pid/net namespace + cgroup。
-/// 其它宿主暂无实现——明确报错，不假装成功（§10.5 语义一致性红线）。
+/// 其它宿主暂无实现——明确报错，不假装成功（PRD F5 一致性要求）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostProgramBackendKind {
     /// Win32：AppContainer profile + Job Object
@@ -272,7 +272,7 @@ pub fn classify_target(
 
 #[cfg(test)]
 mod tests {
-    // ---- 宿主分派（§10.2）----
+    // ---- 宿主分派（docs/architecture.md §3）----
     #[test]
     fn image_backend_follows_host() {
         let k = super::image_backend_kind();

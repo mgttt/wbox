@@ -3,7 +3,7 @@
 #
 # 背景：`memory.max`/`cpu.max`/`pids.max` 这条首选路径至今没有任何环境执行过
 # （GitHub runner 有 v2 但委派未开，本仓开发容器是 cgroup v1），见
-# docs-architecture.md §10.5「覆盖缺口」。在没证据之前不该猜它能不能用。
+# PRD.md F5 的 cgroup v2 覆盖缺口。在没证据之前不该猜它能不能用。
 #
 # 本脚本用 sudo 造一个**已委派**的 cgroup 子树，然后分别验证两种层级布局：
 #

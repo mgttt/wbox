@@ -1,6 +1,6 @@
 //! Linux rootless 隔离原语（`LinuxNativeBackend` 的 L1 实现）。
 //!
-//! 对应 `docs-architecture.md` §10.5 的 L1：user + mount + pid namespace、
+//! 对应 `PRD.md` F5：user + mount + pid namespace、
 //! `uid_map`/`gid_map`、`pivot_root` 到 rootfs、`/proc` 最小挂载。全部在
 //! **非 root** 下可用（unprivileged user namespace），与 wbox「默认不需要
 //! 管理员」的定位一致——这一点与 Windows 侧选 attribute-list 路径而非
@@ -156,7 +156,7 @@ pub(super) fn spawn_isolated(
     };
 
     // 网络：默认**不给**（新建空 network namespace），与 Windows 侧不授
-    // INTERNET_CLIENT 能力的默认一致。§10.5 语义一致性红线要求同一条命令
+    // INTERNET_CLIENT 能力的默认一致。PRD F5 一致性要求同一条命令
     // 在两个宿主上默认隔离强度相同，故这里不能"Linux 上顺便继承宿主网络"。
     let new_netns = !spec.allow_network;
     let unshare_flags = unshare_flags(spec.allow_network);
@@ -578,7 +578,7 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
 ///
 /// 优先 cgroup v2；不可用时退化 setrlimit。**`--cpu-pct` 没有 rlimit 对应物**
 /// （RLIMIT_CPU 限的是累计 CPU 秒数，不是占比），故此时明确报错而非静默忽略
-/// ——§10.5 语义一致性红线：宁可拒绝执行，也不能让同一条命令在不同宿主上
+/// ——PRD F5 一致性要求：宁可拒绝执行，也不能让同一条命令在不同宿主上
 /// 隔离强度不同。
 fn build_limit_plan(spec: &RunSpec) -> Result<LimitPlan> {
     build_limit_plan_with_cgroup(spec, cgroup2_self_dir())
@@ -611,7 +611,7 @@ fn build_limit_plan_with_cgroup(
     // RLIMIT_NPROC **对特权进程不生效**（内核放行 root 绕过该上限）。实测：
     // 同一条 --max-procs 8 以 uid=1001 跑会 "can't fork"，以 root 跑则 40 个
     // 子进程全部起来。既然限不住，就不能静默接受这个参数——否则用户以为
-    // 有进程数上限而实际没有，比直接报错危险得多（§10.5 红线）。
+    // 有进程数上限而实际没有，比直接报错危险得多（PRD F5）。
     if nproc_wanted && unsafe { libc::geteuid() } == 0 {
         return Err(WboxError::args(
             "以 root 运行且本宿主无可用 cgroup v2：无法实施 --max-procs——\
@@ -793,7 +793,7 @@ mod tests {
     //    集合里"。缺了 B，像"这台机器上 --memory 会硬报错"这种缺陷没人发现；
     //    缺了 A，兜底数值就没有确定性覆盖。两组都要。
 
-    /// A) `--cpu-pct` 在无可用 cgroup 时必须明确报错（§10.5 红线：
+    /// A) `--cpu-pct` 在无可用 cgroup 时必须明确报错（PRD F5：
     /// 不静默忽略隔离参数）。
     #[test]
     fn cpu_pct_without_cgroup_errors() {
@@ -857,7 +857,7 @@ mod tests {
             Ok(LimitPlan::Rlimit { .. }) => {
                 panic!("--cpu-pct 不得退化成 rlimit：RLIMIT_CPU 限累计秒数，语义不同")
             }
-            Ok(LimitPlan::None) => panic!("--cpu-pct 被静默忽略了，这是 §10.5 红线"),
+            Ok(LimitPlan::None) => panic!("--cpu-pct 被静默忽略了，这违反 PRD F5"),
         }
     }
 
@@ -875,7 +875,7 @@ mod tests {
                 assert_eq!(as_bytes, Some(16 * 1024 * 1024));
                 assert_eq!(nproc, Some(8));
             }
-            Ok(LimitPlan::None) => panic!("--memory/--max-procs 被静默忽略了，这是 §10.5 红线"),
+            Ok(LimitPlan::None) => panic!("--memory/--max-procs 被静默忽略了，这违反 PRD F5"),
             Err(e) => {
                 let m = format!("{}", e);
                 assert!(is_root, "非 root 下有 rlimit 兜底，不该报错：{}", m);
@@ -899,7 +899,7 @@ mod tests {
     }
 
     /// 网络默认必须**断开**（与 Windows 侧不授 INTERNET_CLIENT 一致），
-    /// `--allow-network` 才共享宿主网络栈。这条是 §10.5 语义一致性红线：
+    /// `--allow-network` 才共享宿主网络栈。这条是 PRD F5 一致性要求：
     /// 同一条命令在两个宿主上默认隔离强度必须相同。
     #[test]
     fn netns_is_created_unless_allow_network() {

@@ -1,4 +1,4 @@
-//! 台阶③：Linux 宿主上跑 Windows 程序（`docs-architecture.md` §10.0 ③ / §10.3）。
+//! Linux 宿主上跑 Windows 程序（`PRD.md` F6 / `docs/architecture.md` §3.4）。
 //!
 //! **定位是"执行器变体"，不是新后端。** 隔离仍然全部由
 //! [`super::linux::LinuxNativeBackend`] 提供（user/mount/pid/net namespace、
@@ -7,11 +7,11 @@
 //!
 //! 这样做的直接好处是**语义自动对齐**——`--memory`/`--max-procs`/
 //! `--allow-network` 对 Windows 程序与对 Linux 程序是同一套实现，不会出现
-//! "wine 那条路忘了限额"这类分叉。§10.5 的语义一致性红线因此不需要额外维护。
+//! "wine 那条路忘了限额"这类分叉。PRD F5/F6 的一致性要求因此不需要额外维护。
 //!
 //! # 范围（刻意收窄）
 //!
-//! 只做 CLI/TUI，不碰 GUI/DirectX/COM——理由见 §10.0：那三块正是 wine 三十年
+//! 只做 CLI/TUI，不碰 GUI/DirectX/COM——范围见 PRD F6：那三块正是 wine 三十年
 //! 工程量的主体。wbox **集成 wine 而不是取代它**：wine 负责 Win32 语义，
 //! wbox 负责隔离与资源管控。
 
@@ -117,8 +117,8 @@ fn is_executable(p: &Path) -> bool {
 /// 取 wine 版本号（`wine --version` 的首行，如 `wine-9.0`）。
 ///
 /// 只在 `-V` 时调用：wine 版本差异是 Windows 程序行为差异的头号来源，
-/// 而那类差异**不属 wbox 缺陷**（§10.3）。把版本打出来，用户报问题时
-/// 一眼能看出该找谁 —— 这也是 §10.3 明文承诺过的。
+/// 而那类差异**不属 wbox 缺陷**（docs/architecture.md §3.4）。把版本打出来，
+/// 用户报问题时一眼能看出该找谁。
 ///
 /// 取不到不致命（返回 `None`）：某些打包把 `--version` 交给 wineserver，
 /// 或需要先初始化 prefix。为此不该让整条命令失败。

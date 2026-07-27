@@ -191,7 +191,7 @@
 - **测试基线的一次修正**：矩阵 B1/B4/B7/B8 原用裸 `cat`/`grep`/`md5sum`，
   在不设 `BLINK_PREFIX` 时 guest `/` 直通宿主 `/`，wine 下命中宿主 coreutils
   而"通过"——即历史基线含**假绿**。已改为 `./busybox <applet>`。
-- 新增本地 wine 复现环境说明（docs/DEVELOPMENT.md §3.1）。W1 在没有本地
+- 新增本地 wine 复现环境说明（现见 docs/testing.md §2.3）。W1 在没有本地
   复现前，8 条静态假设全部落空；装上 wine 后迭代从 10 分钟变成几十秒。
 
 ## [v1.0.0-rc2] —— 终审通过（2026-07-26）

@@ -43,7 +43,7 @@ mkdir -p /tmp/wg && cp tests/guest/bin/<t_xxx> /tmp/wg && cd /tmp/wg &&
 **定位过程**（方法论上值得留档）：先后排除 8 条静态假设（guest close 延迟、
 父子共享 fd、子退出不销毁 System、`VirtualQuery` 自旋、1TB 提交计费、
 `IvInsert` 跨空洞合并、VEH 自死锁、锁泄漏），全部落空。转折点是**在 Linux
-沙箱装 wine 做出本地复现**（见 docs/DEVELOPMENT.md §3.1）：迭代从 10 分钟
+沙箱装 wine 做出本地复现**（见 docs/testing.md §2.3）：迭代从 10 分钟
 一轮变成几十秒，逐步加打点半小时收敛到指令级。
 
 决定性的两行日志对比：

@@ -20,6 +20,6 @@
 #     根因：w32sock.c 把 AF_UNIX **透传给宿主 winsock**，依赖 Windows 10
 #     1803+ 的原生 AF_UNIX 支持；wine 的 winsock 未实现该地址族。
 #     即 wbox 侧无缺陷，是 wine 的能力缺口——不该让 Linux 开发者本地跑
-#     套件时收到"回归"误报（docs/DEVELOPMENT.md §3.1 推荐的正是 wine 流程）。
+#     套件时收到"回归"误报（docs/testing.md §2.3 推荐的正是 wine 流程）。
 #     真机侧不加标注地留空，才能在 AF_UNIX 真出问题时立刻报回归。
 t_net_sockopt @wine

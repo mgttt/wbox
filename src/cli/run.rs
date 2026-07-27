@@ -152,7 +152,7 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
 
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
 /// Linux 上是 namespace+cgroup 但**不换根**（linux.rs 的 `LinuxMode::Host`）
-/// ——即 docs-architecture.md §10.0 的台阶①，供 harness 做环境控制。
+/// ——即 PRD.md F5 的宿主程序模式，供 harness 做环境控制。
 /// 规则本体在 `backend::host_program_backend_kind`（可单测），此处只做分发。
 fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
     let workdir = match &opts.workdir {
@@ -213,7 +213,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     }
 
     let spec = make_spec(opts, dir.join("rootfs"), merged, env);
-    // 按宿主分派（docs-architecture.md §10.2）：Windows 上 guest 是跑不了的
+    // 按宿主分派（docs/architecture.md §3）：Windows 上 guest 是跑不了的
     // Linux ELF，必须经 wbox-linux 模拟；Linux 上宿主自己就能执行，走原生
     // namespace 隔离，省掉一整层模拟开销。规则本体在 backend::image_backend_kind
     // （可单测），此处只做分发。

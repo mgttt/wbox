@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-linux-backend.sh —— LinuxNativeBackend（多宿主 §10）的端到端验收。
 #
-# 覆盖 docs-architecture.md §10.5 的 L1/L2 验收标准，走**完整 CLI 链路**
+# 覆盖 PRD.md F5 的 Linux 后端验收标准，走**完整 CLI 链路**
 # （假镜像缓存 → wbox run），而不是只测内部函数：
 #   L1  uid 映射 / 新根隔离 / PID namespace / 退出码转发
 #   L2  --memory 超限失败 / --max-procs 挡 fork 炸弹 / --cpu-pct 语义
@@ -368,7 +368,7 @@ CEOF
     fi
 
     # 关键：wine 只是执行器变体，隔离语义必须与跑 ELF 时**完全一致**。
-    # 这条是 §10.5 红线在台阶③ 上的体现——不能"wine 那条路忘了断网"。
+    # 这条是 PRD F5/F6 一致性要求的体现——不能"wine 那条路忘了断网"。
     if [ -x "$WORK/net.exe" ]; then
       hrun -- "$WORK/net.exe"
       blocked=$(printf '%s' "$OUT" | grep -c 'NET-BLOCKED')

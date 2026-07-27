@@ -1,6 +1,6 @@
 //! `LinuxNativeBackend`：Linux 宿主上直接运行 Linux 容器（多宿主扩展 L0 骨架）。
 //!
-//! 设计与里程碑见 `docs-architecture.md` §10.2 / §10.5。本文件对应 **L0**：
+//! 设计与里程碑见 `PRD.md` F5 / `docs/architecture.md` §3。本文件对应 **L0**：
 //! 只做 `prepare`（构造执行计划，不启动进程），使镜像解析 → config 合并 →
 //! 环境策略这条链路在 Linux 宿主上完整跑通并可单测；隔离本身（user/mount/pid
 //! namespace、`pivot_root`、cgroup v2）属 L1/L2，`spawn` 目前明确报未实现。
@@ -14,7 +14,7 @@
 //!
 //! 复用的既有资产：`oci` 整个模块（拉取/解包/config 合并）、`backend::env`
 //! 的保留键剥离与脱敏策略、`require_cmd`/`verbose_kv` 等共享原语——这正是
-//! §10.2 判断"Linux 后端复用面最大、风险最低"的依据。
+//! 这是 docs/architecture.md §3 中 Linux 后端复用宿主原语的依据。
 
 use super::{Backend, Prepared, RunSpec};
 
@@ -90,7 +90,7 @@ impl Backend for LinuxNativeBackend {
                         #[cfg(not(target_os = "linux"))]
                         let ver = String::new();
                         // 版本要打出来：wine 版本差异是 Windows 程序行为差异的
-                        // 头号来源，而那类差异不属 wbox 缺陷（§10.3）。
+                        // 头号来源，而那类差异不属 wbox 缺陷（architecture §3.4）。
                         super::verbose_kv(
                             "执行器",
                             format!("wine（目标是 PE）：{}［{}］", w.display(), ver),
