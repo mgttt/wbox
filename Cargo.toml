@@ -43,6 +43,8 @@ features = [
     "Win32_System_Threading",
     # Job Object API
     "Win32_System_JobObjects",
+    # JOB_OBJECT_ASSIGN_PROCESS / QUERY / TERMINATE access masks
+    "Win32_System_SystemServices",
     # GetCurrentProcessId 等内核辅助
     "Win32_System_Kernel",
     # GetComputerNameExW 用不到；保留最小集合

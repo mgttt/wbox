@@ -35,7 +35,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
   wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
-  wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（仅 Linux 宿主）
+  wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
   wbox --help | -h
   wbox --version
 

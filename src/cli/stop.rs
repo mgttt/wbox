@@ -53,24 +53,24 @@ fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
 
 pub fn cmd_stop(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::resolve_existing(opts.name)?;
+    let mut locked = runstate::lock_existing(opts.name)?;
+    let dir = locked.dir.clone();
     if runstate::liveness(&dir) == Liveness::Exited {
         // 已经停了不算错：stop 的意图是"让它别再跑"，这个状态已经满足。
         // 报错只会让 `wbox stop x || true` 这类脚本写得别扭。
+        drop(locked);
         println!("{}（已经是停止状态）", opts.name);
         return Ok(0);
     }
 
-    let pid = runstate::read_meta(&dir).map(|e| e.pid).ok_or_else(|| {
-        WboxError::args(format!(
-            "容器 '{}' 的 meta.json 不可读，无法确定要停的进程",
-            opts.name
-        ))
-    })?;
+    let pid = locked.entry.pid;
 
+    #[cfg(unix)]
+    {
     // 先礼：请它自己退出，让 guest 有机会跑完清理。
-    // （Windows 没有 SIGTERM 的等价物，那里这一步等同于强制终止。）
     runstate::terminate_pid(pid, Kill::Graceful);
+    // Registration::drop 同样要取得操作锁后才能释放 owner 锁，等待前必须放锁。
+    drop(locked);
     if wait_exit(&dir, opts.timeout) {
         println!("{}", opts.name);
         return Ok(0);
@@ -90,6 +90,52 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
         "容器 '{}' 强制终止后仍未退出（pid={}）",
         opts.name, pid
     )))
+    }
+
+    #[cfg(windows)]
+    {
+        locked.mark_stopping()?;
+        // 必须直接终止命名 Job。只杀 supervisor 并依赖 KILL_ON_JOB_CLOSE 不够：
+        // 并发 exec 控制器可能仍持有同一 Job 的另一个 handle。
+        let job = match crate::job::Job::wait_for_container(
+            opts.name,
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(job) => job,
+            Err(open_error) => {
+                // 主进程可能已退出并销毁 Job、但 Registration 正在等我们释放
+                // operation lock 才能标记 Exited。先放锁再复核，避免把正常退出报错。
+                drop(locked);
+                if wait_exit(&dir, 1) {
+                    println!("{}", opts.name);
+                    return Ok(0);
+                }
+                return Err(open_error);
+            }
+        };
+        job.terminate(1)?;
+        drop(locked);
+        if wait_exit(&dir, opts.timeout) {
+            println!("{}", opts.name);
+            return Ok(0);
+        }
+
+        // Job 已终止而 supervisor 仍未收尾时，只终止 supervisor 本身；Job 树在
+        // 上一步已经显式清空，不依赖这个 handle 的关闭副作用。
+        runstate::terminate_pid(pid, Kill::Forceful);
+        if wait_exit(&dir, 5) {
+            eprintln!(
+                "wbox: 容器 '{}' 的 Job 已终止，supervisor 未在 {} 秒内退出，已强制终止",
+                opts.name, opts.timeout
+            );
+            println!("{}", opts.name);
+            return Ok(0);
+        }
+        Err(WboxError::args(format!(
+            "容器 '{}' 的 Job 与 supervisor 强制终止后仍未退出（pid={}）",
+            opts.name, pid
+        )))
+    }
 }
 
 /// 轮询锁直到容器退出。**以锁为准而不是以 pid 为准**：pid 会被复用，

@@ -15,6 +15,64 @@ use crate::{job, sandbox, token};
 /// Windows 原生进程后端（无状态）。
 pub struct NativeBackend;
 
+#[cfg(windows)]
+impl NativeBackend {
+    /// Windows F8.4 的可对齐子集：在同一 AppContainer SID、capability 集合与
+    /// 命名 Job 中启动一个新的原生进程。调用方用 `on_started` 释放短期状态锁。
+    pub fn exec_existing<F>(
+        name: &str,
+        allow_network: bool,
+        workdir: &std::path::Path,
+        cmd: &[String],
+        on_started: F,
+    ) -> Result<u32>
+    where
+        F: FnOnce(),
+    {
+        super::require_cmd(cmd)?;
+        if !workdir.is_dir() {
+            return Err(WboxError::args(format!(
+                "容器工作目录 '{}' 已不存在，无法 exec",
+                workdir.display()
+            )));
+        }
+
+        let mut caps = Vec::new();
+        if allow_network {
+            caps.push(token::CapabilitySid::internet_client()?);
+        }
+
+        let mut job =
+            job::Job::wait_for_container(name, std::time::Duration::from_secs(2))?;
+        // profile 已由运行中的 supervisor 创建。exec 只派生同一 SID，不创建
+        // 或删除注册项，失败路径也不会留下 profile。
+        let profile = token::AppContainerProfile::open_existing(name)?;
+        let cmdline = sandbox::build_cmdline(cmd)?;
+        let workdir = workdir.to_string_lossy().into_owned();
+        let workdir = workdir.strip_prefix(r"\\?\").unwrap_or(&workdir).to_string();
+        let env = super::build_sanitized_env(
+            &[],
+            &[],
+            false,
+            false,
+            super::env::GuestFlavor::Windows,
+        );
+
+        sandbox::run_container_with_start_hook(
+            &profile,
+            &caps,
+            &cmdline,
+            &workdir,
+            &mut job,
+            &env,
+            move |job| {
+                job.close();
+                on_started();
+            },
+        )
+    }
+}
+
 impl Backend for NativeBackend {
     fn prepare(&self, spec: &RunSpec) -> Result<Prepared> {
         super::require_cmd(&spec.cmd)?;
@@ -78,7 +136,7 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
     }
 
     // ---- 3. Job Object ----
-    let job = job::Job::create(spec.limits)?;
+    let mut job = job::Job::create_for_container(&spec.name, spec.limits)?;
 
     // ---- 4. verbose 摘要 ----
     if spec.verbose {
@@ -116,7 +174,14 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
 
     // ---- 5. 启动并等待 ----
     let cmdline = sandbox::build_cmdline(&prepared.cmd)?;
-    let code = sandbox::run_container(&profile, &caps, &cmdline, &workdir, &job, &prepared.env)?;
+    let code =
+        sandbox::run_container(&profile, &caps, &cmdline, &workdir, &mut job, &prepared.env)?;
+    // 主进程退出即代表容器生命周期结束。先在状态锁下发布 stopping，阻止新的
+    // exec 加入，再显式清空 Job 内已有的派生进程。
+    let mut locked = crate::runstate::lock_existing(&spec.name)?;
+    locked.mark_stopping()?;
+    job.terminate(1)?;
+    drop(locked);
 
     if spec.verbose {
         println!("wbox: 子进程退出，退出码 = {}", code);

@@ -25,8 +25,9 @@
 //!
 //! # Windows
 //!
-//! Windows 没有"进入已有容器"的原语，可行性取证见 PRD §4.9 W2。此处明确报错，
-//! 不装作支持。
+//! Windows 没有 namespace 的“进入”原语。原生目标采用可对齐子集：重新派生
+//! 同一 AppContainer SID、按原网络策略重建 capability，并把挂起的新进程加入
+//! 同一命名 Job。OCI/Blink 缺少可靠的 rootfs/env 重建语义，明确拒绝。
 
 use crate::error::{Result, WboxError};
 use crate::runstate::{self, Liveness};
@@ -41,7 +42,7 @@ fn parse(args: &[String]) -> Result<ExecOptions<'_>> {
     let mut cmd: Vec<&str> = Vec::new();
     let mut saw_dashdash = false;
     for a in args {
-        if saw_dashdash {
+        if saw_dashdash || !cmd.is_empty() {
             cmd.push(a);
             continue;
         }
@@ -55,7 +56,8 @@ fn parse(args: &[String]) -> Result<ExecOptions<'_>> {
             }
             other => {
                 if name.is_some() {
-                    // 未写 `--` 时后续位置参数并入命令，与 run 的容错一致
+                    // COMMAND 一旦开始，后续内容全部原样透传，包括 `-` 开头
+                    // 的 guest 参数；与 docker/podman exec 的位置语义一致。
                     cmd.push(other);
                 } else {
                     name = Some(other);
@@ -75,22 +77,73 @@ fn parse(args: &[String]) -> Result<ExecOptions<'_>> {
 
 pub fn cmd_exec(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let dir = runstate::resolve_existing(opts.name)?;
+    exec_existing(opts.name, &opts.cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
+    let dir = runstate::resolve_existing(name)?;
     // 已退出的容器没有可附着的 namespace。必须明确拒绝——否则命令会跑在**宿主**
     // 上，而用户以为它跑在容器里，这比报错危险得多。
     if runstate::liveness(&dir) == Liveness::Exited {
         return Err(WboxError::args(format!(
             "容器 '{}' 已退出，无法 exec（namespace 已随之消失）",
-            opts.name
+            name
         )));
     }
     let pid = runstate::container_pid(&dir).ok_or_else(|| {
         WboxError::args(format!(
             "容器 '{}' 未记录容器内 pid，无法附着（容器可能刚启动，稍后重试）",
-            opts.name
+            name
         ))
     })?;
-    exec_in_namespaces(pid, &opts.cmd)
+    exec_in_namespaces(pid, cmd)
+}
+
+#[cfg(windows)]
+fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
+    let locked = runstate::lock_existing(name)?;
+    if runstate::liveness(&locked.dir) == Liveness::Exited {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 已退出，无法 exec",
+            name
+        )));
+    }
+    if locked.entry.stopping {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 正在停止，无法 exec",
+            name
+        )));
+    }
+    if locked.entry.target != "(native)" {
+        return Err(WboxError::args(format!(
+            "Windows exec 当前只支持原生容器；'{}' 的目标是 '{}'，\
+             OCI/Blink 无法可靠重建 rootfs 与环境",
+            name, locked.entry.target
+        )));
+    }
+    let context = locked.entry.exec_context.clone().ok_or_else(|| {
+        WboxError::args(format!(
+            "容器 '{}' 缺少 Windows exec 上下文（可能由旧版 wbox 启动），请重建容器",
+            name
+        ))
+    })?;
+    let cmd: Vec<String> = cmd.iter().map(|arg| (*arg).to_string()).collect();
+    let workdir = std::path::PathBuf::from(&context.workdir);
+    crate::backend::NativeBackend::exec_existing(
+        name,
+        context.allow_network,
+        &workdir,
+        &cmd,
+        move || drop(locked),
+    )
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn exec_existing(_name: &str, _cmd: &[&str]) -> Result<u32> {
+    Err(WboxError::spawn(
+        "exec 目前只支持 Linux 容器和 Windows 原生容器",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -170,14 +223,6 @@ fn exec_in_namespaces(pid: u32, cmd: &[&str]) -> Result<u32> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn exec_in_namespaces(_pid: u32, _cmd: &[&str]) -> Result<u32> {
-    Err(WboxError::spawn(
-        "exec 目前只在 Linux 宿主可用：Windows 没有\"进入已有容器\"的原语，\
-         可行性取证见 PRD §4.9 W2",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,6 +241,17 @@ mod tests {
         assert_eq!(o.cmd, vec!["ls", "-l"]);
         let b = ["c1".to_string(), "ls".to_string()];
         assert_eq!(parse(&b).unwrap().cmd, vec!["ls"]);
+        let c = [
+            "c1".to_string(),
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "echo ok".to_string(),
+        ];
+        assert_eq!(
+            parse(&c).unwrap().cmd,
+            vec!["powershell.exe", "-NoProfile", "-Command", "echo ok"]
+        );
         assert!(parse(&[]).is_err(), "缺名字应报错");
         assert!(parse(&["c1".to_string()]).is_err(), "缺命令应报错");
         assert!(parse(&["--bogus".to_string()]).is_err());
@@ -209,12 +265,18 @@ mod tests {
         let dir = runstate::dir_for("dead").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"name":"dead","pid":1,"created_unix":1,"cmd":["x"],"target":"(native)"}"#,
+        )
+        .unwrap();
         let err =
             cmd_exec(&["dead".to_string(), "--".to_string(), "true".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("已退出"), "{}", err);
     }
 
     /// 运行中但还没记下 container.pid（容器刚起）要给出可懂的提示。
+    #[cfg(target_os = "linux")]
     #[test]
     fn running_without_recorded_pid_explains() {
         let _home = TempHome::new("nopid");
@@ -222,6 +284,26 @@ mod tests {
         let err =
             cmd_exec(&["live".to_string(), "--".to_string(), "true".to_string()]).unwrap_err();
         assert!(format!("{}", err).contains("未记录容器内 pid"), "{}", err);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_image_exec_is_rejected_before_spawn() {
+        let _home = TempHome::new("windows-image");
+        let _reg = runstate::register_with_context(
+            "image",
+            &["sleep".into()],
+            "alpine:3.20",
+            false,
+            Some(runstate::ExecContext {
+                allow_network: false,
+                workdir: std::env::temp_dir().to_string_lossy().into_owned(),
+            }),
+        )
+        .unwrap();
+        let err =
+            cmd_exec(&["image".to_string(), "--".to_string(), "cmd.exe".to_string()]).unwrap_err();
+        assert!(format!("{}", err).contains("只支持原生容器"), "{}", err);
     }
 
     #[test]

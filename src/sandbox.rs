@@ -39,9 +39,35 @@ pub fn run_container(
     capabilities: &[CapabilitySid],
     cmdline: &str,
     workdir: &str,
-    job: &crate::job::Job,
+    job: &mut crate::job::Job,
     env: &[(String, String)],
 ) -> Result<u32> {
+    run_container_with_start_hook(
+        profile,
+        capabilities,
+        cmdline,
+        workdir,
+        job,
+        env,
+        |_| {},
+    )
+}
+
+/// 与 [`run_container`] 相同，但在子进程已经加入 Job 且成功恢复后调用一次
+/// `on_started`。Windows `exec` 用它释放 runstate 的短期操作锁：锁必须覆盖
+/// “确认同一代容器 → OpenJobObject → 挂起创建并入 Job”，但不能覆盖等待阶段。
+pub fn run_container_with_start_hook<F>(
+    profile: &AppContainerProfile,
+    capabilities: &[CapabilitySid],
+    cmdline: &str,
+    workdir: &str,
+    job: &mut crate::job::Job,
+    env: &[(String, String)],
+    on_started: F,
+) -> Result<u32>
+where
+    F: FnOnce(&mut crate::job::Job),
+{
     let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
     let workdir_wide = to_wide(workdir);
 
@@ -169,6 +195,7 @@ pub fn run_container(
         // 进程已入 Job，KILL_ON_JOB_CLOSE 会负责收割；直接报错即可。
         return Err(crate::error::WboxError::spawn(format!("ResumeThread 失败，GetLastError={}", err)));
     }
+    on_started(job);
 
     // ---- 等待退出并转发退出码 ----
     // # Safety: 进程句柄有效，INFINITE 等待进程退出。
@@ -574,7 +601,7 @@ mod real_windows_tests {
 
         let profile = create_profile(&unique_name("rc"), &[]);
         let caps: Vec<CapabilitySid> = Vec::new();
-        let job = Job::create(Limits::default()).unwrap();
+        let mut job = Job::create(Limits::default()).unwrap();
         let workdir = std::path::Path::new(&exe)
             .parent()
             .unwrap()
@@ -585,7 +612,7 @@ mod real_windows_tests {
         // build_cmdline 把 exe 路径加引号
         // from_ref 而非 clone：无谓的 String 复制（clippy cloned_ref_to_slice_refs）
         let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
-        let rc = run_container(&profile, &caps, &cmdline, &workdir, &job, &env).unwrap();
+        let rc = run_container(&profile, &caps, &cmdline, &workdir, &mut job, &env).unwrap();
         assert_eq!(rc, 0, "hostname.exe 在 AppContainer 内应返回 0");
     }
 
@@ -596,7 +623,7 @@ mod real_windows_tests {
     fn run_container_with_empty_caps_starts_process() {
         let exe = hostname_exe();
         let profile = create_profile(&unique_name("nc"), &[]);
-        let job = Job::create(Limits {
+        let mut job = Job::create(Limits {
             memory_mb: 0,
             cpu_pct: 0,
             max_procs: 0,
@@ -609,7 +636,7 @@ mod real_windows_tests {
             .into_owned();
         let env = minimal_process_env();
         let cmdline = build_cmdline(&[exe]).unwrap();
-        let rc = run_container(&profile, &[], &cmdline, &workdir, &job, &env).unwrap();
+        let rc = run_container(&profile, &[], &cmdline, &workdir, &mut job, &env).unwrap();
         assert_eq!(rc, 0);
     }
 
@@ -646,13 +673,13 @@ mod real_windows_tests {
 
         let denied_caps = Vec::new();
         let denied_profile = create_profile(&unique_name("net_deny"), &denied_caps);
-        let denied_job = Job::create(Limits::default()).unwrap();
+        let mut denied_job = Job::create(Limits::default()).unwrap();
         let denied = run_container(
             &denied_profile,
             &denied_caps,
             &cmdline,
             &workdir,
-            &denied_job,
+            &mut denied_job,
             &env,
         )
         .unwrap();
@@ -663,13 +690,13 @@ mod real_windows_tests {
 
         let allowed_caps = vec![CapabilitySid::internet_client().unwrap()];
         let allowed_profile = create_profile(&unique_name("net_allow"), &allowed_caps);
-        let allowed_job = Job::create(Limits::default()).unwrap();
+        let mut allowed_job = Job::create(Limits::default()).unwrap();
         let allowed = run_container(
             &allowed_profile,
             &allowed_caps,
             &cmdline,
             &workdir,
-            &allowed_job,
+            &mut allowed_job,
             &env,
         )
         .unwrap();
@@ -697,11 +724,11 @@ mod real_windows_tests {
     fn run_container_missing_workdir_is_spawn_error() {
         let exe = hostname_exe();
         let profile = create_profile(&unique_name("mw"), &[]);
-        let job = Job::create(Limits::default()).unwrap();
+        let mut job = Job::create(Limits::default()).unwrap();
         let cmdline = build_cmdline(&[exe]).unwrap();
         // 一个绝对不存在的路径
         let bogus = r"C:\wbox-definitely-does-not-exist-xyz-12345";
-        let err = run_container(&profile, &[], &cmdline, bogus, &job, &[])
+        let err = run_container(&profile, &[], &cmdline, bogus, &mut job, &[])
             .expect_err("应报 spawn 错误");
         let msg = format!("{}", err);
         assert!(

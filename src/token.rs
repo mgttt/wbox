@@ -115,6 +115,19 @@ impl AppContainerProfile {
         Ok(sid)
     }
 
+    /// 打开运行中容器已经注册的 profile，不创建或删除系统注册项。`exec`
+    /// 只需要同一 SID；使用这个入口可避免附着失败时意外留下新 profile。
+    pub fn open_existing(name: &str) -> Result<Self> {
+        let name_wide = to_wide(name);
+        let sid = Self::derive_sid(name)?;
+        Ok(Self {
+            name: name.to_string(),
+            name_wide,
+            sid,
+            keep: true,
+        })
+    }
+
     /// profile 名。
     pub fn name(&self) -> &str {
         &self.name

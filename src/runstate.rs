@@ -60,16 +60,36 @@ pub struct Entry {
     pub cmd: Vec<String>,
     /// 运行目标：镜像引用，或宿主程序模式下的 `(native)`
     pub target: String,
+    /// 运行实例是否已进入不可再附着的停止阶段。旧版记录缺失此字段时按
+    /// `running` 读取；最终 `exited` 仍由 owner 锁是否释放判定。
+    pub stopping: bool,
+    /// `exec` 重建隔离边界所需的最小上下文。刻意不存环境变量，避免把凭证
+    /// 或调用方秘密落到用户目录下的状态文件中。
+    pub exec_context: Option<ExecContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecContext {
+    pub allow_network: bool,
+    pub workdir: String,
 }
 
 impl Entry {
     fn to_json(&self) -> String {
+        let exec_context = self.exec_context.as_ref().map(|context| {
+            serde_json::json!({
+                "allow_network": context.allow_network,
+                "workdir": context.workdir,
+            })
+        });
         let v = serde_json::json!({
             "name": self.name,
             "pid": self.pid,
             "created_unix": self.created_unix,
             "cmd": self.cmd,
             "target": self.target,
+            "lifecycle": if self.stopping { "stopping" } else { "running" },
+            "exec_context": exec_context,
         });
         v.to_string()
     }
@@ -78,6 +98,15 @@ impl Entry {
     /// 用户手改或被上一版 wbox 写过，读不懂就当这条不存在，不要让 `ps` 崩掉。
     fn from_json(text: &str) -> Option<Self> {
         let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        let exec_context = v.get("exec_context").and_then(|context| {
+            if context.is_null() {
+                return None;
+            }
+            Some(ExecContext {
+                allow_network: context.get("allow_network")?.as_bool()?,
+                workdir: context.get("workdir")?.as_str()?.to_string(),
+            })
+        });
         Some(Entry {
             name: v.get("name")?.as_str()?.to_string(),
             pid: u32::try_from(v.get("pid")?.as_u64()?).ok()?,
@@ -89,6 +118,11 @@ impl Entry {
                 .map(|x| x.as_str().unwrap_or_default().to_string())
                 .collect(),
             target: v.get("target")?.as_str()?.to_string(),
+            stopping: v
+                .get("lifecycle")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value == "stopping"),
+            exec_context,
         })
     }
 }
@@ -222,19 +256,17 @@ fn purge_dir(dir: &Path) {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if self.persist {
-            // 后台记录必须保留日志，但 owner 锁应立即释放，让 ps/stop 看见 exited。
-            drop(self.lock.take());
-            return;
-        }
         let root = self.dir.parent().map(Path::to_path_buf);
-        // 先持有根操作锁、再释放 owner 锁：rm 若先取得根锁会看到 Running 并退出；
-        // 本路径若先取得根锁，则没有 register/rm 能插入“释放 → 删除”的窗口。
+        // 先持有根操作锁、再释放 owner 锁：exec/stop/rm 若先取得根锁会完成
+        // 本轮核对后退出；本路径若先取得根锁，则同名 register 无法插入
+        // “释放 owner 锁 → 旧 Job/状态尚未收尾”的窗口。
         if let Some(root) = root {
             if let Ok(_operation_lock) = lock_operations(&root) {
                 // Windows 不允许删除仍被打开的锁文件，必须先显式关闭句柄。
                 drop(self.lock.take());
-                purge_dir(&self.dir);
+                if !self.persist {
+                    purge_dir(&self.dir);
+                }
                 return;
             }
         }
@@ -308,11 +340,22 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
 /// `--detach` 流程里日志文件是**父进程**先建好、再作为子进程 stdio 传下去的，
 /// 子进程随后才登记；此时若按"复用残留"的常规逻辑清目录，就会把父进程刚建好
 /// 的日志一起删掉，容器还没开口就先失声。
+#[cfg(test)]
 pub fn register_with(
     name: &str,
     cmd: &[String],
     target: &str,
     keep_logs: bool,
+) -> Result<Registration> {
+    register_with_context(name, cmd, target, keep_logs, None)
+}
+
+pub fn register_with_context(
+    name: &str,
+    cmd: &[String],
+    target: &str,
+    keep_logs: bool,
+    exec_context: Option<ExecContext>,
 ) -> Result<Registration> {
     let dir = dir_for(name)?;
     let root = dir
@@ -324,7 +367,7 @@ pub fn register_with(
         let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
             WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
         })?;
-        write_meta(&dir, name, cmd, target)?;
+        write_meta(&dir, name, cmd, target, exec_context)?;
         return Ok(Registration {
             dir,
             lock: Some(lock),
@@ -361,6 +404,8 @@ pub fn register_with(
         created_unix: now_unix(),
         cmd: cmd.to_vec(),
         target: target.to_string(),
+        stopping: false,
+        exec_context,
     };
     write_meta_entry(&dir, entry)?;
     Ok(Registration {
@@ -370,7 +415,13 @@ pub fn register_with(
     })
 }
 
-fn write_meta(dir: &Path, name: &str, cmd: &[String], target: &str) -> Result<()> {
+fn write_meta(
+    dir: &Path,
+    name: &str,
+    cmd: &[String],
+    target: &str,
+    exec_context: Option<ExecContext>,
+) -> Result<()> {
     write_meta_entry(
         dir,
         Entry {
@@ -379,6 +430,8 @@ fn write_meta(dir: &Path, name: &str, cmd: &[String], target: &str) -> Result<()
             created_unix: now_unix(),
             cmd: cmd.to_vec(),
             target: target.to_string(),
+            stopping: false,
+            exec_context,
         },
     )
 }
@@ -411,6 +464,46 @@ pub fn resolve_existing(name: &str) -> Result<PathBuf> {
         return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
     }
     Ok(dir)
+}
+
+/// 持有状态根的操作锁，并返回同一代运行记录。调用方应只在核对实例并取得
+/// 平台对象句柄（或递送终止）期间持有；绝不能覆盖整个 `exec` 命令生命周期，
+/// 否则并发 `stop` 会被阻塞。
+pub struct LockedEntry {
+    pub dir: PathBuf,
+    pub entry: Entry,
+    _operation_lock: File,
+}
+
+impl LockedEntry {
+    /// 在状态操作锁保护下发布停止意图。发布后新的 `exec` 必须拒绝附着；
+    /// 调用方应在释放本锁前终止平台生命周期对象。
+    pub fn mark_stopping(&mut self) -> Result<()> {
+        if !self.entry.stopping {
+            self.entry.stopping = true;
+            write_meta_entry(&self.dir, self.entry.clone())?;
+        }
+        Ok(())
+    }
+}
+
+pub fn lock_existing(name: &str) -> Result<LockedEntry> {
+    let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let operation_lock = lock_operations(root)?;
+    if !dir.exists() {
+        return Err(WboxError::args(format!("没有名为 '{}' 的容器记录", name)));
+    }
+    let entry = read_meta(&dir).ok_or_else(|| {
+        WboxError::args(format!("容器 '{}' 的 meta.json 不可读", name))
+    })?;
+    Ok(LockedEntry {
+        dir,
+        entry,
+        _operation_lock: operation_lock,
+    })
 }
 
 /// 删除一条已退出的容器记录（`wbox rm`）。
@@ -598,10 +691,26 @@ mod tests {
             created_unix: 1700000000,
             cmd: vec!["/bin/sh".into(), "-c".into(), "echo hi".into()],
             target: "alpine:latest".into(),
+            stopping: false,
+            exec_context: Some(ExecContext {
+                allow_network: true,
+                workdir: "/work".into(),
+            }),
         };
-        assert_eq!(Entry::from_json(&e.to_json()).unwrap(), e);
+        let encoded = e.to_json();
+        assert_eq!(Entry::from_json(&encoded).unwrap(), e);
+        assert!(!encoded.contains("env"), "状态不应包含环境或凭证字段");
         assert!(Entry::from_json("{}").is_none());
         assert!(Entry::from_json("nonsense").is_none());
+    }
+
+    #[test]
+    fn old_meta_without_exec_context_remains_readable() {
+        let old =
+            r#"{"name":"old","pid":1,"created_unix":1,"cmd":["x"],"target":"(native)"}"#;
+        let entry = Entry::from_json(old).unwrap();
+        assert!(!entry.stopping);
+        assert!(entry.exec_context.is_none());
     }
 
     fn wait_for_path(path: &Path) {
@@ -728,6 +837,7 @@ mod cap_tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kill {
     /// 请求对方自行退出（Linux: SIGTERM）。Windows 无等价物，见 [`terminate_pid`]。
+    #[cfg(unix)]
     Graceful,
     /// 强制终止（Linux: SIGKILL；Windows: TerminateProcess）
     Forceful,
@@ -833,6 +943,7 @@ pub fn record_container_pid(name: &str, pid: u32) {
 }
 
 /// 读回 [`record_container_pid`] 写下的 pid。
+#[cfg(target_os = "linux")]
 pub fn container_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join(CONTAINER_PID))
         .ok()?

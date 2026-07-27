@@ -320,7 +320,17 @@ fn spawn_with_state(
     // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
     // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
     let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
-    let reg = crate::runstate::register_with(&spec.name, &spec.cmd, target, supervised)?;
+    let exec_context = crate::runstate::ExecContext {
+        allow_network: spec.allow_network,
+        workdir: spec.workdir.to_string_lossy().into_owned(),
+    };
+    let reg = crate::runstate::register_with_context(
+        &spec.name,
+        &spec.cmd,
+        target,
+        supervised,
+        Some(exec_context),
+    )?;
     if supervised {
         spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
     }
