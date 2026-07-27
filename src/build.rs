@@ -370,6 +370,58 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 构建缓存的根目录。与镜像缓存并列，用户清理时一处就够。
+fn cache_root() -> Result<PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| WboxError::args("无法确定用户主目录"))?;
+    Ok(PathBuf::from(home).join(".wbox").join("buildcache"))
+}
+
+/// 逐步累进的缓存键。
+///
+/// 键必须覆盖**该步之前的全部输入**，否则会命中一个状态不同的快照——那是
+/// 缓存最危险的失效方式：构建"成功"了，内容却是错的。因此每步都把上一步的
+/// 键一起哈希进去（链式），而 `COPY` 还要额外把**源文件内容**算进去，
+/// 只看路径的话改了文件也会命中旧层。
+fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(prev.as_bytes());
+    h.update(format!("{:?}", ins).as_bytes());
+    if let Instruction::Copy { src, .. } = ins {
+        // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
+        let from = resolve_context_path(context, src)?;
+        hash_path_into(&from, &mut h)?;
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+fn hash_path_into(p: &Path, h: &mut sha2::Sha256) -> Result<()> {
+    use sha2::Digest;
+    let md = std::fs::metadata(p)
+        .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", p.display(), e)))?;
+    if md.is_dir() {
+        let mut entries: Vec<_> = std::fs::read_dir(p)
+            .map_err(|e| WboxError::args(format!("读取目录 '{}' 失败：{}", p.display(), e)))?
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        // 目录枚举顺序不保证稳定；不排序会让同样的内容算出不同的键，
+        // 缓存就永远命不中。
+        entries.sort();
+        for e in entries {
+            h.update(e.file_name().unwrap_or_default().as_encoded_bytes());
+            hash_path_into(&e, h)?;
+        }
+    } else {
+        let data = std::fs::read(p)
+            .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", p.display(), e)))?;
+        h.update(&data);
+    }
+    Ok(())
+}
+
 /// 执行构建。
 pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     let text = std::fs::read_to_string(&opts.dockerfile).map_err(|e| {
@@ -386,9 +438,43 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     let out_dir = crate::oci::image_dir(&target)?;
     let rootfs = out_dir.join("rootfs");
 
+    // ---- 分层缓存：先算出每步的键，再找**最长的已缓存前缀** ----
+    //
+    // 一步步"命中就恢复"会在每个命中步都复制一次快照，白做无用功；先定位到
+    // 最后一个命中点、只恢复那一次，后面的步骤照常执行。
+    let mut keys: Vec<String> = Vec::with_capacity(instructions.len());
+    let mut k = String::new();
+    for ins in &instructions {
+        k = step_key(&k, ins, &opts.context)?;
+        keys.push(k.clone());
+    }
+    let cache = cache_root()?;
+    // 只有会改动 rootfs 的步骤才值得做快照；纯配置指令（ENV/CMD/...）不动
+    // 文件系统，缓存它们只是徒增磁盘占用。
+    let mutating = |i: &Instruction| {
+        matches!(i, Instruction::Run(_) | Instruction::Copy { .. })
+    };
+    let mut resume_from = 0usize;
+    for idx in (0..instructions.len()).rev() {
+        if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
+            resume_from = idx + 1;
+            break;
+        }
+    }
+
     let mut cfg = ConfigAccum::default();
     for (idx, ins) in instructions.iter().enumerate() {
         let step = idx + 1;
+        // 命中前缀内的**改动型**步骤整体跳过；配置型指令仍要重放，
+        // 否则 ENV/CMD/ENTRYPOINT 不会进最终 config.json。
+        if idx < resume_from && mutating(ins) {
+            if idx + 1 == resume_from {
+                println!("[{}/{}] CACHED（复用已缓存层）", step, instructions.len());
+                let _ = std::fs::remove_dir_all(&rootfs);
+                copy_tree(&cache.join(&keys[idx]).join("rootfs"), &rootfs)?;
+            }
+            continue;
+        }
         match ins {
             Instruction::From(base) => {
                 let base_ref = crate::oci::ImageRef::parse(base, None)?;
@@ -404,6 +490,8 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 let _ = std::fs::remove_dir_all(&out_dir);
                 std::fs::create_dir_all(&out_dir)
                     .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
+                // 若后面有缓存命中，这份基础 rootfs 会被命中层整体覆盖；
+                // 仍然先铺一份，保证"无命中"与"部分命中"两条路径起点一致。
                 copy_tree(&base_dir.join("rootfs"), &rootfs)?;
                 // 继承基础镜像的 config，再让后续指令覆盖
                 if let Some(base_cfg) = crate::oci::config::ImageConfig::load(&base_dir)? {
@@ -436,6 +524,17 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             Instruction::Run(cmd) => {
                 println!("[{}/{}] RUN {}", step, instructions.len(), cmd);
                 run_step(&rootfs, cmd, &cfg)?;
+            }
+        }
+        // 改动型步骤执行完就落一份快照，供下次构建复用
+        if mutating(ins) && idx >= resume_from {
+            let snap = cache.join(&keys[idx]);
+            let _ = std::fs::remove_dir_all(&snap);
+            if let Err(e) = copy_tree(&rootfs, &snap.join("rootfs")) {
+                // 缓存写失败不该让构建失败——它只是加速手段。但要说出来，
+                // 否则用户会困惑"为什么每次都不命中"。
+                eprintln!("wbox: 构建缓存写入失败（不影响本次构建）：{}", e);
+                let _ = std::fs::remove_dir_all(&snap);
             }
         }
     }

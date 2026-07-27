@@ -483,6 +483,26 @@ else
   report FAIL "B.3 COPY 越界拒绝" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 200)"
 fi
 
+# B.5 分层缓存：内容未变时重建应命中缓存（否则 build 每次全量重跑，不可用）
+b2=$(HOME=$WORK/home "$WBOX_ABS" build -t built:v1 "$BCTX" 2>&1)
+if printf '%s' "$b2" | grep -q CACHED; then
+  report PASS "B.5 内容未变时重建命中分层缓存"
+else
+  report FAIL "B.5 缓存命中" "第二次构建未见 CACHED：$(printf '%s' "$b2" | tr '\n' ' ' | head -c 200)"
+fi
+
+# B.6 **缓存正确性断言**：改了 COPY 源之后必须失效，产物必须是新内容。
+# 这条比"能命中"重要得多——命中一个状态不同的旧层会让构建"成功"却产出错的
+# 镜像，是缓存最危险的失效方式，而且完全没有报错信号。
+printf 'CHANGED_CONTENT\n' > "$BCTX/data.txt"
+HOME=$WORK/home "$WBOX_ABS" build -t built:v1 "$BCTX" >/dev/null 2>&1
+run built:v1
+if printf '%s' "$OUT" | grep -q CHANGED_CONTENT; then
+  report PASS "B.6 改动 COPY 源后缓存正确失效（产物是新内容）"
+else
+  report FAIL "B.6 缓存失效" "产物仍是旧内容：$(printf '%s' "$OUT" | tr '\n' ' ' | head -c 200)"
+fi
+
 # B.4 未实现的指令要报错而不是静默跳过——跳过会产出"看着成功实则少做事"的镜像
 printf 'FROM lbetest:latest\nVOLUME /data\n' > "$BCTX/Dockerfile.vol"
 vout=$(HOME=$WORK/home "$WBOX_ABS" build -t v:1 -f "$BCTX/Dockerfile.vol" "$BCTX" 2>&1); vrc=$?

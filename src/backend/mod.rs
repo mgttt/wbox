@@ -287,6 +287,21 @@ pub fn classify_target(positional: Option<&str>) -> Result<RunTarget> {
     crate::oci::ImageRef::parse(s, None).map(RunTarget::Image)
 }
 
+/// Windows 盘符路径：`C:`、`C:\dir`、`C:/dir`。
+///
+/// 判据里**必须带分隔符**（或整串就是 `C:`）。原先只看"第二个字节是冒号"，
+/// 于是任何单字母仓库名的镜像引用都被误判成本机程序——`wbox run c:v1` 会去
+/// 找一个叫 `c:v1` 的可执行文件然后报"文件不存在"，而镜像明明就在缓存里。
+/// 真实踩到过：本地构建 `-t c:v1` 之后 run 不起来。
+fn looks_like_drive_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() < 2 || !b[0].is_ascii_alphabetic() || b[1] != b':' {
+        return false;
+    }
+    // `C:` 本身是盘符；再长就必须紧跟路径分隔符
+    b.len() == 2 || b[2] == b'\\' || b[2] == b'/'
+}
+
 fn looks_like_native_program(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
     s.starts_with('/')
@@ -295,10 +310,33 @@ fn looks_like_native_program(s: &str) -> bool {
         || s.starts_with(".\\")
         || s.starts_with("..\\")
         || s.contains('\\')
-        || (s.len() >= 2 && s.as_bytes()[1] == b':')
+        || looks_like_drive_path(s)
         || [".exe", ".com", ".bat", ".cmd", ".ps1"]
             .iter()
             .any(|ext| lower.ends_with(ext))
+}
+
+#[cfg(test)]
+mod drive_path_tests {
+    use super::looks_like_drive_path;
+
+    /// 真正的盘符路径要认出来。
+    #[test]
+    fn recognizes_real_drive_paths() {
+        for p in ["C:", "c:", r"C:\Windows", "D:/tmp", r"z:\a\b"] {
+            assert!(looks_like_drive_path(p), "'{}' 应判为盘符路径", p);
+        }
+    }
+
+    /// **镜像引用不能被误判成盘符路径。** 原先只看"第二字节是冒号"，
+    /// 于是 `c:v1` 这类单字母仓库名的镜像会被当成本机程序，run 时报
+    /// "文件不存在"——而镜像就在缓存里。本地构建 `-t c:v1` 时真踩到过。
+    #[test]
+    fn image_refs_are_not_drive_paths() {
+        for r in ["c:v1", "a:latest", "ubuntu:24.04", "x:1", "1:2"] {
+            assert!(!looks_like_drive_path(r), "'{}' 不该判为盘符路径", r);
+        }
+    }
 }
 
 #[cfg(test)]
