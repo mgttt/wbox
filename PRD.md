@@ -252,7 +252,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 | F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
-| F8.8 detached 管道 EOF | `src/cli/run.rs` | 待本批 G4 | WP.22：`run -d`、`container start`、`start` 的重定向输出及时 EOF，workload 继续运行 |
+| F8.8 detached 管道 EOF | `src/cli/run.rs` | G4 Windows | WP.22：重定向输出及时 EOF且 workload 继续运行；提交 `55761da`、CI 30272887266 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -744,7 +744,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
 | F8.6 `[done]` | `kill` + `top` | Linux P.23/P.24；Windows WP.19/WP.20；Windows `top` 查询 Job 成员，`kill` 清空三层进程树 |
 | F8.7 `[done]` | `create` + `start` | Rust 原子状态机与 CLI 测试、Linux P.25、Windows WP.21 均通过；提交 `1caada0`、CI 30271007552 |
-| F8.8 `[active]` | detached 管道 EOF | Windows 本机 WP.22 已通过；待本批 main CI 裁决后标 done |
+| F8.8 `[done]` | detached 管道 EOF | `run -d`、`container start`、`start` 均由 Windows WP.22 持续验证；提交 `55761da`、CI 30272887266 |
 
 ### F9 对标能力补齐 `[planned]`
 
