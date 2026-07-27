@@ -244,6 +244,10 @@ int main(void) {
       char value = 0;
       struct stat childst;
       close(parent_dirfd);
+      errno = 0;
+      if (fchdir(parent_dirfd) != -1 || errno != EBADF) _exit(12);
+      errno = 0;
+      if (fsync(parent_dirfd) != -1 || errno != EBADF) _exit(13);
       child_dirfd = open("t_fo_dir_b", O_RDONLY | O_DIRECTORY);
       if (child_dirfd != parent_dirfd) _exit(1);
       childfd = openat(child_dirfd, "only_b", O_RDONLY);

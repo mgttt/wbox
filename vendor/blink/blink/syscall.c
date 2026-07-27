@@ -434,15 +434,16 @@ _Noreturn void SysExit(struct Machine *m, int rc) {
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
 // wbox win32: translate a guest fd to its host descriptor (the two
-// diverge in a vfork child's copied fd table; identical elsewhere).
-// Falls back to the guest number when the fd is not tracked.
+// diverge in a snapshot child's copied fd table; identical elsewhere).
+// Untracked guest fds must not fall through to a same-numbered global VFS
+// descriptor owned by another snapshot process.
 static int HostFdOf(struct System *s, int fildes) {
   struct Fd *fd;
-  int h = fildes;
+  int h;
   LOCK(&s->fds.lock);
-  if ((fd = GetFd(&s->fds, fildes))) h = fd->hostfd;
+  h = (fd = GetFd(&s->fds, fildes)) ? fd->hostfd : -1;
   UNLOCK(&s->fds.lock);
-  return h;
+  return h == -1 ? ebadf() : h;
 }
 
 // ---------------------------------------------------------------------
