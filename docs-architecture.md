@@ -5,11 +5,20 @@
 > - ✅ 已实现：§1–§5 Windows 进程容器（AppContainer+Job，**真机冒烟已过 CI**）、
 >   OCI 镜像拉取（`image pull/list/show/rm`）、`Backend` trait 与
 >   Native/Blink 双后端分派（`src/backend/`，已非骨架）
-> - 🔨 进行中：§9 Linux 后端的**真机收尾**——`wbox-linux.exe` 已能在真 Windows 上
->   构建并正确执行 guest 程序，但退出码传播存在缺陷（恒 127，wine 下不复现，
->   CI 探针取证中）；快照式 fork 已落地，§9.2 中"真 fork 不支持"的旧结论作废
+> - ✅ 已实现：§10 多宿主后端的**台阶①②③**——Linux 宿主上沙箱宿主程序
+>   （`LinuxMode::Host`）与 OCI 镜像（`LinuxMode::Image`）：user/mount/pid/net
+>   namespace + 限额 + `PR_SET_PDEATHSIG` 进程树收割；以及经 wine 跑 Windows
+>   CLI 程序（`backend/wine.rs`，执行器变体）。门禁：`test-linux-backend`
+>   与 `test-wine-backend`
+> - 🔨 进行中：§10.5 的 cgroup v2 **首选路径**——已证实现有布局在 cgroup v2 下
+>   不可能工作（EBUSY/EIO 三向取证，见 §10.5），修复方向已定但**尚未实现、
+>   也尚无环境验证**；rlimit 兜底路径正常且有覆盖
 > - 📐 纯设计未实现：§6 路线图各项、§8.4 v2/v3 层、§9.2 的 Wsl1Backend/PicoBackend、
->   §10 多宿主后端
+>   §10 的台阶④（Windows 容器，远期愿景）
+>
+> 注：§9 早先记录的"退出码恒 127"已修复（根因是 `posix_memalign` 分配却用
+> `free()` 释放导致的堆损坏，被 msys2 归一化成 127），真 Windows guest 套件
+> 现为 20/20 文件级通过、基线为空。
 
 ## 1. 问题定义
 
