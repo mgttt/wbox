@@ -17,6 +17,9 @@
    冲突由当前 agent 基于双方意图解决。
 5. 功能状态发生变化时更新本文；发布历史写入 `CHANGELOG.md`，不要在多份文档
    复制同一组动态数字。
+6. **先看 §4.9 `[TODO-PLAN]`**：那里按宿主分派了待办条目。挑与**你这台机器
+   能真实验证**的宿主相符的条目做；验证不了的不要硬写，改成那里的一个新条目
+   交给对应宿主的 agent。
 
 事实发生冲突时，优先级为：当前代码和可重复测试 > CI 配置 > 本文 >
 技术参考 > `CHANGELOG.md` 历史段落。
@@ -27,6 +30,8 @@
 - `[active]`：主路径已实现，但仍有明确缺口或正在补充验证。
 - `[planned]`：认可的后续范围，尚未进入交付。
 - `[out]`：非目标，除非产品范围被明确修改。
+- `[TODO-PLAN]`：跨宿主交接点，见 §4.9。条目上的 `[Windows agent]` /
+  `[Linux agent]` 标明该由哪台机器上的 agent 接手。
 
 ## 2. 产品定义
 
@@ -491,6 +496,82 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
+
+## 4.9 [TODO-PLAN] 跨宿主协作交接点
+
+本节是**给另一台宿主上的 agent 看的工作面**。约定很简单：谁的宿主谁验证，
+拿不到的机器不硬猜。
+
+无法在本机验证的东西**不写进产品代码**，改写成这里的一个条目：说清背景、
+判据、以及"怎样算做完"。这不是甩锅，是本轮反复吃亏后的结论——两次把 CI
+弄红都源于我在没有 Windows/wine 的机器上写 Windows 侧脚本，其中一次测的
+根本不是我以为的东西（msys 把 guest 路径 `/busybox` 改写成宿主路径，
+造出一个纯自伤的假失败）。
+
+```text
+TODO-PLAN
+├── W1 F8 后台生命周期的 Windows 端到端门禁   [Windows agent]
+├── W2 F8.4 exec 的 Windows 可行性取证        [Windows agent]
+└── L1 F8.4 exec 的 Linux 侧实现              [Linux agent，进行中]
+```
+
+### W1 F8 后台生命周期的 Windows 端到端门禁 `[Windows agent]`
+
+**背景**。F8.1–F8.3（`ps` / `--detach`+`logs` / `stop`+`rm`）已实现，端到端
+门禁 P.1–P.18 **只在 Linux 跑**。Windows 侧只有两处平台相关实现有单测在
+windows runner 上真跑：锁语义（`lock_reflects_owner_liveness`）与进程终止
+（`terminate_actually_kills`）。完整的 `--detach → ps → logs → stop` 链路在
+Windows 上没有逐条验证过。
+
+**现状**。`scripts/test-windows-product.ps1` 里已加了 WP.6/WP.7 草稿
+（detach → ps → logs → rm）。**那段 PowerShell 是在没有 pwsh 的 Linux 机器上
+写的，只做过括号/引号平衡与逐行对照，未经真实执行。** 若它在 CI 里报错，
+优先怀疑脚本本身而不是产品代码。
+
+**要判定的真问题**（脚本对不对是次要的，这几条才是）：
+
+1. `--detach` 在 Windows 上到底成不成立。父进程 `spawn` 后立即退出，
+   supervisor 靠什么活下来？Linux 用 `setsid` 脱离会话，
+   `detach_from_terminal` 在非 Linux 上是**空实现**——理由是"stdio 已重定向到
+   文件、父进程不等待，控制台关闭不波及子进程"。这条推理**没有在真机上验证过**。
+   若控制台关闭会带走 supervisor，需要 `DETACHED_PROCESS` 或
+   `CREATE_NEW_PROCESS_GROUP`。
+2. supervisor 持有的 Job（`KILL_ON_JOB_CLOSE`）在父进程退出后是否仍绑着容器树。
+3. `stop` 走 `OpenProcess + TerminateProcess` 终止 supervisor 后，Job 是否
+   如期收走整棵树（Linux 侧由 P.15 用"3 个孙进程 → 0"验证，Windows 需等价断言）。
+
+**做完的标准**：Windows 上有等价于 P.9–P.18 的断言且真实通过；若某条在
+Windows 上语义不同，在 F8.d 里写明差异而不是让门禁将就。
+
+### W2 F8.4 `exec` 的 Windows 可行性取证 `[Windows agent]`
+
+**问题**。Linux 可 `setns` 进已有 namespace；Windows **没有"进入已有容器"的
+原语**。可行的近似是：用同一 AppContainer profile SID + 加入同一个 Job 另起
+一个进程。
+
+**需要取证的点**：
+
+1. 能否用容器名拿到那个 Job（Job 可命名，`OpenJobObjectW`）并
+   `AssignProcessToJobObject` 把新进程塞进去。
+2. 新进程用同一 profile SID 起来后，看到的文件系统/网络视角与原容器是否一致。
+   wbox 本就不做文件系统虚拟化，**两者差异可能比听上去小——但这是假设不是结论**。
+3. 资源限额是否自然继承（同 Job 即同限额）。
+
+**做完的标准**：给出"可以对齐 / 只能部分对齐 / 无法对齐"的结论与依据。
+**不可行就如实记为两侧不对齐**，不要为了凑齐而造一个语义不同的 `exec`。
+
+### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]`
+
+**前置缺口**（已识别，尚未修）：`meta.json` 目前只记 **supervisor 的 pid**，
+而 supervisor **留在宿主 namespace 里**，真正进了容器 namespace 的是 guest。
+`setns` 需要的是 **guest 的 pid**，因此得先把它记进状态目录。
+
+**路线**：记录 guest pid → 打开 `/proc/<guest>/ns/{user,mnt,pid,net}` →
+`setns`（**user 必须最先**，否则后续 setns 缺权限）→ fork（PID namespace 只对
+之后创建的子进程生效）→ exec。
+
+**判据**：`exec` 进去看到的 PID 视图、挂载视图、网络视角与容器内一致；
+容器已退出时明确报错而不是进到一个空壳。
 
 ## 5. 非功能需求
 
