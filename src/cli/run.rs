@@ -409,6 +409,12 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
     }
 }
 
+fn ensure_image_defaults(env: &mut Vec<(String, String)>) {
+    if !env.iter().any(|(k, _)| k.eq_ignore_ascii_case("HOME")) {
+        env.push(("HOME".to_string(), "/root".to_string()));
+    }
+}
+
 /// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
 fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     let dir = oci::image_dir(&iref)?;
@@ -430,6 +436,9 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         None => (opts.cmd.clone(), Vec::new()),
     };
     env.extend(opts.env.iter().cloned());
+    // Docker/Podman 会为默认 root 用户提供 HOME；不能继承宿主 HOME（会泄露
+    // Windows 路径），也不能让 Fedora 的 dnf 等基础工具在无 HOME 时崩溃。
+    ensure_image_defaults(&mut env);
     if merged.is_empty() {
         return Err(WboxError::args(format!(
             "镜像 '{}' 未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
@@ -622,6 +631,17 @@ mod tests {
         assert!(built.iter().any(|(k, v)| k == "PATH" && v == "/cli"));
         assert!(built.iter().any(|(k, v)| k == "KEEP" && v == "ok"));
         assert!(built.iter().any(|(k, v)| k == "NEW" && v == "yes"));
+    }
+
+    #[test]
+    fn image_home_default_does_not_override_explicit_value() {
+        let mut env = Vec::<(String, String)>::new();
+        ensure_image_defaults(&mut env);
+        assert_eq!(env, vec![("HOME".to_string(), "/root".to_string())]);
+
+        let mut env = vec![("HOME".to_string(), "/workspace".to_string())];
+        ensure_image_defaults(&mut env);
+        assert_eq!(env, vec![("HOME".to_string(), "/workspace".to_string())]);
     }
 
     #[test]

@@ -458,6 +458,10 @@ struct SymlinkState {
 }
 
 impl SymlinkState {
+    fn remove_exact(&mut self, rel: &Path) {
+        self.links.remove(rel);
+    }
+
     fn remove_at_or_below(&mut self, rel: &Path) {
         self.links
             .retain(|link, _| link != rel && !link.starts_with(rel));
@@ -816,8 +820,13 @@ fn unpack_layer_with_state(
             continue;
         }
 
-        // 普通条目：解包到解析后的路径（覆盖已存在文件）
-        symlinks.remove_at_or_below(&path);
+        // 目录头只确保目录存在，不会删除目录原有内容；因此只能替换同路径的
+        // 逻辑链接，不能清掉前层留在该目录下的链接。普通文件才覆盖整棵同名路径。
+        if entry_type == tar::EntryType::Directory {
+            symlinks.remove_exact(&path);
+        } else {
+            symlinks.remove_at_or_below(&path);
+        }
         let out = parent_abs.join(&file_name);
         if let Some(p) = out.parent() {
             std::fs::create_dir_all(p)?;
@@ -1282,6 +1291,46 @@ mod tests {
             "后续层创建目标后必须恢复链接语义"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn later_directory_header_preserves_child_symlink_chain() {
+        let dir = tmpdir("symlink-dir-header");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let mut symlinks = SymlinkState::default();
+
+        let first = make_tar_with_symlinks(
+            &[("usr/local/bin/python3.12", b"python" as &[u8])],
+            &[("usr/local/bin/python3", "python3.12")],
+        );
+        unpack_layer_with_state(&first, &rootfs, "", &mut symlinks).unwrap();
+
+        let mut second = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut second);
+            let mut dir_header = tar::Header::new_gnu();
+            dir_header.set_entry_type(tar::EntryType::Directory);
+            dir_header.set_mode(0o755);
+            dir_header.set_size(0);
+            dir_header.set_cksum();
+            b.append_data(&mut dir_header, "usr/local/bin/", &[][..]).unwrap();
+
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_mode(0o777);
+            link_header.set_size(0);
+            link_header.set_cksum();
+            b.append_link(&mut link_header, "usr/local/bin/python", "python3")
+                .unwrap();
+            b.finish().unwrap();
+        }
+        unpack_layer_with_state(&second, &rootfs, "", &mut symlinks).unwrap();
+        finalize_symlinks(&rootfs, &symlinks).unwrap();
+
+        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python3")).unwrap(), b"python");
+        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python")).unwrap(), b"python");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
