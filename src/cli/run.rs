@@ -455,6 +455,7 @@ pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
                 exec_context: crate::runstate::ExecContext {
                     allow_network: opts.allow_network,
                     workdir: workdir.to_string_lossy().into_owned(),
+                    ..Default::default()
                 },
             })
         }
@@ -484,6 +485,7 @@ pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
                         .clone()
                         .or_else(|| config.and_then(|value| value.working_dir))
                         .unwrap_or_else(|| "/".to_string()),
+                    ..Default::default()
                 },
             })
         }
@@ -706,6 +708,25 @@ fn register_for_spawn(
     let exec_context = crate::runstate::ExecContext {
         allow_network: spec.allow_network,
         workdir: spec.workdir.to_string_lossy().into_owned(),
+        // 记下来供 `inspect` 如实报出（此前 Mounts 是写死的空数组）。
+        // 用与用户在命令行上写的一致的形式，看到就知道对应哪个 -v/-p。
+        volumes: spec
+            .volumes
+            .iter()
+            .map(|v| {
+                format!(
+                    "{}:{}{}",
+                    v.host.display(),
+                    v.guest,
+                    if v.read_only { ":ro" } else { "" }
+                )
+            })
+            .collect(),
+        ports: spec
+            .ports
+            .iter()
+            .map(|p| format!("{}:{}", p.host, p.guest))
+            .collect(),
     };
     let reservation = std::env::var(SUPERVISED_TOKEN_ENV).ok();
     let mut reg = crate::runstate::register_with_context(

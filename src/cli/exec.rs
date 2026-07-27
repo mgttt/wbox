@@ -330,6 +330,7 @@ mod tests {
             Some(runstate::ExecContext {
                 allow_network: false,
                 workdir: std::env::temp_dir().to_string_lossy().into_owned(),
+                ..Default::default()
             }),
             None,
         )

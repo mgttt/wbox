@@ -176,6 +176,7 @@ wbox
 | 多容器名一致性 | 有 | F9.30：`stop`/`pause`/`unpause` 也收多个名字（此前只有它们收一个，而 `kill`/`rm`/`start` 早就收多个）（门禁 RMF.6–RMF.7）|
 | `images -q` / `rmi` 多引用 | 有 | F9.31：**并修掉 IMAGE 列印缓存目录名、照抄去 rmi 用不了的缺陷**；补齐 `wbox rmi $(wbox images -q)`（门禁 IMQ.1–IMQ.3）|
 | 暂停状态可见 | 有 | F9.32：**修掉 `Paused` 写死 false、`ps` 把暂停容器显示成 running 的缺陷**；状态从 `/proc` 实测（门禁 PZ.4–PZ.5）|
+| `inspect` 的挂载与端口 | 有 | F9.33：**修掉 `Mounts` 写死 `[]`、端口根本不出现的缺陷**；`.Mounts`/`.HostConfig.PortBindings` 如实反映 `-v`/`-p`（门禁 INS.1–INS.3）|
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
@@ -232,7 +233,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.32 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.33 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
@@ -909,7 +910,8 @@ F9
 ├── F9.29 `ps -q` / `rm -f`                  —— [done]（门禁 RMF.1–RMF.5）
 ├── F9.30 多容器名一致性与错误信息收敛      —— [done]（门禁 RMF.6–RMF.7）
 ├── F9.31 `images -q` / `rmi` 多引用        —— [done]（门禁 IMQ.1–IMQ.3）
-└── F9.32 暂停状态可见（ps / inspect）      —— [done]（仅 Linux，门禁 PZ.4–PZ.5）
+├── F9.32 暂停状态可见（ps / inspect）      —— [done]（仅 Linux，门禁 PZ.4–PZ.5）
+└── F9.33 inspect 如实反映挂载与端口       —— [done]（门禁 INS.1–INS.3）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1041,6 +1043,26 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.33 `inspect` 如实反映挂载与端口** `[done]`（门禁 INS.1–INS.3）。
+
+与 F9.32 同一类缺陷，同一个手法找到的：容器**明明挂着卷、发布着端口**
+（`mount | grep /mnt/data` 数得到，端口也确实在转发），`wbox inspect` 却报
+`"Mounts": []`，端口信息则根本不出现。给一个恒空的字段比不给更糟——docker 用户会
+拿 `.Mounts` 和 `.HostConfig.PortBindings` 去写脚本。
+
+修法是让状态记录里**真的存着这两样**：`ExecContext` 加 `volumes`/`ports`，在登记
+容器时从 `RunSpec` 填入（形式与用户在命令行上写的一致，看到就知道对应哪个
+`-v`/`-p`）。`inspect` 从这里生成 docker 形状的 `Mounts` 与 `PortBindings`。
+`-p` 只支持 TCP（F9.2），所以键写死 `80/tcp` 是**如实**而非偷懒。
+
+**新字段缺失必须按空处理，不能用 `?`**：状态目录里可能躺着上一版 wbox 写的
+`meta.json`，用 `?` 会让 `exec_context` 整个解析失败，那些容器会从 `ps` 里
+**整个消失**。单测直接构造旧格式记录钉住这条。
+
+门禁先确认容器**真的**挂上了（`mount | grep -c`），再比对 `inspect` 的输出——
+否则比的是两个都为空的东西，什么也证明不了；INS.3 反向验没挂卷时如实为空，
+免得修完变成凭空造条目。
 
 **F9.32 暂停状态可见** `[done]`（仅 Linux，门禁 PZ.4–PZ.5）。
 

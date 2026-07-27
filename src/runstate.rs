@@ -79,10 +79,17 @@ pub struct Entry {
     pub exec_context: Option<ExecContext>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecContext {
     pub allow_network: bool,
     pub workdir: String,
+    /// `-v` 卷挂载，形如 `host:guest` / `host:guest:ro`。
+    ///
+    /// 记它是为了 `inspect` 能如实报出 `Mounts`——此前那个字段是写死的 `[]`，
+    /// 容器明明挂着卷，`inspect` 却说没有。docker 用户会读 `.Mounts`。
+    pub volumes: Vec<String>,
+    /// `-p` 端口映射，形如 `host:guest`（仅 TCP）。同上，供 `inspect` 如实报出。
+    pub ports: Vec<String>,
 }
 
 impl Entry {
@@ -91,6 +98,8 @@ impl Entry {
             serde_json::json!({
                 "allow_network": context.allow_network,
                 "workdir": context.workdir,
+                "volumes": context.volumes,
+                "ports": context.ports,
             })
         });
         let v = serde_json::json!({
@@ -113,9 +122,25 @@ impl Entry {
             if context.is_null() {
                 return None;
             }
+            // volumes/ports 是后加的字段：**缺失按空处理，不能让整条记录读不出来**。
+            // 状态目录里可能躺着上一版 wbox 写的 meta.json，用 `?` 会让那些容器
+            // 从 `ps` 里整个消失。
+            let strings = |key: &str| -> Vec<String> {
+                context
+                    .get(key)
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
             Some(ExecContext {
                 allow_network: context.get("allow_network")?.as_bool()?,
                 workdir: context.get("workdir")?.as_str()?.to_string(),
+                volumes: strings("volumes"),
+                ports: strings("ports"),
             })
         });
         Some(Entry {
@@ -1291,6 +1316,8 @@ mod tests {
             exec_context: Some(ExecContext {
                 allow_network: true,
                 workdir: "/work".into(),
+                volumes: vec!["/h:/g:ro".into()],
+                ports: vec!["8080:80".into()],
             }),
         };
         let encoded = e.to_json();
@@ -1298,6 +1325,23 @@ mod tests {
         assert!(!encoded.contains("env"), "状态不应包含环境或凭证字段");
         assert!(Entry::from_json("{}").is_none());
         assert!(Entry::from_json("nonsense").is_none());
+    }
+
+    /// 后加的 `volumes`/`ports` 字段缺失时，整条记录仍要读得出来。
+    /// 用 `?` 取这两个字段的话，上一版 wbox 写的容器会从 `ps` 里整个消失。
+    #[test]
+    fn exec_context_without_the_newer_fields_still_parses() {
+        let text = serde_json::json!({
+            "name": "old", "pid": 7, "created_unix": 1, "cmd": ["x"], "target": "t",
+            "exec_context": { "allow_network": true, "workdir": "/w" },
+        })
+        .to_string();
+        let e = Entry::from_json(&text).expect("旧格式的 exec_context 必须仍可解析");
+        let ctx = e.exec_context.expect("exec_context 本身不该丢");
+        assert!(ctx.allow_network);
+        assert_eq!(ctx.workdir, "/w");
+        assert!(ctx.volumes.is_empty(), "缺失按空处理");
+        assert!(ctx.ports.is_empty());
     }
 
     #[test]

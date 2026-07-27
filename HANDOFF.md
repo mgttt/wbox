@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.32 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.33 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -63,6 +63,7 @@ F9.1–F9.32 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.30 多容器名一致性 | RMF.6–RMF.7 | `stop`/`pause`/`unpause` 也收多个名字；单个容器失败时返回原始错误而非无信息量的汇总；共用措辞里不塞调用方专属动词 |
 | F9.31 `images -q`/`rmi` 多引用 | IMQ.1–IMQ.3 | 修掉 IMAGE 列印缓存目录名（照抄去 rmi 用不了）；还原引用后**往返校验**才采用；枚举从打印里拆出成 `oci::list_refs` |
 | F9.32 暂停状态可见 | PZ.4–PZ.5 | 修掉 `inspect` 的 `Paused` 写死 false、`ps` 把暂停容器显示成 running；状态从 `/proc` 的 `T` 实测而不是记账（账会过期） |
+| F9.33 inspect 的挂载与端口 | INS.1–INS.3 | 修掉 `Mounts` 写死 `[]`、端口不出现；`ExecContext` 加 `volumes`/`ports`，新字段缺失按空处理（用 `?` 会让旧记录整条读不出来） |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -115,16 +116,22 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 最近两轮的缺陷都是同一类，且都不是「功能没做」，而是「做了，但输出/状态是假的」：
 
 - `wbox images` 印的镜像名喂不回给 `rmi`（F9.31）；
-- `wbox pause` 真停住了，但 `ps` 说 running、`inspect` 的 `Paused` 写死 false（F9.32）。
+- `wbox pause` 真停住了，但 `ps` 说 running、`inspect` 的 `Paused` 写死 false（F9.32）；
+- 容器明明挂着卷、发布着端口，`inspect` 的 `Mounts` 写死 `[]`、端口根本不出现（F9.33）。
 
 手法很简单，值得固定下来：**凡是命令打印出来的标识符，实测能不能喂回给别的命令；
-凡是结构化输出里的状态字段，实测能不能变**。两条都不看代码，只看真实行为——
-写死 false 的字段在代码里看着毫不起眼，一跑就露馅。
+凡是结构化输出里的字段，实测它能不能随真实状态变**。两条都不看代码，只看真实行为——
+写死的字面量在代码里看着毫不起眼（`"Paused": false`、`"Mounts": []` 谁都会一眼扫过），
+一跑就露馅。
+
+配套的一条：**比对前先确认"真实那一侧"非空**。拿 inspect 的 Mounts 去比对时，
+要先 `mount | grep -c` 确认容器真挂上了，否则比的是两个都为空的东西，什么也证明不了。
+再补一条反向用例（没挂卷时如实为空），免得修完变成凭空造条目。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **399 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **196 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **401 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **199 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -136,7 +143,7 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.32）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.33）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

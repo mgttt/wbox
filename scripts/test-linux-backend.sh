@@ -2050,6 +2050,48 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== INS inspect 如实反映挂载与端口（PRD F9.33）==="
+
+# 判据是**inspect 说的和容器实际有的一致**。此前 Mounts 写死 []、端口根本没出现，
+# 容器明明挂着卷、发布着端口，inspect 却说没有——给一个恒空的字段比不给更糟，
+# docker 用户会拿 .Mounts / .HostConfig.PortBindings 去写脚本。
+INSH=$WORK/inshome
+rm -rf "$INSH" && mkdir -p "$INSH" "$WORK/insdata"
+HOME=$INSH "$WBOX_ABS" run -d --name insc -v "$WORK/insdata:/mnt/data:ro" -p 18099:80 \
+  -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+
+# 先确认容器**真的**挂上了——不然下面比对的是两个都为空的东西
+insreal=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'mount | grep -c /mnt/data' 2>&1 | tail -1)
+insj=$(HOME=$INSH "$WBOX_ABS" inspect insc 2>&1)
+if [ "$insreal" = "1" ] \
+   && printf '%s' "$insj" | grep -q '"Destination": "/mnt/data"' \
+   && printf '%s' "$insj" | grep -q '"RW": false'; then
+  report PASS "INS.1 inspect 的 Mounts 反映真实挂载（含 :ro）"
+else
+  report FAIL "INS.1 Mounts" "容器内挂载数=$insreal Mounts 段: $(printf '%s' "$insj" | grep -A6 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+fi
+
+if printf '%s' "$insj" | grep -q '"80/tcp"' && printf '%s' "$insj" | grep -q '"HostPort": "18099"'; then
+  report PASS "INS.2 inspect 的 PortBindings 反映 -p 发布的端口"
+else
+  report FAIL "INS.2 PortBindings" "$(printf '%s' "$insj" | grep -A5 PortBindings | tr '\n' ' ' | head -c 160)"
+fi
+
+# 没挂卷的容器要如实是空，不能反过来凭空造出条目
+HOME=$INSH "$WBOX_ABS" run -d --name insplain -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+insj=$(HOME=$INSH "$WBOX_ABS" inspect insplain 2>&1)
+if printf '%s' "$insj" | grep -q '"Mounts": \[\]'; then
+  report PASS "INS.3 没挂卷的容器 Mounts 如实为空"
+else
+  report FAIL "INS.3 空 Mounts" "$(printf '%s' "$insj" | grep -A4 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+fi
+
+HOME=$INSH "$WBOX_ABS" rm -f $(HOME=$INSH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+rm -rf "$INSH" "$WORK/insdata"
+
+echo
 echo "=== IMQ images -q / rmi 多引用（PRD F9.31）==="
 
 # 判据是**列出来的名字喂得回去**。此前 IMAGE 列印的是缓存目录名
