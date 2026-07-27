@@ -517,7 +517,36 @@ fn purge_dir(dir: &Path) {
     // `..`），因此必定落在状态根目录之下；guest 无法把它指到别处。
     // Windows 上还要求先关掉 owner 锁句柄，否则文件仍被占用——`Drop` 已经
     // 先 `drop(lock)` 再调本函数。
+    #[cfg(unix)]
+    make_tree_owner_accessible(dir);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+fn make_tree_owner_accessible(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() {
+        return;
+    }
+
+    let required = if metadata.is_dir() { 0o700 } else { 0o600 };
+    let mode = metadata.permissions().mode();
+    if mode & required != required {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | required));
+    }
+    if !metadata.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        make_tree_owner_accessible(&entry.path());
+    }
 }
 
 impl Drop for Registration {
@@ -962,6 +991,31 @@ mod tests {
         };
         assert!(!dir.exists(), "drop 后状态目录应已删除：{}", dir.display());
         assert!(list().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn purge_restores_owner_access_without_following_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let _home = TempHome::new("purge-permissions");
+        let dir = dir_for("locked-tree").unwrap();
+        let locked = dir.join("layer/work/work");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("index"), b"x").unwrap();
+
+        let outside = dir.parent().unwrap().join("outside-canary");
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(&outside, locked.join("outside-link")).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        purge_dir(&dir);
+        assert!(!dir.exists(), "不可遍历的 overlay work 树也必须删掉");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"keep",
+            "清理不能跟随状态树内 symlink"
+        );
     }
 
     /// 同名且存活 → 必须报错，不能覆盖（PRD F8.c）。
