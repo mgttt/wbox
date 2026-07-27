@@ -259,10 +259,25 @@ wbox-linux: fatal host exception 0xc0000005 (read) at rip=…
 guest rip=0x4038b1 in /busybox   fault address FFFFFFFFFFFFFFFF
 ```
 
-这不是新引入的回归，是一直存在、直到有门禁才暴露的缺陷。为定位崩在
-**模拟器的 prefix 路径**还是**AppContainer 降权**，矩阵新增 G 组：裸跑
-`wbox-linux.exe` + `BLINK_PREFIX`，与 WP.3 只差一层沙箱，两边对照即可判定，
-不必靠猜。G 组本身也永久补上了这块覆盖。
+这不是新引入的回归，是一直存在、直到有门禁才暴露的缺陷。
+
+**定位结论（2026-07-27，矩阵 G 组实测）**：矩阵新增 G 组裸跑
+`wbox-linux.exe` + `BLINK_PREFIX`，与 WP.3 只差一层 AppContainer。真 Windows
+上 **G1/G2/G3 全部通过**——guest 绝对路径执行、换根隔离、退出码转发都正常
+（G2 起初因 `ls` 多收到一个 `/SystemRoot` 参数而假失败，改为直接断言
+rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` 输出）。因此：
+
+> **模拟器的 prefix 路径本身是好的，WP.3 的崩溃出在 AppContainer 这一层。**
+
+进一步的线索：崩溃报的 fault address `0xFFFFFFFFFFFFFFFF` 正是
+`INVALID_HANDLE_VALUE`。这强烈提示沙箱内某次 `CreateFileW` 等句柄获取失败
+（降权后不可达），**返回值未经检查**就被当作有效句柄继续用。查 Win32 shim
+里未检查 `INVALID_HANDLE_VALUE` 的调用点是下一步的首选方向。
+
+无论根因为何，这里都该有两层修复：拿不到句柄时**给出明确错误而不是崩**，
+以及让沙箱内真正拿得到它需要的东西。
+
+G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
 
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
