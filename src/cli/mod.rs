@@ -21,8 +21,11 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
 用法:
   wbox run [OPTIONS] -- <CMD> [ARGS...]            运行本机程序（Win: AppContainer+Job；Linux: namespace+cgroup）
   wbox run [OPTIONS] <IMAGE> [-- <CMD> [ARGS...]]  运行已 pull 的 OCI 镜像（Win: 经模拟器；Linux: 原生 namespace）
+  wbox pull <REF> [image pull 选项]                 `wbox image pull` 的兼容别名
+  wbox images                                      `wbox image list` 的兼容别名
+  wbox rmi <REF> [--yes]                           `wbox image rm` 的兼容别名
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
-  wbox image list
+  wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image rm <REF> [--yes]                      删除已 pull 镜像的本地缓存（默认交互确认）
   wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
@@ -35,12 +38,15 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   --memory <MB>     每进程内存上限（MB），0 = 不限，默认 0
   --cpu-pct <N>     CPU 硬性百分比上限 1-100（Job CPU rate control），默认 0 = 不限
   --max-procs <N>   最大进程数，默认 0 = 不限
+  -w, --workdir <DIR>
+                     容器工作目录（"镜像根"），默认当前目录（仅原生模式）
+  --network <MODE>  兼容模式：none = 默认断网；host = 等价 --allow-network
   --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
   --no-network      显式声明断网（默认行为，预留）
-  --workdir <DIR>   容器工作目录（"镜像根"），默认当前目录（仅原生模式）
+  -e, --env <K=V>   注入显式环境变量；可重复；不支持仅写 K 继承宿主值
   --keep-profile    退出后保留 AppContainer profile（默认删除）
   --rm              显式声明退出即清理（默认行为，docker 习惯写法；仅 run）
-  --interactive     连接 stdio（当前默认且唯一支持的模式；--detach 预留）
+  --interactive     连接 stdio（默认）
   --pull            run 目标为镜像时，本地无缓存则先 pull
   --env-pass-all    继承完整宿主环境（默认仅白名单；BLINK_*/WBOX_* 保留键始终不透传）
   -V, --verbose     打印隔离配置摘要
@@ -50,6 +56,10 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   视为镜像目标：自动按 docker 规则合并 config.json 的 Entrypoint/Cmd，
   注入 Env，rootfs 作为工作目录。镜像经 wbox-linux（blink 移植，开发中）
   模拟执行，未就绪时会得到明确错误。
+
+兼容范围:
+  仅兼容上述可兑现的运行习惯；不支持端口发布、volume/bind、daemon API、
+  Compose、pod 或远程上下文，传入未实现选项会明确报错。
 
 示例:
   wbox run --memory 256 --cpu-pct 50 -- cmd.exe /c echo hello
@@ -62,6 +72,9 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
 pub fn dispatch(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("run") => run::cmd_run(&args[1..]),
+        Some("pull") => image::cmd_image_pull(&args[1..]),
+        Some("images") => image::cmd_image_list(&args[1..]),
+        Some("rmi") => image::cmd_image_rm(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
         Some("ps") => ps::cmd_ps(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
@@ -163,6 +176,14 @@ mod tests {
         assert_eq!(dispatch(&["--help".to_string()]).unwrap(), 0);
     }
 
+    #[test]
+    fn dispatch_docker_style_image_aliases() {
+        let _home = TempHome::new("dispatch-aliases");
+        assert_eq!(dispatch(&["images".to_string()]).unwrap(), 0);
+        assert!(dispatch(&["images".to_string(), "--all".to_string()]).is_err());
+        assert!(dispatch(&["pull".to_string()]).is_err());
+        assert!(dispatch(&["rmi".to_string()]).is_err());
+    }
 
     // ---- 集成：临时 HOME 下的假缓存全链（list → show → run prepare）----
 

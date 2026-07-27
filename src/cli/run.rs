@@ -20,6 +20,8 @@ pub struct RunOptions {
     pub pull: bool,
     /// 继承完整宿主环境（默认仅白名单；保留键始终不透传）
     pub env_pass_all: bool,
+    /// `-e/--env KEY=VALUE` 显式注入；后出现的同名键覆盖镜像 Env。
+    pub env: Vec<(String, String)>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -38,6 +40,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         verbose: false,
         pull: false,
         env_pass_all: false,
+        env: Vec::new(),
         positional: None,
         cmd: Vec::new(),
     };
@@ -74,17 +77,55 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             }
             "--allow-network" => opts.allow_network = true,
             "--no-network" => opts.allow_network = false, // 显式默认，预留
+            "--network" => {
+                let mode = super::args::take_value(args, &mut i, "--network")?;
+                opts.allow_network = match mode.as_str() {
+                    "none" => false,
+                    "host" => true,
+                    _ => {
+                        return Err(WboxError::args(format!(
+                            "--network 仅支持 none 或 host，得到 '{}'",
+                            mode
+                        )));
+                    }
+                };
+            }
             "--keep-profile" => opts.keep_profile = true,
             // docker 风格显式清理：v1 默认即为退出即删（profile RAII 删除 +
             // Job KILL_ON_JOB_CLOSE），接受并等价于默认（与 --no-network 同为显式默认）。
             "--rm" => opts.keep_profile = false,
-            "--interactive" => {} // v1 唯一支持的模式，接受并忽略
+            "--interactive" => {} // 连接 stdio（默认）
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
-            "--workdir" => {
-                opts.workdir = Some(super::args::take_value(args, &mut i, "--workdir")?);
+            "-e" | "--env" => {
+                let raw = super::args::take_value(args, &mut i, a)?;
+                let (key, value) = raw.split_once('=').ok_or_else(|| {
+                    WboxError::args(format!(
+                        "{} 仅支持 KEY=VALUE，不支持从宿主隐式继承：'{}'",
+                        a, raw
+                    ))
+                })?;
+                if key.is_empty() || key.contains('=') {
+                    return Err(WboxError::args(format!("环境变量名非法：'{}'", key)));
+                }
+                if backend::env::is_reserved_key(key) {
+                    return Err(WboxError::args(format!(
+                        "环境变量 '{}' 为 wbox 隔离/凭证保留键，不能注入",
+                        key
+                    )));
+                }
+                opts.env.push((key.to_string(), value.to_string()));
+            }
+            "-w" | "--workdir" => {
+                opts.workdir = Some(super::args::take_value(args, &mut i, a)?);
             }
             "-V" | "--verbose" => opts.verbose = true,
+            "-p" | "--publish" | "-P" | "-v" | "--volume" | "--mount" => {
+                return Err(WboxError::args(format!(
+                    "选项 '{}' 不支持：wbox 当前不实现端口发布或 volume/bind mount",
+                    a
+                )));
+            }
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!("未知选项 '{}'", other)));
             }
@@ -183,7 +224,7 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
         None => std::env::current_dir()
             .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
-    let spec = make_spec(opts, workdir, cmd, Vec::new());
+    let spec = make_spec(opts, workdir, cmd, opts.env.clone());
     match backend::host_program_backend_kind() {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
@@ -217,10 +258,11 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     // 消费 image config：Env 注入、Entrypoint/Cmd 按 docker 规则合并、
     // WorkingDir 记录（guest 路径映射由 wbox-linux 侧落地，当前仅展示）。
     let img_cfg = oci::config::ImageConfig::load(&dir)?;
-    let (merged, env) = match &img_cfg {
+    let (merged, mut env) = match &img_cfg {
         Some(c) => (c.merged_command(&opts.cmd), c.env.clone()),
         None => (opts.cmd.clone(), Vec::new()),
     };
+    env.extend(opts.env.iter().cloned());
     if merged.is_empty() {
         return Err(WboxError::args(format!(
             "镜像 '{}' 未声明 Entrypoint/Cmd，请在 `--` 后显式给出要执行的命令",
@@ -314,6 +356,21 @@ mod tests {
         assert!(parse(&["--bogus", "--", "x"]).is_err());
     }
 
+    #[test]
+    fn parse_rejects_unimplemented_docker_capabilities() {
+        for args in [
+            &["-p", "8080:80", "alpine"][..],
+            &["--publish", "8080:80", "alpine"][..],
+            &["-P", "alpine"][..],
+            &["-v", "/host:/guest", "alpine"][..],
+            &["--volume", "/host:/guest", "alpine"][..],
+            &["--mount", "type=bind,src=/host,dst=/guest", "alpine"][..],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert!(format!("{}", err).contains("不支持"), "{:?}: {}", args, err);
+        }
+    }
+
     // ---- 目标判别后的命令组装（Native 分支）----
 
     #[test]
@@ -340,6 +397,52 @@ mod tests {
         // --no-network 显式回退默认
         let o = parse(&["--allow-network", "--no-network", "--", "x"]).unwrap();
         assert!(!o.allow_network);
+    }
+
+    #[test]
+    fn parse_docker_workdir_and_network_aliases() {
+        let o = parse(&["-w", "/app", "--network", "host", "--", "x"]).unwrap();
+        assert_eq!(o.workdir.as_deref(), Some("/app"));
+        assert!(o.allow_network);
+
+        let o = parse(&["--allow-network", "--network", "none", "--", "x"]).unwrap();
+        assert!(!o.allow_network);
+        assert!(parse(&["--network", "bridge", "--", "x"]).is_err());
+        assert!(parse(&["--network"]).is_err());
+    }
+
+    #[test]
+    fn parse_explicit_env_compatibility_subset() {
+        let o = parse(&[
+            "-e", "FOO=one", "--env", "EMPTY=", "-e", "FOO=two", "--", "x",
+        ])
+        .unwrap();
+        assert_eq!(
+            o.env,
+            vec![
+                ("FOO".to_string(), "one".to_string()),
+                ("EMPTY".to_string(), String::new()),
+                ("FOO".to_string(), "two".to_string())
+            ]
+        );
+        assert!(parse(&["-e", "HOST_ONLY", "--", "x"]).is_err());
+        assert!(parse(&["--env", "=value", "--", "x"]).is_err());
+        assert!(parse(&["-e", "WBOX_REGISTRY_PASS=secret", "--", "x"]).is_err());
+    }
+
+    #[test]
+    fn cli_env_follows_image_env_for_override_precedence() {
+        let opts = parse(&["-e", "PATH=/cli", "-e", "NEW=yes", "fake"]).unwrap();
+        let mut env = vec![
+            ("PATH".to_string(), "/image".to_string()),
+            ("KEEP".to_string(), "ok".to_string()),
+        ];
+        env.extend(opts.env.iter().cloned());
+        let built =
+            backend::env::build_child_env(&env, &[], false, backend::env::GuestFlavor::Linux);
+        assert!(built.iter().any(|(k, v)| k == "PATH" && v == "/cli"));
+        assert!(built.iter().any(|(k, v)| k == "KEEP" && v == "ok"));
+        assert!(built.iter().any(|(k, v)| k == "NEW" && v == "yes"));
     }
 
     #[test]

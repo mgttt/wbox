@@ -9,7 +9,7 @@ use std::io::BufRead;
 pub fn cmd_image(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("pull") => cmd_image_pull(&args[1..]),
-        Some("list") | Some("ls") => oci::list(),
+        Some("list") | Some("ls") => cmd_image_list(&args[1..]),
         Some("show") => cmd_image_show(&args[1..]),
         Some("rm") => cmd_image_rm(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
@@ -18,6 +18,17 @@ pub fn cmd_image(args: &[String]) -> Result<u32> {
         ))),
         None => Err(WboxError::args("image 缺少子命令（pull / list / show / rm）")),
     }
+}
+
+/// `wbox image list` / `image ls` / 顶级 `images` 的统一入口。
+pub(super) fn cmd_image_list(args: &[String]) -> Result<u32> {
+    if let Some(other) = args.first() {
+        return Err(WboxError::args(format!(
+            "image list 不支持参数 '{}'",
+            other
+        )));
+    }
+    oci::list()
 }
 
 /// 删除镜像的本地缓存目录（`rm` 的纯操作部分，与确认提示分离以便测试）。
@@ -39,7 +50,7 @@ fn remove_cached_image(iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
 /// `wbox image rm <REF> [--yes]`：删除已 pull 镜像的本地缓存。
 /// 保护性确认：默认在 stderr 提示并要求 stdin 输入 y/yes；
 /// `--yes`/`-y` 跳过确认（脚本场景）。用户取消返回 0（未删除任何内容）。
-fn cmd_image_rm(args: &[String]) -> Result<u32> {
+pub(super) fn cmd_image_rm(args: &[String]) -> Result<u32> {
     let mut yes = false;
     let mut positional: Vec<String> = Vec::new();
     for a in args {
@@ -152,7 +163,7 @@ pub(crate) fn cmd_image_show(args: &[String]) -> Result<u32> {
 }
 
 /// 解析并执行 `image pull <ref> [--os ..] [--arch ..] [--registry ..] [-V]`。
-fn cmd_image_pull(args: &[String]) -> Result<u32> {
+pub(super) fn cmd_image_pull(args: &[String]) -> Result<u32> {
     let mut image_ref: Option<String> = None;
     // 默认拉 linux/amd64：Windows 进程容器无法运行 Linux 二进制，
     // rootfs 主要用于工具链/资源文件提取与调试，故默认与宿主解耦。
@@ -208,6 +219,13 @@ mod tests {
         assert!(cmd_image_rm(&[]).is_err());
         assert!(cmd_image_rm(&["a".to_string(), "b".to_string()]).is_err());
         assert!(cmd_image_rm(&["--bogus".to_string(), "x".to_string()]).is_err());
+    }
+
+    #[test]
+    fn image_ls_alias_uses_strict_list_parser() {
+        let _home = TempHome::new("image-ls");
+        assert_eq!(cmd_image(&["ls".to_string()]).unwrap(), 0);
+        assert!(cmd_image(&["ls".to_string(), "--all".to_string()]).is_err());
     }
 
     #[test]
