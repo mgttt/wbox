@@ -74,7 +74,7 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/ro
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink hostname"
+APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink hostname rm"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -1114,6 +1114,20 @@ else
   report FAIL "OV.5 逃生口" "rc=$rc 缓存内=$([ -f "$CACHE/rootfs/legacy-way" ] && echo 有 || echo 无)"
 fi
 rm -f "$CACHE/rootfs/legacy-way" "$CACHE/rootfs/ov-probe"
+
+# OV.6 容器内**删除镜像自带的目录**必须成功，且不动到共享缓存。
+# 这条盯的是 rootless overlay 的 `userxattr`：不加它时 overlay 要写
+# trusted.overlay.* xattr 标记 opaque 目录，而那需要初始 userns 的
+# CAP_SYS_ADMIN——rootless 拿不到，于是 `rm -rf` 一个 lower 里的目录直接
+# EIO 失败。**删文件却是好的**，所以只测文件发现不了这个缺陷。
+mkdir -p "$CACHE/rootfs/ovdir" && echo x > "$CACHE/rootfs/ovdir/f"
+run lbetest -- /bin/sh -c 'rm -rf /ovdir && echo RMDIR_OK'
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q RMDIR_OK && [ -f "$CACHE/rootfs/ovdir/f" ]; then
+  report PASS "OV.6 容器内可删除镜像自带目录（userxattr 生效）且缓存不受影响"
+else
+  report FAIL "OV.6 删除镜像目录" "rc=$rc 输出=$(printf '%s' "$OUT"|head -c 80) 缓存仍在=$([ -f "$CACHE/rootfs/ovdir/f" ] && echo 是 || echo 否)"
+fi
+rm -rf "$CACHE/rootfs/ovdir"
 
 echo
 echo "=== PSH 镜像推送（PRD F9.13）==="

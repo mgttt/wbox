@@ -55,7 +55,7 @@ F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **344 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **125 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **126 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -186,6 +186,9 @@ L3 收割检查曾用 `sleep 2` 然后看一眼 → 机器一忙就偶发红。�
 - overlay 探测踩过同一形状的坑：**探测子进程必须写 uid_map**，光有 capability 不够
   （upper 的属主在未映射 ns 里是 overflow uid，过不了 overlayfs 属主校验）。
   手工 `unshare -Umr` 能过而进程内探测不过，差的就是 `-r` 那份映射。
+- rootless overlay **必须带 `userxattr`**：不带时删**文件**正常，删**目录**直接
+  `EIO`。只测文件的话这个缺陷完全看不出来——它在 F9.12 里潜伏了好几轮，
+  是做 L5b 可行性实验时才撞出来的。判据要覆盖"删目录"。
 
 ### 4.5 起了服务当夹具时，必须确认**是你自己**绑上了端口
 

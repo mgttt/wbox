@@ -585,7 +585,7 @@ fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
     }
     let (Ok(opts), Ok(merged), Ok(ov), Ok(root), Ok(empty), Ok(p_sg), Ok(p_uid), Ok(p_gid)) = (
         cstr(&format!(
-            "lowerdir={0}/lower,upperdir={0}/upper,workdir={0}/work",
+            "userxattr,lowerdir={0}/lower,upperdir={0}/upper,workdir={0}/work",
             base.to_string_lossy()
         )),
         cstr(&base.join("merged").to_string_lossy()),
@@ -675,8 +675,13 @@ fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Op
         );
         return None;
     }
+    // `userxattr` 是 rootless overlay 的必需项（内核 5.11+）：不加的话
+    // overlay 要写 `trusted.overlay.*` xattr 来标记 opaque 目录，而那需要
+    // **初始 userns** 里的 CAP_SYS_ADMIN——rootless 拿不到。后果很具体：
+    // 容器里 `rm -rf` 一个镜像自带的目录会直接 EIO 失败（实测），
+    // 而删文件却是好的，所以不测目录就发现不了。
     let opts = cstr(&format!(
-        "lowerdir={},upperdir={}/upper,workdir={}/work",
+        "userxattr,lowerdir={},upperdir={}/upper,workdir={}/work",
         rootfs, layer, layer
     ))
     .ok()?;
