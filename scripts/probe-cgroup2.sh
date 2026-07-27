@@ -63,12 +63,20 @@ try "mkdir $BASE" sudo mkdir -p "$BASE"
 try "根 subtree_control += memory pids cpu" \
   sudo sh -c 'echo "+memory +pids +cpu" > /sys/fs/cgroup/cgroup.subtree_control'
 try "chown $BASE 给当前用户（模拟委派）" sudo chown -R "$(id -u):$(id -g)" "$BASE"
-echo "  $BASE 内可见文件：$(ls "$BASE" | tr '\n' ' ')"
+# 控制器必须**逐级**下发：子 cgroup 里出现 memory.max，前提是它的**父级**在
+# cgroup.subtree_control 里开了 memory。只开根的不够——首版探针漏了 $BASE
+# 这一级，结果 b/target 里只有 cpu.stat/*.pressure，没有任何 *.max，
+# 写入报 ENOENT，差点把"环境没搭对"误读成"布局 B 也不行"。
+try "\$BASE subtree_control += memory pids cpu" \
+  sh -c "echo '+memory +pids +cpu' > '$BASE/cgroup.subtree_control'"
+echo "  $BASE/cgroup.controllers     = $(cat "$BASE/cgroup.controllers" 2>/dev/null)"
+echo "  $BASE/cgroup.subtree_control = $(cat "$BASE/cgroup.subtree_control" 2>/dev/null)"
 
 # ---------------- 布局 A：wbox 当前做法 ----------------
 say "布局 A —— 进程与被限额的子 cgroup 同父（wbox 当前做法）"
 mkdir -p "$BASE/a" 2>/dev/null
 sudo chown -R "$(id -u):$(id -g)" "$BASE/a" 2>/dev/null
+echo "  $BASE/a/cgroup.controllers = $(cat "$BASE/a/cgroup.controllers" 2>/dev/null)"
 # 把一个**子进程**（不是本 shell，避免影响 CI runner 自身）挪进 $BASE/a
 sleep 300 &
 victim=$!
@@ -97,6 +105,7 @@ rmdir "$BASE/a/child" 2>/dev/null; rmdir "$BASE/a" 2>/dev/null
 say "布局 B —— 父级无进程，控制器下发给两个 leaf（runc/systemd 做法）"
 mkdir -p "$BASE/b" 2>/dev/null
 sudo chown -R "$(id -u):$(id -g)" "$BASE/b" 2>/dev/null
+echo "  $BASE/b/cgroup.controllers = $(cat "$BASE/b/cgroup.controllers" 2>/dev/null)"
 mkdir -p "$BASE/b/supervisor" "$BASE/b/target" 2>/dev/null
 if echo "+memory +pids +cpu" > "$BASE/b/cgroup.subtree_control" 2>/tmp/probe.err; then
   echo "  [ok]   无进程的父级可 enable subtree_control"
@@ -132,6 +141,13 @@ if [ ! -x "$WBOX" ]; then
 fi
 mkdir -p "$BASE/run" 2>/dev/null
 sudo chown -R "$(id -u):$(id -g)" "$BASE/run" 2>/dev/null
+# wbox 会在**自己所在的 cgroup**（这里是 run/）下建子目录写限额，
+# 故 run 自己必须能把控制器下发给子级。它此刻还没有进程，应当能开。
+if echo "+memory +pids +cpu" > "$BASE/run/cgroup.subtree_control" 2>/tmp/probe.err; then
+  echo "  [ok]   run/ 下发控制器成功（wbox 进去之前）"
+else
+  echo "  [FAIL] run/ 下发控制器失败 —— $(tr -d '\n' </tmp/probe.err)"
+fi
 # 在子 shell 里把自己挪进 $BASE/run 再 exec wbox —— 这样 wbox 的
 # /proc/self/cgroup 指向一个它有写权限的目录，正是 cgroup2_self_dir 要找的。
 out=$(bash -c "echo \$\$ > '$BASE/run/cgroup.procs' 2>/dev/null;
