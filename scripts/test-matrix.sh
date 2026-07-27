@@ -234,6 +234,55 @@ else
 fi
 
 echo
+echo "=== G. BLINK_PREFIX rootfs 路径（产品路径的模拟器侧）==="
+# 为什么单列一组：`wbox run <镜像>` 走的是 **BLINK_PREFIX=<rootfs>**，而
+# A–F 组全部**不设** BLINK_PREFIX（guest 的 / 直通宿主 /）。也就是说
+# README 首页宣传的"Windows 上跑 Linux OCI 镜像"这条路径，在这组加进来
+# 之前**没有任何自动化覆盖**——scripts/test-windows-product.ps1 的 WP.3
+# 是它第一次被真正执行，一执行就崩（0xc0000005）。
+#
+# 本组与 WP.3 只差一层 AppContainer：这里裸跑 wbox-linux.exe，WP.3 经
+# wbox.exe 在 AppContainer 内跑。两边结果对照即可判定崩溃出在**模拟器的
+# prefix 路径**还是**沙箱降权**，不必靠猜。
+PFX=$WORK/pfxroot
+mkdir -p "$PFX/dev" "$PFX/proc" "$PFX/etc"
+cp "$WORK/busybox" "$PFX/busybox"
+printf 'nameserver %s\n' "${WBOX_MATRIX_DNS:-223.5.5.5}" > "$PFX/etc/resolv.conf"
+
+# pbb <args...> —— 与 bb 同形，但设 BLINK_PREFIX 且以 guest 绝对路径调用
+pbb() {
+  OUT=$(BLINK_PREFIX="$PFX" "${TMO[@]}" "${RUN[@]}" "$WBOX_ABS" /busybox "$@" 2>&1)
+  rc=$?
+  [ "$rc" -eq 124 ] && OUT="（超时 ${MATRIX_TIMEOUT}s 被终止）$OUT"
+  OUT=$(printf '%s' "$OUT" | tr -d '\r')
+  OUT=$(printf '%s\n' "$OUT" | grep -v '^[IWEF][0-9]\{4\}.*:blink/.*Initializing VFS$')
+  return $rc
+}
+
+pbb echo PREFIX_OK; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -qF PREFIX_OK; then
+  report PASS "G1  BLINK_PREFIX 下执行 guest 绝对路径 /busybox"
+else
+  report FAIL "G1  BLINK_PREFIX 执行" "rc=$rc 输出: $(printf '%s' "$OUT" | head -c 300)"
+fi
+
+# 新根隔离：prefix 生效时 guest 的 / 应当只见 rootfs 内容，看不到宿主。
+# 这条同时是安全断言——prefix 没生效意味着 guest 能读遍整个宿主盘。
+pbb ls /; rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -qF busybox && ! printf '%s' "$OUT" | grep -qiE '^(Windows|Program Files|Users)$'; then
+  report PASS "G2  BLINK_PREFIX 换根生效（guest / 只见 rootfs）"
+else
+  report FAIL "G2  BLINK_PREFIX 换根" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 300)"
+fi
+
+pbb sh -c 'exit 7'; rc=$?
+if [ "$rc" -eq 7 ]; then
+  report PASS "G3  BLINK_PREFIX 下退出码转发 (7)"
+else
+  report FAIL "G3  BLINK_PREFIX 退出码" "rc=$rc（期望 7）"
+fi
+
+echo
 echo "=== F. guest C 回归套件（tests/run-guest-tests.sh）==="
 # 每个 t_* 测试二进制映射为一条 F 项。zig 可用则现场编译；
 # CI 真 Windows 无 zig 时设 WBOX_GUEST_PREBUILT=1 使用预编译产物（artifact 上传）。

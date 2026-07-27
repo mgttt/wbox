@@ -236,6 +236,22 @@ F4
 - glibc pthread/通用 clone 尚未支持。
 - ptrace 未支持。
 
+**F4.3 的覆盖缺口（2026-07-27 发现，未修复）**。`wbox run <镜像>` 走的是
+`BLINK_PREFIX=<rootfs>`，而 `scripts/test-matrix.sh` 的 A–F 组**全部不设**
+`BLINK_PREFIX`（guest 的 `/` 直通宿主 `/`）。也就是说产品首页宣传的
+"Windows 上跑 Linux OCI 镜像"这条路径，长期**没有任何自动化覆盖**；
+`test-windows-product.ps1` 的 WP.3 是它第一次被真正执行，一执行即崩：
+
+```
+wbox-linux: fatal host exception 0xc0000005 (read) at rip=…
+guest rip=0x4038b1 in /busybox   fault address FFFFFFFFFFFFFFFF
+```
+
+这不是新引入的回归，是一直存在、直到有门禁才暴露的缺陷。为定位崩在
+**模拟器的 prefix 路径**还是**AppContainer 降权**，矩阵新增 G 组：裸跑
+`wbox-linux.exe` + `BLINK_PREFIX`，与 WP.3 只差一层沙箱，两边对照即可判定，
+不必靠猜。G 组本身也永久补上了这块覆盖。
+
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
 

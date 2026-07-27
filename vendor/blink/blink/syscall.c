@@ -432,6 +432,17 @@ _Noreturn void SysExit(struct Machine *m, int rc) {
 #endif
 }
 
+#if !defined(_WIN32) || defined(__CYGWIN__)
+// 非 Win32：guest fd 与 host fd 恒等（见下面 Win32 版注释里的
+// "identical elsewhere"）。没有这个兜底，syscall.c 里若干**未加 #if 保护**的
+// HostFdOf 调用点会让原生构建整个编译不过——vendored blink 因此长期只能在
+// Windows 上构建。CI 只构建 wbox-linux.exe，所以这处断裂一直没人撞上。
+static int HostFdOf(struct System *s, int fildes) {
+  (void)s;
+  return fildes;
+}
+#endif
+
 #if defined(_WIN32) && !defined(__CYGWIN__)
 // wbox win32: translate a guest fd to its host descriptor (the two
 // diverge in a snapshot child's copied fd table; identical elsewhere).
