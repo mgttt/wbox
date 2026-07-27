@@ -125,6 +125,17 @@ impl ImageRef {
             format!("{}:{}", self.repo, self.reference)
         }
     }
+
+    /// 可持久化的规范引用：Docker Hub 保持现有短形式，其他 registry 不得丢失。
+    pub fn qualified_ref(&self) -> String {
+        if self.registry == DEFAULT_REGISTRY {
+            self.repo_tag()
+        } else if self.reference.starts_with("sha256:") {
+            format!("{}/{}@{}", self.registry, self.repo, self.reference)
+        } else {
+            format!("{}/{}:{}", self.registry, self.repo, self.reference)
+        }
+    }
 }
 
 /// 本地缓存根目录：Windows 用 %USERPROFILE%，其余用 $HOME。
@@ -453,8 +464,13 @@ mod tests {
     fn repo_tag_formats_tag_and_digest() {
         let r = ImageRef::parse("ubuntu:24.04", None).unwrap();
         assert_eq!(r.repo_tag(), "library/ubuntu:24.04");
+        assert_eq!(r.qualified_ref(), "library/ubuntu:24.04");
         let r = ImageRef::parse("ubuntu@sha256:abc", None).unwrap();
         assert_eq!(r.repo_tag(), "library/ubuntu@sha256:abc");
+        let r = ImageRef::parse("quay.io/acme/app:2", None).unwrap();
+        assert_eq!(r.qualified_ref(), "quay.io/acme/app:2");
+        let r = ImageRef::parse("localhost:5000/app@sha256:abc", None).unwrap();
+        assert_eq!(r.qualified_ref(), "localhost:5000/app@sha256:abc");
     }
 
     #[test]

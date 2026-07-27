@@ -1,21 +1,24 @@
-//! `wbox image` 子命令：pull / list / show / rm。
+//! `wbox image` 子命令：pull / list / show / inspect / rm。
 
 use crate::error::{Result, WboxError};
 use crate::backend;
 use crate::oci;
 
-/// `wbox image` 子命令：pull / list / show / rm。
+/// `wbox image` 子命令：pull / list / show / inspect / rm。
 pub fn cmd_image(args: &[String]) -> Result<u32> {
     match args.first().map(|s| s.as_str()) {
         Some("pull") => cmd_image_pull(&args[1..]),
         Some("list") | Some("ls") => cmd_image_list(&args[1..]),
         Some("show") => cmd_image_show(&args[1..]),
+        Some("inspect") => super::inspect::cmd_image_inspect(&args[1..]),
         Some("rm") => cmd_image_rm(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 image 子命令 '{}'（支持 pull / list / show / rm）",
+            "未知 image 子命令 '{}'（支持 pull / list / show / inspect / rm）",
             other
         ))),
-        None => Err(WboxError::args("image 缺少子命令（pull / list / show / rm）")),
+        None => Err(WboxError::args(
+            "image 缺少子命令（pull / list / show / inspect / rm）",
+        )),
     }
 }
 

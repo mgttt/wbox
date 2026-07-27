@@ -81,6 +81,7 @@ $stopPids = @()
 $execName = "product-exec"
 $crashName = "product-crash"
 $writeBgName = "product-write-bg"
+$waitName = "product-wait"
 
 try {
     New-Item -ItemType Directory -Force -Path $bundle, $rootfs | Out-Null
@@ -275,6 +276,35 @@ try {
         throw "WP.7 rm left the record behind: $psAfter"
     }
     Write-Host "PASS WP.7 rm clears the detached record"
+
+    $waitLaunch = & $portableWbox run -d --name $waitName local.test/wbox-fixture:latest `
+        /busybox sh -c 'exit 37' 2>&1 | Out-String
+    Assert-Exit 0 "WP.7B detached wait workload launch" $waitLaunch
+    $waitOutput = & $portableWbox wait $waitName 2>&1 | Out-String
+    Assert-Exit 0 "WP.7B wait command" $waitOutput
+    if ($waitOutput.Trim() -ne "37") {
+        throw "WP.7B wait did not print the guest exit code: $waitOutput"
+    }
+    $containerInspectText = & $portableWbox container inspect $waitName 2>&1 | Out-String
+    Assert-Exit 0 "WP.7C container inspect alias" $containerInspectText
+    $containerInspect = @($containerInspectText | ConvertFrom-Json)[0]
+    if ($containerInspect.State.Status -ne "exited" -or
+        [int]$containerInspect.State.ExitCode -ne 37 -or
+        $containerInspect.Config.Image -ne "local.test/wbox-fixture:latest") {
+        throw "WP.7C container inspect returned the wrong state: $containerInspectText"
+    }
+    $imageInspectText = & $portableWbox image inspect local.test/wbox-fixture:latest `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.7C image inspect" $imageInspectText
+    $imageInspect = @($imageInspectText | ConvertFrom-Json)[0]
+    if ($imageInspect.Os -ne "linux" -or
+        $imageInspect.Config.Cmd[0] -ne "/busybox") {
+        throw "WP.7C image inspect returned the wrong config: $imageInspectText"
+    }
+    & $portableWbox rm $waitName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.7C rm waited record"
+    Write-Host "PASS WP.7B wait persists and reports the guest exit code"
+    Write-Host "PASS WP.7C container/image inspect emits machine-readable JSON"
 
     $autoRemoveName = "product-auto-rm"
     $autoRemove = & $portableWbox run -d --rm --name $autoRemoveName `
@@ -558,6 +588,8 @@ finally {
         & $portableWbox rm $crashName 2>&1 | Out-Null
         & $portableWbox stop $writeBgName 2>&1 | Out-Null
         & $portableWbox rm $writeBgName 2>&1 | Out-Null
+        & $portableWbox stop $waitName 2>&1 | Out-Null
+        & $portableWbox rm $waitName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {

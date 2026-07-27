@@ -64,6 +64,15 @@ detached 父进程在全局状态操作锁内预留名称，supervisor 只能凭
 ACL 遍历不跟随 reparse point，绝对 Linux symlink 也会重写到私有 rootfs 内，
 因此状态目录竞态和链接都不能把删除或授权作用到另一运行实例/宿主路径。
 
+detached 记录在 `~/.wbox/run/<name>/` 保存 `meta.json`、owner `lock`、
+stdout/stderr 日志与最终 `exit-code`。supervisor 先写退出码、再释放 owner 锁；
+`wait` 和 `inspect` 因而读取同一事实源。异常崩溃没有退出码时保持 unknown。
+
+Windows OCI bind volume 的规划入口是 Blink VFS `hostfs`，不是
+`BLINK_OVERLAYS`。宿主根目录将由父进程预开并通过 handle list 精确继承，
+hostfs 以该 HANDLE 为锚；不能通过递归修改用户 ACL 或扩大 `WBOX_ROOT` 实现。
+`:ro` 只有在 VFS 每个路径型、fd 型与 mmap 修改入口都执行 `MS_RDONLY` 后才算成立。
+
 `wbox-linux` 是 blink 的 Win32 移植。它维护两层 fd：
 
 - 每个 guest `System` 的 Linux fd 编号。

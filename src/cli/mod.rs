@@ -10,11 +10,13 @@
 pub mod args;
 pub mod exec;
 pub mod image;
+pub mod inspect;
 pub mod logs;
 pub mod ps;
 pub mod rm;
 pub mod stop;
 pub mod run;
+pub mod wait;
 
 use crate::error::{Result, WboxError};
 
@@ -30,8 +32,11 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
+  wbox image inspect <REF>...                      输出本地镜像的机器可读 JSON
   wbox image rm [-f] <REF>                         删除已 pull 镜像的本地缓存
   wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
+  wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
+  wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
   wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
   wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
@@ -87,8 +92,28 @@ fn is_help_arg(arg: Option<&String>) -> bool {
 fn is_known_command(command: &str) -> bool {
     matches!(
         command,
-        "run" | "pull" | "images" | "rmi" | "image" | "ps" | "logs" | "exec" | "rm" | "stop"
+        "run" | "pull" | "images" | "rmi" | "image" | "container" | "ps" | "inspect"
+            | "wait" | "logs" | "exec" | "rm" | "stop"
     )
+}
+
+fn cmd_container(args: &[String]) -> Result<u32> {
+    match args.first().map(String::as_str) {
+        Some("list") | Some("ls") => ps::cmd_ps(&args[1..]),
+        Some("inspect") => inspect::cmd_container_inspect(&args[1..]),
+        Some("wait") => wait::cmd_wait(&args[1..]),
+        Some("logs") => logs::cmd_logs(&args[1..]),
+        Some("exec") => exec::cmd_exec(&args[1..]),
+        Some("rm") => rm::cmd_rm(&args[1..]),
+        Some("stop") => stop::cmd_stop(&args[1..]),
+        Some(other) => Err(WboxError::args(format!(
+            "未知 container 子命令 '{}'（支持 ls / inspect / wait / logs / exec / rm / stop）",
+            other
+        ))),
+        None => Err(WboxError::args(
+            "container 缺少子命令（ls / inspect / wait / logs / exec / rm / stop）",
+        )),
+    }
 }
 
 /// Docker/Podman-style command help. Keep a single authoritative text until
@@ -116,7 +141,7 @@ fn dispatch_command_help(args: &[String]) -> Option<Result<u32>> {
         print!("{}", USAGE);
         return Some(Ok(0));
     }
-    if command == "image" && is_help_arg(args.get(2)) {
+    if matches!(command, "image" | "container") && is_help_arg(args.get(2)) {
         print!("{}", USAGE);
         return Some(Ok(0));
     }
@@ -134,7 +159,10 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("images") => image::cmd_image_list(&args[1..]),
         Some("rmi") => image::cmd_image_rm(&args[1..]),
         Some("image") => image::cmd_image(&args[1..]),
+        Some("container") => cmd_container(&args[1..]),
         Some("ps") => ps::cmd_ps(&args[1..]),
+        Some("inspect") => inspect::cmd_inspect(&args[1..]),
+        Some("wait") => wait::cmd_wait(&args[1..]),
         Some("logs") => logs::cmd_logs(&args[1..]),
         Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
@@ -153,7 +181,9 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         ))),
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args("缺少子命令（run / image / ps / rm / stop / logs / exec）"))
+            Err(WboxError::args(
+                "缺少子命令（run / image / container / ps / inspect / wait / rm / stop / logs / exec）",
+            ))
         }
     }
 }
@@ -180,6 +210,8 @@ mod tests {
             vec!["run", "--help"],
             vec!["pull", "-h"],
             vec!["image", "pull", "--help"],
+            vec!["container", "inspect", "--help"],
+            vec!["wait", "--help"],
             vec!["help", "run"],
         ] {
             let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
@@ -195,6 +227,18 @@ mod tests {
         assert!(dispatch(&["images".to_string(), "--all".to_string()]).is_err());
         assert!(dispatch(&["pull".to_string()]).is_err());
         assert!(dispatch(&["rmi".to_string()]).is_err());
+    }
+
+    #[test]
+    fn dispatch_docker_style_container_aliases() {
+        let _home = TempHome::new("dispatch-container-aliases");
+        assert_eq!(
+            dispatch(&["container".to_string(), "ls".to_string()]).unwrap(),
+            0
+        );
+        assert!(dispatch(&["container".to_string(), "bogus".to_string()]).is_err());
+        assert!(dispatch(&["wait".to_string()]).is_err());
+        assert!(dispatch(&["inspect".to_string()]).is_err());
     }
 
     // ---- 集成：临时 HOME 下的假缓存全链（list → show → run prepare）----

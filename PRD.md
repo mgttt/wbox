@@ -539,7 +539,7 @@ F6
 
 ### F8 运维型容器生命周期 `[active]`
 
-`--detach`、`wbox ps/stop/rm/logs/exec`。这是 wbox 离"能当 harness 的长期
+`--detach`、`wbox ps/stop/rm/logs/exec/wait/inspect`。这是 wbox 离"能当 harness 的长期
 环境"最近的一组能力；基础链路已经实现，当前重点是持续门禁与平台差异收敛。
 
 四个前置问题的设计答复如下：
@@ -605,6 +605,12 @@ Windows 由 WP.6–WP.17 覆盖 detach、ps、logs、stop、rm 与原生 exec，
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
 OCI/Blink exec 不在承诺范围，必须明确拒绝。
 
+detached supervisor 在释放 owner 锁前把 guest 退出码写到状态目录的
+`exit-code`；`wbox wait NAME...` 等待锁释放后打印该值，`inspect` 的
+`State.ExitCode` 使用同一来源。异常崩溃和旧版残留没有可信退出码时必须报告
+unknown，不能编造为 0。`wbox inspect`、`image inspect` 与
+`container inspect` 输出 JSON 数组；镜像内疑似凭证的 Env 仍脱敏。
+
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
 `exec` 只能部分对齐：Linux 进入已有 namespace；Windows 原生目标重新使用同一
 AppContainer SID、网络 capability 与命名 Job，并继承记录的工作目录。Windows
@@ -620,6 +626,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
+| F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
 
 ### F9 对标能力补齐 `[planned]`
 
@@ -628,13 +635,13 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 
 ```text
 F9
-├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [done]（Linux 侧）
+├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
 ├── F9.3 镜像构建（Dockerfile 子集）          —— 两个象限
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
 
-**F9.1 卷 / 绑定挂载** `[done]`（Linux 宿主；门禁 V.1–V.4）。已定的语义：
+**F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
 
 - 只读/读写：`:ro` / `:rw`（默认读写）。**`:ro` 必须 remount 第二次才生效**
   ——首次 bind 会忽略 `MS_RDONLY`，这是 `mount(2)` 的既定行为；漏了这步
@@ -647,8 +654,28 @@ F9
   是防"一条命令让沙箱失效"。
 - 宿主模式同样支持：虽不换根，但已在独立 mount namespace 里，bind 只对容器可见。
 
-**Windows 侧不支持且明确报错**（不是静默忽略）：AppContainer 无路径重定向手段，
-那需要 minifilter 驱动，撞 §2.4 天花板一。取证见 §4.9 W3。
+**Windows 原生程序侧**仍不支持且明确报错：AppContainer 无通用路径重定向，
+完整 bind/写重定向需要 minifilter 驱动，撞 §2.4 天花板一。
+
+**Windows OCI/Blink 侧存在不装驱动的可行路径，但尚未实现，不能提前放开 `-v`**：
+
+1. `BLINK_OVERLAYS` 只是冒号分隔的候选根，不表达 `host -> guest`，Windows
+   盘符还会被误拆；数据面必须走 `VfsMount(source,target,"hostfs",flags)`。
+2. 不得递归修改用户目录 ACL。父 wbox 应以 `FILE_FLAG_OPEN_REPARSE_POINT`
+   打开并验证 volume 根，通过 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只继承该句柄；
+   mount manifest 只记录句柄值、guest target、对象类型与 `read_only`，不泄漏
+   宿主路径。
+3. Win32 hostfs 必须以继承根 HANDLE 为锚做相对打开，逐组件拒绝 reparse
+   越界；不能把 volume 加进单一文本 `WBOX_ROOT` allowlist。
+4. `VfsDevice.flags` 的 `MS_RDONLY` 要在 open/create、write/pwrite/writev、
+   truncate、共享可写 mmap、unlink/rename/link、mkdir、chmod/chown/utime 等
+   **所有**修改入口统一返回 `EROFS`；跨 volume rename/link 返回 `EXDEV`。
+5. 首版只承诺目录 bind。当前 hostfs 与挂载点均要求目录，而解析器接受文件路径；
+   文件 bind 在真正实现前必须明确拒绝，不能把文件悄悄当目录。
+
+验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
+不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
+`--rm`、stop、启动失败与 supervisor 强杀都不能泄漏句柄、状态目录或宿主权限。
 
 **F9.2 端口映射** `[done]`（Linux 宿主，**仅 TCP**；门禁 N2.1–N2.3）。
 

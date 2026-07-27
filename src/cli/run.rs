@@ -395,6 +395,9 @@ fn spawn_registered(
     crate::portfwd::spawn_forwarders(spec.name.clone(), spec.ports.clone());
     let rc = b.spawn(spec, prepared);
     if supervised {
+        if let Ok(code) = rc.as_ref() {
+            crate::runstate::record_exit_code(reg.dir(), *code)?;
+        }
         // 退出后再收一次尾。这条不是冗余：看门狗每 500ms 才看一眼，而一个
         // 一秒内狂写几百 MB 然后退出的容器**根本活不到第一次 tick**，只靠
         // 周期检查会让它整份输出原样落盘（实测 300k 行 2.5MB 全须全尾）。
@@ -501,7 +504,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             let backend = BlinkBackend;
             #[cfg(windows)]
             let reg = {
-                let reg = register_for_spawn(&spec, &iref.repo_tag(), opts.auto_remove)?;
+                let reg = register_for_spawn(&spec, &iref.qualified_ref(), opts.auto_remove)?;
                 let private_rootfs = reg.dir().join("rootfs");
                 backend::create_private_rootfs(
                     &spec.workdir,
@@ -522,7 +525,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
                     &backend,
                     &spec,
                     &prepared,
-                    &iref.repo_tag(),
+                    &iref.qualified_ref(),
                     opts.auto_remove,
                 )
             }
@@ -530,7 +533,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         backend::ImageBackendKind::LinuxNative => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag(), opts.auto_remove)
+            spawn_with_state(&backend, &spec, &prepared, &iref.qualified_ref(), opts.auto_remove)
         }
     }
 }

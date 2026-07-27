@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 const OPERATION_LOCK: &str = ".operations.lock";
 const DETACHED_RESERVATION: &str = ".detached-reservation";
+const EXIT_CODE: &str = "exit-code";
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 状态根目录：`~/.wbox/run`（与镜像缓存同在 `~/.wbox` 下，便于统一清理）。
@@ -238,7 +239,6 @@ pub struct Registration {
 impl Registration {
     /// 状态目录路径。Windows OCI 的私有可写 rootfs 也放在这里，使前台退出、
     /// `--rm` 和显式 `wbox rm` 都复用同一生命周期清理路径。
-    #[cfg(any(windows, test))]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -364,6 +364,7 @@ fn purge_dir(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
     let _ = std::fs::remove_file(dir.join(LOG_STDERR));
     let _ = std::fs::remove_file(dir.join(CONTAINER_PID));
+    let _ = std::fs::remove_file(dir.join(EXIT_CODE));
     let _ = std::fs::remove_file(dir.join(DETACHED_RESERVATION));
     let _ = std::fs::remove_dir(dir);
 }
@@ -441,6 +442,21 @@ pub fn enforce_log_cap(dir: &Path, file: &str) {
             cap
         );
     }
+}
+
+/// 在 owner 锁释放前持久化 guest 退出码，供 `wait` / `inspect` 读取。
+pub fn record_exit_code(dir: &Path, code: u32) -> Result<()> {
+    std::fs::write(dir.join(EXIT_CODE), code.to_string())
+        .map_err(|e| WboxError::args(format!("写容器退出码失败：{}", e)))
+}
+
+/// 尚未退出或旧版记录没有退出码时返回 `None`；畸形文件也按未知处理。
+pub fn read_exit_code(dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(dir.join(EXIT_CODE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// [`register_with`] 的简写（不保留日志）。生产路径一律走 `register_with`
