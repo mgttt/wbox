@@ -441,6 +441,58 @@ CEOF
 fi
 
 echo
+echo "=== B 镜像构建（PRD F9.3）==="
+
+BCTX=$WORK/bctx
+mkdir -p "$BCTX"
+printf 'HELLO_FROM_COPY\n' > "$BCTX/data.txt"
+cat > "$BCTX/Dockerfile" <<'DFEOF'
+FROM lbetest:latest
+ENV GREETING=built
+COPY data.txt /data.txt
+RUN /bin/echo RUN_EXECUTED > /ran.txt
+CMD ["/bin/cat", "/data.txt", "/ran.txt"]
+DFEOF
+
+bout=$(HOME=$WORK/home "$WBOX_ABS" build -t built:v1 "$BCTX" 2>&1); brc=$?
+if [ "$brc" -eq 0 ] && printf '%s' "$bout" | grep -q "构建完成"; then
+  report PASS "B.1 build 走完 FROM/ENV/COPY/RUN/CMD"
+else
+  report FAIL "B.1 build" "rc=$brc 输出: $(printf '%s' "$bout" | tr '\n' ' ' | head -c 200)"
+fi
+
+# B.2 构建产物必须**能跑**，且 COPY 的文件与 RUN 的副作用都在。
+# 只断言"构建成功"是不够的——那只证明流程没报错，不证明镜像是对的。
+run built:v1
+if [ "$rc" -eq 0 ] && printf '%s' "$OUT" | grep -q HELLO_FROM_COPY \
+   && printf '%s' "$OUT" | grep -q RUN_EXECUTED; then
+  report PASS "B.2 构建产物可运行（COPY 内容与 RUN 副作用都在）"
+else
+  report FAIL "B.2 产物可运行" "rc=$rc 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 200)"
+fi
+
+# B.3 **安全断言**：COPY 不得把上下文之外的宿主文件打进镜像。
+# 夹具必须用一个**真实存在**的外部文件——本地第一次用了不存在的路径，
+# 于是 canonicalize 先失败，报错看着对但越界检查压根没被执行到。
+printf 'OUTSIDE_SECRET\n' > "$WORK/outside.txt"
+printf 'FROM lbetest:latest\nCOPY ../outside.txt /x\n' > "$BCTX/Dockerfile.esc"
+eout=$(HOME=$WORK/home "$WBOX_ABS" build -t esc:v1 -f "$BCTX/Dockerfile.esc" "$BCTX" 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eout" | grep -q "逃出了构建上下文"; then
+  report PASS "B.3 COPY 拒绝上下文外的源（真实存在的外部文件）"
+else
+  report FAIL "B.3 COPY 越界拒绝" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 200)"
+fi
+
+# B.4 未实现的指令要报错而不是静默跳过——跳过会产出"看着成功实则少做事"的镜像
+printf 'FROM lbetest:latest\nVOLUME /data\n' > "$BCTX/Dockerfile.vol"
+vout=$(HOME=$WORK/home "$WBOX_ABS" build -t v:1 -f "$BCTX/Dockerfile.vol" "$BCTX" 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] && printf '%s' "$vout" | grep -q "未实现"; then
+  report PASS "B.4 未实现的 Dockerfile 指令明确报错"
+else
+  report FAIL "B.4 未实现指令报错" "rc=$vrc 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+echo
 echo "=== V 卷挂载（PRD F9.1）==="
 
 VOLSRC=$WORK/volsrc

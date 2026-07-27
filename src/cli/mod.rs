@@ -8,6 +8,7 @@
 //! 全部为纯逻辑（不直接调 Win32），跨平台可编译、可在 Linux 沙箱单测。
 
 pub mod args;
+pub mod build;
 pub mod exec;
 pub mod image;
 pub mod inspect;
@@ -29,6 +30,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox pull <REF> [image pull 选项]                 `wbox image pull` 的兼容别名
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
+  wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
@@ -155,6 +157,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
     }
     match args.first().map(|s| s.as_str()) {
         Some("run") => run::cmd_run(&args[1..]),
+        Some("build") => build::cmd_build(&args[1..]),
         Some("pull") => image::cmd_image_pull(&args[1..]),
         Some("images") => image::cmd_image_list(&args[1..]),
         Some("rmi") => image::cmd_image_rm(&args[1..]),

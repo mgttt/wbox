@@ -41,7 +41,7 @@ Portable Windows 发布包包含两个文件：
 |---|---|---|
 | Windows × Windows 程序 | Sandboxie-Plus | 无文件系统写重定向、无注册表虚拟化 |
 | Windows × Linux 镜像 | WSL2 / Docker Desktop | 无卷挂载（撞驱动天花板）/端口映射/构建；性能不可比 |
-| Linux × Linux 镜像 | Podman / Docker | 已有 `-v` 卷挂载、`-p` 端口转发（**仅 TCP**）；无镜像构建/compose |
+| Linux × Linux 镜像 | Podman / Docker | 已有 `-v` 卷挂载、`-p` 端口转发（**仅 TCP**）、`build` Dockerfile 子集；无分层缓存/compose |
 | Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖 |
 
 两条硬天花板：wbox **不装内核驱动**，所以 Windows 程序沙箱达不到 Sandboxie

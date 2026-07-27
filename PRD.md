@@ -637,7 +637,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
-├── F9.3 镜像构建（Dockerfile 子集）          —— 两个象限
+├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux 侧）
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
 
@@ -701,8 +701,21 @@ namespace 里 euid 相同的进程对子 namespace 持有权能——所以多�
 
 **能力边界：只覆盖 TCP。** UDP 与 ICMP 这套做不了，README 与 `--help` 都写明了。
 
-**F9.3 镜像构建**。只做 Dockerfile 子集（FROM/RUN/COPY/ENV/CMD/ENTRYPOINT）
-就能覆盖多数自用场景；RUN 直接复用现成的容器执行路径。
+**F9.3 镜像构建** `[done]`（Linux 宿主；门禁 B.1–B.4）。
+`wbox build -t NAME[:TAG] [-f Dockerfile] <上下文>`，子集为
+`FROM/RUN/COPY/ENV/WORKDIR/CMD/ENTRYPOINT`。
+
+- **`RUN` 直接复用运行期的容器路径**（同一 backend、同一套 namespace 与限额），
+  所以构建期与运行期隔离强度一致，不存在"构建时能做、运行时不能"的错位。
+- **产物与 `pull` 下来的镜像同布局**（`rootfs/` + `manifest.json` +
+  `layers.json` + `config.json`），`run`/`images` 无差别对待。本地构建没有
+  registry 层信息，`layers.json` 就写空数组——编一个假 digest 只会误导。
+- **未实现的指令一律报错**，不静默跳过：跳过会产出一个"看着构建成功、实则
+  少做了事"的镜像，比构建失败难查得多（B.4）。
+- **两条安全断言**：`COPY` 源不得逃出构建上下文（否则构建成了读取宿主任意
+  文件的通道），目标不得用 `..` 逃出 rootfs。
+- 暂不做分层缓存与 overlay：overlayfs 在 rootless 下未必可用（§2.4 差距表里
+  "无 overlay"就是这条）。`FROM` 走整份 rootfs 复制——先要正确，再谈快。
 
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
