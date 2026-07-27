@@ -955,6 +955,62 @@ pub fn remove(name: &str) -> Result<()> {
     }
 }
 
+/// 改容器名（`PRD.md` F9.27）。
+///
+/// **只对没在运行的容器开放**，而且这不是偷懒——运行中的容器把自己的名字用在
+/// 三个地方：overlay 可写层的路径（`dir_for(name)/layer`）、默认主机名、
+/// 以及 Windows 上那个按名字创建的 Job object。改名只动状态目录，改不到
+/// 已经跑起来的 supervisor 手里的那几样，结果是容器名和它实际在用的资源对不上
+/// ——一种改完看着成功、之后才出问题的状态。宁可明说不支持。
+///
+/// 与 `remove` 一样在**根操作锁**内做：否则可能与并发的 run/rm 撞上，
+/// 出现「刚改完名就被另一个进程按旧名清掉」这种事。
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    crate::backend::validate_container_name(new)?;
+    let from = dir_for(old)?;
+    let to = dir_for(new)?;
+    let root = from
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
+    if !from.exists() {
+        return Err(missing_record(old));
+    }
+    if old == new {
+        return Err(WboxError::args("新旧容器名相同，无需改名"));
+    }
+    if to.exists() {
+        return Err(WboxError::args(format!(
+            "容器名 '{}' 已被占用；请换名或先执行 `wbox rm {}`",
+            new, new
+        )));
+    }
+    if liveness(&from) == Liveness::Running {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 正在运行，拒绝改名：运行中的容器把名字用在可写层路径、\
+             默认主机名与（Windows 上的）Job object 上，改名改不到这些，会让\
+             容器名与它实际在用的资源对不上。请先 stop 再改名",
+            old
+        )));
+    }
+    std::fs::rename(&from, &to)
+        .map_err(|e| WboxError::args(format!("改名失败（{} → {}）：{}", old, new, e)))?;
+    // meta.json 里存着一份名字，`ps`/`inspect` 读的是它。不同步的话，改完名
+    // `ps` 还会显示旧名——目录名和记录名各说各话，比不支持改名更让人困惑。
+    if let Some(mut entry) = read_meta(&to) {
+        entry.name = new.to_string();
+        if let Err(e) = std::fs::write(to.join("meta.json"), entry.to_json()) {
+            // 目录已经改完了，这里失败不该把改名整个回滚成"什么都没发生"——
+            // 那要再做一次可能同样失败的 rename。如实说明当前状态即可。
+            return Err(WboxError::args(format!(
+                "目录已改名为 '{}'，但更新 meta.json 失败：{}（ps 可能仍显示旧名）",
+                new, e
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

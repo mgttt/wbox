@@ -25,6 +25,8 @@ mod commit;
 mod cp;
 mod export;
 mod restart;
+mod rename;
+mod prune;
 mod stats;
 mod pause;
 mod diff;
@@ -69,6 +71,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox kill [-s KILL] <NAME>...                    立即强制终止运行中的容器
   wbox top <NAME>                                  列出容器隔离单元内的进程
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
+  wbox rename <旧名> <新名>                        给未运行的容器改名（见 PRD F9.27）
+  wbox prune [-f]                                  批量清掉已退出的容器记录（不加 -f 只列清单）
   wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
   wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
   wbox --help | -h
@@ -163,6 +167,8 @@ const VERBS: &[(&str, Scope, Handler)] = &[
     ("logs", Scope::Container, logs::cmd_logs),
     ("exec", Scope::Container, exec::cmd_exec),
     ("rm", Scope::Container, rm::cmd_rm),
+    ("rename", Scope::Container, rename::cmd_rename),
+    ("prune", Scope::Container, prune::cmd_prune),
     ("stop", Scope::Container, stop::cmd_stop),
     ("restart", Scope::Container, restart::cmd_restart),
     ("kill", Scope::Container, kill::cmd_kill),
