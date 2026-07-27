@@ -213,3 +213,197 @@ fn host_err_maps_not_found_to_enoent() {
     let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x");
     assert_eq!(host_err(&e), -EACCES);
 }
+
+// ---------------------------------------------------------------- 管道与 EOF
+
+/// 建一对管道，返回 (读 fd, 写 fd)。
+fn pipe_pair(m: &mut Machine) -> (i32, i32) {
+    let at = scratch(m);
+    assert_eq!(sys_pipe(m, at, 0), 0);
+    (
+        m.mem.read_u32(at).unwrap() as i32,
+        m.mem.read_u32(at + 4).unwrap() as i32,
+    )
+}
+
+#[test]
+fn pipe_read_returns_eagain_while_a_writer_is_open_and_eof_after() {
+    let mut m = mach();
+    let (rd, wr) = pipe_pair(&mut m);
+    let at = scratch(&mut m) + 64;
+
+    // 空管道 + 写端还开着 = EAGAIN（单线程下阻塞必然死锁，见 sys_read）
+    assert_eq!(sys_read(&mut m, rd, at, 4), -EAGAIN);
+
+    m.mem.write_raw(at, b"hey");
+    assert_eq!(sys_write(&mut m, wr, at, 3), 3);
+    assert_eq!(sys_read(&mut m, rd, at + 16, 3), 3);
+    let mut got = [0u8; 3];
+    m.mem.read(at + 16, &mut got).unwrap();
+    assert_eq!(&got, b"hey");
+
+    // 写端关掉之后，空管道 = EOF（返回 0）。这一条是 `$(cmd)` 能收敛的前提：
+    // 若继续报 EAGAIN，shell 会在读端上无限自旋。
+    assert_eq!(sys_close(&mut m, wr), 0);
+    assert_eq!(sys_read(&mut m, rd, at, 4), 0);
+}
+
+#[test]
+fn pipe_writer_count_survives_dup_and_drops_with_the_last_fd() {
+    let mut m = mach();
+    let (rd, wr) = pipe_pair(&mut m);
+    let at = scratch(&mut m) + 64;
+
+    let alias = sys_dup(&mut m, wr);
+    assert!(alias >= 0, "管道必须能 dup（shell 的重定向就靠它）");
+    // 关掉原来的写端，别名还在 -> 还不是 EOF
+    assert_eq!(sys_close(&mut m, wr), 0);
+    assert_eq!(sys_read(&mut m, rd, at, 4), -EAGAIN);
+    // 最后一个写端也关掉 -> EOF
+    assert_eq!(sys_close(&mut m, alias as i32), 0);
+    assert_eq!(sys_read(&mut m, rd, at, 4), 0);
+}
+
+#[test]
+fn pipes_are_not_seekable_and_not_p_readable() {
+    let mut m = mach();
+    let (rd, wr) = pipe_pair(&mut m);
+    let at = scratch(&mut m) + 64;
+    // Linux 对管道给 ESPIPE，不是 EBADF——guest 靠这个区分"不能 seek"
+    // 和"fd 是坏的"。
+    assert_eq!(sys_lseek(&mut m, rd, 0, 1), -ESPIPE);
+    assert_eq!(sys_pread(&mut m, rd, at, 1, 0), -ESPIPE);
+    assert_eq!(sys_pwrite(&mut m, wr, at, 1, 0), -ESPIPE);
+    // 反向使用两端仍然是 EBADF
+    assert_eq!(sys_read(&mut m, wr, at, 1), -EBADF);
+    assert_eq!(sys_write(&mut m, rd, at, 1), -EBADF);
+}
+
+#[test]
+fn bad_fd_is_ebadf_even_when_the_iovec_is_empty() {
+    let mut m = mach();
+    let at = scratch(&mut m);
+    // iov 数量为 0 时循环一次都不跑，必须在进循环前校验 fd。
+    assert_eq!(sys_readv(&mut m, 9999, at, 0), -EBADF);
+    assert_eq!(sys_writev(&mut m, 9999, at, 0), -EBADF);
+    assert_eq!(sys_preadv(&mut m, 9999, at, 0, 0), -EBADF);
+    assert_eq!(sys_pwritev(&mut m, 9999, at, 0, 0), -EBADF);
+}
+
+// ------------------------------------------------------------- 合成 /dev
+
+/// 打开一个 guest 路径，返回 fd 或 -errno。
+fn open_guest(m: &mut Machine, path: &str, flags: i32) -> i64 {
+    let at = 0x9_0000;
+    m.mem.map(at, PAGE_SIZE, PROT_READ | PROT_WRITE);
+    m.mem.write_raw(at, path.as_bytes());
+    m.mem.write_raw(at + path.len() as u64, &[0]);
+    sys_openat(m, AT_FDCWD, at, flags, 0)
+}
+
+#[test]
+fn dev_null_zero_and_full_have_the_documented_semantics() {
+    let mut m = mach();
+    let buf = scratch(&mut m) + 128;
+
+    let null = open_guest(&mut m, "/dev/null", O_RDWR);
+    assert!(null >= 0, "/dev/null 必须能打开（rootfs 里没有 /dev）");
+    let null = null as i32;
+    assert_eq!(sys_read(&mut m, null, buf, 16), 0, "/dev/null 读出来是 EOF");
+    assert_eq!(sys_write(&mut m, null, buf, 16), 16, "写入被丢弃但报成功");
+
+    let zero = open_guest(&mut m, "/dev/zero", O_RDONLY) as i32;
+    m.mem.write_raw(buf, &[0xff; 8]);
+    assert_eq!(sys_read(&mut m, zero, buf, 8), 8);
+    let mut got = [0u8; 8];
+    m.mem.read(buf, &mut got).unwrap();
+    assert_eq!(got, [0u8; 8], "/dev/zero 必须真的填 0");
+
+    // /dev/full 的全部存在意义就是写入失败
+    let full = open_guest(&mut m, "/dev/full", O_RDWR) as i32;
+    assert_eq!(sys_read(&mut m, full, buf, 4), 4);
+    assert_eq!(sys_write(&mut m, full, buf, 4), -ENOSPC);
+}
+
+#[test]
+fn dev_nodes_stat_as_character_devices() {
+    let mut m = mach();
+    let at = 0x9_0000;
+    m.mem.map(at, PAGE_SIZE, PROT_READ | PROT_WRITE);
+    m.mem.write_raw(at, b"/dev/null\0");
+    let out = at + 256;
+    assert_eq!(sys_stat_path(&mut m, AT_FDCWD, at, out, true), 0);
+    let mode = m.mem.read_u32(out + 24).unwrap();
+    const S_IFMT: u32 = 0o170000;
+    const S_IFCHR: u32 = 0o020000;
+    assert_eq!(mode & S_IFMT, S_IFCHR, "test -c /dev/null 靠这一位");
+    // access 也必须说"存在"
+    assert_eq!(sys_access(&mut m, at, 0), 0);
+}
+
+#[test]
+fn empty_path_is_enoent_not_the_current_directory() {
+    let mut m = mach();
+    // 不显式判空，`open("")` 会被当成 cwd 并成功返回一个目录 fd。
+    assert_eq!(open_guest(&mut m, "", O_RDONLY), -ENOENT);
+}
+
+// ------------------------------------------------------------ 进程族记账
+
+#[test]
+fn wait4_reports_recorded_children_and_then_echild() {
+    let mut m = mach();
+    let at = scratch(&mut m);
+    // 没有子进程：ECHILD（而不是挂住）
+    assert_eq!(process::sys_wait4(&mut m, -1, at, 0), -ECHILD);
+
+    // 快照式 fork 下子进程在 fork 返回前就跑完了，僵尸表里直接记账。
+    m.os.zombies.push(process::ZombieChild { pid: 7, status: 42 << 8 });
+    m.os.zombies.push(process::ZombieChild { pid: 8, status: 9 });
+
+    // 指定 pid 收指定的那个
+    assert_eq!(process::sys_wait4(&mut m, 8, at, 0), 8);
+    assert_eq!(m.mem.read_u32(at).unwrap(), 9, "被信号杀：低 7 位是信号号");
+
+    // -1 收任意一个
+    assert_eq!(process::sys_wait4(&mut m, -1, at, 0), 7);
+    assert_eq!(m.mem.read_u32(at).unwrap(), 42 << 8, "正常退出：码在 8..16 位");
+
+    // 收干净之后再 wait 是 ECHILD
+    assert_eq!(process::sys_wait4(&mut m, -1, at, 0), -ECHILD);
+    // 不是自己孩子的 pid 也是 ECHILD
+    m.os.zombies.push(process::ZombieChild { pid: 7, status: 0 });
+    assert_eq!(process::sys_wait4(&mut m, 999, at, 0), -ECHILD);
+}
+
+#[test]
+fn wait4_rejects_unknown_options_and_bad_status_pointers() {
+    let mut m = mach();
+    m.os.zombies.push(process::ZombieChild { pid: 3, status: 0 });
+    assert_eq!(process::sys_wait4(&mut m, -1, 0, 0x4000), -EINVAL);
+    // 坏指针：账不能被吞掉，否则这个子进程永远收不回来
+    assert_eq!(process::sys_wait4(&mut m, -1, 0xdead_0000, 0), -EFAULT);
+    assert_eq!(m.os.zombies.len(), 1, "写状态失败时僵尸必须留在表里");
+}
+
+#[test]
+fn clone_with_thread_flags_is_enosys_not_a_silent_fork() {
+    let mut m = mach();
+    // CLONE_VM|CLONE_THREAD|CLONE_SIGHAND = 线程创建。假装成功会让 guest
+    // 以为多了一个执行流，之后的行为完全不可预测。
+    assert_eq!(process::sys_clone(&mut m, 0x1_0000 | 0x100 | 0x800, 0, 0), -ENOSYS);
+}
+
+#[test]
+fn pids_are_unique_across_the_whole_process_tree() {
+    let m = mach();
+    let a = m.os.alloc_pid();
+    let b = m.os.alloc_pid();
+    assert_ne!(a, b);
+    // 子进程共享同一个计数器：不共享的话父子会各自发出重复的 pid。
+    let child = m.os.clone_for_fork(m.os.fds.try_clone().unwrap(), a);
+    assert_ne!(child.alloc_pid(), b);
+    assert!(child.alloc_pid() > b);
+    assert_eq!(child.ppid, m.os.pid);
+    assert_eq!(child.fork_depth, m.os.fork_depth + 1);
+}

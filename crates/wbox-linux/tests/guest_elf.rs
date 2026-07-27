@@ -488,3 +488,95 @@ fn shebang_script_runs_through_its_interpreter() {
     assert!(o.stdout.contains("tail"), "{}", o.stdout);
     assert!(o.stdout.contains("/s"), "{}", o.stdout);
 }
+
+// -------------------------------------------------- 进程族（fork/execve/wait4）
+
+/// `bb_run` 的 shell 版：`/busybox sh -c '<script>'`。
+fn bb_sh(root: &Path, script: &str) -> Out {
+    bb_run(root, &["sh", "-c", script], &[])
+}
+
+#[test]
+fn shell_and_and_sequences_fork_and_exec() {
+    let Some(root) = busybox_rootfs("procseq") else { return };
+
+    // `a && b` 的右边要 shell fork+exec 出一个新进程。这条正是 Windows
+    // 产品用例 WP.3W 跑的形状（写进私有 rootfs 再读回来）。
+    let o = bb_sh(&root, "echo private-ok > /w && /busybox cat /w");
+    assert_ok(&o, 0, "&& 链");
+    assert_eq!(o.stdout, "private-ok\n");
+
+    // `;` 顺序执行，两条都要跑到
+    let o = bb_sh(&root, "echo one; /busybox echo two");
+    assert_ok(&o, 0, "; 序列");
+    assert_eq!(o.stdout, "one\ntwo\n");
+
+    // 退出码要从子进程一路传回来：`false && ...` 不执行右边，整体非 0
+    let o = bb_sh(&root, "/busybox false && echo unreachable");
+    assert_eq!(o.code, 1, "失败的 && 链应保留非零退出码：{}", o.stderr);
+    assert_eq!(o.stdout, "");
+}
+
+#[test]
+fn command_substitution_reads_child_output_through_a_pipe() {
+    let Some(root) = busybox_rootfs("procsubst") else { return };
+    // `$(...)`：父进程建管道、fork、子进程 exec 后写、父进程读到 **EOF**。
+    // 读端必须在写端全部关闭后返回 0；返回 EAGAIN 会让 shell 无限自旋。
+    let o = bb_sh(&root, "v=$(/busybox echo inner); echo got=$v");
+    assert_ok(&o, 0, "命令替换");
+    assert_eq!(o.stdout, "got=inner\n");
+}
+
+#[test]
+fn pipeline_passes_data_between_two_processes() {
+    let Some(root) = busybox_rootfs("procpipe") else { return };
+    let o = bb_sh(&root, "/busybox echo abcd | /busybox wc -c");
+    assert_ok(&o, 0, "管道");
+    assert_eq!(o.stdout.trim(), "5"); // abcd + 换行
+}
+
+#[test]
+fn loops_fork_repeatedly_without_leaking_the_budget() {
+    let Some(root) = busybox_rootfs("procloop") else { return };
+    // 同一层里连续 fork 很多次：不该撞上 fork 嵌套深度上限
+    // （那个上限管的是 fork 里再 fork，不是顺序 fork）。
+    let o = bb_sh(&root, "for i in 1 2 3 4 5; do /busybox echo n$i; done");
+    assert_ok(&o, 0, "循环里反复 fork");
+    assert_eq!(o.stdout, "n1\nn2\nn3\nn4\nn5\n");
+}
+
+#[test]
+fn dev_null_and_zero_are_synthesised() {
+    let Some(root) = busybox_rootfs("devnodes") else { return };
+
+    // rootfs 里**没有** /dev 目录，这几个节点全靠我们合成。
+    // `2>/dev/null` 是 shell 脚本里最常见的一句，缺了它脚本第一行就挂。
+    let o = bb_sh(&root, "/busybox cat /nonexistent 2>/dev/null; echo rc=$?");
+    assert_ok(&o, 0, "2>/dev/null");
+    assert_eq!(o.stdout, "rc=1\n");
+
+    // /dev/null 读出来是 EOF
+    let o = bb_sh(&root, "/busybox wc -c < /dev/null");
+    assert_ok(&o, 0, "读 /dev/null");
+    assert_eq!(o.stdout.trim(), "0");
+
+    // /dev/zero 读出来是 0 字节；用 dd 取固定长度，避免无限读
+    let o = bb_sh(&root, "/busybox dd if=/dev/zero bs=1 count=8 2>/dev/null | /busybox wc -c");
+    assert_ok(&o, 0, "读 /dev/zero");
+    assert_eq!(o.stdout.trim(), "8");
+
+    // test -c 要认得它是字符设备（走的是我们合成的 stat）
+    let o = bb_sh(&root, "if [ -c /dev/null ]; then echo chardev; fi");
+    assert_ok(&o, 0, "test -c /dev/null");
+    assert_eq!(o.stdout, "chardev\n");
+}
+
+#[test]
+fn proc_self_exe_points_at_the_running_image() {
+    let Some(root) = busybox_rootfs("selfexe") else { return };
+    // readlink /proc/self/exe 必须给**真的** guest 路径：回一条
+    // "/proc/self/exe" 自身会让 guest 的 re-exec 无声失败。
+    let o = bb_run(&root, &["readlink", "/proc/self/exe"], &[]);
+    assert_ok(&o, 0, "readlink /proc/self/exe");
+    assert_eq!(o.stdout.trim(), "/busybox");
+}

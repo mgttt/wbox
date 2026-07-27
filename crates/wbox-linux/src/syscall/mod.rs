@@ -7,17 +7,23 @@
 //! 绝不假装成功——假装成功会让 guest 在离故障点很远的地方以莫名其妙的方式坏掉。
 
 pub mod fs;
+pub mod process;
 
 use crate::cpu::{RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11};
 use crate::machine::{ExecResult, Exception, Machine};
 use crate::mem::{PAGE_MASK, PROT_EXEC, PROT_READ, PROT_WRITE};
 use fs::{Fd, FdKind, FdTable, Vfs};
+use std::cell::Cell;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::rc::Rc;
 
 // ---------------------------------------------------------------- errno
 pub const EPERM: i64 = 1;
 pub const EIO: i64 = 5;
 pub const ENOENT: i64 = 2;
+pub const ESRCH: i64 = 3;
+pub const E2BIG: i64 = 7;
+pub const ENOEXEC: i64 = 8;
 pub const EBADF: i64 = 9;
 pub const ECHILD: i64 = 10;
 pub const EAGAIN: i64 = 11;
@@ -32,6 +38,7 @@ pub const EMFILE: i64 = 24;
 pub const ENOTTY: i64 = 25;
 pub const ESPIPE: i64 = 29;
 pub const EPIPE: i64 = 32;
+pub const ENOSPC: i64 = 28;
 pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
@@ -49,6 +56,9 @@ const O_APPEND: i32 = 0o2000;
 const O_NONBLOCK: i32 = 0o4000;
 const O_DIRECTORY: i32 = 0o200000;
 const O_CLOEXEC: i32 = 0o2000000;
+/// `__O_TMPFILE`。glibc 的 `O_TMPFILE` 是它按位或上 `O_DIRECTORY`，
+/// 所以判定要看这一位而不是整个常量。
+const O_TMPFILE: i32 = 0o20000000;
 
 const AT_FDCWD: i32 = -100;
 /// `newfstatat` 的 `AT_EMPTY_PATH`：路径为空时对 fd 本身取状态。
@@ -62,8 +72,22 @@ const PATH_MAX: usize = 4096;
 pub struct Os {
     pub fds: FdTable,
     pub vfs: Vfs,
-    /// guest 进程号。模拟器是单进程，报一个固定值即可。
+    /// guest 进程号。初始进程是 1（容器里的 init）。
     pub pid: i32,
+    /// 父进程号。初始进程报 0（Linux 上 init 的 ppid 就是 0）。
+    pub ppid: i32,
+    /// pid 分配器。**整棵进程树共享一个计数器**，所以要 `Rc<Cell<..>>`：
+    /// fork 出来的子进程再 fork 时不能发出和别人重复的 pid。
+    pid_alloc: Rc<Cell<i32>>,
+    /// 已退出、等着 `wait4` 收账的子进程。见 `process.rs` 的快照式 fork 说明。
+    pub zombies: Vec<process::ZombieChild>,
+    /// 当前 fork 嵌套深度。子进程跑在宿主调用栈上，必须限深。
+    pub fork_depth: u32,
+    /// `O_TMPFILE` 的名字计数器（见 `open_tmpfile`）。
+    tmpfile_seq: u64,
+    /// 正在运行的镜像的 **guest 绝对路径**，`readlink("/proc/self/exe")` 要回它。
+    /// 启动时与每次 `execve` 成功后更新。空串表示还没装载。
+    pub exe: String,
     /// `set_tid_address` 记下的地址，线程退出时要清零（当前单线程，仅存不用）。
     pub tid_address: u64,
     /// `WBOX_STRACE=1`：把每次 syscall 打到 stderr。
@@ -86,6 +110,12 @@ impl Os {
             fds: FdTable::new(),
             vfs: Vfs::from_env(),
             pid: 1,
+            ppid: 0,
+            pid_alloc: Rc::new(Cell::new(2)),
+            zombies: Vec::new(),
+            fork_depth: 0,
+            tmpfile_seq: 0,
+            exe: String::new(),
             tid_address: 0,
             strace: std::env::var_os("WBOX_STRACE").is_some_and(|v| v != "0"),
             // 报一个足够新的版本：glibc 会检查内核版本下限，报太老会直接
@@ -94,10 +124,39 @@ impl Os {
             umask: 0o022,
         }
     }
+
+    /// 分配一个新 pid（整棵进程树共享计数器）。
+    pub fn alloc_pid(&self) -> i32 {
+        let p = self.pid_alloc.get();
+        self.pid_alloc.set(p.wrapping_add(1).max(2));
+        p
+    }
+
+    /// 造出 fork 后子进程的 `Os`。
+    ///
+    /// fd 表由调用方 `try_clone` 好传进来（那一步会失败，得先做）。
+    /// 子进程**不继承**父进程的僵尸表——那些是父进程的孩子，不是它的。
+    pub fn clone_for_fork(&self, fds: FdTable, pid: i32) -> Os {
+        Os {
+            fds,
+            vfs: self.vfs.clone(),
+            pid,
+            ppid: self.pid,
+            pid_alloc: Rc::clone(&self.pid_alloc),
+            zombies: Vec::new(),
+            fork_depth: self.fork_depth + 1,
+            tmpfile_seq: 0,
+            exe: self.exe.clone(),
+            tid_address: self.tid_address,
+            strace: self.strace,
+            release: self.release.clone(),
+            umask: self.umask,
+        }
+    }
 }
 
 /// 把宿主 `io::Error` 翻成 `-errno`。
-fn host_err(e: &std::io::Error) -> i64 {
+pub fn host_err(e: &std::io::Error) -> i64 {
     use std::io::ErrorKind as K;
     -match e.kind() {
         K::NotFound => ENOENT,
@@ -142,6 +201,21 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         );
     }
 
+    // execve 成功时**不能**走后面统一的"写 rax / 设 rip"收尾：新程序的
+    // 入口和栈已经设好了，再改就跳回旧镜像了。所以它在分派表之前单独处理。
+    if nr == 59 {
+        match process::sys_execve(m, a[0], a[1], a[2]) {
+            Ok(()) => return Ok(()),
+            Err(errno) => {
+                m.cpu.regs[RAX] = errno as u64;
+                m.cpu.regs[RCX] = ret_rip;
+                m.cpu.regs[R11] = m.cpu.flags.pack();
+                m.cpu.rip = ret_rip;
+                return Ok(());
+            }
+        }
+    }
+
     let ret = match nr {
         0 => sys_read(m, a[0] as i32, a[1], a[2]),
         1 => sys_write(m, a[0] as i32, a[1], a[2]),
@@ -160,6 +234,10 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         13 | 14 | 131 => 0,
         16 => sys_ioctl(m, a[0] as i32, a[1], a[2]),
         17 => sys_pread(m, a[0] as i32, a[1], a[2], a[3] as i64),
+        // preadv/pwritev（以及带 flags 的 v2 变体）。偏移是 pos_l|pos_h<<32，
+        // 我们只支持 64 位宿主，pos_h 恒为 0，直接取 a[3]。
+        295 | 327 => sys_preadv(m, a[0] as i32, a[1], a[2], a[3] as i64),
+        296 | 328 => sys_pwritev(m, a[0] as i32, a[1], a[2], a[3] as i64),
         19 => sys_readv(m, a[0] as i32, a[1], a[2]),
         20 => sys_writev(m, a[0] as i32, a[1], a[2]),
         21 => sys_access(m, a[0], a[1] as i32),
@@ -170,10 +248,29 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         33 => sys_dup2(m, a[0] as i32, a[1] as i32),
         39 | 102 | 104 | 107 | 108 | 110 | 111 => match nr {
             39 => m.os.pid as i64,  // getpid
-            110 => 0,               // getppid
+            110 => m.os.ppid as i64, // getppid
             111 => m.os.pid as i64, // getpgrp
             _ => 0,                 // getuid/getgid/geteuid/getegid：容器内是 root
         },
+        // ---- 进程族（快照式 fork，见 syscall/process.rs） ----
+        56 => process::sys_clone(m, a[0], a[1], ret_rip),
+        // fork / vfork 都没有参数。vfork 的语义是"父进程挂起到子进程
+        // exec 或退出"——快照式 fork 恰好就是它的超集，所以同一份实现。
+        57 | 58 => process::sys_fork(m, 0, ret_rip),
+        61 => process::sys_wait4(m, a[0] as i32, a[1], a[2] as i32),
+        // nanosleep / clock_nanosleep：真的睡。clock_nanosleep 的 req 在 a[2]。
+        35 => process::sys_nanosleep(m, a[0], a[1]),
+        230 => process::sys_nanosleep(m, a[2], a[3]),
+        // pause / sigsuspend：等不到的等待，见 pause_deadlock 的说明。
+        34 | 130 => return Err(process::pause_deadlock(m)),
+        // kill/tkill/tgkill：给自己发致命信号必须真的终止（abort() 靠它）。
+        62 => process::sys_kill(m, a[0] as i32, a[1] as i32)?,
+        200 => process::sys_kill(m, a[0] as i32, a[1] as i32)?,
+        234 => process::sys_kill(m, a[0] as i32, a[2] as i32)?,
+        // 进程组/会话：模拟器里只有一个组、一个会话，`setpgid` 无副作用，
+        // 查询一律回自己的 pid（shell 的作业控制会读这几个值做判断）。
+        109 => 0,                             // setpgid
+        112 | 121 | 124 => m.os.pid as i64,   // setsid / getpgid / getsid
         60 | 231 => return Err(Exception::Exit(a[0] as i32 & 0xff)),
         63 => sys_uname(m, a[0]),
         72 => sys_fcntl(m, a[0] as i32, a[1] as i32, a[2]),
@@ -310,14 +407,31 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
         Some(FdKind::Stdin) => std::io::stdin().read(&mut tmp),
         Some(FdKind::File(f)) => f.read(&mut tmp),
         Some(FdKind::Dir { .. }) => return -EISDIR,
-        Some(FdKind::Pipe { buf, write_end }) => {
-            if *write_end {
-                return -EBADF; // 写端不可读
+        Some(FdKind::Dev(d)) => match d {
+            fs::DevKind::Null => Ok(0), // EOF
+            fs::DevKind::Zero | fs::DevKind::Full => {
+                tmp.fill(0);
+                Ok(n)
             }
-            let mut q = buf.borrow_mut();
+            // /dev/{u,}random 走和 getrandom(2) 同一个宿主 CSPRNG。
+            fs::DevKind::Random => match host_random(&mut tmp) {
+                Ok(()) => Ok(n),
+                Err(e) => return e,
+            },
+            fs::DevKind::Tty => std::io::stdin().read(&mut tmp),
+        },
+        Some(FdKind::PipeWrite(_)) => return -EBADF, // 写端不可读
+        Some(FdKind::PipeRead(inner)) => {
+            let mut q = inner.data.borrow_mut();
             if q.is_empty() {
-                // 单线程下没人能在我们阻塞期间写入，阻塞必然死锁。
-                // 报 EAGAIN 把决定权交回 guest，而不是挂住整个进程。
+                if inner.writers_closed() {
+                    // 写端全关了：这是 EOF，必须返回 0。快照式 fork 下
+                    // `$(cmd)` 的子进程早已退出、写端随它的 fd 表一起析构，
+                    // 若这里还报 EAGAIN，父进程会在读端上无限自旋。
+                    return 0;
+                }
+                // 还有写端开着。单线程下没人能在我们阻塞期间写入，阻塞必然
+                // 死锁；报 EAGAIN 把决定权交回 guest，而不是挂住整个进程。
                 return -EAGAIN;
             }
             let k = n.min(q.len());
@@ -356,6 +470,9 @@ fn sys_pread(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
             let _ = f.seek(SeekFrom::Start(cur));
             r
         }
+        // 管道与字符设备不可寻址：Linux 给 ESPIPE，不是 EBADF。
+        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) | Some(FdKind::Dev(_))
+        | Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => return -ESPIPE,
         Some(_) => return -EBADF,
         None => return -EBADF,
     };
@@ -391,11 +508,18 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         }
         Some(FdKind::File(f)) => f.write(data),
         Some(FdKind::Dir { .. }) => return -EBADF,
-        Some(FdKind::Pipe { buf, write_end }) => {
-            if !*write_end {
-                return -EBADF; // 读端不可写
+        Some(FdKind::Dev(d)) => match d {
+            // /dev/full 的存在意义就是"写入必失败"，别给它成功。
+            fs::DevKind::Full => return -ENOSPC,
+            fs::DevKind::Null | fs::DevKind::Zero | fs::DevKind::Random => Ok(data.len()),
+            fs::DevKind::Tty => {
+                let mut o = std::io::stdout();
+                o.write_all(data).and_then(|_| o.flush()).map(|_| data.len())
             }
-            buf.borrow_mut().extend(data.iter().copied());
+        },
+        Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
+        Some(FdKind::PipeWrite(w)) => {
+            w.inner().data.borrow_mut().extend(data.iter().copied());
             Ok(data.len())
         }
         _ => return -EBADF,
@@ -421,6 +545,9 @@ fn read_iovec(m: &Machine, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64> {
 }
 
 fn sys_writev(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
+    if !m.os.fds.contains(fd) {
+        return -EBADF;
+    }
     let iov = match read_iovec(m, ptr, cnt) {
         Ok(v) => v,
         Err(e) => return e,
@@ -439,6 +566,11 @@ fn sys_writev(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
 }
 
 fn sys_readv(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
+    // fd 要先校验：`readv(坏fd, NULL, 0)` 必须 EBADF。少了这一句，
+    // iov 为空时循环一次都不跑，坏 fd 会被报成"成功读了 0 字节"。
+    if !m.os.fds.contains(fd) {
+        return -EBADF;
+    }
     let iov = match read_iovec(m, ptr, cnt) {
         Ok(v) => v,
         Err(e) => return e,
@@ -455,6 +587,70 @@ fn sys_readv(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
         total += r;
         if (r as u64) < len {
             break; // 短读，停止
+        }
+    }
+    total
+}
+
+/// `preadv` / `pwritev`：逐个 iovec 走 `pread`/`pwrite`，偏移自增。
+///
+/// 不可寻址的 fd（管道、字符设备）由 `sys_pread`/`sys_pwrite` 报 `ESPIPE`；
+/// 这里同样要先校验 fd，理由和 `sys_readv` 一样。
+fn sys_preadv(m: &mut Machine, fd: i32, ptr: u64, cnt: u64, off: i64) -> i64 {
+    if !m.os.fds.contains(fd) {
+        return -EBADF;
+    }
+    if off < 0 {
+        return -EINVAL;
+    }
+    let iov = match read_iovec(m, ptr, cnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut total = 0i64;
+    let mut at = off;
+    for (base, len) in iov {
+        if len == 0 {
+            continue;
+        }
+        let r = sys_pread(m, fd, base, len, at);
+        if r < 0 {
+            return if total > 0 { total } else { r };
+        }
+        total += r;
+        at += r;
+        if (r as u64) < len {
+            break; // 短读
+        }
+    }
+    total
+}
+
+fn sys_pwritev(m: &mut Machine, fd: i32, ptr: u64, cnt: u64, off: i64) -> i64 {
+    if !m.os.fds.contains(fd) {
+        return -EBADF;
+    }
+    if off < 0 {
+        return -EINVAL;
+    }
+    let iov = match read_iovec(m, ptr, cnt) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut total = 0i64;
+    let mut at = off;
+    for (base, len) in iov {
+        if len == 0 {
+            continue;
+        }
+        let r = sys_pwrite(m, fd, base, len, at);
+        if r < 0 {
+            return if total > 0 { total } else { r };
+        }
+        total += r;
+        at += r;
+        if (r as u64) < len {
+            break;
         }
     }
     total
@@ -479,8 +675,11 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
             Ok(p) => p as i64,
             Err(e) => host_err(&e),
         },
-        // 标准流可能是管道；管道不可 seek
-        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => -ESPIPE,
+        // 字符设备可以 seek，但位置恒为 0（Linux 对 /dev/null 就是这样）。
+        Some(FdKind::Dev(_)) => 0,
+        // 标准流可能是管道；管道本身也不可 seek。
+        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr)
+        | Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) => -ESPIPE,
         Some(_) => -EBADF,
         None => -EBADF,
     }
@@ -521,6 +720,11 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
             entries: Vec::new(),
             pos: 0,
         },
+        // 管道也必须能 dup：shell 做重定向就是 `dup2(pipe_fd, 1)`，
+        // 这里漏掉会让 `$(cmd)`、`a | b` 直接拿到 EBADF。
+        Some(FdKind::Dev(d)) => FdKind::Dev(*d),
+        Some(FdKind::PipeRead(inner)) => FdKind::PipeRead(std::rc::Rc::clone(inner)),
+        Some(FdKind::PipeWrite(w)) => FdKind::PipeWrite(w.clone()),
         _ => return -EBADF,
     };
     let flags = m.os.fds.get(fd).map(|f| f.flags).unwrap_or(0);
@@ -544,6 +748,9 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
     const F_SETFD: i32 = 2;
     const F_GETFL: i32 = 3;
     const F_SETFL: i32 = 4;
+    const F_GETLK: i32 = 5;
+    const F_SETLK: i32 = 6;
+    const F_SETLKW: i32 = 7;
     const F_DUPFD_CLOEXEC: i32 = 1030;
     if !m.os.fds.contains(fd) {
         return -EBADF;
@@ -581,6 +788,23 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
             }
             0
         }
+        // 咨询锁（advisory lock）。模拟器里只有一个 guest 进程在参与锁协议，
+        // 所以"能不能拿到锁"的答案恒为能——这不是假装成功，是真的没有竞争者。
+        // F_GETLK 据此回 F_UNLCK（l_type 是 struct flock 的第 0 个 short）。
+        F_GETLK => {
+            const F_UNLCK: u16 = 2;
+            if m.mem.write_u16(arg, F_UNLCK).is_err() {
+                return -EFAULT;
+            }
+            0
+        }
+        F_SETLK | F_SETLKW => {
+            // 只校验 arg 可读，别默默吃掉坏指针。
+            if m.mem.read_u16(arg).is_err() {
+                return -EFAULT;
+            }
+            0
+        }
         _ => -EINVAL,
     }
 }
@@ -589,6 +813,8 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
 fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
     const TCGETS: u64 = 0x5401;
     const TIOCGWINSZ: u64 = 0x5413;
+    const FIONCLEX: u64 = 0x5450;
+    const FIOCLEX: u64 = 0x5451;
     if !m.os.fds.contains(fd) {
         return -EBADF;
     }
@@ -597,11 +823,81 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
         // 全缓冲、让 ls 输出单列——语义正确且可预期。真正的 pty 支持
         // 需要宿主侧的伪终端，属于后续里程碑。
         TCGETS | TIOCGWINSZ => -ENOTTY,
+        // FIOCLEX / FIONCLEX 与 tty 无关：它们等价于 fcntl(F_SETFD)，
+        // 对任何 fd 都该生效。报 ENOTTY 是错的。
+        FIOCLEX | FIONCLEX => {
+            if let Some(f) = m.os.fds.get_mut(fd) {
+                f.cloexec = req == FIOCLEX;
+            }
+            0
+        }
         _ => -ENOTTY,
     }
 }
 
 // ------------------------------------------------------------- open/stat
+
+/// `open(dir, O_TMPFILE|O_RDWR)`：在 `dir` 里开一个**没有名字**的文件。
+///
+/// 两个平台都能做到"无名"，但机制不同：
+///   - Unix：建好立刻 `unlink`。已打开的句柄仍然有效，这正是 POSIX 的语义，
+///     也是 glibc 在没有 `O_TMPFILE` 的老内核上的回退做法。
+///   - Windows：`FILE_FLAG_DELETE_ON_CLOSE`，并且必须放开 `FILE_SHARE_DELETE`，
+///     否则句柄还开着时目录里那个名字删不掉。
+///
+/// 注意**不能**靠"关 fd 时再删"这类自己记账的方案：`dup` 之后有多个 fd 指向
+/// 同一个文件，记账一定会漏，漏了就在 rootfs 里留垃圾——`t_stress` 的
+/// 5000 次循环就是专门查这个的。
+fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -> i64 {
+    if !dir.is_dir() {
+        return -ENOTDIR;
+    }
+    // O_TMPFILE 必须带写权限（Linux 也这么要求）。
+    if flags & O_ACCMODE == O_RDONLY {
+        return -EINVAL;
+    }
+    // 名字只在"建好到 unlink"之间存在，够唯一即可：pid + 单调计数器。
+    m.os.tmpfile_seq = m.os.tmpfile_seq.wrapping_add(1);
+    let name = format!(".wbox-tmpfile-{}-{}", m.os.pid, m.os.tmpfile_seq);
+    let path = dir.join(name);
+
+    let mut opt = std::fs::OpenOptions::new();
+    opt.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opt.mode(mode & 0o777);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        const FILE_SHARE_WRITE: u32 = 2;
+        const FILE_SHARE_DELETE: u32 = 4;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        let _ = mode;
+        opt.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+    }
+    let f = match opt.open(&path) {
+        Ok(f) => f,
+        Err(e) => return host_err(&e),
+    };
+    #[cfg(unix)]
+    if let Err(e) = std::fs::remove_file(&path) {
+        // 删不掉就别把这个 fd 交出去：交出去 = 在 rootfs 里留下可见垃圾，
+        // 而 guest 以为它拿到的是无名文件。
+        drop(f);
+        let _ = std::fs::remove_file(&path);
+        return host_err(&e);
+    }
+    m.os.fds.alloc(Fd {
+        kind: FdKind::File(f),
+        cloexec: flags & O_CLOEXEC != 0,
+        // O_TMPFILE 之外的 O_DIRECTORY 位不该回给 F_GETFL，摘掉。
+        flags: flags & !(O_TMPFILE | O_DIRECTORY),
+    }) as i64
+}
 
 fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32) -> i64 {
     let path = match guest_path(m, path_ptr) {
@@ -612,6 +908,28 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         Ok(p) => p,
         Err(e) => return e,
     };
+
+    // 空路径永远是 ENOENT。不显式判的话它会被当成"当前目录"，
+    // `open("", O_RDONLY)` 就会成功返回一个目录 fd。
+    if path.is_empty() {
+        return -ENOENT;
+    }
+
+    // 合成的 /dev/*：必须在碰宿主文件系统之前拦下来，容器 rootfs 里通常
+    // 没有 /dev，Windows 宿主上更是根本没有这些路径。
+    if let Some(d) = fs::DevKind::from_guest_path(&path) {
+        return m.os.fds.alloc(Fd {
+            kind: FdKind::Dev(d),
+            cloexec: flags & O_CLOEXEC != 0,
+            flags: flags & !O_CLOEXEC,
+        }) as i64;
+    }
+
+    // O_TMPFILE 要在"目录"分支之前判：它的路径**就是**一个目录，但要的
+    // 不是目录 fd 而是该目录下一个无名的可读写文件。
+    if flags & O_TMPFILE != 0 {
+        return open_tmpfile(m, &host, flags, mode);
+    }
 
     // 目录：单独一种 fd（getdents64 要用），不能按普通文件打开。
     let is_dir = host.is_dir();
@@ -820,7 +1138,8 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
         Some(FdKind::File(f)) => f.metadata(),
         Some(FdKind::Dir { path, .. }) => std::fs::metadata(path),
         // 标准流：合成一个字符设备的 stat。guest 的 isatty/缓冲判断会读它。
-        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => {
+        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr)
+        | Some(FdKind::Dev(_)) => {
             let mut b = [0u8; 144];
             b[24..28].copy_from_slice(&0o020620u32.to_le_bytes()); // S_IFCHR
             b[16..24].copy_from_slice(&1u64.to_le_bytes());
@@ -840,6 +1159,15 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
         Ok(p) => p,
         Err(e) => return e,
     };
+    // 合成的 /dev/*：宿主上没有对应的 inode，得自己造一份字符设备 stat。
+    // 少了这一条，shell 的 `test -c /dev/null`、`[ -e /dev/null ]` 会说不存在。
+    if fs::DevKind::from_guest_path(&path).is_some() {
+        let mut b = [0u8; 144];
+        b[24..28].copy_from_slice(&0o020666u32.to_le_bytes()); // S_IFCHR | 0666
+        b[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink
+        b[56..64].copy_from_slice(&4096i64.to_le_bytes()); // st_blksize
+        return if m.mem.write(out, &b).is_err() { -EFAULT } else { 0 };
+    }
     let host = match resolve_at(m, dirfd, &path) {
         Ok(p) => p,
         Err(e) => return e,
@@ -874,6 +1202,9 @@ fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if fs::DevKind::from_guest_path(&path).is_some() {
+        return 0;
+    }
     let host = match m.os.vfs.host_path_confined(&path) {
         Some(p) => p,
         None => return -EACCES,
@@ -912,9 +1243,15 @@ fn sys_readlinkat(m: &mut Machine, dirfd: i32, path_ptr: u64, buf: u64, size: u6
         Ok(p) => p,
         Err(e) => return e,
     };
-    // /proc/self/exe 是 guest 定位自身的常用手段，单独answer。
-    if path == "/proc/self/exe" {
-        let s = b"/proc/self/exe";
+    // /proc/self/exe 是 guest 定位自身（然后 re-exec 或读自己的 ELF）的常用
+    // 手段。procfs 整体还没合成，但这一条必须给**真的路径**：回一个
+    // "/proc/self/exe" 自身会让 guest 拿到一条 exec 不出去的路径，
+    // 表现成 execl 无声失败——比直接 EINVAL 难查得多。
+    if path == "/proc/self/exe" || path == format!("/proc/{}/exe", m.os.pid) {
+        if m.os.exe.is_empty() {
+            return -ENOENT;
+        }
+        let s = m.os.exe.clone().into_bytes();
         let n = (size as usize).min(s.len());
         return if m.mem.write(buf, &s[..n]).is_err() {
             -EFAULT
@@ -1489,6 +1826,8 @@ fn sys_pwrite(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
                 Err(e) => host_err(&e),
             }
         }
+        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) | Some(FdKind::Dev(_))
+        | Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => -ESPIPE,
         Some(_) => -EBADF,
         None => -EBADF,
     }
@@ -1550,20 +1889,17 @@ fn sys_dup3(m: &mut Machine, old: i32, new: i32, flags: i32) -> i64 {
     r
 }
 
-/// `pipe` / `pipe2`。进程内缓冲，见 `FdKind::Pipe` 的说明。
+/// `pipe` / `pipe2`。进程内缓冲，见 `fs::PipeInner` 的说明。
 fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-    use std::rc::Rc;
-    let buf = Rc::new(RefCell::new(VecDeque::new()));
+    let (rk, wk) = fs::new_pipe();
     let cloexec = flags & O_CLOEXEC != 0;
     let rd = m.os.fds.alloc(Fd {
-        kind: FdKind::Pipe { buf: Rc::clone(&buf), write_end: false },
+        kind: rk,
         cloexec,
         flags: flags & !O_CLOEXEC,
     });
     let wr = m.os.fds.alloc(Fd {
-        kind: FdKind::Pipe { buf, write_end: true },
+        kind: wk,
         cloexec,
         flags: flags & !O_CLOEXEC,
     });
@@ -1599,10 +1935,12 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
         };
         let revents = match m.os.fds.get(fd).map(|f| &f.kind) {
             None => POLLNVAL,
-            Some(FdKind::Pipe { buf, write_end }) => {
-                if *write_end {
-                    POLLOUT & events
-                } else if !buf.borrow().is_empty() {
+            Some(FdKind::Dev(_)) => (POLLIN | POLLOUT) & events,
+            Some(FdKind::PipeWrite(_)) => POLLOUT & events,
+            // 读端：有数据就绪，写端全关也算"就绪"（读到 EOF 而不是挂住），
+            // 这正是 POSIX 对已关闭管道的 POLLIN 语义。
+            Some(FdKind::PipeRead(inner)) => {
+                if !inner.data.borrow().is_empty() || inner.writers_closed() {
                     POLLIN & events
                 } else {
                     0

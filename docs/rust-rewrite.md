@@ -72,7 +72,7 @@ wbox-linux: fatal: unsupported instruction at 0x5555555567e5: d9 e8 48 89 e5 ...
 
 ## 3. 已验证到哪一档
 
-门禁：`cargo test -p wbox-linux`（142 项：67 单测 + 61 指令语义 + 14 端到端）。
+门禁：`cargo test -p wbox-linux`（165 项：84 单测 + 61 指令语义 + 20 端到端）。
 指令语义测试用手工汇编的字节序列，**不依赖任何工具链**，Windows CI 上跑的是
 同一批断言。
 
@@ -84,7 +84,9 @@ wbox-linux: fatal: unsupported instruction at 0x5555555567e5: d9 e8 48 89 e5 ...
 | **静态 glibc** C 程序（printf/malloc/strcpy/strcat/strcmp/循环） | ✅ |
 | **动态链接** glibc 程序（PT_INTERP → ld.so → 重定位 → TLS） | ✅ |
 | 仓库内静态 busybox：echo/uname/cat/ls/wc/stat/find/sort/head/printf/date/sha256sum | ✅ |
-| busybox `sh -c`（内建命令；不含需要 fork 的管道） | ✅ |
+| busybox `sh -c`：`a && b`、`a; b`、`$(...)`、`a \| b`、`for` 循环 | ✅ |
+| 合成的 `/dev/{null,zero,full,random,urandom,tty}`（rootfs 里没有 `/dev`） | ✅ |
+| `readlink /proc/self/exe` 给出真实 guest 路径（re-exec 可用） | ✅ |
 | 真实动态 coreutils：cat/id/basename/wc/sha256sum/sort/tr/head/date | ✅ |
 | **OCI 镜像端到端**：`wbox image pull alpine:3.20` 后跑其中的动态 musl PIE busybox | ✅ |
 | 文件读写往返（openat/read/write/lseek/fstat，落盘内容宿主可见） | ✅ |
@@ -101,21 +103,40 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 
 这些是**尚未实现**、会明确报错而不是静默跑错的部分。按影响面排序：
 
-1. **`fork`/`clone`/`execve`/`wait4`（多进程）** —— 返回 `ENOSYS`。
-   影响 shell 的管道、命令替换、后台任务。blink 用"快照式 fork"实现过这一档，
-   Rust 侧的稀疏页表反而更容易做写时复制，但还没做。
-2. **x87 浮点**（`fld1`/`fnstcw`/…）—— 报 `Undefined`。
+1. **真正并发的多进程**。`fork`/`vfork`/`clone`/`execve`/`wait4` 已实现，
+   走的是和 blink 同一套**快照式 fork**（`syscall/process.rs` 顶部有完整说明）：
+   fork 时克隆整个稀疏页表与 CPU 状态，**子进程先完整跑到退出**，父进程再继续，
+   `wait4` 从僵尸表取账。
+
+   能跑的是顺序模式：`a && b`、`a; b`、`$(cmd)`、`a | b`（写完再读）、
+   `if cmd; then`、`for` 循环。**不能**跑的是两端同时存活的结构——`cmd &`
+   之后父子还要互相通信、双向管道、父进程给运行中的子进程发信号。
+   这类用法会挂住或读到空数据，不会静默给错答案。
+
+   两个可观察的语义差异，已记进 `tests/known-failures.txt` 的 D 组：
+   `waitpid(WNOHANG)` 永远不会报"还在运行"；`kill(child, ...)` 找不到活目标。
+2. **`MAP_SHARED` 不跨进程共享，文件映射也不写回宿主。**
+   页表在 fork 时按值深拷贝，共享区域因此在父子之间断开。这是
+   `t_exec` / `t_fork_mem` 目前唯一的失败来源（A 组）。
+   要修就得把页数据从 `Box<[u8; 4096]>` 换成按映射种类区分的共享持有，
+   涉及访存热路径，是一个独立的改动。
+3. **x87 浮点**（`fld1`/`fnstcw`/…）—— 报 `Undefined`。
    SSE/SSE2 的标量与打包浮点已实现（add/sub/mul/div/min/max/sqrt/比较/各类
    int↔float 转换），但 glibc 的 `long double` 路径走 x87。
    已知受影响：`seq`、`printf "%f"`。
-3. **线程**（`clone(CLONE_THREAD)`）与真正的 futex 等待。
-   当前 `futex` 直接返回成功——单线程下无竞争路径不会走到那里。
-4. **信号投递**。`sigaction`/`sigprocmask` 登记接口返回成功但信号永不投递，
-   等价于"没有信号发生"。
-5. **socket 族与 epoll/eventfd/timerfd/signalfd**。
-6. **JIT**。当前纯解释执行，见 §2 的性能说明。
-7. `MAP_SHARED` 文件映射的写回（当前是快照式映射）、pty。
-8. 宿主 symlink 不防护——rootfs 里若有指向外部的符号链接，guest 能顺着出去。
+4. **线程**（`clone(CLONE_VM|CLONE_THREAD)`）与真正的 futex 等待。
+   `clone` 带线程标志时明确返回 `ENOSYS`——不假装成功，否则 guest 会以为
+   多了一个执行流。当前 `futex` 直接返回成功，单线程下无竞争路径不会走到那里。
+5. **信号投递**。`sigaction`/`sigprocmask` 登记接口返回成功但信号永不投递，
+   等价于"没有信号发生"。因此 `pause()`/`sigsuspend()` 是**确定的死锁**，
+   不是"暂时等不到"：返回 `EINTR`/`ENOSYS` 会让 `for (;;) pause();` 满 CPU
+   空转（CI 上表现为几百秒后超时），所以直接按 SIGKILL 终止并打印原因。
+6. **socket 族与 epoll/eventfd/timerfd/signalfd**。
+7. **JIT**。当前纯解释执行，见 §2 的性能说明。
+8. **file description 级共享状态**。`dup` 出来的 fd 应与原 fd 共享
+   `O_APPEND`/`O_NONBLOCK` 等状态标志与文件偏移；当前 `dup` 走宿主
+   `try_clone`（偏移共享），但状态标志各自一份。另含 pty。
+9. 宿主 symlink 不防护——rootfs 里若有指向外部的符号链接，guest 能顺着出去。
    与 blink 的限制相同（不是新增风险）。
    **越根路径已收紧**：`/..`、`../../..`、绝对宿主路径一律拒绝（`EACCES`），
    不再"夹到根"后成功。内核语义是夹住，夹住也逃不出 rootfs，但本仓的安全
@@ -126,7 +147,9 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 `tests/run-guest-tests.sh` 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）
 ——这套用例本就是这么设计的，见 `tests/KNOWN-FAILURES.md` 的说明。
 
-当前 **4 通过 / 17 失败**（旧引擎除 `t_net_sockopt@wine` 外全通）。
+当前 **5 通过 / 16 失败**（旧引擎除 `t_net_sockopt@wine` 外全通）。
+`t_stress` 已随 `O_TMPFILE` 的实现转绿并从基线移出；`t_exec` 从 7 个失败降到 2 个、
+`t_fork_mem` 从 19 个降到 12 个、`t_proc` 从 300s 超时变成快速失败。
 这是一次真实的 ABI 覆盖回退，逐条根因与分组见
 `tests/known-failures.txt`；门禁靠基线判定，新回归照样变红。
 安全相关的 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通且不在基线内**。

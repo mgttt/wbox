@@ -10,8 +10,8 @@
 
 use std::process::ExitCode;
 use wbox_linux::machine::{Exception, Machine};
+use wbox_linux::proc;
 use wbox_linux::syscall::Os;
-use wbox_linux::{elf, stack};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -82,39 +82,7 @@ fn main() -> ExitCode {
 
 /// 装配并运行 guest，返回退出码。
 fn run(prog: &str, argv_rest: &[String]) -> Result<i32, String> {
-    let os = Os::new();
-
-    // guest 路径 -> 宿主路径。程序本身也走 VFS，这样 rootfs 里的
-    // /bin/sh 才能按 guest 视角指定。
-    let host = os.vfs.host_path(prog);
-    let image = std::fs::read(&host)
-        .map_err(|e| format!("读取 '{}'（guest '{}'）失败：{}", host.display(), prog, e))?;
-
-    // `#!` 脚本：由加载器之外处理，与内核的 binfmt_script 一致。
-    if image.starts_with(b"#!") {
-        return run_script(prog, &image, argv_rest);
-    }
-
-    let mut m = Machine::new(os);
-
-    // PT_INTERP 的解析要走同一套 VFS 前缀，否则动态链接器会命中宿主的
-    // /lib64/ld-linux 而不是 rootfs 里的那个。
-    let prefix_vfs = wbox_linux::syscall::fs::Vfs::from_env();
-    let loaded = elf::load(&mut m.mem, &image, |interp| {
-        let hp = prefix_vfs.host_path(interp);
-        std::fs::read(&hp).map_err(|e| {
-            format!(
-                "读取动态链接器 '{}'（guest '{}'）失败：{}",
-                hp.display(),
-                interp,
-                e
-            )
-        })
-    })
-    .map_err(|e| format!("加载 '{prog}' 失败：{e}"))?;
-
-    m.mem.brk = loaded.brk;
-    m.mem.brk_start = loaded.brk;
+    let mut m = Machine::new(Os::new());
 
     let mut argv: Vec<Vec<u8>> = vec![prog.as_bytes().to_vec()];
     argv.extend(argv_rest.iter().map(|s| s.as_bytes().to_vec()));
@@ -129,9 +97,16 @@ fn run(prog: &str, argv_rest: &[String]) -> Result<i32, String> {
         })
         .collect();
 
-    let rsp = stack::setup(&mut m.mem, &loaded, &argv, &envp);
-    m.cpu.set_rsp(rsp);
-    m.cpu.rip = loaded.entry;
+    // 装载走的是和 `execve` 完全同一份代码（ELF、`#!` 脚本、PT_INTERP 都在里面），
+    // 这样"直接启动"和"guest 自己 exec 出来"的程序不可能有行为差异。
+    let program = proc::load_into(&mut m.mem, &m.os.vfs, prog, &argv, &envp)
+        .map_err(|e| e.msg)?;
+
+    m.os.exe = m.os.vfs.guest_abs(prog);
+    m.mem.brk = program.loaded.brk;
+    m.mem.brk_start = program.loaded.brk;
+    m.cpu.set_rsp(program.rsp);
+    m.cpu.rip = program.loaded.entry;
 
     let max = std::env::var("WBOX_MAX_INSNS")
         .ok()
@@ -142,29 +117,6 @@ fn run(prog: &str, argv_rest: &[String]) -> Result<i32, String> {
         Ok(code) => Ok(code),
         Err(e) => Err(fatal_report(&m, &e)),
     }
-}
-
-/// `#!` 脚本：取出解释器与可选的单个参数，改成执行解释器。
-fn run_script(path: &str, image: &[u8], argv_rest: &[String]) -> Result<i32, String> {
-    let line_end = image.iter().position(|&b| b == b'\n').unwrap_or(image.len());
-    let line = String::from_utf8_lossy(&image[2..line_end]);
-    let line = line.trim().to_string();
-    if line.is_empty() {
-        return Err(format!("'{path}' 的 #! 行是空的"));
-    }
-    // Linux 只把 #! 行拆成「解释器 + 最多一个参数」，剩下的整体算一个参数。
-    let mut it = line.splitn(2, char::is_whitespace);
-    let interp = it.next().unwrap().to_string();
-    let mut new_argv: Vec<String> = Vec::new();
-    if let Some(arg) = it.next() {
-        let arg = arg.trim();
-        if !arg.is_empty() {
-            new_argv.push(arg.to_string());
-        }
-    }
-    new_argv.push(path.to_string());
-    new_argv.extend(argv_rest.iter().cloned());
-    run(&interp, &new_argv)
 }
 
 /// 崩溃报告。内容对齐 blink 的 `fatal host exception`，沿用既有排查习惯。

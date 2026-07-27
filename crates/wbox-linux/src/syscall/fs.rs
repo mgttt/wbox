@@ -7,7 +7,7 @@
 //! 环境变量：`WBOX_PREFIX` 是首选；`BLINK_PREFIX` 作为兼容名保留，
 //! 因为 `src/backend/blink.rs` 目前还在设它。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
@@ -31,15 +31,117 @@ pub enum FdKind {
         entries: Vec<(Vec<u8>, u8)>,
         pos: usize,
     },
-    /// 匿名管道的一端。缓冲区是**进程内**共享的（`Rc<RefCell<..>>`）。
-    ///
-    /// 单进程模拟器里管道只有一种用法：同一个 guest 自己写再自己读
-    /// （典型是 `pipe2` + `poll` 的自唤醒模式）。因此不需要跨进程共享，
-    /// 也不需要阻塞——读空管道时若写端仍开着，本该阻塞的语义在单线程下
-    /// 必然死锁，所以返回 `EAGAIN` 让 guest 自己决定怎么办，而不是挂住。
-    Pipe { buf: Rc<RefCell<VecDeque<u8>>>, write_end: bool },
+    /// 匿名管道的读端。
+    PipeRead(Rc<PipeInner>),
+    /// 匿名管道的写端。持有 `PipeWriter` 而不是裸 `Rc`，这样"还有几个写端
+    /// 开着"是自动记账的，见 `PipeWriter`。
+    PipeWrite(PipeWriter),
+    /// 合成的字符设备（`/dev/null` 等），见 `DevKind`。
+    Dev(DevKind),
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
     Closed,
+}
+
+/// `/dev` 下我们**自己合成**的字符设备。
+///
+/// 为什么必须合成而不是转给宿主：容器的 rootfs 里通常没有 `/dev`，而
+/// `2>/dev/null` 是 shell 脚本里最常见的一句；Windows 宿主上更是根本没有
+/// 这些路径。少了它们，绝大多数真实脚本第一行就挂。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevKind {
+    /// `/dev/null`：读到 EOF，写入丢弃。
+    Null,
+    /// `/dev/zero`：读到无限的 0，写入丢弃。
+    Zero,
+    /// `/dev/full`：读到无限的 0，写入一律 `ENOSPC`。
+    Full,
+    /// `/dev/random` / `/dev/urandom`：读到随机字节。
+    Random,
+    /// `/dev/tty`：转给宿主的标准流（读 stdin、写 stdout）。
+    Tty,
+}
+
+impl DevKind {
+    /// 按 **guest 绝对路径**识别。只认绝对路径：相对路径要求我们合成出
+    /// `/dev` 这个目录本身（`getdents64` 能列出来），那是另一件事，
+    /// 没做就不要假装做了。
+    pub fn from_guest_path(p: &str) -> Option<DevKind> {
+        Some(match p {
+            "/dev/null" => DevKind::Null,
+            "/dev/zero" => DevKind::Zero,
+            "/dev/full" => DevKind::Full,
+            "/dev/random" | "/dev/urandom" => DevKind::Random,
+            "/dev/tty" | "/dev/console" => DevKind::Tty,
+            "/dev/stdin" => DevKind::Tty,
+            _ => return None,
+        })
+    }
+}
+
+/// 匿名管道的共享状态。
+///
+/// 缓冲区在**宿主进程内**共享（`Rc`）。快照式 `fork`（见 `syscall/process.rs`）
+/// 下父子在同一个宿主进程里，所以 fork 出来的两端指向同一个 `PipeInner`，
+/// `echo x | cat` 这种"写完再读"的用法能通。
+pub struct PipeInner {
+    pub data: RefCell<VecDeque<u8>>,
+    /// 当前还开着的**写端**个数。读到空缓冲时要靠它区分两件事：
+    /// 还有人可能写（`EAGAIN`）vs. 写端全关了（返回 0，也就是 EOF）。
+    /// 没有这个计数，`$(cmd)` 会在读端上无限 `EAGAIN` 自旋。
+    writers: Cell<usize>,
+}
+
+impl PipeInner {
+    fn new() -> Rc<Self> {
+        Rc::new(PipeInner {
+            data: RefCell::new(VecDeque::new()),
+            writers: Cell::new(0),
+        })
+    }
+
+    /// 写端是否已全部关闭（读端据此报 EOF）。
+    pub fn writers_closed(&self) -> bool {
+        self.writers.get() == 0
+    }
+}
+
+/// 写端的持有凭证：构造 +1、`Drop` -1。
+///
+/// 用 RAII 而不是在 `close` 里手工减，是因为 fd 表消失的路径有好几条
+/// （`close`、`dup2` 覆盖、`execve` 清 `O_CLOEXEC`、子进程退出整表析构），
+/// 手工记账一定会漏，而漏账的表现是读端永远读不到 EOF——挂死。
+pub struct PipeWriter(Rc<PipeInner>);
+
+impl PipeWriter {
+    fn new(inner: Rc<PipeInner>) -> Self {
+        inner.writers.set(inner.writers.get() + 1);
+        PipeWriter(inner)
+    }
+
+    pub fn inner(&self) -> &PipeInner {
+        &self.0
+    }
+}
+
+impl Clone for PipeWriter {
+    fn clone(&self) -> Self {
+        PipeWriter::new(Rc::clone(&self.0))
+    }
+}
+
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        self.0.writers.set(self.0.writers.get().saturating_sub(1));
+    }
+}
+
+/// 新建一对管道端点，返回 (读端, 写端)。
+pub fn new_pipe() -> (FdKind, FdKind) {
+    let inner = PipeInner::new();
+    (
+        FdKind::PipeRead(Rc::clone(&inner)),
+        FdKind::PipeWrite(PipeWriter::new(inner)),
+    )
 }
 
 pub struct Fd {
@@ -118,9 +220,47 @@ impl FdTable {
     pub fn close_on_exec(&mut self) {
         self.map.retain(|_, f| !f.cloexec);
     }
+
+    /// `fork` 时复制整张 fd 表。
+    ///
+    /// 不能 `derive(Clone)`：`File` 不是 `Clone`，只能 `try_clone`（宿主层面
+    /// 的 `dup`，父子共享同一个文件偏移——正是 Linux `fork` 的语义）。
+    /// 管道共享同一个 `Rc` 缓冲区，这是 fork 之后管道还能通的前提。
+    /// `Dir` 的目录项缓存不复制：子进程重新枚举一次，`pos` 也归零，
+    /// 因为缓存本身是我们的实现细节而不是 guest 可见状态。
+    pub fn try_clone(&self) -> std::io::Result<FdTable> {
+        let mut map = HashMap::with_capacity(self.map.len());
+        for (&n, f) in &self.map {
+            let kind = match &f.kind {
+                FdKind::Stdin => FdKind::Stdin,
+                FdKind::Stdout => FdKind::Stdout,
+                FdKind::Stderr => FdKind::Stderr,
+                FdKind::File(h) => FdKind::File(h.try_clone()?),
+                FdKind::Dir { path, .. } => FdKind::Dir {
+                    path: path.clone(),
+                    entries: Vec::new(),
+                    pos: 0,
+                },
+                FdKind::Dev(d) => FdKind::Dev(*d),
+                FdKind::PipeRead(inner) => FdKind::PipeRead(Rc::clone(inner)),
+                FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
+                FdKind::Closed => FdKind::Closed,
+            };
+            map.insert(
+                n,
+                Fd {
+                    kind,
+                    cloexec: f.cloexec,
+                    flags: f.flags,
+                },
+            );
+        }
+        Ok(FdTable { map, next: self.next })
+    }
 }
 
 /// VFS：guest 路径 <-> 宿主路径。
+#[derive(Clone)]
 pub struct Vfs {
     /// guest `/` 对应的宿主目录。`None` 表示直通宿主根（无 rootfs 隔离）。
     pub prefix: Option<PathBuf>,
@@ -206,6 +346,18 @@ impl Vfs {
     ///
     /// **已知缺口**：宿主侧的 symlink 不做防护——rootfs 里若存在指向外部的
     /// 符号链接，guest 能顺着它出去。与 blink 的限制相同，见 crate 文档。
+    /// 把一条（可能是相对的）guest 路径变成 **guest 视角**的绝对路径字符串。
+    ///
+    /// 用于 `/proc/self/exe` 之类"要把路径回报给 guest"的场合：容器模式下
+    /// 就是规范化后的 guest 绝对路径；直通模式下 guest 视角等于宿主视角，
+    /// 所以直接用宿主绝对路径（不能走 `normalize`，Windows 盘符会被丢）。
+    pub fn guest_abs(&self, guest: &str) -> String {
+        match &self.prefix {
+            None => self.host_path(guest).to_string_lossy().into_owned(),
+            Some(_) => self.normalize(guest).to_string_lossy().into_owned(),
+        }
+    }
+
     pub fn host_path(&self, guest: &str) -> PathBuf {
         match &self.prefix {
             None => {

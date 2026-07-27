@@ -45,12 +45,18 @@ impl std::fmt::Display for Fault {
 
 pub type MemResult<T> = Result<T, Fault>;
 
+#[derive(Clone)]
 struct Page {
     data: Box<[u8; PAGE_SIZE as usize]>,
     prot: u8,
 }
 
 /// guest 地址空间。
+///
+/// `Clone` 是快照式 `fork` 的基础：整张稀疏页表按值复制一份，父子从此互不
+/// 影响。代价是 fork 的开销与已映射内存成正比（真内核是 COW），对
+/// `sh -c 'a && b'` 这类用法完全够用。
+#[derive(Clone)]
 pub struct Mem {
     pages: HashMap<u64, Page>,
     /// mmap 的自底向上分配游标（`MAP_FIXED` 不走它）。

@@ -54,6 +54,9 @@ pub struct Machine {
     pub os: Os,
     /// `WBOX_TRACE=1`：每条指令打一行寄存器转储到 stderr。
     pub trace: bool,
+    /// 指令数上限（0 = 不限）。存在 `Machine` 上而不只是 `run()` 的参数，
+    /// 是因为 `fork` 出来的子进程要继承同一个预算。
+    pub max_insns: u64,
 }
 
 impl Machine {
@@ -63,6 +66,7 @@ impl Machine {
             mem: Mem::new(),
             os,
             trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
+            max_insns: 0,
         }
     }
 
@@ -71,6 +75,7 @@ impl Machine {
     /// `max_insns` 是安全阀（0 = 不限）：单测和 `WBOX_MAX_INSNS` 用它保证
     /// 死循环的 guest 不会把测试挂住。
     pub fn run(&mut self, max_insns: u64) -> ExecResult<i32> {
+        self.max_insns = max_insns;
         loop {
             if max_insns != 0 && self.cpu.icount >= max_insns {
                 return Err(Exception::Killed { signo: 24 }); // SIGXCPU

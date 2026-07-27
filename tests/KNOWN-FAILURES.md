@@ -15,7 +15,7 @@
 | 引擎 | 结果 |
 |---|---|
 | blink（旧，C） | 21 个用例中除 `t_net_sockopt @wine` 外全通 |
-| wbox-linux（新，纯 Rust） | **4 PASS / 17 FAIL** |
+| wbox-linux（新，纯 Rust） | **5 PASS / 16 FAIL** |
 
 这是一次**真实的 guest ABI 覆盖回退**，不是测试环境问题，也不打算用基线
 掩盖过去。之所以仍然合入：全 Rust 化本身是 PRD §2.2.1 列为发布验收条件的
@@ -23,19 +23,40 @@
 后续工作。基线如实记录现状——任何**新**回归照样让门禁变红，任何修好的项
 也会强制回来收紧 `tests/known-failures.txt`。
 
-失败按根因分七组（逐条见 `docs/rust-rewrite.md` §4）：
+失败按根因分组（逐条见 `docs/rust-rewrite.md` §4）：
 
 | 组 | 缺口 | 用例 |
 |---|---|---|
-| A | `fork`/`clone`/`execve`/`wait4` 未实现 | `t_exec` `t_fork_mem` `t_stress` |
-| B | socket 族与 epoll 未实现 | `t_net_epoll` `t_net_sockopt` |
+| A | `MAP_SHARED` 不跨进程共享、文件映射不写回 | `t_exec` `t_fork_mem` |
+| B | socket 族与 epoll 未实现；rlimit 边界校验 | `t_net_epoll` `t_net_sockopt` `t_negative` |
 | C | eventfd/timerfd/signalfd 未实现；信号不投递 | `t_eventfd` `t_timerfd` `t_signalfd` `t_signal_timer` |
-| D | procfs 未合成 | `t_proc` |
+| D | 快照式 fork 的并发语义差异 | `t_proc` |
 | E | `mount(2)` 未实现 | `t_mount_ro` |
-| F | errno 与边界精度未对齐 | `t_fd_open` `t_fd_rw` `t_mmap` `t_negative` |
-| G | 宿主 symlink 不防护 | `t_sec_path` `t_sec_linkabs` |
+| F | file description 级共享状态未建模 | `t_fd_open` `t_fd_rw` |
+| G | mmap 精度（私有文件映射的 mremap 增长回读） | `t_mmap` |
+| H | 宿主 symlink 不防护 | `t_sec_path` `t_sec_linkabs` |
 
-**G 组是唯一带安全含义的一组，且范围已收窄。** 本次同时做了两件事：
+### 进程族已补齐（原 A 组的主体）
+
+`fork`/`vfork`/`clone`/`execve`/`wait4` 现在按 blink 同一套**快照式 fork**
+实现（`crates/wbox-linux/src/syscall/process.rs` 顶部有完整取舍说明）：fork
+时克隆整个稀疏页表与 CPU 状态，**子进程先完整跑到退出**，父进程再继续。
+连带修掉的还有：管道写端全关时读端要报 EOF（否则 `$(cmd)` 无限自旋）、
+管道能被 `dup`（shell 重定向的前提）、`readlink /proc/self/exe` 给真路径、
+`O_TMPFILE`、合成的 `/dev/{null,zero,full,random,urandom,tty}`、
+`nanosleep`、`preadv`/`pwritev`、`F_GETLK`、`FIOCLEX`。
+
+效果：`t_stress` **全通并已从基线移出**；`t_exec` 从 7 个失败降到 2 个，
+`t_fork_mem` 从 19 个降到 12 个，`t_proc` 从 300s 超时变成快速失败
+（`pause()` 不再空转）。三者剩下的失败集中在 `MAP_SHARED`（A 组）与
+快照式 fork 的并发语义（D 组）。
+
+D 组的两个可观察差异是**取舍而非 bug**：子进程在 `fork` 返回前就跑完了，
+所以 `waitpid(WNOHANG)` 不可能看到"还在运行"，父进程也无法给运行中的
+子进程发信号。真并发要把 `Machine` 变成可调度的协程集合，并给每个阻塞点
+实现让出与唤醒，是另一个量级的工程。
+
+**H 组是唯一带安全含义的一组，且范围已收窄。** 本次同时做了两件事：
 
 1. runner 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）。这套用例本
    就是这么设计的——`t_sec_path.c` 开头写明它测的是"confines guest paths to
@@ -47,7 +68,7 @@
    改完 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通**并留在基线之外，
    `t_sec_path` 从 3/16 升到 12/16。
 
-剩在 G 组里的就是 symlink 链——rootfs 内指向外部的符号链接仍可被顺出去，
+剩在 H 组里的就是 symlink 链——rootfs 内指向外部的符号链接仍可被顺出去，
 与旧引擎**同样**的限制（不是新增风险）。
 
 ### 基线新增 `@linux` / `@windows` 标注

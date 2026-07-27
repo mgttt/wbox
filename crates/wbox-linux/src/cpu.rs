@@ -97,6 +97,8 @@ pub fn parity(v: u64) -> bool {
     (v as u8).count_ones().is_multiple_of(2)
 }
 
+/// `Clone` 是 `fork` 的基础：快照式 fork 直接克隆整个 CPU 状态。
+#[derive(Clone)]
 pub struct Cpu {
     pub regs: [u64; 16],
     pub rip: u64,

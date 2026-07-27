@@ -15,38 +15,47 @@
 # 2026-07-27：引擎从 blink（C）换成 crates/wbox-linux（纯 Rust）后重定基线。
 #
 # **这是一次真实的 guest ABI 覆盖回退，不是测试环境问题。** 旧引擎除
-# t_net_sockopt@wine 外全绿；新引擎当前 4 通过 / 17 失败。之所以仍然合入：
+# t_net_sockopt@wine 外全绿；新引擎当前 5 通过 / 16 失败。之所以仍然合入：
 # 全 Rust 化本身是 PRD §2.2.1 的发布验收条件（旧引擎是 122k 行 C），而
 # 补齐 ABI 是 §4.9 F4.R3–R6 明确在跟踪的后续工作。基线如实记录现状，
 # 任何**新**回归照样会让门禁变红，任何修好的项也会强制回来收紧这份文件。
 #
 # 缺口分组（逐条根因见 docs/rust-rewrite.md §4）：
 #
-#   A. fork/clone/execve/wait4 未实现 —— 多进程整块缺失
-#      t_exec t_fork_mem t_stress
+#   A. MAP_SHARED 映射不跨进程共享，文件映射也不写回宿主
+#      t_exec t_fork_mem
+#      fork/execve/wait4 本身已实现（快照式，见 syscall/process.rs），
+#      这两个用例剩下的失败全部集中在共享映射：稀疏页表在 fork 时按值
+#      深拷贝，MAP_SHARED 区域因此在父子之间断开。
 #   B. socket 族与 epoll 未实现
-#      t_net_epoll t_net_sockopt
+#      t_net_epoll t_net_sockopt t_negative
+#      （t_negative 剩下的失败是 socket 与 rlimit 边界校验）
 #   C. eventfd / timerfd / signalfd 未实现；信号不投递
 #      t_eventfd t_timerfd t_signalfd t_signal_timer
-#   D. procfs 未合成（/proc/self/* 等）
-#      t_proc
+#   D. 快照式 fork 的并发语义差异
+#      t_proc —— 子进程在 fork 返回前就跑完了，所以 waitpid(WNOHANG) 不可能
+#      看到"还在运行"，父子也无法互相发信号。这是取舍而不是 bug，见
+#      syscall/process.rs 顶部的说明。
 #   E. mount(2) 未实现（hostfs / MS_RDONLY 挂载）
 #      t_mount_ro
-#   F. 精度未对齐（功能在，errno/边界条件与 Linux 有差）
-#      t_fd_open t_fd_rw t_mmap t_negative
-#   G. 宿主 symlink 不防护（rootfs 内指向外部的符号链接可被顺出去）
+#   F. 文件描述（file description）级共享状态未建模
+#      t_fd_open t_fd_rw —— dup 出来的 fd 应共享 O_APPEND/O_NONBLOCK 等
+#      状态标志与文件偏移；当前 dup 走宿主 try_clone，状态标志各自一份。
+#      另含管道容量与非阻塞写的边界。
+#   G. mmap 的部分精度（私有文件映射的 mremap 增长回读）
+#      t_mmap
+#   H. 宿主 symlink 不防护（rootfs 内指向外部的符号链接可被顺出去）
 #      t_sec_path t_sec_linkabs
 #
-# G 组是唯一带安全含义的一组，**范围已收窄**：越根路径（`/..`、`../../..`、
+# H 组是唯一带安全含义的一组，**范围已收窄**：越根路径（`/..`、`../../..`、
 # 绝对宿主路径）现在一律拒绝，`t_sec_path_abshost` 与 `t_sec_path_relesc`
 # 已全通并留在基线之外（回归会立刻变红）。剩下的是 symlink 链，与旧引擎
 # 同样的限制。
 # ============================================================================
 
-# A. 多进程
+# A. MAP_SHARED
 t_exec
 t_fork_mem
-t_stress
 
 # B. socket / epoll
 t_net_epoll
@@ -58,25 +67,29 @@ t_timerfd
 t_signalfd
 t_signal_timer
 
-# D. procfs
+# D. 快照式 fork 的并发语义差异
 t_proc
 
 # E. mount(2)
 t_mount_ro
 
-# F. errno 与边界精度
+# F. file description 级共享状态
 t_fd_open
 t_fd_rw
+
+# G. mmap 精度
 t_mmap
+
+# B'（同 socket 组）：rlimit/socket 边界校验
 t_negative
 
-# G. 宿主 symlink 不防护（越根路径已修，见上）
+# H. 宿主 symlink 不防护（越根路径已修，见上）
 t_sec_path
 # 只在 Linux 宿主失败：Windows 上建 symlink 需要特权，逃逸链根本搭不起来，
 # 该用例反而通过。标注 @linux 才能让同一份基线在两个宿主上都成立。
 t_sec_linkabs @linux
 
-# H. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
+# I. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
 # st_nlink 在 Windows 侧是合成值（拿不到真实硬链接数），且建 symlink 需要
 # 特权，symlink 环路（ELOOP）测不起来。Linux 宿主上本用例通过，故标 @windows。
 t_path @windows

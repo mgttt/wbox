@@ -325,7 +325,7 @@ S4 在 Linux 上运行 Windows CLI
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
 | F4.R0 移除 C/C++ runtime | 全仓、CI、发布脚本 | `[done]` | `vendor/blink` 已删除；TLS 去 OpenSSL；CI 不再装 C 工具链 |
-| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `crates/wbox-linux` | G1 | `cargo test -p wbox-linux`（142 项）；实测跑通静态/动态 glibc、busybox、Alpine 镜像。fork/x87/socket 仍是缺口，见 `docs/rust-rewrite.md` §4 |
+| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `crates/wbox-linux` | G1 | `cargo test -p wbox-linux`（165 项）；实测跑通静态/动态 glibc、busybox、Alpine 镜像、shell 的 fork/exec 与管道。x87/socket/MAP_SHARED 仍是缺口，见 `docs/rust-rewrite.md` §4 |
 | F4.R8 合并成单一 `wbox.exe` | `src/runtime` + `EmuBackend` | `[planned]` | 见 §4.9 R8：需先决定进程内执行如何保留"AppContainer 套模拟器"的双层隔离 |
 | F4 Windows 完整 Linux guest 路径 | Rust runtime + F2/F3 | G3 | `WP.3`：portable artifact 在 AppContainer 内执行 BusyBox（当前仍是两个 exe） |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
@@ -515,9 +515,12 @@ F4
 ├── F4.R0 `[done]` 删除 Blink/C 产品依赖与构建链（含 native-tls -> 纯 Rust TLS）
 ├── F4.R1 `[done]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈（含 auxv）
 ├── F4.R2 `[done]` 纯 Rust x86-64 解释执行器（整数全集 + SSE/SSE2）；JIT 未做
-├── F4.R3 `[active]` Linux syscall 与 fd 已可用（约 50 个）；信号与进程模型未做
-├── F4.R4 `[active]` guest VFS 与 rootfs 前缀约束已做；/proc、/dev 未合成
-├── F4.R5 `[active]` 动态 glibc 已跑通；线程、fork/exec、epoll、socket 未做
+├── F4.R3 `[active]` Linux syscall 与 fd 已可用（约 80 个）；进程族（快照式
+│                   fork/execve/wait4）已做，信号投递未做
+├── F4.R4 `[active]` guest VFS 与 rootfs 前缀约束已做；/dev/{null,zero,full,
+│                   random,tty} 与 /proc/self/exe 已合成，procfs 其余未做
+├── F4.R5 `[active]` 动态 glibc、shell 的 fork/exec 与管道已跑通；
+│                   线程、epoll、socket、MAP_SHARED 跨进程共享未做
 ├── F4.R6 `[active]` Alpine 已手工跑通；Ubuntu 与产品门禁未接
 └── F4.R7 `[done]` vendor/blink 已从仓库、CI、文档和发布物删除
 ```
@@ -2030,7 +2033,9 @@ Rust-only 发布门禁。纯 Rust runtime 接管 WP.3 前，Windows OCI 能力�
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[done]` F4.R0–F4.R4：C/C++ 依赖已清零，纯 Rust ELF64 loader、初始栈、
    x86-64 整数指令全集 + SSE/SSE2、约 50 个 syscall 与 VFS 前缀约束均已落地
-   并有门禁（142 项）。下一步是 F4.R5（单一 exe）与 fork/x87 两个缺口。
+   并有门禁（165 项）。进程族（快照式 fork/execve/wait4）已补齐，Windows
+   产品用例 WP.3W 随之转绿。下一步是 §4.9 R8（单一 exe）与
+   x87/socket/MAP_SHARED 三个缺口。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
