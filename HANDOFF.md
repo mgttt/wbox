@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.28 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -58,6 +58,7 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.25 `export`/`import` | EX.1–EX.7 | 与 `save`/`load` 搬的东西不同（裸 rootfs vs 镜像）；import 收任意来源归档，顶层无从白名单化，只能挡穿越 + 全落 `rootfs/` 下 |
 | F9.26 `wbox restart` | RT.1–RT.7 | 顺带补了真实缺口：`run -d` 的容器此前不记启动配置，退出后连 `start` 都不行；`run-args.json` 与 `create.json` 必须分开，后者的存在本身是「该走 start」的标记 |
 | F9.27 `rename`/`prune` | RN.1–RN.6 | rename 只对未运行容器开放（名字被用在可写层路径、默认主机名、Windows Job object 上，改名改不到这些）；prune 默认只列清单，`created` 不在清理范围 |
+| F9.28 `logs -f`/`--tail` | LG.1–LG.4 | 跟随必须认日志截断（超上限会清零重写），否则之后静默哑掉；循环里先判活再读，反了会丢容器退出前的最后一段输出 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -76,7 +77,7 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 `resolve`（一处措辞，调用方只说"我要干什么"）、`lookup`（读先 upper 后 lower，
 认 whiteout）、`materialize`（硬链接铺下层 + 合并 upper，commit 与 export 共用）。
 
-### 写门禁本身也会踩的两个坑（本轮各踩一次）
+### 写门禁本身也会踩的坑（都是实际踩过的）
 
 - **别跟别的组共用 HOME 做破坏性操作**。`prune -f` 会清掉该 HOME 下所有已退出
   记录；跟别的组共用 `$WORK/home` 就会顺手扫掉它们的残留，制造跨组干扰。
@@ -86,11 +87,18 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
   已翻成 exited。直接 kill 完就 rm，偶发会留下还在跑的容器污染后面按 `ps`
   判断的用例（RT 组实测偶发红一次）。收尾要**轮询真实状态**再 rm，
   固定 sleep 睡多久都只是猜。
+- **跑门禁前必须 `cargo build`**。门禁跑的是 `target/debug/wbox` 这个**文件**，
+  而 `cargo test` 只构建测试二进制、不更新它。改完代码只跑 test 就跑门禁，
+  测的是上一版程序——实测因此整组红过一次，报的是「未知参数」这种一看就知道
+  跑错了版本的错。
+- **判据要能排除「碰巧成立」**。LG.2 起初只数行数，可万一容器早已跑完，
+  一次性读全也能凑够行数——那证明不了跟随。改成同时断言命令自身耗时 > 0，
+  才是真的在验「它等到了后来才产生的输出」。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **391 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **180 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **393 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **184 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -102,7 +110,7 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.27）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.28）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

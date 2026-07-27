@@ -2030,6 +2030,67 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== LG wbox logs -f / --tail（PRD F9.28）==="
+
+# 这一组不需要镜像（只读状态目录里的日志文件），用独立 HOME + 宿主程序模式，
+# 与别的组彻底不相干。
+LGH=$WORK/lghome
+rm -rf "$LGH" && mkdir -p "$LGH"
+HOME=$LGH "$WBOX_ABS" run -d --name lgc -- \
+  /bin/sh -c 'for i in 1 2 3 4 5 6 7 8; do echo line$i; sleep 0.7; done' >/dev/null 2>&1
+
+# --tail：只要最后几行，且不能把结尾的换行当成一整行（那会让 --tail 1 输出空行）
+sleep 2
+lout=$(HOME=$LGH "$WBOX_ABS" logs --tail 2 lgc 2>&1)
+lcnt=$(printf '%s\n' "$lout" | grep -c '^line')
+if [ "$lcnt" -eq 2 ] && printf '%s' "$lout" | grep -q 'line'; then
+  report PASS "LG.1 --tail N 只输出最后 N 行（实得 $lcnt 行）"
+else
+  report FAIL "LG.1 --tail" "行数=$lcnt 输出: $(printf '%s' "$lout" | tr '\n' '|' | head -c 120)"
+fi
+
+# --follow 的判据是**它真的等到了后来才产生的输出**。
+# 跟随必须在容器退出后自行结束（否则这里会一直挂到 timeout）——
+# 用 timeout 兜底，但正常路径不该触发它。
+# 容器整段输出跨约 5.6 秒，跟随从第 2 秒起接手，故必然要等 3 秒以上——
+# 判据取 >=1 秒是留足余量，不是卡在临界点上。
+# 还要证明它**确实等了**：只数行数的话，若容器早已跑完，一次性读全也能凑够
+# 8 行——那证明不了跟随。所以同时要求这条命令自身耗时明显大于 0。
+lt0=$(date +%s)
+lfout=$(timeout 20 env HOME=$LGH "$WBOX_ABS" logs -f lgc 2>&1); lfrc=$?
+lt1=$(date +%s)
+lwait=$((lt1 - lt0))
+lfcnt=$(printf '%s\n' "$lfout" | grep -c '^line')
+if [ "$lfrc" -eq 0 ] && [ "$lfcnt" -eq 8 ] && [ "$lwait" -ge 1 ]; then
+  report PASS "LG.2 -f 真的等到了后续输出（收齐 8 行，等待 ${lwait}s）"
+elif [ "$lfrc" -eq 0 ] && [ "$lfcnt" -eq 8 ]; then
+  report FAIL "LG.2 -f 跟随" "收齐 8 行但没等待（${lwait}s）——容器可能早已跑完，这一轮没真正验到跟随"
+elif [ "$lfrc" -eq 124 ]; then
+  report FAIL "LG.2 -f 自行结束" "容器已退出但跟随没结束（被 timeout 杀掉）"
+else
+  report FAIL "LG.2 -f 跟随" "rc=$lfrc 行数=$lfcnt（期望 8）"
+fi
+
+# 容器最后一段输出不能丢：跟随循环若"先读后判活"，会漏掉两者之间写下的内容，
+# 而那一段往往正是失败原因。上面收齐 8 行已覆盖，这里再单独盯住末行。
+if printf '%s\n' "$lfout" | grep -qx 'line8'; then
+  report PASS "LG.3 跟随不丢容器退出前的最后一行输出"
+else
+  report FAIL "LG.3 末行完整性" "输出尾部: $(printf '%s' "$lfout" | tail -c 80 | tr '\n' '|')"
+fi
+
+# 已退出的容器加 -f 必须立即返回，不能挂住等一个永远不会来的写入
+lfout=$(timeout 10 env HOME=$LGH "$WBOX_ABS" logs -f lgc 2>&1); lfrc=$?
+if [ "$lfrc" -eq 0 ]; then
+  report PASS "LG.4 对已退出容器 -f 立即返回（不挂住）"
+else
+  report FAIL "LG.4 已退出容器 -f" "rc=$lfrc（124 = 被 timeout 杀掉，说明挂住了）"
+fi
+
+HOME=$LGH "$WBOX_ABS" rm lgc >/dev/null 2>&1
+rm -rf "$LGH"
+
+echo
 echo "=== RN wbox rename / prune（PRD F9.27）==="
 
 # **这一组必须用自己的 HOME**：RN.6 要跑 `prune -f`，那会清掉该 HOME 下所有

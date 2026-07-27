@@ -73,7 +73,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
   wbox rename <旧名> <新名>                        给未运行的容器改名（见 PRD F9.27）
   wbox prune [-f]                                  批量清掉已退出的容器记录（不加 -f 只列清单）
-  wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
+  wbox logs [-f] [--tail N] [--stderr] <NAME>       读取 --detach 容器的输出（-f 持续跟随，见 PRD F9.28）
   wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
   wbox --help | -h
   wbox --version
