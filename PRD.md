@@ -414,7 +414,10 @@ dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部
 `docker.m.daocloud.io` 拉取并通过 manifest/config/layer digest 校验。Fedora
 单层镜像的 shell、os-release、`uname -m=x86_64` 与 RPM 架构通过；首次运行
 `dnf --version` 暴露容器环境缺少 `HOME`，镜像默认环境现补为 `/root`，显式
-`-e HOME=...` 仍优先。
+`-e HOME=...` 仍优先。补齐 `HOME` 后 `dnf5 --version` 在 AppContainer 内外
+均超过 10 秒无输出，排除 AppContainer 权限层后仍可复现；该项是独立的
+Blink/Linux ABI、线程或同步原语兼容缺口，必须以有界超时门禁继续定位，当前
+不得标记为通过。
 
 Python 四层镜像暴露两个独立问题：
 
@@ -426,8 +429,10 @@ Python 四层镜像暴露两个独立问题：
    `wbox-linux.exe` 脱离 AppContainer 后正常。根因是 Win32 `fdopendir`
    依赖在 AppContainer 中可能被拒绝的 `GetFinalPathNameByHandleW`。Win32 fd
    现记录 `openat` 的规范宿主路径，并在 `dup/dup2/close` 同步生命周期；
-   `WP.3D` 用真实 AppContainer 目录枚举裁决。该项须等待 CI 重建
-   `wbox-linux.exe` 后才能把 Python import 标为通过，本机旧 artifact 不作假绿。
+   `WP.3D` 用真实 AppContainer 目录枚举裁决。CI 30257127594 中该门禁通过；
+   同源 artifact 回灌 Windows 实机后，Python 3.12.13 成功加载
+   `encodings/__init__.py`，`sys.executable=/usr/local/bin/python3`、
+   `platform.machine()=x86_64`，该问题关闭。
 
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。

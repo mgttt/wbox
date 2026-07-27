@@ -357,12 +357,14 @@ _Noreturn static void PrintVersion(void) {
 }
 
 #if defined(_WIN32) && !defined(__CYGWIN__)
-// wbox: GNU-style --version (wbox-linux.exe --version). Handled before
-// blink's short-option parser, which would otherwise treat "--version"
-// as "--" + a guest program named "version".
-static void WboxMaybePrintVersion(int argc, char *argv[]) {
+// wbox: GNU-style metadata options. Handle these before blink's short-option
+// parser, which would otherwise treat them as guest program names.
+static void WboxMaybePrintMetadata(int argc, char *argv[]) {
   if (argc > 1 && !strcmp(argv[1], "--version")) {
     PrintVersion();
+  }
+  if (argc > 1 && !strcmp(argv[1], "--help")) {
+    PrintUsage(argc, argv, EXIT_SUCCESS, 1);
   }
 }
 #endif
@@ -477,7 +479,7 @@ int main(int argc, char *argv[]) {
 #endif
   g_blink_path = argc > 0 ? argv[0] : 0;
 #if defined(_WIN32) && !defined(__CYGWIN__)
-  WboxMaybePrintVersion(argc, argv);  // wbox: --version
+  WboxMaybePrintMetadata(argc, argv);
 #endif
   WriteErrorInit();
   InitMap();
