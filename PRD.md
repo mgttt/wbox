@@ -408,6 +408,21 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 换名或先 `rm`；目标已亡则提示 `rm` 后重来，不自动覆盖（自动覆盖会让"我以为
 在跑的那个"悄悄消失）。
 
+**F8.c 补充：`stop` 的平台差异（已实现，如实记录）**。`stop` 终止的是
+**supervisor（wbox 自己）**而非 guest——容器整棵树的存活绑在 supervisor 上
+（Linux 的 PDEATHSIG、Windows 的 Job kill-on-close），杀 supervisor 内核就会
+收走整棵树；直接杀 guest 反而漏掉它的子孙。
+
+Linux 先 `SIGTERM` 后 `SIGKILL`（默认给 10 秒，`--timeout` 可调）。
+**Windows 没有 SIGTERM 的等价物**——控制台事件对无控制台的后台进程不适用，
+因此 `Graceful` 在 Windows 上等同于强制终止。这不是偷懒，是平台确实缺少对齐物。
+
+退出判定**以锁为准而不是以 pid 为准**：pid 会被复用，而锁被释放才真正等价于
+"持有它的那个 wbox 没了"。
+
+`stop` 对已停止的容器**幂等**（不报错），否则 `wbox stop x` 在脚本里没法用；
+但停一个**不存在**的容器仍然报错——那是"没这个东西"，与"已经停了"是两回事。
+
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
 `exec` 存疑：Linux 可 `setns` 进已有 namespace；Windows 没有"进入已有容器"
 的原语，只能用同一 profile + 同一 Job 另起进程。因 wbox 本就不做文件系统
@@ -420,7 +435,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 |---|---|---|
 | F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5 已覆盖 Linux；Windows Rust 已验证清理修复，WP.5 尚未跑到成功终点 |
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
-| F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器。**`rm` 已完成**（门禁 P.6/P.7/P.8），`stop` 待做 |
+| F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
 
 ## 5. 非功能需求

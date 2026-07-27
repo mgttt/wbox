@@ -556,3 +556,101 @@ mod cap_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 进程终止（`wbox stop`，PRD F8.3）
+// ---------------------------------------------------------------------------
+
+/// 终止方式。Linux 上先礼后兵，Windows 只有"兵"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kill {
+    /// 请求对方自行退出（Linux: SIGTERM）。Windows 无等价物，见 [`terminate_pid`]。
+    Graceful,
+    /// 强制终止（Linux: SIGKILL；Windows: TerminateProcess）
+    Forceful,
+}
+
+/// 终止指定进程。返回是否成功递送（**不代表对方已经退出**，退出要靠轮询锁判定）。
+///
+/// 杀的是 **supervisor（wbox 自己）**，不是 guest：容器整棵进程树的存活绑在
+/// supervisor 上（Linux 的 PDEATHSIG、Windows 的 Job kill-on-close），
+/// supervisor 一死内核就会收走整棵树。直接去杀 guest 反而漏掉它的子孙。
+///
+/// **平台差异如实记录**：Windows 没有 SIGTERM 这类"请你自己退出"的通用机制
+/// （控制台事件对无控制台的后台进程不适用），因此 `Graceful` 在 Windows 上
+/// 等同于 `Forceful`。这不是偷懒，是平台确实没有对齐物；`wbox stop` 的文案
+/// 会说明这一点。
+#[cfg(unix)]
+pub fn terminate_pid(pid: u32, how: Kill) -> bool {
+    let sig = match how {
+        Kill::Graceful => libc::SIGTERM,
+        Kill::Forceful => libc::SIGKILL,
+    };
+    // SAFETY: kill(2) 只按 pid 递送信号，不解引用任何指针。
+    unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
+}
+
+#[cfg(windows)]
+pub fn terminate_pid(pid: u32, _how: Kill) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+    // SAFETY: OpenProcess 失败返回 null，此时不调用 TerminateProcess；
+    // 句柄无论成败都只关一次。
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let ok = TerminateProcess(h, 1) != 0;
+        CloseHandle(h);
+        ok
+    }
+}
+
+#[cfg(test)]
+mod kill_tests {
+    use super::*;
+
+    /// 起一个真的会赖着不走的子进程，用来验证终止确实生效。
+    fn spawn_sleeper() -> std::process::Child {
+        #[cfg(unix)]
+        let mut c = std::process::Command::new("/bin/sleep");
+        #[cfg(unix)]
+        c.arg("30");
+        #[cfg(windows)]
+        let mut c = std::process::Command::new("cmd");
+        #[cfg(windows)]
+        c.args(["/c", "ping -n 30 127.0.0.1 >nul"]);
+        c.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper")
+    }
+
+    /// 终止必须真的把进程干掉。**两个平台都跑这条**——Windows 那半
+    /// （OpenProcess + TerminateProcess）我在本机无从验证，靠 CI 的 windows
+    /// runner 真实执行；本轮之前正是这种"写完就算"的平台代码出过 Drop 顺序的错。
+    #[test]
+    fn terminate_actually_kills() {
+        let mut child = spawn_sleeper();
+        assert!(child.try_wait().unwrap().is_none(), "子进程本应还活着");
+        assert!(terminate_pid(child.id(), Kill::Forceful), "递送终止失败");
+        // 给内核一点时间收尸
+        let mut gone = false;
+        for _ in 0..100 {
+            if child.try_wait().unwrap().is_some() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone, "终止后子进程仍未退出");
+    }
+
+    /// 不存在的 pid 应当返回失败而不是 panic，也不该误伤别人。
+    #[test]
+    fn terminate_missing_pid_reports_failure() {
+        // 极大的 pid 在两个平台都几乎不可能被占用
+        assert!(!terminate_pid(4_000_000_000, Kill::Forceful));
+    }
+}
