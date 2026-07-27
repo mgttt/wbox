@@ -14,12 +14,13 @@ env:
   CARGO_TERM_COLOR: always
 
 # 发布门禁说明（详见 docs/testing.md §发布门禁）：
-#   tag v* 的 release job needs 全部七个门禁 job——
+#   tag v* 的 release job needs 全部八个门禁 job——
 #   test-linux（Rust 单测）+ test-windows（同一套单测在 windows 上跑，
 #   覆盖 cfg(windows) 模块）+ check-windows-msvc（Win32 编译门禁）+
 #   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
 #   guest-tests（guest 测试，前置未就绪时 SKIP 标黄不阻塞）+
-#   test-linux-backend（Linux 原生后端 rootless/cgroup 验收，见 §10）——
+#   test-linux-backend（Linux 原生后端 rootless/cgroup 验收，见 §10）+
+#   test-wine-backend（台阶③：Linux 上经 wine 跑 Windows 程序）——
 #   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
 
 jobs:
@@ -343,12 +344,49 @@ jobs:
         continue-on-error: true
         run: scripts/probe-cgroup2.sh target/debug/wbox
 
+  # ⑧ 台阶③（Linux 上跑 Windows 程序）：单独成 job 而不是并进
+  #    test-linux-backend——wine64 + mingw 装下来体量不小，塞进主门禁会拖慢
+  #    每次 push；单独 job 并行跑，不占用主链路时间。
+  test-wine-backend:
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked
+      - name: 装 wine64 与 mingw（PE 夹具现场编译）
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            wine64 gcc-mingw-w64-x86-64
+      - name: 打开 unprivileged user namespace（隔离硬前置）
+        run: |
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - name: 下载静态 busybox（镜像模式用例需要）
+        run: |
+          curl -fsSL --retry 3 -o busybox \
+            https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
+          chmod +x busybox
+      - name: 记录 wine 能力（不判定成败）
+        run: |
+          command -v wine64 wine || ls -l /usr/lib/wine/ || true
+          (wine64 --version || /usr/lib/wine/wine64 --version) 2>&1 | head -2 || true
+      # 整套跑（W 段是重点；其余段落顺带再验一遍，成本很低）。
+      # REQUIRE=1 同样适用：这台 runner 也是专门配齐依赖的。
+      - name: 端到端 —— 含 W 段（台阶③ wine 执行器）
+        env:
+          WBOX_LBE_REQUIRE: '1'
+        run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
+
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
     timeout-minutes: 30  # 构建 release + 打包 + 上传
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-linux-backend]
+    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-linux-backend, test-wine-backend]
     runs-on: windows-latest
     permissions:
       contents: write

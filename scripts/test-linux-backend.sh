@@ -319,6 +319,86 @@ reap_check "L3.2 镜像模式 wbox 被 SIGKILL 后无残留进程" \
   lbetest -- /bin/sh -c '/bin/sleep 300 & /bin/sleep 300'
 
 echo
+echo "=== W 台阶③：Linux 上跑 Windows 程序（集成 wine）==="
+
+# 前置：一个真 PE（用 mingw 现场编）+ 一个 wine 加载器。缺任一记 SKIP——
+# 这两样是可选依赖，不像 userns 那样是 wbox 自身的硬前置，故**不**受
+# WBOX_LBE_REQUIRE 管辖（专门的 test-wine-backend job 会装齐再跑）。
+MINGW=x86_64-w64-mingw32-gcc
+wine_found=$(WBOX_WINE=${WBOX_WINE:-} command -v wine64 || command -v wine || \
+             ls /usr/lib/wine/wine64 2>/dev/null | head -1)
+if ! command -v "$MINGW" >/dev/null 2>&1; then
+  report SKIP "W.1-W.4 台阶③" "无 $MINGW，无法现场编 PE 夹具"
+elif [ -z "$wine_found" ] && [ -z "${WBOX_WINE:-}" ]; then
+  report SKIP "W.1-W.4 台阶③" "本机没有 wine"
+else
+  cat > "$WORK/hi.c" <<'CEOF'
+#include <stdio.h>
+int main(int argc, char **argv) {
+    printf("PE-OK argc=%d\n", argc);
+    return argc == 3 ? 7 : 0;
+}
+CEOF
+  cat > "$WORK/net.c" <<'CEOF'
+#include <stdio.h>
+#include <winsock2.h>
+int main(void) {
+    WSADATA w; WSAStartup(MAKEWORD(2,2), &w);
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET; a.sin_port = htons(53);
+    a.sin_addr.s_addr = inet_addr("1.1.1.1");
+    printf(connect(s,(struct sockaddr*)&a,sizeof a) == 0 ? "NET-OK\n" : "NET-BLOCKED\n");
+    return 0;
+}
+CEOF
+  if ! "$MINGW" -O2 -o "$WORK/hi.exe" "$WORK/hi.c" 2>"$WORK/cc.log"; then
+    report SKIP "W.1-W.4 台阶③" "PE 夹具编译失败：$(head -c 150 "$WORK/cc.log")"
+  else
+    "$MINGW" -O2 -o "$WORK/net.exe" "$WORK/net.c" -lws2_32 2>/dev/null
+
+    hrun -- "$WORK/hi.exe" a b
+    if printf '%s' "$OUT" | grep -q 'PE-OK argc=3'; then
+      report PASS "W.1 PE 被自动识别并经 wine 执行（参数原样传入）"
+    else
+      report FAIL "W.1 跑 PE" "rc=$rc 输出: $(printf '%s' "$OUT" | tail -c 200)"
+    fi
+
+    if [ "$rc" -eq 7 ]; then
+      report PASS "W.2 Windows 程序退出码原样转发（exit 7）"
+    else
+      report FAIL "W.2 PE 退出码" "rc=$rc（期望 7）"
+    fi
+
+    # 关键：wine 只是执行器变体，隔离语义必须与跑 ELF 时**完全一致**。
+    # 这条是 §10.5 红线在台阶③ 上的体现——不能"wine 那条路忘了断网"。
+    if [ -x "$WORK/net.exe" ]; then
+      hrun -- "$WORK/net.exe"
+      blocked=$(printf '%s' "$OUT" | grep -c 'NET-BLOCKED')
+      hrun --allow-network -- "$WORK/net.exe"
+      allowed=$(printf '%s' "$OUT" | grep -c 'NET-OK')
+      if [ "$blocked" -ge 1 ] && [ "$allowed" -ge 1 ]; then
+        report PASS "W.3 Windows 程序同样默认断网、--allow-network 放行"
+      elif [ "$blocked" -ge 1 ]; then
+        report SKIP "W.3 PE 网络语义" "默认断网正确，但宿主自身似乎无外网，放行侧无法判定"
+      else
+        report FAIL "W.3 PE 网络语义" "默认竟未断网：$(printf '%s' "$OUT" | tail -c 150)"
+      fi
+    else
+      report SKIP "W.3 PE 网络语义" "net.exe 编译失败（缺 winsock 头？）"
+    fi
+
+    # ELF 不能被误塞 wine：误判的代价是拿 wine 去跑 Linux 程序，报错极难懂
+    hrun -V -- /bin/echo elf-probe
+    if printf '%s' "$OUT" | grep -q '直接执行（目标是本机 ELF）'; then
+      report PASS "W.4 ELF 目标不经 wine（PE 判定看完整签名，不只看 MZ）"
+    else
+      report FAIL "W.4 ELF 误判" "$(printf '%s' "$OUT" | grep 执行器 | head -c 150)"
+    fi
+  fi
+fi
+
+echo
 echo "==================================="
 echo "结果: PASS=$pass FAIL=$fail SKIP=$skip"
 [ "$fail" -eq 0 ]

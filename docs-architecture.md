@@ -208,7 +208,7 @@ Linux 后端跑在 v1 的 AppContainer+Job 容器**之内**：wbox-linux 进程�
 
 **两个利好**：`jit.h` 已内建 Win64 ABI（JIT 移植成本大幅降低）；guest `execve` 是进程内重建 Machine，不依赖宿主 exec（fork+exec 特判的工程量比预判小）。
 
-## 10. 多宿主后端（Linux 宿主台阶①② 已落地，③④ 为设计）
+## 10. 多宿主后端（Linux 宿主台阶①② 已落地，③ CLI 已跑通，④ 为愿景）
 
 > 起因：wbox 最初只做「Windows 宿主」。把宿主维度打开后，`Backend` trait
 > 天然可以承载更多组合。本节记录**评估结论与优先级**，避免把"能做"当成
@@ -223,7 +223,7 @@ Linux 侧不是"顺手也支持一下"，而是与 Windows 侧对等的一条主
 |---|---|---|---|
 | ① 沙箱 Linux 程序 | 宿主已有的 ELF 关进 namespace + cgroup | ✅ L0/L1/L2 已落地（`LinuxMode::Host`） | `bwrap` / `systemd-run` |
 | ② 沙箱 Linux 容器 | OCI 镜像 rootfs 直接跑 | ✅ 同上（`LinuxMode::Image`，复用整个 `oci/`） | podman / docker（**只对标 runner，不对标生态**） |
-| ③ 沙箱 Windows 程序 | Linux 上跑 PE，**聚焦 CLI/TUI** | 📐 见 §10.3 | wine（集成而非取代） |
+| ③ 沙箱 Windows 程序 | Linux 上跑 PE，**聚焦 CLI/TUI** | 🔨 CLI 已跑通（`backend/wine.rs`，见 §10.3） | wine（集成而非取代） |
 | ④ Windows 容器 | Linux 上跑 Windows 容器镜像 | 🔭 远期愿景，仅记录 | Windows Container |
 
 关于 ① 与 ② 的**关系**：两者共用同一套隔离原语（user/mount/pid/net
@@ -299,12 +299,30 @@ compose/镜像构建/registry 生态，那是人年级工程。wbox 的位置是
 - **范围收窄到 CLI/TUI**（§10.0 ③）：不碰 GUI/DirectX/COM。这不是偷懒，
   而是把工程量压到可控：CLI/TUI 需要的 Win32 表面主要是控制台 API、
   文件/注册表、进程/线程，而 GUI 那一大摊正是 wine 工程量的主体。
-- **落地形态**（待做，非本期）：`WineBackend` 与 `LinuxNativeBackend` 共用
-  同一套隔离（namespace + cgroup），差别只在执行器——前者 `wine app.exe`，
-  后者直接 exec。故实现上应是 `LinuxNativeBackend` 的一个执行器变体，
-  而不是平行的第三份隔离代码。
-- **前置检测**：宿主无 wine 时必须明确报"该宿主不支持运行 PE"，
-  不得静默降级（§10.5 语义一致性红线）。
+- **落地形态**（✅ CLI 已跑通，`src/backend/wine.rs`）：如设计所述，它**不是**
+  平行的第三份隔离代码，而是 `LinuxNativeBackend` 宿主模式下的一个执行器
+  变体——`prepare` 里判定目标是 PE 就在命令前插一个 wine 加载器，
+  namespace/cgroup/PDEATHSIG 一行都不改。
+  这样做的直接收益是**语义自动对齐**：`--memory`/`--max-procs`/
+  `--allow-network` 对 PE 与对 ELF 是同一条实现，不可能出现"wine 那条路忘了
+  限额/忘了断网"的分叉。实测佐证：同一个 `net.exe`，默认下 UDP connect 得
+  `WSAENETUNREACH`，加 `--allow-network` 才通，与宿主直接跑 wine 的结果一致。
+- **PE 判定看完整签名**（`MZ` → `e_lfanew` → `PE\0\0`），不只看 `MZ` 魔数：
+  误判的代价是拿 wine 去跑一个 Linux 程序，报错会非常难懂。ELF、纯 DOS 程序、
+  越界 `e_lfanew` 都有单测钉住。
+- **WINEPREFIX 放 `~/.wbox/wineprefix`**，不是默认的 `~/.wine`：wbox 的子进程
+  环境是白名单制的，`HOME` 刻意不透传（会泄漏宿主用户目录），没有 HOME 时
+  wine 会去写 `/.wine` 并失败；放在 `~/.wbox` 下也不会污染用户自己可能已装了
+  别的应用的 `~/.wine`。
+- **前置检测**：宿主无 wine 时明确报错并给出安装命令（`apt install wine64` /
+  `WBOX_WINE=...`），不静默降级——直接 exec 一个 PE 只会得到内核的
+  `Exec format error`，用户根本看不出是缺 wine（§10.5 语义一致性红线）。
+- **验收**：`scripts/test-linux-backend.sh` 的 W 段（W.1 识别并执行 + 参数传递 /
+  W.2 退出码转发 / W.3 网络语义与 ELF 一致 / W.4 ELF 不被误塞 wine），
+  由独立的 `test-wine-backend` CI job 装齐 wine64 + mingw 后执行——
+  单独成 job 是因为那两个依赖体量不小，并进主门禁会拖慢每次 push。
+- **尚未做**：镜像模式下的 PE（`wbox run <镜像> -- app.exe`）暂未接线；
+  GUI/DirectX/COM 明确不做；wine 版本差异导致的行为差异不属 wbox 缺陷。
 - **不做的事**：不 bundle wine（体积与许可）、不替 wine 做兼容层补丁、
   不承诺 GUI 程序可用。用户的 wine 版本差异导致的行为差异不属 wbox 缺陷，
   但 `wbox run -V` 应打印 wine 版本便于甩锅定位。

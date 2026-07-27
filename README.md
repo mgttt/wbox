@@ -150,6 +150,13 @@ wbox image list
 | 生命周期 | `PR_SET_PDEATHSIG` 双段链，wbox 退出/被杀后整棵进程树被清理，无孤儿 | 同左 |
 | 文件系统 | **不隔离**（不换根，宿主可见）；`--workdir` 是工作目录 | `pivot_root` 进镜像 rootfs，宿主不可见 |
 
+**在 Linux 上跑 Windows 程序（CLI/TUI）**：`wbox run -- app.exe` 会自动认出
+PE 并经 wine 执行，隔离与限额和跑 ELF **完全一样**（同一条实现，不是另一条
+代码路径）。wbox **集成 wine 而非取代它**——wine 负责 Win32 语义，wbox 负责
+隔离与资源管控。没装 wine 时明确报错并给出安装命令，不会静默降级。
+`WINEPREFIX` 默认在 `~/.wbox/wineprefix`，`WBOX_WINE` 可指定 wine 路径。
+不做 GUI/DirectX/COM。
+
 不提供什么：
 
 - **无需 root，但也不越权**：全程 unprivileged user namespace。宿主禁用

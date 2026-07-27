@@ -49,19 +49,50 @@ impl Backend for LinuxNativeBackend {
         if self.0 == LinuxMode::Host {
             // 宿主模式：不换根，故不校验 rootfs、不注入 resolv.conf
             // （用宿主自己的 /etc/resolv.conf）。workdir 就是工作目录。
-            let env = super::build_sanitized_env(
+            // 同下：wine 分支在非 Linux 目标下整块 cfg 掉，mut 是条件性需要的
+            #[allow(unused_mut)]
+            let mut env = super::build_sanitized_env(
                 &spec.env,
                 &[],
                 spec.env_pass_all,
                 spec.verbose,
                 super::env::GuestFlavor::Linux,
             );
+            // 台阶③：目标若是 PE，插一个 wine 加载器在前面。隔离原语一律不变
+            // ——wine 只是执行器变体，`--memory`/`--max-procs`/`--allow-network`
+            // 走的仍是同一条实现，不会出现"wine 那条路忘了限额"的分叉。
+            // 非 Linux 目标下这两个绑定不会被改写（wine 分支整块 cfg 掉），
+            // 故 mut 是条件性需要的
+            #[allow(unused_mut)]
+            let mut cmd = spec.cmd.clone();
+            #[allow(unused_mut)]
+            let mut via_wine: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+            // wine 模块只在 Linux 编译：Windows 宿主跑 PE 走的是原生
+            // AppContainer 路径，压根不该出现 wine。
+            #[cfg(target_os = "linux")]
+            if super::wine::is_pe(std::path::Path::new(&cmd[0])) {
+                let wine = super::wine::find_wine(
+                    std::env::var("WBOX_WINE").ok().as_deref(),
+                    std::env::var("PATH").ok().as_deref(),
+                )?;
+                let prefix = super::wine::prepare_prefix()?;
+                super::wine::augment_env(&mut env, &prefix, spec.verbose);
+                cmd.insert(0, wine.display().to_string());
+                via_wine = Some((wine, prefix));
+            }
             if spec.verbose {
                 super::verbose_kv("宿主后端", "linux-native（宿主程序模式，不换根）");
                 super::verbose_kv("工作目录", spec.workdir.display());
+                match &via_wine {
+                    Some((w, p)) => {
+                        super::verbose_kv("执行器", format!("wine（目标是 PE）：{}", w.display()));
+                        super::verbose_kv("WINEPREFIX", p.display());
+                    }
+                    None => super::verbose_kv("执行器", "直接执行（目标是本机 ELF）"),
+                }
             }
             return Ok(Prepared {
-                cmd: spec.cmd.clone(),
+                cmd,
                 workdir: spec.workdir.clone(),
                 env,
             });

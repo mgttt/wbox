@@ -18,6 +18,10 @@ pub mod env;
 // Linux 原生后端（多宿主扩展 L0，见 docs-architecture.md §10）。
 // prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
 mod linux;
+/// 台阶③：Linux 上跑 Windows 程序的执行器变体（集成 wine，非新后端）。
+/// 只在 Linux 宿主编译——Windows 上跑 PE 本来就是原生路径，不需要 wine。
+#[cfg(target_os = "linux")]
+pub mod wine;
 // native 的 prepare 纯逻辑跨平台可编译（spawn 链路内部 cfg），
 // 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;

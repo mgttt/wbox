@@ -158,12 +158,18 @@ wbox 的验证分三层：**Rust 单测**（纯逻辑，跨平台可跑）、**g
 - **cgroup v2 首选路径目前无任何环境覆盖**（runner 委派未开、本地容器是
   cgroup v1）。脚本每次打印 `note:` 说明本次覆盖了哪条路径，不靠猜。
   详见 `docs-architecture.md` §10.5「覆盖缺口」。
-- 本地跑：`scripts/test-linux-backend.sh`（默认 `target/debug/wbox` + `./busybox`）。
+- **W 段（台阶③：Linux 上经 wine 跑 Windows 程序）**：现场用 mingw 编一个 PE
+  夹具，验证识别/参数/退出码，以及**网络语义与跑 ELF 完全一致**（同一条实现，
+  故不该分叉）。这段的依赖（wine64 + mingw）是可选的，缺了记 SKIP，**不**受
+  `WBOX_LBE_REQUIRE` 管辖——由独立的 `test-wine-backend` job 装齐再跑，
+  单独成 job 是因为那两个依赖体量不小，并进主门禁会拖慢每次 push。
+- 本地跑：`scripts/test-linux-backend.sh`（默认 `target/debug/wbox` + `./busybox`）；
+  装了 wine 与 mingw 时 W 段自动生效（本机实测 21/21 PASS）。
 
 ## 二、本地跑法
 
 ```bash
-# Rust 单测（Linux 180 项；Windows 另含 11 项真机 API/启动链测试）
+# Rust 单测（Linux 185 项；Windows 另含 11 项真机 API/启动链测试）
 cargo test --locked
 
 # Windows 代码编译门禁（Win32 专属模块只在 windows target 编译）
@@ -206,6 +212,7 @@ tag v* push
        ④ smoke-windows       真机冒烟（AppContainer 链路）
        ⑤ build-wbox-linux    wbox-linux 构建 + 完整真机矩阵
        ⑥ guest-tests         guest 测试（前置未就绪 = SKIP，补齐后自动生效）
+       ⑧ test-wine-backend   台阶③：Linux 上经 wine 跑 Windows 程序（W 段）
        ⑦ test-linux-backend  Linux 原生后端验收：L1/L2 + 宿主程序模式 +
                              网络默认（rootless namespace +
                              cgroup v2；ubuntu runner 才同时具备"非 root"与
