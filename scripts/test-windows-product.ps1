@@ -151,7 +151,7 @@ try {
     Write-Host "PASS WP.3D AppContainer Linux directory enumeration"
 
     $writeGuest = & $portableWbox run --name product-write local.test/wbox-fixture:latest `
-        /busybox sh -c 'echo PRIVATE_WRITE_OK > /probe/private-write && cat /probe/private-write' `
+        /busybox sh -c 'echo PRIVATE_WRITE_OK > /probe/private-write && /busybox cat /probe/private-write' `
         2>&1 | Out-String
     Assert-Exit 0 "WP.3W Windows OCI private writable rootfs" $writeGuest
     if ($writeGuest -notmatch "PRIVATE_WRITE_OK") {
@@ -166,7 +166,7 @@ try {
     Write-Host "PASS WP.3W Windows OCI private writable rootfs and cache isolation"
 
     $writeBg = & $portableWbox run -d --name $writeBgName local.test/wbox-fixture:latest `
-        /busybox sh -c 'echo PRIVATE_BG_OK > /probe/private-bg && cat /probe/private-bg' `
+        /busybox sh -c 'echo PRIVATE_BG_OK > /probe/private-bg && /busybox cat /probe/private-bg' `
         2>&1 | Out-String
     Assert-Exit 0 "WP.3WB detached private rootfs launch" $writeBg
     $writeBgDir = Join-Path $testHome ".wbox\run\$writeBgName"

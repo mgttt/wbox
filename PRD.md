@@ -436,6 +436,12 @@ guest 写权限。F4.8 首版在取得容器注册锁后，把缓存复制到
 `~/.wbox/run/<name>/rootfs`，只向该 profile 的确定性 AppContainer SID 授予
 修改权。前台退出自动清理；后台退出保留到 `wbox rm`；`--rm` 立即清理。
 `WP.3W/WP.3WB` 分别裁决前台写入、缓存不变、自动清理与后台保留/显式删除。
+detached 父进程现在必须在 `.operations.lock` 内写入一次性预留令牌，
+supervisor 凭同一令牌接管；`run/rm` 在接管前均把该名称视为运行中，禁止锁外
+盲删状态树。supervisor 在 pull/copy/prepare 失败时负责撤销预留，`--rm`
+从登记开始即采用自动清理语义。ACL 递归使用 `symlink_metadata` 并把所有
+reparse point 当作不递归的叶节点，禁止链接把容器 SID 授权带出 rootfs；
+私有副本中的绝对 symlink 目标则重写到该次运行的私有 rootfs 内。
 
 Windows 实机复测中，Fedora 42 `dnf5 --version` 首次 rc0 并列出完整插件，
 耗时约 43.9 秒；Python 3.12.13 import（含跨层 symlink 链）约 20.6 秒，

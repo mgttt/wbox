@@ -8,6 +8,7 @@ const NATIVE_TARGET: &str = "(native)";
 /// 父进程用它告诉脱离出来的子进程"你是 supervisor，日志已备好、别再脱离一次"。
 /// 同时也是 [`crate::runstate::register_with`] 保留日志的开关。
 const SUPERVISED_ENV: &str = "WBOX_SUPERVISED";
+const SUPERVISED_TOKEN_ENV: &str = "WBOX_SUPERVISED_TOKEN";
 use crate::error::{Result, WboxError};
 use crate::oci;
 
@@ -211,6 +212,18 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     if opts.detach && std::env::var_os(SUPERVISED_ENV).is_none() {
         return spawn_detached(&opts, args);
     }
+    // supervisor 在任何 pull/copy/prepare 错误出口都要清掉父进程留下的预留；
+    // 登记成功会先删除令牌，因此这个 guard 随后 drop 时自然成为 no-op。
+    let _detached_guard = match std::env::var(SUPERVISED_TOKEN_ENV) {
+        Ok(token) => {
+            let name = opts
+                .name
+                .as_deref()
+                .ok_or_else(|| WboxError::args("detached supervisor 缺少容器名"))?;
+            Some(crate::runstate::adopt_detached(name, &token)?)
+        }
+        Err(_) => None,
+    };
 
     // 可解析的镜像引用默认按镜像处理并在缺失时拉取；本地程序使用
     // `run -- PROGRAM` 或明确的路径/可执行文件名。
@@ -242,21 +255,10 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
         .name
         .clone()
         .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
-    let dir = crate::runstate::dir_for(&name)?;
-
-    // 名字被占就地拒绝：等到 supervisor 起来再失败，用户只会看到一个空壳容器名
-    // 和一份空日志，排查成本高得多。
-    if dir.exists() && crate::runstate::liveness(&dir) == crate::runstate::Liveness::Running {
-        return Err(WboxError::args(format!(
-            "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
-            name
-        )));
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| WboxError::args(format!("创建状态目录失败：{}", e)))?;
-    let out = crate::runstate::open_log_append(&dir, crate::runstate::LOG_STDOUT)?;
-    let err = crate::runstate::open_log_append(&dir, crate::runstate::LOG_STDERR)?;
+    let mut reservation = crate::runstate::reserve_detached(&name)?;
+    let dir = reservation.dir();
+    let out = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDOUT)?;
+    let err = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDERR)?;
 
     let exe = std::env::current_exe()
         .map_err(|e| WboxError::args(format!("定位 wbox 自身可执行文件失败：{}", e)))?;
@@ -273,6 +275,7 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
         }
     }
     cmd.env(SUPERVISED_ENV, "1")
+        .env(SUPERVISED_TOKEN_ENV, reservation.token())
         .stdin(std::process::Stdio::null())
         .stdout(out)
         .stderr(err);
@@ -281,6 +284,7 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
     let child = cmd
         .spawn()
         .map_err(|e| WboxError::spawn(format!("启动后台 wbox 失败：{}", e)))?;
+    reservation.disarm();
     // 只打名字，方便脚本 `NAME=$(wbox run -d ...)` 直接取用
     println!("{}", name);
     // 不 wait：supervisor 要活得比我们久。它被 init 收养，不会成为僵尸。
@@ -337,6 +341,7 @@ fn spawn_log_watchdog(dir: std::path::PathBuf) {
 fn register_for_spawn(
     spec: &backend::RunSpec,
     target: &str,
+    auto_remove: bool,
 ) -> Result<crate::runstate::Registration> {
     // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
     // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
@@ -345,13 +350,19 @@ fn register_for_spawn(
         allow_network: spec.allow_network,
         workdir: spec.workdir.to_string_lossy().into_owned(),
     };
-    crate::runstate::register_with_context(
+    let reservation = std::env::var(SUPERVISED_TOKEN_ENV).ok();
+    let mut reg = crate::runstate::register_with_context(
         &spec.name,
         &spec.cmd,
         target,
         supervised,
         Some(exec_context),
-    )
+        reservation.as_deref(),
+    )?;
+    if supervised && auto_remove {
+        reg.remove_on_drop();
+    }
+    Ok(reg)
 }
 
 fn spawn_registered(
@@ -359,7 +370,6 @@ fn spawn_registered(
     spec: &backend::RunSpec,
     prepared: &backend::Prepared,
     reg: crate::runstate::Registration,
-    auto_remove: bool,
 ) -> Result<u32> {
     let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
     if supervised {
@@ -380,14 +390,6 @@ fn spawn_registered(
         crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDERR);
     }
     drop(reg);
-    if supervised && auto_remove {
-        if let Err(cleanup) = crate::runstate::remove(&spec.name) {
-            if rc.is_ok() {
-                return Err(cleanup);
-            }
-            eprintln!("wbox: 警告：--rm 清理容器 '{}' 失败：{}", spec.name, cleanup);
-        }
-    }
     rc
 }
 
@@ -398,8 +400,8 @@ fn spawn_with_state(
     target: &str,
     auto_remove: bool,
 ) -> Result<u32> {
-    let reg = register_for_spawn(spec, target)?;
-    spawn_registered(b, spec, prepared, reg, auto_remove)
+    let reg = register_for_spawn(spec, target, auto_remove)?;
+    spawn_registered(b, spec, prepared, reg)
 }
 
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
@@ -485,7 +487,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             let backend = BlinkBackend;
             #[cfg(windows)]
             let reg = {
-                let reg = register_for_spawn(&spec, &iref.repo_tag())?;
+                let reg = register_for_spawn(&spec, &iref.repo_tag(), opts.auto_remove)?;
                 let private_rootfs = reg.dir().join("rootfs");
                 backend::create_private_rootfs(
                     &spec.workdir,
@@ -498,7 +500,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             let prepared = backend.prepare(&spec)?;
             #[cfg(windows)]
             {
-                spawn_registered(&backend, &spec, &prepared, reg, opts.auto_remove)
+                spawn_registered(&backend, &spec, &prepared, reg)
             }
             #[cfg(not(windows))]
             {

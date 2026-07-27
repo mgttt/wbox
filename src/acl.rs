@@ -69,9 +69,17 @@ pub fn grant_modify_recursive_for_profile(root: &Path, profile_name: &str) -> Re
 
 /// 递归遍历并授权。单项失败即整体报错（授权不全 = 运行时莫名 EACCES）。
 fn grant_tree(path: &Path, sid: &str, access: u32, count: &mut u32) -> Result<()> {
-    grant_ace(path, path.is_dir(), sid, access)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("读取 '{}' 元数据失败", path.display()))
+        .ctx(ErrKind::Registry)?;
+    if is_reparse_point(&metadata) {
+        // 绝不跟随 symlink/junction，否则 ACL 遍历可越出 rootfs。
+        return Ok(());
+    }
+    let is_dir = metadata.is_dir();
+    grant_ace(path, is_dir, sid, access)?;
     *count += 1;
-    if path.is_dir() {
+    if is_dir {
         let entries = std::fs::read_dir(path)
             .with_context(|| format!("遍历 '{}' 失败", path.display()))
             .ctx(ErrKind::Registry)?;
@@ -81,6 +89,12 @@ fn grant_tree(path: &Path, sid: &str, access: u32, count: &mut u32) -> Result<()
         }
     }
     Ok(())
+}
+
+fn is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
 /// 对单个路径授予 ACE（目录带继承标志，文件不继承）。

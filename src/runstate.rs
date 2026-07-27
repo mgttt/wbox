@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const OPERATION_LOCK: &str = ".operations.lock";
+const DETACHED_RESERVATION: &str = ".detached-reservation";
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 状态根目录：`~/.wbox/run`（与镜像缓存同在 `~/.wbox` 下，便于统一清理）。
@@ -198,6 +199,11 @@ fn try_lock_exclusive(path: &Path) -> Option<File> {
 
 /// 判定一个状态目录的存活状态。
 pub fn liveness(dir: &Path) -> Liveness {
+    // detached 父进程先在操作锁内预留名字，supervisor 随后凭令牌接管。
+    // 预留期间必须按 Running 处理，否则并发 run/rm 会把它正在准备的目录删掉。
+    if dir.join(DETACHED_RESERVATION).is_file() {
+        return Liveness::Running;
+    }
     let lock = dir.join("lock");
     if !lock.exists() {
         // 没有锁文件：要么根本没登记完，要么被清理过——都按已亡处理
@@ -236,6 +242,110 @@ impl Registration {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+
+    /// `--rm` supervisor 从登记成功起就在任意错误出口清理状态树。
+    pub fn remove_on_drop(&mut self) {
+        self.persist = false;
+    }
+}
+
+/// detached 父进程对容器名的原子预留。只有拿到同一令牌的 supervisor 能接管。
+pub struct DetachedReservation {
+    dir: PathBuf,
+    token: String,
+    armed: bool,
+}
+
+impl DetachedReservation {
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DetachedReservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(root) = self.dir.parent() else {
+            return;
+        };
+        if let Ok(_operation_lock) = lock_operations(root) {
+            let reservation = self.dir.join(DETACHED_RESERVATION);
+            if std::fs::read_to_string(&reservation).ok().as_deref() == Some(&self.token) {
+                purge_dir(&self.dir);
+            }
+        }
+    }
+}
+
+/// 在根操作锁内检查旧状态、清理已退出残留并预留 detached 名称。
+pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_RESERVATION: AtomicU64 = AtomicU64::new(1);
+
+    let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
+    if dir.exists() {
+        match liveness(&dir) {
+            Liveness::Running => {
+                return Err(WboxError::args(format!(
+                    "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
+                    name
+                )));
+            }
+            Liveness::Exited => purge_dir(&dir),
+        }
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
+    let token = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        now_unix(),
+        NEXT_RESERVATION.fetch_add(1, Ordering::Relaxed)
+    );
+    std::fs::write(dir.join(DETACHED_RESERVATION), &token)
+        .map_err(|e| WboxError::args(format!("写入 detached 预留令牌失败：{}", e)))?;
+    Ok(DetachedReservation {
+        dir,
+        token,
+        armed: true,
+    })
+}
+
+/// supervisor 在开始 pull/prepare 前接过清理责任；若尚未完成登记就报错退出，
+/// guard 会删除预留及日志，避免名称永久卡在“运行中”。
+pub fn adopt_detached(name: &str, token: &str) -> Result<DetachedReservation> {
+    let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
+    let actual = std::fs::read_to_string(dir.join(DETACHED_RESERVATION))
+        .map_err(|_| WboxError::args(format!("容器 '{}' 的 detached 预留不存在", name)))?;
+    if actual != token {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 的 detached 预留令牌不匹配",
+            name
+        )));
+    }
+    Ok(DetachedReservation {
+        dir,
+        token: token.to_string(),
+        armed: true,
+    })
 }
 
 /// 删掉一个状态目录的全部内容。**调用前必须确认没有 owner 持锁**
@@ -254,6 +364,7 @@ fn purge_dir(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
     let _ = std::fs::remove_file(dir.join(LOG_STDERR));
     let _ = std::fs::remove_file(dir.join(CONTAINER_PID));
+    let _ = std::fs::remove_file(dir.join(DETACHED_RESERVATION));
     let _ = std::fs::remove_dir(dir);
 }
 
@@ -350,7 +461,7 @@ pub fn register_with(
     target: &str,
     keep_logs: bool,
 ) -> Result<Registration> {
-    register_with_context(name, cmd, target, keep_logs, None)
+    register_with_context(name, cmd, target, keep_logs, None, None)
 }
 
 pub fn register_with_context(
@@ -359,6 +470,7 @@ pub fn register_with_context(
     target: &str,
     keep_logs: bool,
     exec_context: Option<ExecContext>,
+    reservation_token: Option<&str>,
 ) -> Result<Registration> {
     let dir = dir_for(name)?;
     let root = dir
@@ -366,11 +478,26 @@ pub fn register_with_context(
         .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
     let _operation_lock = lock_operations(root)?;
     if dir.exists() && keep_logs {
-        // detach 的子进程：目录是父进程刚建的，锁还没人持有，直接接手即可
+        // detach 的子进程只允许凭父进程写下的同一令牌接管。
+        let expected = reservation_token.ok_or_else(|| {
+            WboxError::args(format!("容器 '{}' 缺少 detached 预留令牌", name))
+        })?;
+        let reservation = dir.join(DETACHED_RESERVATION);
+        let actual = std::fs::read_to_string(&reservation).map_err(|_| {
+            WboxError::args(format!("容器 '{}' 的 detached 预留不存在或不可读", name))
+        })?;
+        if actual != expected {
+            return Err(WboxError::args(format!(
+                "容器 '{}' 的 detached 预留令牌不匹配（并发的 wbox？）",
+                name
+            )));
+        }
         let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
             WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
         })?;
         write_meta(&dir, name, cmd, target, exec_context)?;
+        std::fs::remove_file(&reservation)
+            .map_err(|e| WboxError::args(format!("接管 detached 预留失败：{}", e)))?;
         return Ok(Registration {
             dir,
             lock: Some(lock),
@@ -666,6 +793,60 @@ mod tests {
         // 所以文案不该提它。
         assert!(m.contains("换个 --name"), "报错要给出可行解法：{}", m);
         assert!(!m.contains("wbox rm"), "不该建议一条必然被拒的命令：{}", m);
+    }
+
+    #[test]
+    fn detached_reservation_blocks_competing_operations_and_requires_token() {
+        let _home = TempHome::new("detached-reservation");
+        let mut reservation = reserve_detached("reserved").unwrap();
+        let dir = reservation.dir().to_path_buf();
+        let token = reservation.token().to_string();
+        assert_eq!(liveness(&dir), Liveness::Running);
+        assert!(register("reserved", &["x".into()], "(native)").is_err());
+        assert!(remove("reserved").is_err());
+        assert!(
+            register_with_context(
+                "reserved",
+                &["x".into()],
+                "(native)",
+                true,
+                None,
+                Some("wrong-token"),
+            )
+            .is_err()
+        );
+
+        let reg = register_with_context(
+            "reserved",
+            &["x".into()],
+            "(native)",
+            true,
+            None,
+            Some(&token),
+        )
+        .unwrap();
+        reservation.disarm();
+        assert!(!dir.join(DETACHED_RESERVATION).exists());
+        assert_eq!(liveness(&dir), Liveness::Running);
+        drop(reg);
+        assert_eq!(liveness(&dir), Liveness::Exited);
+        remove("reserved").unwrap();
+    }
+
+    #[test]
+    fn adopted_reservation_cleans_up_before_registration_on_error() {
+        let _home = TempHome::new("detached-adopt");
+        let mut parent = reserve_detached("adopted").unwrap();
+        let dir = parent.dir().to_path_buf();
+        let token = parent.token().to_string();
+        parent.disarm();
+        drop(parent);
+
+        {
+            let _supervisor_guard = adopt_detached("adopted", &token).unwrap();
+            assert!(dir.exists());
+        }
+        assert!(!dir.exists(), "未登记的 supervisor 退出后必须清理预留");
     }
 
     /// 已亡的残留可以被同名容器复用——否则崩过一次就再也用不了这个名字。

@@ -60,6 +60,9 @@ Job Object 提供：
 创建完整的私有 rootfs 副本，并只向该 profile 的确定性 SID 授予修改权。
 前台退出随状态登记清理，后台实例保留到 `rm`。全量复制是语义正确的首版，
 后续稀疏层必须保持相同生命周期、cache isolation 与 write/rename/delete 契约。
+detached 父进程在全局状态操作锁内预留名称，supervisor 只能凭一次性令牌接管；
+ACL 遍历不跟随 reparse point，绝对 Linux symlink 也会重写到私有 rootfs 内，
+因此状态目录竞态和链接都不能把删除或授权作用到另一运行实例/宿主路径。
 
 `wbox-linux` 是 blink 的 Win32 移植。它维护两层 fd：
 

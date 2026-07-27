@@ -139,6 +139,16 @@ pub(crate) fn create_private_rootfs(
 
 #[cfg(any(windows, test))]
 fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
+    copy_rootfs_tree_inner(source, destination, source, destination)
+}
+
+#[cfg(any(windows, test))]
+fn copy_rootfs_tree_inner(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
     std::fs::create_dir(destination).map_err(|e| {
         WboxError::spawn(format!(
             "创建私有 rootfs 目录 '{}' 失败：{}",
@@ -157,7 +167,7 @@ fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
             WboxError::spawn(format!("读取 rootfs 项 '{}' 类型失败：{}", src.display(), e))
         })?;
         if ty.is_dir() {
-            copy_rootfs_tree(&src, &dst)?;
+            copy_rootfs_tree_inner(&src, &dst, source_root, destination_root)?;
         } else if ty.is_file() {
             std::fs::copy(&src, &dst).map_err(|e| {
                 WboxError::spawn(format!(
@@ -168,7 +178,7 @@ fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
                 ))
             })?;
         } else if ty.is_symlink() {
-            copy_rootfs_symlink(&src, &dst)?;
+            copy_rootfs_symlink(&src, &dst, source_root, destination_root)?;
         } else {
             return Err(WboxError::spawn(format!(
                 "rootfs 项 '{}' 类型不受 Windows 私有层支持",
@@ -180,17 +190,53 @@ fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
+fn copy_rootfs_symlink(
+    source: &Path,
+    destination: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<()> {
     use std::os::windows::fs::{symlink_dir, symlink_file};
 
     let target = std::fs::read_link(source).map_err(|e| {
         WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
     })?;
-    let target_is_dir = std::fs::metadata(source).map(|m| m.is_dir()).unwrap_or(false);
-    let result = if target_is_dir {
-        symlink_dir(&target, destination)
+    let source_target = if target.has_root() {
+        let relative: std::path::PathBuf = target
+            .components()
+            .filter(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )
+            })
+            .collect();
+        source_root.join(relative)
     } else {
-        symlink_file(&target, destination)
+        source
+            .parent()
+            .ok_or_else(|| WboxError::spawn("rootfs symlink 缺少父目录"))?
+            .join(&target)
+    };
+    let source_root = std::fs::canonicalize(source_root).map_err(|e| {
+        WboxError::spawn(format!("规范化共享 rootfs '{}' 失败：{}", source_root.display(), e))
+    })?;
+    let source_target = std::fs::canonicalize(&source_target).map_err(|e| {
+        WboxError::spawn(format!(
+            "rootfs symlink '{}' 的目标不存在或不可解析：{}",
+            source.display(),
+            e
+        ))
+    })?;
+    let relative_target = source_target.strip_prefix(&source_root).map_err(|_| {
+        WboxError::spawn(format!("rootfs symlink '{}' 的目标越出共享 rootfs", source.display()))
+    })?;
+    let private_target = destination_root.join(relative_target);
+    let target_is_dir = source_target.is_dir();
+    let result = if target_is_dir {
+        symlink_dir(&private_target, destination)
+    } else {
+        symlink_file(&private_target, destination)
     };
     result.map_err(|e| {
         WboxError::spawn(format!(
@@ -203,7 +249,12 @@ fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
 }
 
 #[cfg(all(unix, test))]
-fn copy_rootfs_symlink(source: &Path, destination: &Path) -> Result<()> {
+fn copy_rootfs_symlink(
+    source: &Path,
+    destination: &Path,
+    _source_root: &Path,
+    _destination_root: &Path,
+) -> Result<()> {
     let target = std::fs::read_link(source).map_err(|e| {
         WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
     })?;

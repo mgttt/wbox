@@ -293,6 +293,7 @@ mod tests {
                 allow_network: false,
                 workdir: std::env::temp_dir().to_string_lossy().into_owned(),
             }),
+            None,
         )
         .unwrap();
         let err =
