@@ -9,6 +9,7 @@ use super::ImageRef;
 use crate::error::{ErrKind, KindExt, WboxError};
 use anyhow::Context;
 use sha2::Digest;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -54,7 +55,9 @@ pub fn pull_image(
         }
         let (ctype2, body2, hd2) = client.get_manifest(&iref.repo, &digest)?;
         if is_index(&ctype2) {
-            return Err(WboxError::registry("子 manifest 仍是 index（嵌套 index 不支持）"));
+            return Err(WboxError::registry(
+                "子 manifest 仍是 index（嵌套 index 不支持）",
+            ));
         }
         // 子 manifest 是按 digest 取回的，必须校验该 digest（H2）。
         verify_digest(&digest, &body2)
@@ -77,9 +80,15 @@ pub fn pull_image(
         .and_then(|v| v.as_str())
         .ok_or_else(|| WboxError::registry("manifest 缺少 config.digest"))?;
     let config_bytes = client.get_blob(&iref.repo, config_digest)?;
-    verify_digest(config_digest, &config_bytes).context("config digest 校验失败").ctx(ErrKind::Registry)?;
+    verify_digest(config_digest, &config_bytes)
+        .context("config digest 校验失败")
+        .ctx(ErrKind::Registry)?;
     if verbose {
-        println!("wbox: config {} 校验通过（{} 字节）", config_digest, config_bytes.len());
+        println!(
+            "wbox: config {} 校验通过（{} 字节）",
+            config_digest,
+            config_bytes.len()
+        );
     }
 
     // ---- 3. 准备输出目录（重新 pull 同 tag 时先清掉旧 rootfs，避免残留）----
@@ -99,6 +108,7 @@ pub fn pull_image(
         .and_then(|v| v.as_array())
         .ok_or_else(|| WboxError::registry("manifest 缺少 layers 数组"))?;
     let mut layer_digests = Vec::new();
+    let mut symlinks = SymlinkState::default();
     for (i, layer) in layers.iter().enumerate() {
         let digest = layer
             .get("digest")
@@ -118,7 +128,7 @@ pub fn pull_image(
         verify_digest(digest, &blob)
             .context(format!("layer {} digest 校验失败", digest))
             .ctx(ErrKind::Registry)?;
-        unpack_layer(&blob, &rootfs, media_type)
+        unpack_layer_with_state(&blob, &rootfs, media_type, &mut symlinks)
             .context(format!("解包层 {} 失败", digest))
             .ctx(ErrKind::Registry)?;
         if verbose {
@@ -126,6 +136,9 @@ pub fn pull_image(
         }
         layer_digests.push(digest.to_string());
     }
+    finalize_symlinks(&rootfs, &symlinks)
+        .context("实现镜像符号链接失败")
+        .ctx(ErrKind::Registry)?;
 
     // ---- 5. 写元数据 ----
     std::fs::write(dest.join("manifest.json"), &manifest_bytes)
@@ -146,7 +159,11 @@ pub fn pull_image(
 }
 
 /// 从 manifest index 中挑选匹配 os/arch 的子 manifest digest。
-fn select_manifest(index: &serde_json::Value, os: &str, arch: &str) -> crate::error::Result<String> {
+fn select_manifest(
+    index: &serde_json::Value,
+    os: &str,
+    arch: &str,
+) -> crate::error::Result<String> {
     let manifests = index
         .get("manifests")
         .and_then(|v| v.as_array())
@@ -176,8 +193,12 @@ fn select_manifest(index: &serde_json::Value, os: &str, arch: &str) -> crate::er
             let p = m.get("platform");
             format!(
                 "{}/{}",
-                p.and_then(|p| p.get("os")).and_then(|v| v.as_str()).unwrap_or("?"),
-                p.and_then(|p| p.get("architecture")).and_then(|v| v.as_str()).unwrap_or("?")
+                p.and_then(|p| p.get("os"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?"),
+                p.and_then(|p| p.get("architecture"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
             )
         })
         .collect();
@@ -239,70 +260,13 @@ fn decompress_layer(blob: &[u8], media_type: &str) -> anyhow::Result<Vec<u8>> {
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(blob).read_to_end(&mut out)?;
         Ok(out)
-    } else if mt.is_empty()
-        || mt.ends_with("+tar")
-        || mt.contains("tar")
-        || mt.contains("layer")
-    {
+    } else if mt.is_empty() || mt.ends_with("+tar") || mt.contains("tar") || mt.contains("layer") {
         // 未压缩 tar：application/vnd.oci.image.layer.v1.tar、
         // application/vnd.docker.image.rootfs.diff.tar 等。
         Ok(blob.to_vec())
     } else {
         anyhow::bail!("不支持的 layer 压缩/格式：mediaType={}", media_type)
     }
-}
-
-/// 逐段解析 `rel`（rootfs 相对路径），解析途中遇到的每个符号链接，
-/// 返回 rootfs 内的最终绝对路径；任何中间组件命中越出 rootfs 的 symlink
-/// （绝对目标或 `..` 逃逸）都报错。参照 Docker FollowSymlinkInScope 思路，
-/// 防止恶意层用 symlink 条目让后续写出/删除落到 rootfs 之外（C1）。
-fn resolve_in_scope(root: &Path, rel: &Path) -> anyhow::Result<PathBuf> {
-    use std::collections::VecDeque;
-    use std::ffi::OsString;
-    use std::path::Component;
-
-    let mut pending: VecDeque<OsString> = rel
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_os_string()),
-            _ => None,
-        })
-        .collect();
-    let mut cur = PathBuf::new(); // 已解析的 rootfs 相对前缀
-    let mut hops = 0u32;
-    while let Some(comp) = pending.pop_front() {
-        cur.push(&comp);
-        let abs = root.join(&cur);
-        if let Ok(md) = std::fs::symlink_metadata(&abs) {
-            if md.file_type().is_symlink() {
-                hops += 1;
-                anyhow::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
-                let target = std::fs::read_link(&abs)?;
-                cur.pop(); // 摘掉 symlink 自身，替换为其目标
-                let mut normals: Vec<OsString> = Vec::new();
-                for c in target.components() {
-                    match c {
-                        Component::RootDir | Component::Prefix(_) => {
-                            anyhow::bail!("符号链接目标越出 rootfs（绝对路径）：{:?}", target)
-                        }
-                        Component::CurDir => {}
-                        // cur 已完全解析且在 rootfs 内，.. 直接作用在 cur 上
-                        Component::ParentDir => {
-                            if !cur.pop() {
-                                anyhow::bail!("符号链接目标越出 rootfs（.. 逃逸）：{:?}", target)
-                            }
-                        }
-                        Component::Normal(n) => normals.push(n.to_os_string()),
-                    }
-                }
-                // 目标中的普通组件还需继续做 symlink 检查，压回 pending 头部
-                for n in normals.into_iter().rev() {
-                    pending.push_front(n);
-                }
-            }
-        }
-    }
-    Ok(root.join(cur))
 }
 
 /// 把 symlink 目标归一化为 rootfs 相对路径。
@@ -338,24 +302,116 @@ fn symlink_target_in_scope(parent_rel: &Path, target: &Path) -> bool {
     normalize_symlink_target(parent_rel, target).is_some()
 }
 
+#[derive(Default)]
+struct SymlinkState {
+    /// 链接路径 -> OCI 条目中的原始目标。整个镜像的所有层共享此表。
+    links: BTreeMap<PathBuf, PathBuf>,
+}
+
+impl SymlinkState {
+    fn remove_at_or_below(&mut self, rel: &Path) {
+        self.links
+            .retain(|link, _| link != rel && !link.starts_with(rel));
+    }
+
+    fn remove_below(&mut self, rel: &Path) {
+        self.links
+            .retain(|link, _| link == rel || !link.starts_with(rel));
+    }
+}
+
+/// 与 `resolve_in_scope` 相同，但在文件系统之外同时解析尚未落地的 OCI symlink。
+/// 这使后续层通过目录链接写入时仍落到真实目标，而不是写进提前复制的快照。
+fn resolve_with_symlinks(
+    root: &Path,
+    rel: &Path,
+    symlinks: &SymlinkState,
+) -> anyhow::Result<PathBuf> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    let mut pending: VecDeque<OsString> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    let mut cur = PathBuf::new();
+    let mut hops = 0u32;
+    while let Some(comp) = pending.pop_front() {
+        cur.push(&comp);
+        if let Some(target) = symlinks.links.get(&cur) {
+            hops += 1;
+            anyhow::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
+            let parent = cur.parent().unwrap_or_else(|| Path::new(""));
+            let normalized = normalize_symlink_target(parent, target)
+                .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target))?;
+            cur.clear();
+            for component in normalized.components().rev() {
+                if let Component::Normal(name) = component {
+                    pending.push_front(name.to_os_string());
+                }
+            }
+            continue;
+        }
+
+        let abs = root.join(&cur);
+        if let Ok(md) = std::fs::symlink_metadata(&abs) {
+            if md.file_type().is_symlink() {
+                hops += 1;
+                anyhow::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
+                let target = std::fs::read_link(&abs)?;
+                let parent = cur.parent().unwrap_or_else(|| Path::new(""));
+                let normalized = normalize_symlink_target(parent, &target)
+                    .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target))?;
+                cur.clear();
+                for component in normalized.components().rev() {
+                    if let Component::Normal(name) = component {
+                        pending.push_front(name.to_os_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(root.join(cur))
+}
+
 /// symlink 降级：把符号链接物化为目标内容的副本（Windows 无
-/// SeCreateSymbolicLinkPrivilege 时 symlink 创建必败，层末统一复制）。
+/// SeCreateSymbolicLinkPrivilege 时 symlink 创建必败，全部层结束后统一复制）。
 /// `target_rel_raw` 为条目里写的目标（相对 symlink 所在目录）。
-fn materialize_symlink_as_copy(root: &Path, link_rel: &Path, target_raw: &Path) -> anyhow::Result<()> {
+fn materialize_symlink_as_copy(
+    root: &Path,
+    link_rel: &Path,
+    target_raw: &Path,
+    symlinks: &SymlinkState,
+) -> anyhow::Result<()> {
     let parent_rel = link_rel.parent().unwrap_or_else(|| Path::new(""));
     let norm = normalize_symlink_target(parent_rel, target_raw)
         .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target_raw))?;
-    let src = resolve_in_scope(root, &norm)?;
+    let src = resolve_with_symlinks(root, &norm, symlinks)?;
     let dst = root.join(link_rel);
-    std::fs::remove_file(&dst).ok();
+    remove_path(&dst)?;
     if src.is_dir() {
         copy_dir_recursive(&src, &dst)?;
     } else {
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }
-        std::fs::copy(&src, &dst)
-            .map_err(|e| anyhow::anyhow!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e))?;
+        std::fs::copy(&src, &dst).map_err(|e| {
+            anyhow::anyhow!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e)
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) if md.is_dir() && !md.file_type().is_symlink() => std::fs::remove_dir_all(path)?,
+        Ok(_) => std::fs::remove_file(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
@@ -375,6 +431,59 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> anyhow::Result<()> {
+    for link_rel in symlinks.links.keys() {
+        let dst = root.join(link_rel);
+        remove_path(&dst)?;
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    #[cfg(unix)]
+    for (link_rel, target_raw) in &symlinks.links {
+        let dst = root.join(link_rel);
+        std::os::unix::fs::symlink(target_raw, &dst)?;
+    }
+
+    #[cfg(windows)]
+    {
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        let mut dangling = Vec::new();
+        for (link_rel, target_raw) in &symlinks.links {
+            let parent = link_rel.parent().unwrap_or_else(|| Path::new(""));
+            let target_rel = normalize_symlink_target(parent, target_raw)
+                .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target_raw))?;
+            let target = resolve_with_symlinks(root, &target_rel, symlinks)?;
+            if target.is_dir() {
+                directories.push((link_rel, target_raw));
+            } else if target.is_file() {
+                files.push((link_rel, target_raw));
+            } else {
+                dangling.push((link_rel, target_raw));
+            }
+        }
+
+        // 目录目标中可能还包含待落地的文件链接（Debian 的
+        // /lib64 -> /usr/lib64 -> /lib/.../ld-linux）。先实现文件，
+        // 再从深到浅复制目录，外层目录快照才能包含最终内容。
+        for (link_rel, target_raw) in files {
+            materialize_symlink_as_copy(root, link_rel, target_raw, symlinks)?;
+        }
+        directories.sort_by_key(|(link, _)| std::cmp::Reverse(link.components().count()));
+        for (link_rel, target_raw) in directories {
+            materialize_symlink_as_copy(root, link_rel, target_raw, symlinks)?;
+        }
+        for (link_rel, target_raw) in dangling {
+            if let Err(e) = materialize_symlink_as_copy(root, link_rel, target_raw, symlinks) {
+                eprintln!("wbox: 警告：符号链接 {:?} 降级复制失败：{}", link_rel, e);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 解包单层到 dest，处理 whiteout、硬链接与符号链接。
 /// `media_type` 为 manifest 中该层的 mediaType（用于显式判断压缩格式）。
 ///
@@ -383,9 +492,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
 /// - 语义级（C1）：所有写出/删除路径先经 `resolve_in_scope` 逐段解析，
 ///   任何中间组件是越出 rootfs 的 symlink 即跳过；symlink 条目目标本身
 ///   也须解析在 rootfs 内，否则不创建。
-/// - H3：symlink 创建失败（Windows 无 SeCreateSymbolicLinkPrivilege）时
-///   延迟记录，层末把目标内容复制到链接位置（降级语义见 README）。
+/// - H3：symlink 在所有层应用期间保存在逻辑链接表中，最终才落地；Windows
+///   无 SeCreateSymbolicLinkPrivilege 时把最终目标内容复制到链接位置。
 pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Result<()> {
+    let mut symlinks = SymlinkState::default();
+    unpack_layer_with_state(blob, dest, media_type, &mut symlinks)?;
+    finalize_symlinks(dest, &symlinks)
+}
+
+fn unpack_layer_with_state(
+    blob: &[u8],
+    dest: &Path,
+    media_type: &str,
+    symlinks: &mut SymlinkState,
+) -> anyhow::Result<()> {
     let tar_bytes = decompress_layer(blob, media_type)?;
 
     // ---- 第一遍：收集本层 opaque 目录集合，并在解包任何条目之前应用清理（L7），
@@ -420,7 +540,8 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
             }
         }
         for parent_rel in opq_dirs {
-            let parent_abs = match resolve_in_scope(dest, &parent_rel) {
+            symlinks.remove_below(&parent_rel);
+            let parent_abs = match resolve_with_symlinks(dest, &parent_rel, symlinks) {
                 Ok(p) => p,
                 Err(_) => continue, // 越界路径：不清理
             };
@@ -445,8 +566,6 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
     // 硬链接目标可能在其链接条目之后才出现（如 ubuntu 层），
     // 先记录、解包完成后再统一创建：(链接路径, 目标路径)，均为 rootfs 相对路径。
     let mut hardlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
-    // symlink 创建失败的延迟记录（H3）：(链接路径, 条目内原始目标)
-    let mut deferred_symlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     // 单遍流式处理：遇到 whiteout 立即删除目标（规范保证 whiteout 先于目标出现）。
     for entry in archive.entries()? {
@@ -480,7 +599,7 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
             })
             .collect();
         // 父目录逐段解析；中间组件若是越界 symlink 则整个条目跳过（C1）
-        let parent_abs = match resolve_in_scope(dest, &parent_rel) {
+        let parent_abs = match resolve_with_symlinks(dest, &parent_rel, symlinks) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -491,6 +610,7 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
         }
         if let Some(target) = file_name.strip_prefix(".wh.") {
             // whiteout：删除下层同名文件/目录（不跟随 symlink 判定，避免误删链接目标）
+            symlinks.remove_at_or_below(&parent_rel.join(target));
             let target_path = parent_abs.join(target);
             match std::fs::symlink_metadata(&target_path) {
                 Ok(md) if md.is_dir() && !md.file_type().is_symlink() => {
@@ -524,9 +644,8 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
             continue;
         }
 
-        // 符号链接：先校验目标按容器路径语义解析后不越出 rootfs，再创建。
-        // Linux 绝对链接不能交给 Windows 原生 symlink，否则会指向宿主根；
-        // 它们与创建失败的相对链接都在层末物化为 rootfs 内目标副本（H3）。
+        // 符号链接先进入跨层逻辑表。等所有层完成后再统一落地，避免 Windows
+        // 的复制降级成为旧快照，也让 dangling 目标有机会在后续层出现。
         if entry_type == tar::EntryType::Symlink {
             let target = match entry.link_name() {
                 Ok(Some(t)) => t.into_owned(),
@@ -539,14 +658,14 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
             if let Some(p) = out.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            std::fs::remove_file(&out).ok();
-            if (cfg!(windows) && target.has_root()) || entry.unpack(&out).is_err() {
-                deferred_symlinks.push((path.to_path_buf(), target));
-            }
+            remove_path(&out)?;
+            symlinks.remove_at_or_below(&path);
+            symlinks.links.insert(path.to_path_buf(), target);
             continue;
         }
 
         // 普通条目：解包到解析后的路径（覆盖已存在文件）
+        symlinks.remove_at_or_below(&path);
         let out = parent_abs.join(&file_name);
         if let Some(p) = out.parent() {
             std::fs::create_dir_all(p)?;
@@ -556,11 +675,12 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
 
     // 第三遍：创建硬链接；失败时（如文件系统不支持）退化为复制。
     for (link_rel, target_rel) in hardlinks {
-        let link_abs = match resolve_in_scope(dest, &link_rel) {
+        symlinks.remove_at_or_below(&link_rel);
+        let link_abs = match resolve_with_symlinks(dest, &link_rel, symlinks) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let target_abs = match resolve_in_scope(dest, &target_rel) {
+        let target_abs = match resolve_with_symlinks(dest, &target_rel, symlinks) {
             Ok(p) => p,
             Err(_) => continue,
         };
@@ -571,13 +691,6 @@ pub fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Resul
         if std::fs::hard_link(&target_abs, &link_abs).is_err() {
             std::fs::copy(&target_abs, &link_abs)
                 .map_err(|e| anyhow::anyhow!("创建硬链接/复制失败 {:?}: {}", link_rel, e))?;
-        }
-    }
-
-    // 第四遍：symlink 降级——把创建失败的符号链接物化为目标内容副本（H3）。
-    for (link_rel, target_raw) in deferred_symlinks {
-        if let Err(e) = materialize_symlink_as_copy(dest, &link_rel, &target_raw) {
-            eprintln!("wbox: 警告：符号链接 {:?} 降级复制失败：{}", link_rel, e);
         }
     }
     Ok(())
@@ -659,15 +772,28 @@ mod tests {
             ("dir/keep.txt", b"k"),
             ("dir/gone.txt", b"g"),
         ]);
-        unpack_layer(&gzip(&l1), &rootfs, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap();
+        unpack_layer(
+            &gzip(&l1),
+            &rootfs,
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+        )
+        .unwrap();
         assert!(rootfs.join("a.txt").exists());
         assert!(rootfs.join("dir/gone.txt").exists());
 
         // 第二层：whiteout 删 gone.txt，新增 b.txt
         let l2 = make_tar(&[("dir/.wh.gone.txt", b"" as &[u8]), ("b.txt", b"bb")]);
-        unpack_layer(&gzip(&l2), &rootfs, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap();
+        unpack_layer(
+            &gzip(&l2),
+            &rootfs,
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+        )
+        .unwrap();
         assert!(!rootfs.join("dir/gone.txt").exists(), "whiteout 未删除目标");
-        assert!(!rootfs.join("dir/.wh.gone.txt").exists(), "whiteout 文件不应落盘");
+        assert!(
+            !rootfs.join("dir/.wh.gone.txt").exists(),
+            "whiteout 文件不应落盘"
+        );
         assert!(rootfs.join("dir/keep.txt").exists());
         assert_eq!(std::fs::read(rootfs.join("b.txt")).unwrap(), b"bb");
 
@@ -683,7 +809,10 @@ mod tests {
         std::fs::write(rootfs.join("d/sub/old2.txt"), b"y").unwrap();
 
         // opaque 层：.wh..wh..opq + 一个新文件
-        let l = make_tar(&[("d/.wh..wh..opq", b"" as &[u8]), ("d/new.txt", b"n" as &[u8])]);
+        let l = make_tar(&[
+            ("d/.wh..wh..opq", b"" as &[u8]),
+            ("d/new.txt", b"n" as &[u8]),
+        ]);
         unpack_layer(&l, &rootfs, "application/vnd.oci.image.layer.v1.tar").unwrap();
 
         assert!(!rootfs.join("d/old.txt").exists());
@@ -757,10 +886,24 @@ mod tests {
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         // 合法层：目录 real/ 与指向它的同级 symlink alias -> real，再经 alias 写入
-        let l2 = make_tar_with_symlinks(
-            &[("real/keep.txt", b"k" as &[u8]), ("alias/new.txt", b"n" as &[u8])],
-            &[("alias", "real")],
-        );
+        let mut b = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o777);
+        h.set_cksum();
+        b.append_link(&mut h, "alias", "real").unwrap();
+        for (path, data) in [
+            ("real/keep.txt", b"k".as_slice()),
+            ("alias/new.txt", b"n".as_slice()),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            b.append_data(&mut h, path, data).unwrap();
+        }
+        let l2 = b.into_inner().unwrap();
         unpack_layer(&l2, &rootfs, "").unwrap();
         assert!(rootfs.join("real/keep.txt").exists());
         // 经 in-scope symlink 写入的文件应落在 rootfs 内的真实目录
@@ -811,11 +954,17 @@ mod tests {
         // 篡改 index 本体
         let mut evil_index = index_body.to_vec();
         evil_index[20] ^= 0xff;
-        assert!(verify_digest(&index_d, &evil_index).is_err(), "index 本体必须校验");
+        assert!(
+            verify_digest(&index_d, &evil_index).is_err(),
+            "index 本体必须校验"
+        );
         // 篡改子 manifest
         let mut evil_child = child_body.to_vec();
         evil_child[5] ^= 0xff;
-        assert!(verify_digest(&child_d, &evil_child).is_err(), "子 manifest 必须校验");
+        assert!(
+            verify_digest(&child_d, &evil_child).is_err(),
+            "子 manifest 必须校验"
+        );
     }
 
     // ---- H3：symlink 降级为复制 ----
@@ -826,14 +975,77 @@ mod tests {
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(rootfs.join("usr/bin")).unwrap();
         std::fs::write(rootfs.join("usr/bin/real"), b"binary").unwrap();
+        let symlinks = SymlinkState::default();
         // 直接调用降级路径（模拟 Windows 上 symlink 创建失败后的层末物化）
-        materialize_symlink_as_copy(&rootfs, Path::new("usr/bin/alias"), Path::new("real")).unwrap();
-        assert_eq!(std::fs::read(rootfs.join("usr/bin/alias")).unwrap(), b"binary");
+        materialize_symlink_as_copy(
+            &rootfs,
+            Path::new("usr/bin/alias"),
+            Path::new("real"),
+            &symlinks,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/bin/alias")).unwrap(),
+            b"binary"
+        );
         // 目录目标的递归复制
-        materialize_symlink_as_copy(&rootfs, Path::new("usr/libcopy"), Path::new("bin")).unwrap();
+        materialize_symlink_as_copy(
+            &rootfs,
+            Path::new("usr/libcopy"),
+            Path::new("bin"),
+            &symlinks,
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read(rootfs.join("usr/libcopy/real")).unwrap(),
             b"binary"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cross_layer_symlink_observes_later_target_update() {
+        let dir = tmpdir("sym-cross-layer");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let mut symlinks = SymlinkState::default();
+
+        let first =
+            make_tar_with_symlinks(&[("real/value", b"old" as &[u8])], &[("alias", "real")]);
+        unpack_layer_with_state(&first, &rootfs, "", &mut symlinks).unwrap();
+        let second = make_tar(&[("real/value", b"new" as &[u8])]);
+        unpack_layer_with_state(&second, &rootfs, "", &mut symlinks).unwrap();
+        finalize_symlinks(&rootfs, &symlinks).unwrap();
+
+        assert_eq!(
+            std::fs::read(rootfs.join("alias/value")).unwrap(),
+            b"new",
+            "链接必须看到后续层对目标目录的最终修改"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dangling_symlink_waits_for_target_in_later_layer() {
+        let dir = tmpdir("sym-dangling-layer");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        let mut symlinks = SymlinkState::default();
+
+        let first = make_tar_with_symlinks(&[], &[("bin/tool", "../lib/tool")]);
+        unpack_layer_with_state(&first, &rootfs, "", &mut symlinks).unwrap();
+        assert!(
+            symlinks.links.contains_key(Path::new("bin/tool")),
+            "dangling 链接不能在目标出现前丢失"
+        );
+        let second = make_tar(&[("lib/tool", b"ready" as &[u8])]);
+        unpack_layer_with_state(&second, &rootfs, "", &mut symlinks).unwrap();
+        finalize_symlinks(&rootfs, &symlinks).unwrap();
+
+        assert_eq!(
+            std::fs::read(rootfs.join("bin/tool")).unwrap(),
+            b"ready",
+            "后续层创建目标后必须恢复链接语义"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -883,8 +1095,7 @@ mod tests {
         h.set_size(0);
         h.set_mode(0o777);
         h.set_cksum();
-        b.append_link(&mut h, "bin/ash", "/bin/busybox")
-            .unwrap();
+        b.append_link(&mut h, "bin/ash", "/bin/busybox").unwrap();
         let mut h = tar::Header::new_gnu();
         h.set_size(7);
         h.set_mode(0o755);
@@ -919,6 +1130,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn unpack_debian_loader_absolute_directory_symlinks() {
+        let dir = tmpdir("debian-loader-links");
+        let rootfs = dir.join("rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+
+        // bookworm-slim 的目录链接与动态加载器链接都可能先于最终目标出现。
+        let mut b = tar::Builder::new(Vec::new());
+        for (link, target) in [
+            ("lib64", "/usr/lib64"),
+            (
+                "usr/lib64/ld-linux-x86-64.so.2",
+                "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            ),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_cksum();
+            b.append_link(&mut h, link, target).unwrap();
+        }
+        let loader = b"elf-loader";
+        let mut h = tar::Header::new_gnu();
+        h.set_size(loader.len() as u64);
+        h.set_mode(0o755);
+        h.set_cksum();
+        b.append_data(
+            &mut h,
+            "lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+            loader.as_slice(),
+        )
+        .unwrap();
+
+        unpack_layer(&b.into_inner().unwrap(), &rootfs, "").unwrap();
+        if cfg!(windows) {
+            assert_eq!(
+                std::fs::read(rootfs.join("usr/lib64/ld-linux-x86-64.so.2")).unwrap(),
+                loader
+            );
+            assert_eq!(
+                std::fs::read(rootfs.join("lib64/ld-linux-x86-64.so.2")).unwrap(),
+                loader,
+                "外层目录链接必须在内部文件链接落地后复制"
+            );
+        } else {
+            assert_eq!(
+                std::fs::read_link(rootfs.join("lib64")).unwrap(),
+                Path::new("/usr/lib64")
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ---- L7：opaque 目录在解包本层条目之前应用 ----
 
     #[test]
@@ -929,10 +1194,16 @@ mod tests {
         std::fs::write(rootfs.join("d/old.txt"), b"x").unwrap();
         // opq 条目排在新文件之后（规范不禁止的顺序）：
         // 旧实现会误删同层先前写入的 new.txt；修复后应先清下层再解包。
-        let l = make_tar(&[("d/new.txt", b"n" as &[u8]), ("d/.wh..wh..opq", b"" as &[u8])]);
+        let l = make_tar(&[
+            ("d/new.txt", b"n" as &[u8]),
+            ("d/.wh..wh..opq", b"" as &[u8]),
+        ]);
         unpack_layer(&l, &rootfs, "").unwrap();
         assert!(!rootfs.join("d/old.txt").exists(), "opaque 应清空下层内容");
-        assert!(rootfs.join("d/new.txt").exists(), "同层新文件不应被 opaque 误删");
+        assert!(
+            rootfs.join("d/new.txt").exists(),
+            "同层新文件不应被 opaque 误删"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -945,8 +1216,12 @@ mod tests {
         std::fs::create_dir_all(&rootfs).unwrap();
         let fake_zstd = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x01];
         // 按 mediaType 显式拒绝
-        let e = unpack_layer(&fake_zstd, &rootfs, "application/vnd.oci.image.layer.v1.tar+zstd")
-            .unwrap_err();
+        let e = unpack_layer(
+            &fake_zstd,
+            &rootfs,
+            "application/vnd.oci.image.layer.v1.tar+zstd",
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("不支持的压缩格式"), "{}", e);
         // 空 mediaType 时按 magic 嗅探拒绝
         let e = unpack_layer(&fake_zstd, &rootfs, "").unwrap_err();
@@ -1009,32 +1284,55 @@ mod tests {
             ("linux", "amd64", "sha256:amd"),
             ("windows", "amd64", "sha256:win"),
         ]);
-        assert_eq!(select_manifest(&idx, "linux", "amd64").unwrap(), "sha256:amd");
-        assert_eq!(select_manifest(&idx, "linux", "arm64").unwrap(), "sha256:arm");
+        assert_eq!(
+            select_manifest(&idx, "linux", "amd64").unwrap(),
+            "sha256:amd"
+        );
+        assert_eq!(
+            select_manifest(&idx, "linux", "arm64").unwrap(),
+            "sha256:arm"
+        );
     }
 
     #[test]
     fn select_manifest_skips_attestation_entries() {
         // attestations 条目 platform 为 unknown/unknown：不得匹配
-        let idx = index_with(&[("unknown", "unknown", "sha256:att"), ("linux", "amd64", "sha256:real")]);
-        assert_eq!(select_manifest(&idx, "linux", "amd64").unwrap(), "sha256:real");
+        let idx = index_with(&[
+            ("unknown", "unknown", "sha256:att"),
+            ("linux", "amd64", "sha256:real"),
+        ]);
+        assert_eq!(
+            select_manifest(&idx, "linux", "amd64").unwrap(),
+            "sha256:real"
+        );
         // 全部 unknown 平台时查询 unknown/unknown 会命中第一条（记录现状）
         let idx = index_with(&[("unknown", "unknown", "sha256:att")]);
-        assert_eq!(select_manifest(&idx, "unknown", "unknown").unwrap(), "sha256:att");
+        assert_eq!(
+            select_manifest(&idx, "unknown", "unknown").unwrap(),
+            "sha256:att"
+        );
     }
 
     #[test]
     fn select_manifest_no_match_lists_available_platforms() {
-        let idx = index_with(&[("linux", "arm64", "sha256:arm"), ("windows", "amd64", "sha256:w")]);
+        let idx = index_with(&[
+            ("linux", "arm64", "sha256:arm"),
+            ("windows", "amd64", "sha256:w"),
+        ]);
         let e = select_manifest(&idx, "linux", "amd64").unwrap_err();
         let msg = e.to_string();
         assert!(msg.contains("linux/amd64"), "{}", msg);
-        assert!(msg.contains("linux/arm64") && msg.contains("windows/amd64"), "{}", msg);
+        assert!(
+            msg.contains("linux/arm64") && msg.contains("windows/amd64"),
+            "{}",
+            msg
+        );
     }
 
     #[test]
     fn select_manifest_missing_manifests_array() {
-        let e = select_manifest(&serde_json::json!({"schemaVersion": 2}), "linux", "amd64").unwrap_err();
+        let e = select_manifest(&serde_json::json!({"schemaVersion": 2}), "linux", "amd64")
+            .unwrap_err();
         assert!(e.to_string().contains("manifests"), "{}", e);
     }
 
@@ -1062,8 +1360,14 @@ mod tests {
         let tar = make_tar(&[("f", b"x" as &[u8])]);
         let gz = gzip(&tar);
         // gzip mediaType（大小写不敏感）
-        assert_eq!(decompress_layer(&gz, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap(), tar);
-        assert_eq!(decompress_layer(&gz, "Application/Vnd.Oci.Image.Layer.V1.Tar+Gzip").unwrap(), tar);
+        assert_eq!(
+            decompress_layer(&gz, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap(),
+            tar
+        );
+        assert_eq!(
+            decompress_layer(&gz, "Application/Vnd.Oci.Image.Layer.V1.Tar+Gzip").unwrap(),
+            tar
+        );
         // 空 mediaType 按 magic 嗅探 gzip
         assert_eq!(decompress_layer(&gz, "").unwrap(), tar);
         // 未知格式显式拒绝（mediaType 不含 tar/layer/gzip/zstd 关键词）
@@ -1088,9 +1392,13 @@ mod tests {
     #[test]
     fn is_index_media_types() {
         assert!(is_index("application/vnd.oci.image.index.v1+json"));
-        assert!(is_index("application/vnd.docker.distribution.manifest.list.v2+json"));
+        assert!(is_index(
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+        ));
         assert!(!is_index("application/vnd.oci.image.manifest.v1+json"));
-        assert!(!is_index("application/vnd.docker.distribution.manifest.v2+json"));
+        assert!(!is_index(
+            "application/vnd.docker.distribution.manifest.v2+json"
+        ));
         assert!(!is_index(""));
     }
 
@@ -1154,7 +1462,10 @@ mod tests {
         let dir = tmpdir("whnoop");
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        let l = make_tar(&[(".wh.never-existed", b"" as &[u8]), ("ok.txt", b"o" as &[u8])]);
+        let l = make_tar(&[
+            (".wh.never-existed", b"" as &[u8]),
+            ("ok.txt", b"o" as &[u8]),
+        ]);
         unpack_layer(&l, &rootfs, "").unwrap();
         assert!(rootfs.join("ok.txt").exists());
         std::fs::remove_dir_all(&dir).ok();
@@ -1166,14 +1477,26 @@ mod tests {
     fn symlink_target_scope_rules() {
         use std::path::Path;
         // 相对目标在同层/子层：允许
-        assert!(symlink_target_in_scope(Path::new("usr/bin"), Path::new("real")));
-        assert!(symlink_target_in_scope(Path::new("usr/bin"), Path::new("../lib/x")));
+        assert!(symlink_target_in_scope(
+            Path::new("usr/bin"),
+            Path::new("real")
+        ));
+        assert!(symlink_target_in_scope(
+            Path::new("usr/bin"),
+            Path::new("../lib/x")
+        ));
         // 根级 symlink 的 ../x：弹出根 → 拒绝
         assert!(!symlink_target_in_scope(Path::new(""), Path::new("../x")));
         // 越出 rootfs 的 ..：拒绝
-        assert!(!symlink_target_in_scope(Path::new("a"), Path::new("../../x")));
+        assert!(!symlink_target_in_scope(
+            Path::new("a"),
+            Path::new("../../x")
+        ));
         // Linux 绝对目标以容器根解析，而不是宿主根。
-        assert!(symlink_target_in_scope(Path::new("a"), Path::new("/etc/passwd")));
+        assert!(symlink_target_in_scope(
+            Path::new("a"),
+            Path::new("/etc/passwd")
+        ));
         assert_eq!(
             normalize_symlink_target(Path::new("a"), Path::new("/etc/passwd")).unwrap(),
             Path::new("etc/passwd")
@@ -1192,7 +1515,12 @@ mod tests {
         std::fs::write(rootfs.join("a/b/gone"), b"g").unwrap();
         std::fs::write(rootfs.join("a/keep"), b"k").unwrap();
         let l = make_tar(&[("a/b/.wh.gone", b"" as &[u8])]);
-        unpack_layer(&gzip(&l), &rootfs, "application/vnd.oci.image.layer.v1.tar+gzip").unwrap();
+        unpack_layer(
+            &gzip(&l),
+            &rootfs,
+            "application/vnd.oci.image.layer.v1.tar+gzip",
+        )
+        .unwrap();
         assert!(!rootfs.join("a/b/gone").exists());
         assert!(rootfs.join("a/keep").exists());
         std::fs::remove_dir_all(&dir).ok();

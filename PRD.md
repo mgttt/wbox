@@ -129,6 +129,7 @@ S4 在 Linux 上运行 Windows CLI
 |---|---|---|---|
 | F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`WN.1-WN.8`、L/H；退出码已有行为断言 |
 | F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | G3 | `WP.3` 持续覆盖离线缓存到 Linux guest；pull 失败原子性仍缺门禁 |
+| F1.7 Docker/Podman 基础 CLI 兼容 | `src/cli` | G0 | 别名与参数解析单测；仍缺从兼容命令到 workload 的 G3 门禁 |
 | F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
 | F2.3 Windows 网络放行 | `token.rs` | G3 | `WNET.1-WNET.4` 对照宿主、默认拒绝和 `--allow-network` |
 | F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
@@ -184,7 +185,15 @@ F1
 ├── F1.3 `--pull` 在缓存缺失时拉取镜像
 ├── F1.4 `image pull/list/show/rm`
 ├── F1.5 参数、子进程和内部错误退出码稳定
-└── F1.6 `src/cli/mod.rs::USAGE` 是帮助文本唯一来源
+├── F1.6 `src/cli/mod.rs::USAGE` 是帮助文本唯一来源
+└── F1.7 Docker/Podman 基础 CLI 兼容层
+    ├── F1.7.1 `pull <IMAGE>` 等价 `image pull <IMAGE>`
+    ├── F1.7.2 `images` 与 `image ls` 等价 `image list`
+    ├── F1.7.3 `rmi <IMAGE>` 等价 `image rm <IMAGE>`
+    ├── F1.7.4 `ps -a`、`rm <NAME>...` 保持常见命令形状
+    ├── F1.7.5 `run --name/-w/--workdir/--rm` 接受常见参数拼法
+    ├── F1.7.6 `run --network none|host` 映射 wbox 的默认断网与网络放行
+    └── F1.7.7 未实现参数必须明确拒绝，禁止静默忽略
 ```
 
 验收：
@@ -192,6 +201,40 @@ F1
 - Windows 路径、镜像引用、显式 `--` 和参数转义不会互相误判。
 - 子进程退出码原样返回；参数/profile/job/spawn/image 错误有固定分类。
 - `--memory`、`--cpu-pct`、`--max-procs`、网络和环境参数跨后端语义一致。
+- Docker/Podman 兼容只覆盖 wbox 能兑现的前台沙箱语义。`-d`、端口发布、
+  bind volume、守护进程 API、compose/pod 和远程上下文不在当前兼容范围；
+  收到这些参数时必须返回参数错误，不得假成功。
+
+#### F1.7 Docker/Podman 兼容命令树
+
+```text
+wbox
+├── run [兼容子集] IMAGE|-- PROGRAM [ARG...]
+│   ├── 生命周期：--name、--rm
+│   ├── 工作目录：-w、--workdir
+│   ├── 网络：--network none|host
+│   └── wbox 扩展：--memory、--cpu-pct、--max-procs、--allow-network
+├── pull IMAGE              -> image pull IMAGE
+├── images                  -> image list
+├── rmi IMAGE               -> image rm IMAGE
+├── image
+│   ├── pull IMAGE
+│   ├── ls|list
+│   ├── show IMAGE
+│   └── rm IMAGE
+├── ps [-a|--all]
+└── rm NAME...
+```
+
+兼容原则：
+
+1. 命令名、常用短选项和参数位置优先贴近 Docker/Podman；同一输入在两者语义
+   一致时，wbox 应给出等价结果。
+2. wbox 默认前台运行、默认断网、退出即清理。兼容参数不得削弱这些默认边界。
+3. Docker 与 Podman 语义不一致，或 wbox 后端无法兑现时，帮助和错误必须明确
+   写出 wbox 的行为；不以“参数已接受”冒充功能兼容。
+4. 每个新增兼容项至少具备 G0 解析测试；涉及隔离、网络、缓存或生命周期的项
+   还必须进入对应 G3/G4 产品门禁后才能标记完成。
 
 ### F2 Windows 原生进程容器 `[active]`
 
@@ -402,7 +445,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 期 | 范围 | 验收 |
 |---|---|---|
-| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5 已覆盖 Linux；Windows Rust 已验证清理修复，WP.5 尚未跑到成功终点 |
+| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态已有 G0 回归，待 main CI |
 | F8.2 | `--detach` + `logs` | detach 后前台立即返回且容器仍在跑；`logs` 拿到完整输出；超上限时截断可见 |
 | F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器。**`rm` 已完成**（门禁 P.6/P.7/P.8），`stop` 待做 |
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
@@ -426,6 +469,8 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 - Windows 10/11/Server 和 Linux x86-64 为目标宿主。
 - Linux guest 目标是常见 x86-64 CLI，不承诺完整内核 ABI。
+- CLI 以 Docker/Podman 的常用前台基础命令为迁移入口，精确范围以 F1.7 为准；
+  未列出的命令和选项不构成兼容承诺。
 - GUI、驱动、内核模块和依赖硬件特性的程序不在兼容范围。
 
 ### N4 可维护性
@@ -442,7 +487,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8 与 WNET.1-WNET.4 通过；资源超限和进程树回收缺行为门禁 |
-| OCI pull/cache/config | active | Alpine 3.20 绝对 applet 链接与真实重拉通过；dangling symlink 和原子缓存仍有缺口 |
+| OCI pull/cache/config | active | Alpine 3.20 真实重拉通过；BusyBox 1.36 与 Debian bookworm-slim 实机暴露延迟/目录 symlink 降级缺口，原子缓存仍未门禁 |
 | Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 210 pass、0 fail、1 个公网测试 ignored |
