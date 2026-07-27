@@ -126,6 +126,11 @@ own/
   └── wbox-<pid>/        限额写这里
 ```
 
+策略 A 有一条硬性禁止：**父级是根 cgroup 时直接放弃**。往
+`/sys/fs/cgroup/cgroup.subtree_control` 写是整机范围的改动（会给所有顶层
+cgroup 打开该控制器的记账），一个"把自己关进沙箱"的工具没有理由去改宿主的
+全局设置，哪怕权限允许。这种情形退回策略 B 或 rlimit。
+
 **策略 B 有一个前提容易被忽略**：`own` 里必须只有 wbox 自己。否则挪走 wbox
 之后 `own` 仍有别的进程，enable 依旧 `EBUSY`。典型情形就是从 shell 启动
 wbox —— shell 留在同一个 cgroup 里。这一点是被门禁抓出来的：探针里 shell

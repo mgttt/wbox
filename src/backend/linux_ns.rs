@@ -125,6 +125,9 @@ enum LimitPlan {
 /// 控制器齐全，但 runner 用户对自己的 cgroup 目录**没有写权限**（委派未开）。
 /// 早先这里只查 `cgroup.controllers` 存在就返回 Some，于是 `build_limit_plan`
 /// 认定"有 v2"却写不进去，把一个本可以退化到 rlimit 的情形变成了硬报错。
+/// cgroup v2 统一层级的挂载点。
+const CGROUP2_ROOT: &str = "/sys/fs/cgroup";
+
 fn cgroup2_self_dir() -> Option<std::path::PathBuf> {
     let content = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let rel = content
@@ -132,7 +135,7 @@ fn cgroup2_self_dir() -> Option<std::path::PathBuf> {
         .find_map(|l| l.strip_prefix("0::"))?
         .trim_start_matches('/')
         .to_string();
-    let dir = std::path::Path::new("/sys/fs/cgroup").join(&rel);
+    let dir = std::path::Path::new(CGROUP2_ROOT).join(&rel);
     // 必须确认 v2 特征文件存在，否则可能是 v1 的 tmpfs
     if !dir.join("cgroup.controllers").is_file() {
         return None;
@@ -673,6 +676,13 @@ fn try_sibling_layout(spec: &RunSpec, own: &std::path::Path) -> Result<Option<Li
     let Some(parent) = own.parent() else {
         return Ok(None);
     };
+    // **绝不动根 cgroup。** 往 /sys/fs/cgroup/cgroup.subtree_control 写是
+    // 整机范围的改动（会给所有顶层 cgroup 打开该控制器的记账），一个
+    // "把自己关进沙箱"的工具没有理由去改宿主的全局设置——哪怕权限允许。
+    // 这种情形退回策略 B，或者干脆用 rlimit 兜底。
+    if parent == std::path::Path::new(CGROUP2_ROOT) {
+        return Ok(None);
+    }
     // 不越过 cgroup v2 挂载点：/sys/fs/cgroup 之上不是我们该碰的地方
     if !parent.join("cgroup.controllers").is_file() {
         return Ok(None);
@@ -1040,6 +1050,29 @@ mod tests {
                 assert!(m.contains("max-procs"), "错误应点明是 --max-procs：{}", m);
             }
         }
+    }
+
+    /// 策略 A 绝不能去改**根** cgroup 的 subtree_control：那是整机范围的
+    /// 改动（给所有顶层 cgroup 打开控制器记账）。一个"把自己关进沙箱"的
+    /// 工具没理由改宿主全局设置，哪怕权限允许。
+    #[test]
+    fn sibling_layout_never_touches_root_cgroup() {
+        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 0 });
+        // own 是根的直接子级 → parent 就是根 → 必须拒绝（返回 None 走兜底）
+        let own = std::path::Path::new(CGROUP2_ROOT).join("some-toplevel-cg");
+        let got = try_sibling_layout(&s, &own).unwrap();
+        assert!(
+            got.is_none(),
+            "own 的父级是根 cgroup 时，策略 A 必须放弃而不是去写根的 subtree_control"
+        );
+        // 而且不能在根下留下任何 wbox-* 目录
+        let leaked = std::fs::read_dir(CGROUP2_ROOT)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("wbox-"))
+            })
+            .unwrap_or(false);
+        assert!(!leaked, "策略 A 在根 cgroup 下留下了 wbox-* 目录");
     }
 
     /// `cgroup2_self_dir()` 说有 v2，就必须真的有 `cgroup.controllers`；
