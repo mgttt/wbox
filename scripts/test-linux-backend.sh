@@ -74,7 +74,7 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/ro
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat grep mount test true false"
+APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -1207,6 +1207,108 @@ fi
 
 kill "$PSH_PID" 2>/dev/null
 wait "$PSH_PID" 2>/dev/null
+fi
+
+echo
+echo "=== CMP compose 编排子集（PRD F9.14）==="
+
+CMPDIR=$WORK/cproj
+mkdir -p "$CMPDIR"
+cat > "$CMPDIR/compose.yaml" <<'CMPEOF'
+services:
+  api:
+    image: lbetest
+    command: ["/bin/sleep", "60"]
+    environment:
+      - ROLE=api
+  worker:
+    image: lbetest
+    depends_on:
+      - api
+    command: ["/bin/sleep", "60"]
+CMPEOF
+
+# CMP.1 up -d 起全部服务，容器名为 <项目>_<服务>。
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose up -d 2>&1); crc=$?
+sleep 1
+pslist=$(HOME=$WORK/home "$WBOX_ABS" ps 2>&1)
+if [ "$crc" -eq 0 ] && printf '%s' "$pslist" | grep -q cproj_api && printf '%s' "$pslist" | grep -q cproj_worker; then
+  report PASS "CMP.1 compose up -d 起全部服务（容器名 <项目>_<服务>）"
+else
+  report FAIL "CMP.1 up" "rc=$crc ps=$(printf '%s' "$pslist" | tr '\n' ' ' | head -c 160)"
+fi
+
+# CMP.2 **网络语义的行为判据**：服务之间共享同一 netns（第一个服务持有网络，
+# 其余加入）。三方比对——只比两方会漏掉"两者都掉进宿主网络"。
+# 这条同时是那个竞态的回归测试：加入方曾因 peer 的 container.pid 还没落盘
+# 而直接退出，而 container.pid 又曾被 overlay 探测的短命子进程占掉。
+nsA=$(timeout 15 env HOME=$WORK/home "$WBOX_ABS" exec cproj_api -- readlink /proc/self/ns/net 2>/dev/null)
+nsB=$(timeout 15 env HOME=$WORK/home "$WBOX_ABS" exec cproj_worker -- readlink /proc/self/ns/net 2>/dev/null)
+nsH=$(readlink /proc/self/ns/net)
+if [ -n "$nsA" ] && [ "$nsA" = "$nsB" ] && [ "$nsA" != "$nsH" ]; then
+  report PASS "CMP.2 服务间共享同一 netns（且非宿主网络）"
+else
+  report FAIL "CMP.2 共享网络" "api=$nsA worker=$nsB host=$nsH"
+fi
+
+# CMP.3 compose ps 反映真实状态。
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose ps 2>&1)
+if printf '%s' "$cout" | grep -q 'api.*cproj_api.*running'; then
+  report PASS "CMP.3 compose ps 显示服务与容器状态"
+else
+  report FAIL "CMP.3 ps" "输出: $(printf '%s' "$cout" | tr '\n' ' ' | head -c 160)"
+fi
+
+# CMP.4 down 清干净：容器记录不再存在。
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose down 2>&1); crc=$?
+pslist=$(HOME=$WORK/home "$WBOX_ABS" ps -a 2>&1)
+if [ "$crc" -eq 0 ] && ! printf '%s' "$pslist" | grep -q cproj_; then
+  report PASS "CMP.4 compose down 停止并删除全部服务容器"
+else
+  report FAIL "CMP.4 down" "rc=$crc 残留: $(printf '%s' "$pslist" | tr '\n' ' ' | head -c 160)"
+fi
+
+# CMP.5 尚未支持的字段必须报错。静默忽略 build:/networks: 会让用户以为配置
+# 生效了——对编排文件而言这是最危险的失败形态。
+cat > "$CMPDIR/bad.yaml" <<'CMPEOF'
+services:
+  a:
+    image: lbetest
+    networks:
+      - front
+CMPEOF
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose -f bad.yaml up -d 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "尚未支持的字段"; then
+  report PASS "CMP.5 未支持字段明确报错（不静默忽略）"
+else
+  report FAIL "CMP.5 未支持字段" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
+fi
+
+# CMP.6 循环依赖要点名报错，不能死循环或随便挑个顺序。
+cat > "$CMPDIR/cycle.yaml" <<'CMPEOF'
+services:
+  a:
+    image: lbetest
+    depends_on:
+      - b
+  b:
+    image: lbetest
+    depends_on:
+      - a
+CMPEOF
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose -f cycle.yaml up -d 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "循环依赖"; then
+  report PASS "CMP.6 depends_on 循环依赖被拒绝并点名"
+else
+  report FAIL "CMP.6 循环依赖" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
+fi
+
+# CMP.7 前台 up 要明说不支持，而不是偷偷加 -d（偷偷加会让用户以为命令挂了）。
+cout=$(cd "$CMPDIR" && HOME=$WORK/home "$WBOX_ABS" compose up 2>&1); crc=$?
+if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "stdio"; then
+  report PASS "CMP.7 compose up 缺 -d 时说明原因（不偷偷后台化）"
+else
+  report FAIL "CMP.7 缺 -d" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
 fi
 
 echo

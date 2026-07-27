@@ -21,6 +21,8 @@ mod build;
 // capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；
 // 落地在 backend/linux_ns.rs。
 mod caps;
+// compose 多容器编排子集（PRD F9.14）。含手写 YAML 子集解析器。
+mod compose;
 // 健康检查（PRD F9.10）：探针经 setns 跑在容器内，循环挂在 supervisor 上。
 mod health;
 mod portfwd;

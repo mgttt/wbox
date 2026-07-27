@@ -346,12 +346,33 @@ pub(super) fn spawn_isolated(
                     peer
                 )));
             }
-            let pid = crate::runstate::container_pid(&peer_dir).ok_or_else(|| {
-                crate::error::WboxError::args(format!(
-                    "--network container:{}：目标未记录容器 pid（可能刚启动，稍后重试）",
-                    peer
-                ))
-            })?;
+            // 有界等待 peer 的 container.pid 落盘。**不能一看没有就报错**：
+            // `run -d` 在 supervisor 起来那一刻就返回，而 container.pid 由后台
+            // 轮询 /proc 的记录器稍后写入——中间有个真实的竞态窗口。
+            // compose 顺序启动服务时必然撞上（实测第二个服务直接退出）。
+            // 让调用方"稍后重试"是把我们的竞态转嫁给用户。
+            let pid = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    if let Some(p) = crate::runstate::container_pid(&peer_dir) {
+                        break p;
+                    }
+                    // 等待期间目标可能退出，那时再等下去也没有意义
+                    if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
+                        return Err(crate::error::WboxError::args(format!(
+                            "--network container:{}：目标容器在等待其网络就绪期间退出了",
+                            peer
+                        )));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(crate::error::WboxError::args(format!(
+                            "--network container:{}：等待 5 秒后目标仍未记录容器 pid",
+                            peer
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            };
             let open = |ns: &str| {
                 std::fs::File::open(format!("/proc/{}/ns/{}", pid, ns)).map_err(|e| {
                     crate::error::WboxError::spawn(format!(

@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.13 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -44,14 +44,15 @@ F9.1–F9.13 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.11 `--network container:` | NC.1–NC.4 | user+net 必须一起加入（netns setns 要在属主 userns 有 CAP_SYS_ADMIN） |
 | F9.12 overlay 可写层 | OV.1–OV.5 | 修了真实缺陷：此前容器写 `/` 会污染共享镜像缓存 |
 | F9.13 `wbox push` | PSH.1–PSH.5 | 缓存无原始层 blob，只能 flatten 成单层；门禁用 python3 stub 闭环，不打真 registry |
+| F9.14 compose 子集 | CMP.1–CMP.7 | 手写有界 YAML 子集（不引已归档的 serde_yaml）；up 复用 cmd_run 而非另写启动逻辑 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **316 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **102 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **340 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **109 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -63,7 +64,16 @@ F9.1–F9.13 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-Q3 还剩 **compose 一格**（L4），以及天花板之外的"镜像分层存储"。
+**Q3 的 F9 序列已全部做完**（F9.1–F9.14）。剩下的都在天花板之外或属另一象限：
+
+- **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
+  两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push
+  四条路径。
+- **pod**（多容器共享 IPC/UTS 的一等抽象）。F9.11 的共享 netns 已覆盖大半用途。
+- 四象限里 Q1/Q2 的缺口属 Windows 侧，见 §4.9 W3。
+
+下一轮如果没有明确目标，优先做**巩固**：跑一遍 `PRD.md` §2.4 四象限表逐行核对
+实况，以及在 CI 上确认 `WBOX_LBE_REQUIRE=1` 的门禁是真绿。
 
 ### ~~L3 `wbox push`~~ —— 已完成（F9.13，门禁 PSH.1–PSH.5）
 
@@ -97,18 +107,11 @@ Q3 还剩 **compose 一格**（L4），以及天花板之外的"镜像分层存�
   `WBOX_INSECURE_REGISTRY=<host>`：仅当 registry host 精确匹配时才允许 http，
   且**明文时拒绝发送任何凭证**，并打印告警。这是安全相关改动，实现时把理由写进注释。
 
-### L4 compose 子集（下一步做这个）
+### ~~L4 compose 子集~~ —— 已完成（F9.14，门禁 CMP.1–CMP.7）
 
-范围先钉死，否则会滑向"重新实现 docker-compose"。建议第一刀：
-
-- `services.<name>.{image, command, volumes, ports, environment, depends_on,
-  restart, healthcheck}`
-- 三个动词：`up -d` / `down` / `ps`
-- `depends_on` 只做启动顺序，不做 condition
-- YAML 解析引 `serde_yaml`（新依赖，需过 §2.2 的"纯 Rust、无 C 编译"门槛——它满足）
-- 网络语义：同一 compose 文件的服务默认 `--network container:<第一个服务>` 共享
-  netns（F9.11 已就绪），经 localhost 互访。**这与 docker 的 bridge+DNS 不同**，
-  对 sidecar 场景等价，文档要直说。
+实现时改了当初的一个判断：**没有引 `serde_yaml`**（它已归档停维护，不再收安全
+修复），改为手写有界 YAML 子集解析器并对不支持的构造逐条报错带行号。理由与
+Dockerfile 子集解析器一致。
 
 ### 明确不做的（别去做，PRD 已列为天花板/非目标）
 
@@ -212,4 +215,4 @@ git fetch origin main && git rebase origin/main
 
 门禁分组速查：L1/L2 隔离与限额、H 宿主模式、N/N2 网络与转发、C cgroup v2、
 W wine、B 构建、V 卷、R 重启、U `--user`、CAP capability、SEC seccomp、
-HC 健康检查、NC 容器间网络、OV overlay、PSH 镜像推送、P 生命周期。
+HC 健康检查、NC 容器间网络、OV overlay、PSH 镜像推送、CMP compose、P 生命周期。

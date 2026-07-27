@@ -136,7 +136,8 @@ wbox
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
 | overlay 镜像分层存储 | 无 | `FROM`/pull 仍整份复制；与 F9.12 的运行期可写层是两件事 |
 | 镜像 push | 部分 | F9.13：`wbox push`，**平铺为单层**（门禁 PSH.1–PSH.5）；不保留原始分层 |
-| compose / pod | 无 | |
+| compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
+| pod | 无 | |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
 | healthcheck | 有 | F9.10：`--health-cmd` + interval/retries/start-period（门禁 HC.1–HC.5）|
 | 容器间通信 | 部分 | F9.11：`--network container:<NAME>` 共享 netns、localhost 互通（门禁 NC.1–NC.4）|
@@ -769,7 +770,8 @@ F9
 ├── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
 ├── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
 ├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
-└── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
+├── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
+└── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -909,6 +911,38 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.14 compose 子集** `[partial]`（门禁 CMP.1–CMP.7）。范围先钉死，不做
+"重新实现 docker-compose"：八个 service 字段（`image`/`command`/`volumes`/
+`ports`/`environment`/`depends_on`/`restart`/`healthcheck`）+ 三个动词
+（`up -d`/`down`/`ps`）。**其余字段一律明确报错**——静默忽略 `build:`/`networks:`
+会让用户以为配置生效了，对编排文件这是最危险的失败形态（CMP.5）。
+
+**复用而不是另起一套**：`up` 把每个 service 翻译成一条 `wbox run` 的 argv 交给
+`cmd_run`，`down` 走 `stop` + `rm`。于是 compose 天然继承 run 的全部校验与语义，
+不会出现"compose 起的容器和 run 起的行为不一样"这种最难查的偏差。
+
+**网络语义与 docker 不同，直说**：docker compose 给每个项目建 bridge + 内建
+DNS，服务之间用服务名互访。rootless 下没有 bridge（§2.4 已记：那需要
+slirp4netns 级常驻网络栈，与"免安装、无服务"冲突）。这里是**第一个服务持有
+网络，其余用 `--network container:` 加入它**，服务间经 `localhost` 互通。
+对 sidecar 这类主要场景等价；"用服务名当主机名"做不到。CMP.2 三方比对
+netns inode 取证。
+
+其余取舍：
+
+- **YAML 是手写的有界子集**，不引 `serde_yaml`（已归档停维护，不再收安全修复）。
+  不支持的构造（锚点/别名、多行标量、流式映射、tab、序列里的映射）**逐条报错
+  并带行号**——子集解析器最危险的失败是"看着解析成功了其实理解错了"。
+  检查要看**值**的位置而非行首：`a: &anchor` 与 `a: {b: 1}` 的行首都是普通字符。
+- `depends_on` 只定**启动顺序**，不做 `condition: service_healthy`（那要在启动
+  中等待另一容器变健康，是另一档复杂度）。循环依赖点名报错（CMP.6）。
+- `up` **要求 `-d`**：多服务同时前台运行没有确定的 stdio 归属。明说而不是偷偷
+  加 `-d`——偷偷加会让用户以为命令挂了（CMP.7）。
+- `environment` 的序列与映射两种写法归一成 `K=V`，下游只认一种形状。
+- `healthcheck.test` 的 `CMD`/`CMD-SHELL` 前缀都归一成一条 shell 命令
+  （wbox 的 `--health-cmd` 本就交给 `/bin/sh -c`）；`NONE` 明确报错——它的语义
+  是"禁用继承来的探针"，而 wbox 不存在继承这回事。
 
 **F9.13 `wbox push`** `[partial]`（门禁 PSH.1–PSH.5）。
 
@@ -1146,7 +1180,7 @@ TODO-PLAN
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
-└── L4 compose 子集                           [任一 agent] 待认领
+└── L4 compose 子集                           [任一 agent] 已完成（F9.14）
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -1235,7 +1269,10 @@ GET/匿名 token；push 需要 POST/PUT + Basic 凭证换 token（凭证已有 F
 registry stub（收 POST/PUT、存内存、response 202/201），断言收到的 manifest
 与 blob digest 对得上；再用 `wbox pull` 从 stub 拉回来跑通，形成闭环。
 
-### L4 compose 子集 `[任一 agent]` `[待认领]`
+### L4 compose 子集 `[任一 agent]` `[done]`
+
+**已实现，见 F9.14**（门禁 CMP.1–CMP.7）。与下面当初的设想有一处不同：
+最终**没有引 `serde_yaml`**（已归档停维护），改为手写有界子集解析器。
 
 范围要先钉死，否则会滑向"重新实现 docker-compose"。建议第一刀只做：
 `services.<name>.{image, command, volumes, ports, environment, depends_on,

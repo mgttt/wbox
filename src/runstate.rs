@@ -1481,25 +1481,54 @@ pub const CONTAINER_PID: &str = "container.pid";
 ///
 /// 于是改为从宿主侧观察：中间进程就是 `Command::spawn` fork 出来的**直接子
 /// 进程**，读 `/proc/<self>/task/<self>/children` 即可拿到，不必等 spawn 返回。
-/// supervisor 此刻没有别的子进程（看门狗是线程不是进程），所以第一个就是它。
+/// **但"第一个子进程就是它"这个假设不成立**：wbox 自己也会 fork 短命子进程
+/// （F9.12 的 rootless overlay 探测就是），记录器可能正好采样到那一个，把它
+/// 写进 `container.pid`，随后它退出——于是 `exec`/`-p`/`--network container:`
+/// 全都对着一个不存在的 pid。compose 顺序启动服务时这条必现（第二个服务直接
+/// 退出）。故候选 pid 必须**活过一个轮询间隔**才作数：短命探测子进程会在这一
+/// 拍里消失，真正的容器进程不会。但"等一拍"是时序启发式，机器一忙就不可靠；
+/// 真正的判别是**语义**的：overlay 探测子进程只 `unshare(NEWUSER|NEWNS)`，
+/// **不含 PID namespace**，而容器中间进程一定有新的 PID namespace。
+/// 于是只认 `ns/pid_for_children` 与宿主不同的那个子进程——不依赖时间。
 ///
 /// 记的是**中间进程**而非它 fork 出的孙进程：中间进程已经在新的
 /// user/mount/net namespace 里，而 PID namespace 可经
 /// `/proc/<pid>/ns/pid_for_children` 取到——四个 namespace 从这一个 pid 全都
 /// 够得着（`unshare(CLONE_NEWPID)` 对调用者自己不生效，故它的 `ns/pid` 仍是
 /// 宿主的，必须用 `pid_for_children`）。
+/// 该子进程是否已进入**新的** PID namespace。
+///
+/// 这是把容器中间进程与 wbox 自己 fork 的短命探测子进程区分开的判据：
+/// 后者不 unshare PID namespace。用 `pid_for_children` 而不是 `ns/pid`——
+/// `unshare(CLONE_NEWPID)` 对调用者自己不生效，它的 `ns/pid` 仍是宿主的。
+#[cfg(target_os = "linux")]
+fn in_new_pid_namespace(pid: u32, host_pidns: Option<&str>) -> bool {
+    let Some(host) = host_pidns else { return false };
+    match std::fs::read_link(format!("/proc/{}/ns/pid_for_children", pid)) {
+        Ok(p) => p.to_string_lossy() != host,
+        Err(_) => false,
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub fn spawn_container_pid_recorder(name: String) {
     std::thread::spawn(move || {
         let me = std::process::id();
         let path = format!("/proc/{}/task/{}/children", me, me);
+        // 宿主的 PID namespace，用来把容器子进程与我们自己的探测子进程区分开
+        let host_pidns = std::fs::read_link(format!("/proc/{}/ns/pid", me))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
         // 上界 ~30s：容器起不来就算了，`exec` 会因缺 pid 明确报错，
         // 总好过一个永不退出的线程。
         for _ in 0..600 {
+            // 遍历**全部**子进程而不是只看第一个：短命探测子进程可能排在前面。
             if let Ok(s) = std::fs::read_to_string(&path) {
-                if let Some(pid) = s.split_whitespace().next().and_then(|t| t.parse().ok()) {
-                    record_container_pid(&name, pid);
-                    return;
+                for pid in s.split_whitespace().filter_map(|t| t.parse::<u32>().ok()) {
+                    if in_new_pid_namespace(pid, host_pidns.as_deref()) {
+                        record_container_pid(&name, pid);
+                        return;
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
