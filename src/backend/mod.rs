@@ -674,10 +674,27 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     if guest == "/" {
         return Err(bad("不允许挂载到容器根 '/'——那会让隔离失效"));
     }
+    // 不含路径分隔符 = **命名卷**（F9.35），与 docker 同一条规则。
+    // 这条规则要简单且可预测，它决定了"数据写到哪"；任何"先当路径试试、
+    // 不存在就当名字"的聪明做法，都会把一次手滑变成一个新建的空卷。
+    if crate::volume::looks_like_name(host) {
+        let (dir, fresh) = crate::volume::create(host)?;
+        if fresh {
+            // 隐式建卷要出声。docker 也隐式建，但沉默地建会让 `-v mydta:/data`
+            // 这种手滑变成"数据不见了"——说一句，用户当场就能发现名字打错了。
+            println!("wbox: 已创建命名卷 '{}'（{}）", host, dir.display());
+        }
+        return Ok(VolumeMount {
+            host: dir,
+            guest: guest.to_string(),
+            read_only,
+        });
+    }
     let host_path = PathBuf::from(host);
     if !host_path.exists() {
         return Err(bad("宿主路径不存在（wbox 不会替你创建：拼错的路径会变成一个\
-                        空目录，等你发现数据不见了才知道挂错了）"));
+                        空目录，等你发现数据不见了才知道挂错了）；\
+                        若本意是命名卷，写成不含 '/' 的名字即可（如 -v mydata:/data）"));
     }
     let host_path = host_path.canonicalize().map_err(|e| {
         WboxError::args(format!("-v '{}'：解析宿主路径失败：{}", spec, e))

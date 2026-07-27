@@ -100,9 +100,13 @@ pub fn cpu_percent(before: &Sample, after: &Sample, elapsed: std::time::Duration
     dc / dt as f64 * 100.0
 }
 
-#[cfg(target_os = "linux")]
 /// 人读的字节数。`stats` 的用途是"扫一眼有没有异常"，给到小数点后一位足够，
 /// 精确到字节反而更难扫。
+///
+/// **不加平台门**：它是纯格式化，没有任何平台依赖，而且 `volume ls` 也要用
+/// （F9.35）。早先给它加 `cfg(linux)` 只是因为当时 Windows 上没人调用——
+/// 那种"为消死代码警告而加的门"一旦有了新调用者就该撤掉，否则会逼着调用方
+/// 各写一份格式化。
 pub fn human_bytes(v: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut f = v as f64;

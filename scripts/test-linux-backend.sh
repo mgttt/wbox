@@ -2061,6 +2061,71 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== VOL 命名卷（PRD F9.35）==="
+
+# 命名卷的**全部意义**是数据活得比容器久。所以判据不是"命令返回 0"，
+# 而是：A 容器写进去，A 没了之后 B 容器还能读到同一份。
+VLH=$WORK/home
+vout=$(HOME=$VLH "$WBOX_ABS" run --rm -v volpersist:/data lbetest -- \
+  /bin/sh -c 'echo PERSISTED > /data/f' 2>&1); vrc=$?
+vread=$(HOME=$VLH "$WBOX_ABS" run --rm -v volpersist:/data lbetest -- \
+  /bin/cat /data/f 2>&1 | tail -1)
+if [ "$vrc" -eq 0 ] && [ "$vread" = "PERSISTED" ]; then
+  report PASS "VOL.1 命名卷跨容器保留数据（A 写，A 没了 B 仍读得到）"
+else
+  report FAIL "VOL.1 跨容器持久" "写 rc=$vrc 读到=$vread（期望 PERSISTED）"
+fi
+
+# 隐式建卷要**出声**：docker 也隐式建，但沉默地建会让 `-v mydta:/data` 这种手滑
+# 变成"数据不见了"，说一句用户当场就能发现名字打错了。
+if printf '%s' "$vout" | grep -q '已创建命名卷'; then
+  report PASS "VOL.2 隐式建卷时出声（手滑打错名字当场可见）"
+else
+  report FAIL "VOL.2 隐式建卷提示" "输出: $(printf '%s' "$vout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 含 '/' 的源仍按宿主路径处理，且不存在时照旧拒绝——这条规则一旦漂了，
+# 用户的绑定挂载会被悄悄变成一个新建的空卷。
+vout=$(HOME=$VLH "$WBOX_ABS" run --rm -v /definitely/not/here:/data lbetest -- /bin/true 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] && printf '%s' "$vout" | grep -q '宿主路径不存在'; then
+  report PASS "VOL.3 含 '/' 的源仍是宿主路径，不存在时照旧拒绝"
+else
+  report FAIL "VOL.3 路径/卷名分界" "rc=$vrc 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+# 被运行中的容器占用时拒绝删除：卷目录被抽掉，容器里的挂载点就悬空了
+HOME=$VLH "$WBOX_ABS" run -d --name volholder -v volpersist:/data lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+vout=$(HOME=$VLH "$WBOX_ABS" volume rm volpersist 2>&1); vrc=$?
+vstill=$(HOME=$VLH "$WBOX_ABS" volume ls -q | grep -c '^volpersist$')
+if [ "$vrc" -ne 0 ] && [ "$vstill" -eq 1 ] && printf '%s' "$vout" | grep -q volholder; then
+  report PASS "VOL.4 卷被运行中的容器占用时拒绝删除，并点名是谁在用"
+else
+  report FAIL "VOL.4 占用保护" "rc=$vrc 卷还在=$vstill 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+# inspect 要报出真实挂载点与占用者
+vout=$(HOME=$VLH "$WBOX_ABS" volume inspect volpersist 2>&1)
+if printf '%s' "$vout" | grep -q '"UsedBy"' && printf '%s' "$vout" | grep -q volholder \
+   && printf '%s' "$vout" | grep -q 'volumes/volpersist'; then
+  report PASS "VOL.5 volume inspect 报出挂载点与占用者"
+else
+  report FAIL "VOL.5 volume inspect" "$(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+HOME=$VLH "$WBOX_ABS" rm -f volholder >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  HOME=$VLH "$WBOX_ABS" ps 2>/dev/null | awk '$1=="volholder"{f=1} END{exit !f}' || break
+  sleep 0.5
+done
+vout=$(HOME=$VLH "$WBOX_ABS" volume rm volpersist 2>&1); vrc=$?
+if [ "$vrc" -eq 0 ] && [ -z "$(HOME=$VLH "$WBOX_ABS" volume ls -q)" ]; then
+  report PASS "VOL.6 容器停掉后卷可正常删除"
+else
+  report FAIL "VOL.6 删除卷" "rc=$vrc 剩余: $(HOME=$VLH "$WBOX_ABS" volume ls -q | tr '\n' ' ')"
+fi
+
+echo
 echo "=== INS inspect 如实反映挂载与端口（PRD F9.33）==="
 
 # 判据是**inspect 说的和容器实际有的一致**。此前 Mounts 写死 []、端口根本没出现，

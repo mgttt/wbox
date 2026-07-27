@@ -19,6 +19,7 @@ mod error;
 mod oci;
 mod build;
 mod layers;
+mod volume;
 // capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；
 // 落地在 backend/linux_ns.rs。
 mod caps;

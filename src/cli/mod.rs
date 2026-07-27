@@ -28,6 +28,7 @@ mod restart;
 mod rename;
 mod prune;
 mod status;
+mod volume;
 mod stats;
 mod pause;
 mod diff;
@@ -65,6 +66,9 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image inspect <REF>...                      输出本地镜像的机器可读 JSON
   wbox image rm [-f] <REF>...                      删除已 pull 镜像的本地缓存
+  wbox volume create <NAME>...                     创建命名卷（见 PRD F9.35）
+  wbox volume ls [-q] | volume inspect <NAME>...   列出/查看命名卷
+  wbox volume rm [-f] <NAME>...                    删除命名卷（运行中被占用时拒绝）
   wbox ps [-a] [-q]                                列出已登记的容器（-a 含已退出的残留；-q 只出名字）
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
@@ -88,8 +92,9 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
                      容器工作目录（"镜像根"），默认当前目录（仅原生模式）
   -p, --publish <HOST:GUEST>
                      把宿主端口转发到容器内端口（**仅 TCP**，仅 Linux 宿主）
-  -v, --volume <HOST:GUEST[:ro|:rw]>
-                     Linux 宿主 bind volume；宿主路径必须存在，禁止覆盖容器根
+  -v, --volume <HOST|NAME:GUEST[:ro|:rw]>
+                     绑定挂载（宿主路径必须存在）或**命名卷**（源不含 '/' 即为卷名，
+                     缺失时自动创建并出声）；禁止覆盖容器根
   --network <MODE>  none = 默认断网；host = 等价 --allow-network；
                     container:<NAME> = 加入该容器的网络，经 localhost 互通（仅 Linux）
   --ipc container:<NAME>   共享该容器的 IPC namespace（仅 Linux，见 PRD F9.15）
@@ -194,7 +199,7 @@ const VERBS: &[(&str, Scope, Handler)] = &[
 
 /// 两个**分组**动词（`image` / `container`）不在表里：它们自己带子命令，
 /// 形状与表里的一元动词不同。列在这里是为了帮助主题判定不漏掉它们。
-const GROUPS: &[&str] = &["image", "container"];
+const GROUPS: &[&str] = &["image", "container", "volume"];
 
 fn lookup(command: &str, scope: Option<Scope>) -> Option<Handler> {
     VERBS
@@ -279,6 +284,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         // 两个分组动词自带子命令，形状与表里的一元动词不同，单独走。
         Some("image") => image::cmd_image(&args[1..]),
         Some("container") => cmd_container(&args[1..]),
+        Some("volume") => volume::cmd_volume(&args[1..]),
         // 内部动词：端口转发的中继子进程，不进动词表也不进帮助。
         #[cfg(target_os = "linux")]
         Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),

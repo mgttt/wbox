@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.34 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.35 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -65,6 +65,7 @@ F9.1–F9.34 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.32 暂停状态可见 | PZ.4–PZ.5 | 修掉 `inspect` 的 `Paused` 写死 false、`ps` 把暂停容器显示成 running；状态从 `/proc` 的 `T` 实测而不是记账（账会过期） |
 | F9.33 inspect 的挂载与端口 | INS.1–INS.3 | 修掉 `Mounts` 写死 `[]`、端口不出现；`ExecContext` 加 `volumes`/`ports`，新字段缺失按空处理（用 `?` 会让旧记录整条读不出来） |
 | F9.34 状态口径与网络三态 | INS.4–INS.5 | 状态标签三份收敛成 `cli::status::label`（`compose ps` 此前漏了 paused）；`NetworkMode` 补 `container:<NAME>`；`is_paused` 改看 init 是否 T（原判据会被僵尸永久带偏） |
+| F9.35 命名卷 | VOL.1–VOL.6 | docker 一等概念，此前完全缺失；卷 = `~/.wbox/volumes/<名字>`，rootless 可用；名字/路径按有无 `/` 分界；隐式建卷要出声；「谁在用」现算不记引用计数 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -161,8 +162,8 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **402 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **202 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **410 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **208 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -174,7 +175,7 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.34）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.35）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push
