@@ -351,6 +351,23 @@ Alpine 3.20 的 `/bin/sh`，执行 `uname` 与读取 `/etc/alpine-release` 均�
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
 
+**Ubuntu 24.04 真镜像取证（2026-07-27）**。Docker Hub 直连在本机超时，改用
+`docker.m.daocloud.io` 后成功选择 linux/amd64 manifest，校验 config 与单层
+digest，并解包约 29.7 MB rootfs。Windows 实机通过 `wbox run` 验证：
+
+- `/bin/sh` 和动态 glibc 可启动，`/etc/os-release` 为
+  `ID=ubuntu VERSION_ID=24.04`；
+- `dpkg --print-architecture=amd64`、`getconf LONG_BIT=64`；
+- guest 看不到宿主 `/Windows/System32`；
+- guest `exit 37` 原样返回 37，前台状态无残留。
+
+该取证发现两个边界。其一，Windows 无 symlink 权限时，Ubuntu 文档与 locale
+中的部分悬空/后置目标链接会产生降级复制警告；核心 shell 未受影响，但这类
+非关键链接不能宣称完整还原。其二，`uname -m` 一度错误输出构建年份 `2026`：
+`SysUname` 用 `strcpy` 把过长构建元数据写入 Linux 固定 65 字节的 `version`
+字段，覆盖了其后的 `machine`。实现已改为字段内有界 `snprintf`，组件矩阵新增
+精确断言 `uname -m == x86_64`；待 Windows CI artifact 回灌本机复测后关闭。
+
 验收基线由 `tests/run.sh` 裁决；技术范围见
 `vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
 

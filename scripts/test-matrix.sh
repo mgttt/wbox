@@ -2,7 +2,7 @@
 # test-matrix.sh —— wbox-linux 验收矩阵产品化脚本
 #
 # 矩阵内容（与 vendor/blink/WIN32-PORT.md §7/§7.3/§7.4 的 wine 实测口径一致）：
-#   A. 基础矩阵 11 项（uname/echo/cat/ls/stat/find/重定向/退出码…）
+#   A. 基础矩阵 12 项（uname/架构/echo/cat/ls/stat/find/重定向/退出码…）
 #   B. shell 矩阵 8 项（管道/命令替换/后台+wait/重定向链/dev/null/fork 子 exec）
 #   C. fork 矩阵（子 shell 顺序/嵌套命令替换/后台任务产出）
 #   D. 网络：busybox wget 公网下载 + md5 精确比对（回归保护值）
@@ -143,8 +143,14 @@ check_rc_out() {
 }
 
 echo
-echo "=== A. 基础矩阵（11 项）==="
+echo "=== A. 基础矩阵（12 项）==="
 check_rc_out "A1  uname -a"            0 Linux        uname -a
+bb uname -m; rc_uname_m=$?
+if [ "$rc_uname_m" -eq 0 ] && [ "$OUT" = x86_64 ]; then
+  report PASS "A1b uname -m 精确架构"
+else
+  report FAIL "A1b uname -m 精确架构" "rc=$rc_uname_m 输出='$OUT'（期望 x86_64）"
+fi
 check_rc_out "A2  echo hello wbox"     0 "hello wbox" echo hello wbox
 check_rc_out "A3  cat t.txt"           0 "line1 from host file" cat t.txt
 check_rc_out "A4  ls -la t.txt"        0 t.txt        ls -la t.txt

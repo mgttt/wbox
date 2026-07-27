@@ -2363,7 +2363,11 @@ static int SysUname(struct Machine *m, i64 utsaddr) {
   strcpy(uts.machine, "x86_64");
   strcpy(uts.sysname, "Linux");
   strcpy(uts.release, LINUX_VERSION "-blink-" BLINK_VERSION);
-  strcpy(uts.version, "#" BLINK_COMMITS " " BLINK_UNAME_V " " BUILD_TIMESTAMP);
+  // Build metadata can exceed Linux's fixed 65-byte utsname fields. The old
+  // strcpy overflowed version into machine, making `uname -m` report the tail
+  // of the build timestamp (for example "2026") instead of "x86_64".
+  snprintf(uts.version, sizeof(uts.version), "#%s %s %s", BLINK_COMMITS,
+           BLINK_UNAME_V, BUILD_TIMESTAMP);
   memset(u.host, 0, sizeof(u.host));
   gethostname(u.host, sizeof(u.host) - 1);
   strcpy(uts.nodename, u.host);
