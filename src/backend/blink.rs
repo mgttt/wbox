@@ -138,7 +138,7 @@ pub(crate) fn create_private_rootfs(
 }
 
 #[cfg(any(windows, test))]
-fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
+pub(crate) fn copy_rootfs_tree(source: &Path, destination: &Path) -> Result<()> {
     copy_rootfs_tree_inner(source, destination, source, destination)
 }
 
@@ -169,14 +169,7 @@ fn copy_rootfs_tree_inner(
         if ty.is_dir() {
             copy_rootfs_tree_inner(&src, &dst, source_root, destination_root)?;
         } else if ty.is_file() {
-            std::fs::copy(&src, &dst).map_err(|e| {
-                WboxError::spawn(format!(
-                    "复制 rootfs 文件 '{}' 到 '{}' 失败：{}",
-                    src.display(),
-                    dst.display(),
-                    e
-                ))
-            })?;
+            copy_rootfs_file(&src, &dst)?;
         } else if ty.is_symlink() {
             copy_rootfs_symlink(&src, &dst, source_root, destination_root)?;
         } else {
@@ -186,6 +179,45 @@ fn copy_rootfs_tree_inner(
             )));
         }
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_rootfs_file(source: &Path, destination: &Path) -> Result<()> {
+    // CopyFile 会连安全描述符一起复制，构建 staging 上临时授予的 AppContainer
+    // 修改 ACE 就可能泄漏进最终镜像缓存。显式新建目标并只复制内容，让目标继承
+    // destination 父目录的干净 DACL。
+    let mut input = std::fs::File::open(source).map_err(|e| {
+        WboxError::spawn(format!("打开 rootfs 文件 '{}' 失败：{}", source.display(), e))
+    })?;
+    let mut output = std::fs::File::create(destination).map_err(|e| {
+        WboxError::spawn(format!(
+            "创建 rootfs 文件 '{}' 失败：{}",
+            destination.display(),
+            e
+        ))
+    })?;
+    std::io::copy(&mut input, &mut output).map_err(|e| {
+        WboxError::spawn(format!(
+            "复制 rootfs 文件 '{}' 到 '{}' 失败：{}",
+            source.display(),
+            destination.display(),
+            e
+        ))
+    })?;
+    Ok(())
+}
+
+#[cfg(all(unix, test))]
+fn copy_rootfs_file(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::copy(source, destination).map_err(|e| {
+        WboxError::spawn(format!(
+            "复制 rootfs 文件 '{}' 到 '{}' 失败：{}",
+            source.display(),
+            destination.display(),
+            e
+        ))
+    })?;
     Ok(())
 }
 
@@ -201,7 +233,15 @@ fn copy_rootfs_symlink(
     let target = std::fs::read_link(source).map_err(|e| {
         WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
     })?;
-    let source_target = if target.has_root() {
+    let has_windows_prefix = target
+        .components()
+        .any(|component| matches!(component, std::path::Component::Prefix(_)));
+    let source_target = if has_windows_prefix {
+        // 私有 rootfs 再复制时，上一轮已经把 Linux 绝对 symlink 重写成了
+        // staging 内的 Windows 绝对路径。直接校验它仍在 source_root 内，
+        // 不能再按容器根路径拼一次。
+        target.clone()
+    } else if target.has_root() {
         let relative: std::path::PathBuf = target
             .components()
             .filter(|component| {

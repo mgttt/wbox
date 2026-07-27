@@ -34,6 +34,8 @@ use blink::ensure_resolv_conf;
 pub use blink::BlinkBackend;
 #[cfg(windows)]
 pub(crate) use blink::create_private_rootfs;
+#[cfg(windows)]
+pub(crate) use blink::copy_rootfs_tree;
 pub use linux::{LinuxMode, LinuxNativeBackend};
 pub use native::NativeBackend;
 

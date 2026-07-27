@@ -111,7 +111,7 @@ wbox
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
 | 卷挂载 `-v` | 无 | 受天花板一牵连：Windows 侧无路径重定向手段，`-v` 明确报错 |
 | 端口映射 `-p` | 无 | Linux 侧的用户态转发依赖 `setns`，Windows 无对应原语 |
-| 镜像构建 | 无 | `build` 目前仅 Linux 宿主（`RUN` 依赖 Linux 容器路径）→ §4.9 W4 |
+| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink，WP.18；无分层缓存 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
 | systemd / 服务 | 不做 | 非目标 |
 
@@ -694,7 +694,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
-├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux 侧）
+├── F9.3 镜像构建（Dockerfile 子集）          —— [verify]（Linux 已完成，Windows 待 CI）
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
 
@@ -762,12 +762,16 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 
 **能力边界：只覆盖 TCP。** UDP 与 ICMP 这套做不了，README 与 `--help` 都写明了。
 
-**F9.3 镜像构建** `[done]`（Linux 宿主；门禁 B.1–B.4）。
+**F9.3 镜像构建** `[verify]`（Linux 门禁 B.1–B.4 已完成；Windows WP.18 待 CI）。
 `wbox build -t NAME[:TAG] [-f Dockerfile] <上下文>`，子集为
 `FROM/RUN/COPY/ENV/WORKDIR/CMD/ENTRYPOINT`。
 
 - **`RUN` 直接复用运行期的容器路径**（同一 backend、同一套 namespace 与限额），
   所以构建期与运行期隔离强度一致，不存在"构建时能做、运行时不能"的错位。
+- Windows 使用 staging rootfs：`RUN` 经 AppContainer + Blink 执行，临时 profile
+  SID 只对 staging 有修改权；发布时重新复制内容与 symlink，不能把临时写 ACE
+  带进共享镜像缓存。Windows 绝对 symlink 与 Linux 根路径分别解析，最终仍用
+  `strip_prefix(source_root)` 拒绝越界。
 - **产物与 `pull` 下来的镜像同布局**（`rootfs/` + `manifest.json` +
   `layers.json` + `config.json`），`run`/`images` 无差别对待。本地构建没有
   registry 层信息，`layers.json` 就写空数组——编一个假 digest 只会误导。
@@ -804,7 +808,7 @@ TODO-PLAN
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
-├── W4 build 在 Windows 宿主的可行性          [Windows agent] 待认领
+├── W4 build 在 Windows 宿主的可行性          [Windows agent] 待 CI
 └── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ```
 
@@ -873,23 +877,21 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
 退出，不会被掩盖。
 
-### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]`
+### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[verify]`
 
-**背景**。F9.3 的 `wbox build` 目前**只在 Linux 宿主可用**：`RUN` 复用的是
-Linux 容器执行路径。Windows 上要跑 `RUN`，得让 `wbox-linux`（blink）在私有可写
-rootfs 里执行命令——这条路径本身已经通了（Q2 已能跑 OCI 镜像），所以问题不是
-"能不能执行"，而是几处语义：
+Windows 已能执行 F9.3 子集。`FROM` 先复制到 staging rootfs，`RUN` 复用
+AppContainer + Blink 运行路径并默认授予网络 capability；每一步使用临时容器记录，
+满足 NativeBackend 的 Job/停止协议。构建成功后不直接 rename staging，因为其 DACL
+含临时 profile SID 的修改 ACE；发布阶段重新创建目录、只复制文件内容与 symlink，
+让最终镜像继承干净 DACL。
 
-1. `RUN` 的每一步都要写进 rootfs，而 Windows 侧的可写层刚落地——`build` 能否
-   直接复用它，还是需要每步一个独立层。
-2. `FROM` 走整份 rootfs 复制，Windows 上的符号链接复制已有专门处理
-   （`copy_rootfs_symlink` 带逃逸约束）；构建路径要复用那套，别另写一份。
-3. 构建期是否需要网络。Linux 侧 `RUN` 默认放行网络（与 docker build 一致），
-   Windows 侧要确认 AppContainer 下的等价做法。
+Windows symlink 复制复用 Blink 的逃逸约束。Linux `/etc/...` 根路径按容器根解析；
+已经重写到 staging 内的 `C:\...` 目标按 Windows 绝对路径解析，二者最终都必须
+`strip_prefix(source_root)` 成功。
 
-**做完的标准**：Windows 上 `wbox build` 能产出可被 `wbox run` 直接运行的镜像，
-且有持续门禁；做不到时在 §2.4 的 Q2 表格里如实标注，别让 `build` 在 Windows
-上静默产出半成品镜像。
+WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重建必须命中
+`CACHED`；运行产物必须同时输出 COPY/RUN 标记，并断言基础镜像未被修改、staging
+无残留。本机已通过；CI 通过后将本节与 F9.3 恢复为 `[done]`。
 
 ### L2 Wine 象限的 `wineprefix` 隔离 `[Linux agent]` `[done]`
 

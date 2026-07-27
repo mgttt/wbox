@@ -88,7 +88,9 @@ try {
     Copy-Item -LiteralPath $wboxSource -Destination (Join-Path $bundle "wbox.exe")
     Copy-Item -LiteralPath $linuxSource -Destination (Join-Path $bundle "wbox-linux.exe")
     Copy-Item -LiteralPath $busyboxSource -Destination (Join-Path $rootfs "busybox")
-    New-Item -ItemType Directory -Force -Path (Join-Path $rootfs "probe") | Out-Null
+    New-Item -ItemType Directory -Force -Path `
+        (Join-Path $rootfs "probe"), (Join-Path $rootfs "bin") | Out-Null
+    Copy-Item -LiteralPath $busyboxSource -Destination (Join-Path $rootfs "bin\sh")
     Set-Content -LiteralPath (Join-Path $rootfs "probe\directory-entry-ok") `
         -Encoding utf8NoBOM -Value "ok"
 
@@ -573,6 +575,44 @@ while ($true) {
     & $portableWbox rm $crashName 2>&1 | Out-Null
     Assert-Exit 0 "WP.17 rm crashed record"
     Write-Host "PASS WP.17 supervisor crash closes the Job and all attached guests"
+
+    # Windows build must run each RUN inside AppContainer+Blink, persist the
+    # guest mutation into the output image, and leave the shared base untouched.
+    $buildContext = Join-Path $sandbox "build-context"
+    New-Item -ItemType Directory -Force -Path $buildContext | Out-Null
+    Set-Content -LiteralPath (Join-Path $buildContext "marker.txt") `
+        -Encoding utf8NoBOM -Value "COPY_WINDOWS_OK"
+    Set-Content -LiteralPath (Join-Path $buildContext "Dockerfile") `
+        -Encoding utf8NoBOM -Value @'
+FROM local.test/wbox-fixture:latest
+COPY marker.txt /probe/build-copy.txt
+RUN /busybox cp /probe/build-copy.txt /probe/build-run.txt && /busybox echo RUN_WINDOWS_OK >> /probe/build-run.txt
+CMD ["/busybox","cat","/probe/build-run.txt"]
+'@
+    $buildOutput = & $portableWbox build -t local.test/wbox-built:latest $buildContext `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.18 Windows OCI build" $buildOutput
+    $cachedBuildOutput = & $portableWbox build -t local.test/wbox-built:latest $buildContext `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.18 Windows OCI cached rebuild" $cachedBuildOutput
+    if ($cachedBuildOutput -notmatch "CACHED") {
+        throw "WP.18 second build did not restore a cached layer: $cachedBuildOutput"
+    }
+    $builtOutput = & $portableWbox run --rm local.test/wbox-built:latest 2>&1 | Out-String
+    Assert-Exit 0 "WP.18 run Windows-built image" $builtOutput
+    if ($builtOutput -notmatch "COPY_WINDOWS_OK" -or
+        $builtOutput -notmatch "RUN_WINDOWS_OK") {
+        throw "WP.18 built image missed COPY/RUN effects: $builtOutput"
+    }
+    if (Test-Path -LiteralPath (Join-Path $rootfs "probe\build-run.txt")) {
+        throw "WP.18 RUN modified the shared base image"
+    }
+    $buildImageParent = Join-Path $testHome ".wbox\images\local.test\wbox-built"
+    if (Get-ChildItem -LiteralPath $buildImageParent -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like ".wbox-build-*" }) {
+        throw "WP.18 build left a staging rootfs in the image cache"
+    }
+    Write-Host "PASS WP.18 Windows OCI build/cache persists COPY/RUN without mutating the base"
 
     if ($null -ne $guestFailure) {
         throw $guestFailure

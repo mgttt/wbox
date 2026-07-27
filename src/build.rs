@@ -337,10 +337,21 @@ impl ConfigAccum {
     }
 }
 
+#[cfg(windows)]
+struct BuildStaging(PathBuf);
+
+#[cfg(windows)]
+impl Drop for BuildStaging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// 递归复制目录。构建的第一步是把基础镜像的 rootfs 整份拷出来当作可写层。
 ///
 /// 不做硬链接/overlay：那是性能优化，而 overlayfs 在 rootless 下未必可用
 /// （PRD §2.4 的差距表里"无 overlay"就是这条）。先要正确，再谈快。
+#[cfg(not(windows))]
 fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
     let fail = |what: &str, p: &Path, e: std::io::Error| {
         WboxError::args(format!("{} '{}' 失败：{}", what, p.display(), e))
@@ -422,6 +433,34 @@ fn hash_path_into(p: &Path, h: &mut sha2::Sha256) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_file_contents(src: &Path, dst: &Path) -> Result<()> {
+    let mut input = std::fs::File::open(src)
+        .map_err(|e| WboxError::args(format!("打开 COPY 源 '{}' 失败：{}", src.display(), e)))?;
+    let mut output = std::fs::File::create(dst).map_err(|e| {
+        WboxError::args(format!("创建 COPY 目标 '{}' 失败：{}", dst.display(), e))
+    })?;
+    std::io::copy(&mut input, &mut output)
+        .map_err(|e| WboxError::args(format!("COPY '{}' 失败：{}", src.display(), e)))?;
+    Ok(())
+}
+
+fn copy_build_tree(src: &Path, dst: &Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            WboxError::args(format!("创建复制目标父目录 '{}' 失败：{}", parent.display(), e))
+        })?;
+    }
+    #[cfg(windows)]
+    {
+        crate::backend::copy_rootfs_tree(src, dst)
+    }
+    #[cfg(not(windows))]
+    {
+        copy_tree(src, dst)
+    }
+}
+
 /// 执行构建。
 pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     let text = std::fs::read_to_string(&opts.dockerfile).map_err(|e| {
@@ -436,7 +475,24 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     // 目标镜像目录：与 pull 用同一套布局，run 才认得
     let target = crate::oci::ImageRef::parse(&opts.tag, None)?;
     let out_dir = crate::oci::image_dir(&target)?;
-    let rootfs = out_dir.join("rootfs");
+    #[cfg(windows)]
+    let staging = {
+        let dir = out_dir.with_file_name(format!(
+            ".wbox-build-{}-{}",
+            std::process::id(),
+            out_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("image")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        BuildStaging(dir)
+    };
+    #[cfg(windows)]
+    let build_dir = staging.0.clone();
+    #[cfg(not(windows))]
+    let build_dir = out_dir.clone();
+    let rootfs = build_dir.join("rootfs");
 
     // ---- 分层缓存：先算出每步的键，再找**最长的已缓存前缀** ----
     //
@@ -471,7 +527,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             if idx + 1 == resume_from {
                 println!("[{}/{}] CACHED（复用已缓存层）", step, instructions.len());
                 let _ = std::fs::remove_dir_all(&rootfs);
-                copy_tree(&cache.join(&keys[idx]).join("rootfs"), &rootfs)?;
+                copy_build_tree(&cache.join(&keys[idx]).join("rootfs"), &rootfs)?;
             }
             continue;
         }
@@ -487,12 +543,12 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 }
                 println!("[{}/{}] FROM {}", step, instructions.len(), base);
                 // 重建输出目录：残留的上一次构建会让结果不可复现
-                let _ = std::fs::remove_dir_all(&out_dir);
-                std::fs::create_dir_all(&out_dir)
+                let _ = std::fs::remove_dir_all(&build_dir);
+                std::fs::create_dir_all(&build_dir)
                     .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
                 // 若后面有缓存命中，这份基础 rootfs 会被命中层整体覆盖；
                 // 仍然先铺一份，保证"无命中"与"部分命中"两条路径起点一致。
-                copy_tree(&base_dir.join("rootfs"), &rootfs)?;
+                copy_build_tree(&base_dir.join("rootfs"), &rootfs)?;
                 // 继承基础镜像的 config，再让后续指令覆盖
                 if let Some(base_cfg) = crate::oci::config::ImageConfig::load(&base_dir)? {
                     cfg.env.extend(base_cfg.env.iter().cloned());
@@ -508,8 +564,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                         .map_err(|e| WboxError::args(format!("创建 COPY 目标目录失败：{}", e)))?;
                 }
                 if from.is_dir() {
-                    copy_tree(&from, &to)?;
+                    copy_build_tree(&from, &to)?;
                 } else {
+                    #[cfg(windows)]
+                    copy_file_contents(&from, &to)?;
+                    #[cfg(not(windows))]
                     std::fs::copy(&from, &to)
                         .map_err(|e| WboxError::args(format!("COPY '{}' 失败：{}", src, e)))?;
                 }
@@ -530,13 +589,23 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         if mutating(ins) && idx >= resume_from {
             let snap = cache.join(&keys[idx]);
             let _ = std::fs::remove_dir_all(&snap);
-            if let Err(e) = copy_tree(&rootfs, &snap.join("rootfs")) {
+            if let Err(e) = copy_build_tree(&rootfs, &snap.join("rootfs")) {
                 // 缓存写失败不该让构建失败——它只是加速手段。但要说出来，
                 // 否则用户会困惑"为什么每次都不命中"。
                 eprintln!("wbox: 构建缓存写入失败（不影响本次构建）：{}", e);
                 let _ = std::fs::remove_dir_all(&snap);
             }
         }
+    }
+
+    #[cfg(windows)]
+    {
+        // staging 带构建 AppContainer SID 的临时修改 ACE，不能直接 rename 成最终
+        // 镜像。重新创建目标并只复制内容/symlink，让其继承镜像缓存的干净 DACL。
+        let _ = std::fs::remove_dir_all(&out_dir);
+        std::fs::create_dir_all(&out_dir)
+            .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
+        crate::backend::copy_rootfs_tree(&rootfs, &out_dir.join("rootfs"))?;
     }
 
     // 元数据补齐：manifest/layers 供 `image list` 显示，内容为空是诚实的
@@ -570,9 +639,22 @@ fn run_step(rootfs: &Path, cmd: &str, cfg: &ConfigAccum) -> Result<()> {
         verbose: false,
         env_pass_all: false,
     };
+    #[cfg(windows)]
+    crate::acl::grant_modify_recursive_for_profile(rootfs, &spec.name)?;
     let backend = build_backend();
     let prepared = backend.prepare(&spec)?;
+    #[cfg(windows)]
+    let registration = crate::runstate::register_with_context(
+        &spec.name,
+        &spec.cmd,
+        "(build-step)",
+        false,
+        None,
+        None,
+    )?;
     let rc = backend.spawn(&spec, &prepared)?;
+    #[cfg(windows)]
+    drop(registration);
     if rc != 0 {
         return Err(WboxError::args(format!(
             "RUN 失败（退出码 {}）：{}",
