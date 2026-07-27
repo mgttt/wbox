@@ -74,7 +74,7 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/ro
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink"
+APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink hostname"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -1356,6 +1356,82 @@ if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q "stdio"; then
 else
   report FAIL "CMP.7 缺 -d" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 160)"
 fi
+
+echo
+echo "=== IU IPC/UTS 隔离与共享（PRD F9.15）==="
+
+# IU.1 IPC 与 UTS 默认**隔离**。此前 wbox 让容器直接共享宿主的这两个
+# namespace——guest 能碰宿主的 System V 对象、能 sethostname 改掉宿主主机名。
+# 这是真实的隔离缺口，不是"少一个特性"，故判据是与宿主 inode **不同**。
+run lbetest -- /bin/sh -c 'readlink /proc/self/ns/ipc; readlink /proc/self/ns/uts'
+cipc=$(printf '%s' "$OUT" | sed -n 1p)
+cuts=$(printf '%s' "$OUT" | sed -n 2p)
+hipc=$(readlink /proc/self/ns/ipc)
+huts=$(readlink /proc/self/ns/uts)
+if [ "$rc" -eq 0 ] && [ -n "$cipc" ] && [ "$cipc" != "$hipc" ] && [ "$cuts" != "$huts" ]; then
+  report PASS "IU.1 IPC/UTS 默认与宿主隔离"
+else
+  report FAIL "IU.1 默认隔离" "容器 ipc=$cipc uts=$cuts；宿主 ipc=$hipc uts=$huts"
+fi
+
+# IU.2 主机名默认取容器名（与 docker 一致），且**宿主主机名不受影响**。
+# 后半条是关键：UTS 没隔离时 sethostname 会改掉宿主的。
+hostbefore=$(hostname)
+run --name iuhost lbetest -- /bin/hostname
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT")" = "iuhost" ] && [ "$(hostname)" = "$hostbefore" ]; then
+  report PASS "IU.2 主机名默认取容器名，且不改动宿主主机名"
+else
+  report FAIL "IU.2 主机名" "容器内=$(printf '%s' "$OUT"|head -c 40) 宿主 before=$hostbefore after=$(hostname)"
+fi
+
+# IU.3 --hostname 覆盖默认值。
+run --name iuh2 --hostname custom.local lbetest -- /bin/hostname
+if [ "$rc" -eq 0 ] && [ "$(printf '%s' "$OUT")" = "custom.local" ]; then
+  report PASS "IU.3 --hostname 覆盖默认容器名"
+else
+  report FAIL "IU.3 --hostname" "输出: $(printf '%s' "$OUT" | head -c 60)"
+fi
+
+# IU.4/IU.5 共享：--ipc/--uts container: 加入既有容器的 namespace。
+# 判据取自**容器内**（经 exec），不是宿主视角——exec 现在也会进 ipc/uts，
+# 早先它只进 user/mnt/net/pid，量到的是宿主的，那次差点误判成"共享没生效"。
+HOME=$WORK/home "$WBOX_ABS" run -d --name iupeer lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+pipc=$(timeout 15 env HOME=$WORK/home "$WBOX_ABS" exec iupeer -- readlink /proc/self/ns/ipc 2>/dev/null)
+puts=$(timeout 15 env HOME=$WORK/home "$WBOX_ABS" exec iupeer -- readlink /proc/self/ns/uts 2>/dev/null)
+jipc=$(timeout 20 env HOME=$WORK/home "$WBOX_ABS" run --rm --name iuj1 --ipc container:iupeer lbetest -- readlink /proc/self/ns/ipc 2>/dev/null)
+juts=$(timeout 20 env HOME=$WORK/home "$WBOX_ABS" run --rm --name iuj2 --uts container:iupeer lbetest -- readlink /proc/self/ns/uts 2>/dev/null)
+if [ -n "$pipc" ] && [ "$pipc" = "$jipc" ] && [ "$pipc" != "$hipc" ]; then
+  report PASS "IU.4 --ipc container: 共享目标容器的 IPC namespace"
+else
+  report FAIL "IU.4 --ipc container:" "peer=$pipc joiner=$jipc host=$hipc"
+fi
+if [ -n "$puts" ] && [ "$puts" = "$juts" ] && [ "$puts" != "$huts" ]; then
+  report PASS "IU.5 --uts container: 共享目标容器的 UTS namespace"
+else
+  report FAIL "IU.5 --uts container:" "peer=$puts joiner=$juts host=$huts"
+fi
+
+# IU.6 exec 必须落在容器的 UTS 里。早先它不进 ipc/uts，于是 exec 看到的是
+# 宿主主机名——用户以为自己在容器内，看到的却是宿主。
+eout=$(timeout 15 env HOME=$WORK/home "$WBOX_ABS" exec iupeer -- hostname 2>/dev/null)
+if [ "$eout" = "iupeer" ]; then
+  report PASS "IU.6 exec 落在容器的 UTS namespace（看到容器主机名）"
+else
+  report FAIL "IU.6 exec UTS" "exec 看到的主机名=$eout（期望 iupeer）"
+fi
+
+# IU.7 三个 container: 指向不同容器要报错：加入模式先进目标 userns，
+# 而一个进程只能在一个 userns 里。挑一个赢家等于悄悄忽略另一个。
+iout=$(HOME=$WORK/home "$WBOX_ABS" run --ipc container:iupeer --uts container:other lbetest -- /bin/true 2>&1); irc=$?
+if [ "$irc" -ne 0 ] && printf '%s' "$iout" | grep -q "不同的容器"; then
+  report PASS "IU.7 --network/--ipc/--uts 指向不同容器时报错"
+else
+  report FAIL "IU.7 多目标冲突" "rc=$irc 输出: $(printf '%s' "$iout" | head -c 150)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill iupeer >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm iupeer iuhost iuh2 >/dev/null 2>&1
 
 echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="

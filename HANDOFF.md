@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.15 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -45,6 +45,7 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.12 overlay 可写层 | OV.1–OV.5 | 修了真实缺陷：此前容器写 `/` 会污染共享镜像缓存 |
 | F9.13 `wbox push` | PSH.1–PSH.5 | 缓存无原始层 blob，只能 flatten 成单层；门禁用 python3 stub 闭环，不打真 registry |
 | F9.14 compose 子集 | CMP.1–CMP.7 | 手写有界 YAML 子集（不引已归档的 serde_yaml）；up 复用 cmd_run 而非另写启动逻辑 |
+| F9.15 IPC/UTS 隔离与共享 | IU.1–IU.7 | 修的是**隔离缺口**：此前容器直接用宿主的 IPC/UTS；顺带发现 exec 没进这两个 ns |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -52,7 +53,7 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **342 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **113 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **120 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -79,8 +80,8 @@ F9.1–F9.14 全部落地并有持续门禁。近期这一串是本轮做的：
 - **L5 镜像分层存储**（待认领，Linux）：与 F9.12 的运行期可写层**不是一回事**，
   要改缓存布局保存原始压缩层 blob，牵动 pull/build/overlay/push 四条路径。
   判据：多层镜像 pull 后能原样 push 回去且 manifest digest 不变。
-- **L6 pod**（待评估）：结论允许是"不做"。F9.11 已覆盖共享网络这个主要用途，
-  要回答的是"去掉网络之后还剩多少真实需求"。
+- ~~**L6 pod**~~：**已评估，结论是不做**。评估过程发现 IPC/UTS 根本没隔离，
+  于是先补了 F9.15；补齐后 pod 的三样共享都能单独取得，再抽一层只是换个说法。
 
 Q2 的 `-v` 由 Windows agent 在推进（broker 打开对象 HANDLE + Blink VFS 数据面，
 **不走** OS 路径重定向），别去碰那块。

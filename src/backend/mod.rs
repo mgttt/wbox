@@ -138,6 +138,15 @@ pub struct RunSpec {
     /// 而是加入该容器的 user+net namespace。
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub network_container: Option<String>,
+    /// `--ipc container:<NAME>`（PRD F9.15，仅 Linux 宿主）
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub ipc_container: Option<String>,
+    /// `--uts container:<NAME>`（PRD F9.15，仅 Linux 宿主）
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub uts_container: Option<String>,
+    /// `--hostname`：容器内主机名。`None` = 用容器名（与 docker 一致）。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub hostname: Option<String>,
     /// **直写 rootfs**（不套 overlay 可写层）。`build` 的 `RUN` 步骤必须置真：
     /// 它的写入就是产物，引到 upper 层等于把 RUN 的效果全丢掉。
     /// 普通 `run` 保持默认 false——容器写入不该污染共享镜像缓存（F9.12）。

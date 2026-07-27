@@ -133,7 +133,7 @@ wbox
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| rootless 运行 | 有 | user/PID/mount/net namespace |
+| rootless 运行 | 有 | user/PID/mount/net/**IPC/UTS** namespace（F9.15 补齐后两个）|
 | 资源限额 | 有 | cgroup v2 首选，受限时明确回退或拒绝 |
 | `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
 | `--detach` | 有 | |
@@ -145,10 +145,12 @@ wbox
 | overlay 镜像分层存储 | 无 | `FROM`/pull 仍整份复制；与 F9.12 的运行期可写层是两件事 |
 | 镜像 push | 部分 | F9.13：`wbox push`，**平铺为单层**（门禁 PSH.1–PSH.5）；不保留原始分层 |
 | compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
-| pod | 无 | |
+| pod | 不做 | F9.15 之后 net/IPC/UTS 三种共享都能单独取得，再抽一层 pod 只是换个说法；理由见 §4.9 L6 |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
 | healthcheck | 有 | F9.10：`--health-cmd` + interval/retries/start-period（门禁 HC.1–HC.5）|
 | 容器间通信 | 部分 | F9.11：`--network container:<NAME>` 共享 netns、localhost 互通（门禁 NC.1–NC.4）|
+| namespace 共享（IPC/UTS）| 有 | F9.15：`--ipc`/`--uts container:<NAME>`，与 `--network container:` 同一套机制（门禁 IU.4–IU.7）|
+| `--hostname` | 有 | F9.15：默认取容器名（docker 用容器 ID 前 12 位）|
 | 自定义 bridge 网络、内建 DNS | 无 | rootless 下需要 slirp4netns/pasta 级的常驻用户态网络栈，与"免安装、无服务"（§2.2）冲突 |
 | `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
 | `--cap-add` / `--cap-drop` | 有 | F9.8：先 drop 后 add，含 `ALL`（门禁 CAP.1–CAP.5）|
@@ -186,7 +188,7 @@ wbox
 | Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
 | Q3 Podman | 镜像**分层**存储 | 要让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push 四条路径 | §4.9 L5 |
-| Q3 Podman | pod（共享 IPC/UTS 的一等抽象） | F9.11 的共享 netns 已覆盖大半用途；是否值得再抽一层待评估 | §4.9 L6 |
+| Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
 | Q4 Wine | GUI / DirectX / .NET | **不做**：§2.3 非目标 | — |
@@ -806,7 +808,8 @@ F9
 ├── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
 ├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
 ├── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
-└── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
+├── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
+└── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -960,6 +963,33 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.15 IPC/UTS 隔离与共享** `[done]`（门禁 IU.1–IU.7）。
+
+**先修的是一个隔离缺口，不是加特性。** 此前 wbox 只 unshare
+user/mount/PID(/net)，容器**直接共享宿主的 IPC 与 UTS**：guest 能看见并操作
+宿主的 System V 信号量与共享内存段，也能 `sethostname` 改掉宿主主机名。
+docker/podman 默认隔离这两个。IU.1/IU.2 的判据因此是"与宿主 inode 不同"
+与"宿主主机名不变"。
+
+主机名默认取**容器名**（docker 用容器 ID 前 12 位，我们用名字更可读），
+`--hostname` 可覆盖；超长时截断而不是失败——一个太长的容器名不该让容器起不来。
+
+`--ipc`/`--uts container:<NAME>` 与 `--network container:`（F9.11）**共用同一套
+机制**：`JoinNs` 从"user+net 两个写死的 fd"改成"user + 一组按需打开的 fd"。
+各写一份迟早会在"必须先进 userns"这条关键顺序上漂移，而那条顺序错了就是
+`EPERM`。三者若指向不同容器则明确报错：加入模式要先进目标的 user namespace，
+而一个进程只能在一个 userns 里，挑一个赢家等于悄悄忽略另一个（IU.7）。
+
+`--ipc`/`--uts` 目前**只收 `container:<NAME>`**。docker 还有 `host`/`shareable`/
+`private`：`private` 已是默认，而 `host` 等于放弃刚补上的隔离——要开必须是显式
+且有理由的设计，不顺手加。
+
+**连带修掉一处不一致**：`exec` 此前只 setns 进 user/mnt/net/pid，IPC/UTS 一隔离，
+`wbox exec` 就会落在**宿主的**那两个里——用户以为自己在容器内，看到的却是宿主
+主机名、碰得到宿主的 System V 对象。IU.6 盯这条。这个缺陷是写门禁时才暴露的：
+第一版判据用 `exec` 读 ns inode，量出来"共享没生效"，查下去才发现错的是探针
+所在的位置，不是共享本身。
 
 **F9.14 compose 子集** `[partial]`（门禁 CMP.1–CMP.7）。范围先钉死，不做
 "重新实现 docker-compose"：八个 service 字段（`image`/`command`/`volumes`/
@@ -1231,7 +1261,7 @@ TODO-PLAN
 ├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
 ├── L4 compose 子集                           [任一 agent] 已完成（F9.14）
 ├── L5 镜像分层存储                           [Linux agent] 待认领
-└── L6 pod 抽象是否值得做                     [任一 agent] 待评估
+└── L6 pod 抽象是否值得做                     [任一 agent] 已评估：不做（见下）
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -1350,16 +1380,22 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 **判据**：pull 一个多层镜像后能原样 push 回去且 manifest digest 不变；
 `FROM` 复用基础层时磁盘占用明显低于整份复制。达不到这两条就不算做完。
 
-### L6 pod 抽象是否值得做 `[任一 agent]` `[待评估]`
+### L6 pod 抽象是否值得做 `[任一 agent]` `[done：结论是不做]`
 
-**先评估再动手，结论允许是"不做"。** podman 的 pod 是共享 IPC/UTS/network 的
-一等抽象。wbox 已有的 F9.11（共享 netns）覆盖了其中最常用的那部分，
-F9.14 的 compose 又提供了成组管理。
+**评估结论：不做，并已把促成这个结论的能力补齐。**
 
-要回答的问题只有一个：**去掉网络之后，还剩多少真实需求？** 共享 IPC
-（`CLONE_NEWIPC`）与 UTS（主机名）在容器场景里用得远比网络少。若答案是"不多"，
-就把这一格记为**不做**，并在 §2.4 写明理由——那同样是有价值的结论，
-省得后来人反复问"为什么没有 pod"。
+podman 的 pod 是共享 network/IPC/UTS 的一等抽象。评估先问"去掉网络之后还剩
+什么"，答案是 IPC 与 UTS——而查代码发现 wbox **根本没隔离这两个**（容器直接
+用宿主的）。于是先修缺口：F9.15 把 IPC/UTS 纳入默认隔离，并按 F9.11 同一套
+机制提供 `--ipc`/`--uts container:<NAME>`。
+
+补齐之后，pod 的三样共享（net/IPC/UTS）都能**单独且组合取得**，成组管理由
+F9.14 的 compose 提供。再引入一个 pod 对象，得到的只是换个说法：多一个要维护
+的生命周期实体（创建/删除/列举/与容器的从属关系），换不来任何现在做不到的事。
+
+故 §2.4 Q3 的 pod 一行记为**不做**，理由指向这里。若将来出现"必须以 pod 为
+单位调度/迁移"的需求，再回来重估——那时驱动它的是调度语义，不是 namespace
+共享。
 
 ### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 

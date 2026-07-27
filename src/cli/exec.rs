@@ -175,10 +175,15 @@ fn exec_in_namespaces_with(pid: u32, cmd: &[&str], quiet: bool) -> Result<u32> {
     use std::os::unix::process::CommandExt;
 
     // 顺序见模块文档：user 最先，PID 用 pid_for_children。
-    let wanted: [(&str, libc::c_int); 4] = [
+    // IPC 与 UTS 也要进：容器默认隔离这两个（见 linux_ns::unshare_flags），
+    // 只 setns 前四个的话 `wbox exec` 会落在**宿主的** IPC/UTS 里——用户以为
+    // 自己在容器内，看到的却是宿主的主机名、能碰到宿主的 System V 对象。
+    let wanted: [(&str, libc::c_int); 6] = [
         ("user", libc::CLONE_NEWUSER),
         ("mnt", libc::CLONE_NEWNS),
         ("net", libc::CLONE_NEWNET),
+        ("ipc", libc::CLONE_NEWIPC),
+        ("uts", libc::CLONE_NEWUTS),
         ("pid_for_children", libc::CLONE_NEWPID),
     ];
     let mut fds: Vec<(std::fs::File, libc::c_int)> = Vec::new();

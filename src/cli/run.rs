@@ -49,6 +49,11 @@ pub struct RunOptions {
     /// `--network container:<NAME>`（PRD F9.11，仅 Linux）：加入既有容器的
     /// netns，两容器经 localhost 互通。
     pub network_container: Option<String>,
+    /// `--ipc container:<NAME>` / `--uts container:<NAME>`（PRD F9.15，仅 Linux）
+    pub ipc_container: Option<String>,
+    pub uts_container: Option<String>,
+    /// `--hostname NAME`（仅 Linux；UTS namespace 已默认隔离）
+    pub hostname: Option<String>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -79,6 +84,9 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         seccomp_deny: Vec::new(),
         health: None,
         network_container: None,
+        ipc_container: None,
+        uts_container: None,
+        hostname: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -149,6 +157,33 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
                         }
                     };
                 }
+            }
+            // `--ipc`/`--uts` 目前只收 `container:<NAME>`：docker 还支持
+            // `host`/`shareable`/`private`，但我们默认已是 private，而 `host`
+            // 等于放弃刚补上的隔离——要开必须是显式且有理由的设计，不顺手加。
+            "--ipc" | "--uts" => {
+                let flag = a.clone();
+                let v = super::args::take_value(args, &mut i, &flag)?;
+                let peer = v.strip_prefix("container:").ok_or_else(|| {
+                    WboxError::args(format!(
+                        "{} 目前只支持 container:<NAME>（默认已是独立 namespace），得到 '{}'",
+                        flag, v
+                    ))
+                })?;
+                if peer.is_empty() {
+                    return Err(WboxError::args(format!(
+                        "{} container: 缺少容器名（用法 container:<NAME>）",
+                        flag
+                    )));
+                }
+                if flag == "--ipc" {
+                    opts.ipc_container = Some(peer.to_string());
+                } else {
+                    opts.uts_container = Some(peer.to_string());
+                }
+            }
+            "--hostname" | "-h" => {
+                opts.hostname = Some(super::args::take_value(args, &mut i, "--hostname")?);
             }
             "--keep-profile" => opts.keep_profile = true,
             "--rm" => opts.auto_remove = true,
@@ -285,6 +320,9 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         seccomp: crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny).unwrap_or_default(),
         health: opts.health.clone(),
         network_container: opts.network_container.clone(),
+        ipc_container: opts.ipc_container.clone(),
+        uts_container: opts.uts_container.clone(),
+        hostname: opts.hostname.clone(),
         direct_rootfs_writes: false,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,

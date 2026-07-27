@@ -83,6 +83,9 @@ struct NsPlan {
     limits: LimitPlan,
     /// capability 裁剪计划（PRD F9.8），fork 前算好
     caps: CapPlan,
+    /// 容器内主机名（UTS namespace 已隔离，见 unshare_flags）。
+    /// 空 = 不设（加入了 peer 的 UTS 时不该改它的主机名）。
+    hostname: Vec<u8>,
     /// seccomp 过滤器程序（PRD F9.9），fork 前构造好。空 = 不装。
     /// 子进程里不能分配，BPF 指令序列必须在这之前就备齐。
     seccomp: Vec<libc::sock_filter>,
@@ -98,8 +101,13 @@ struct NsPlan {
 
 /// `--network container:` 模式要加入的目标 namespace 文件句柄。
 struct JoinNs {
+    /// 目标容器的 user namespace。**永远第一个进**：其余 namespace 的 setns
+    /// 都要求在其属主 userns 内有 CAP_SYS_ADMIN。
     user: std::fs::File,
-    net: std::fs::File,
+    /// 要加入的其余 namespace：(fd, CLONE_* 标志)。哪些进来由调用方决定，
+    /// 这里不写死——`--network`/`--ipc`/`--uts container:` 共用同一套机制，
+    /// 各写一份迟早会在"先进 userns"这条关键顺序上漂移。
+    others: Vec<(std::fs::File, libc::c_int)>,
 }
 
 /// capability 裁剪的**预算好**形式。fork 后的子进程不能分配、不能读文件，
@@ -284,13 +292,27 @@ pub(super) fn spawn_isolated(
     // 网络：默认**不给**（新建空 network namespace），与 Windows 侧不授
     // INTERNET_CLIENT 能力的默认一致。PRD F5 一致性要求同一条命令
     // 在两个宿主上默认隔离强度相同，故这里不能"Linux 上顺便继承宿主网络"。
-    let joining = spec.network_container.is_some();
+    let joining = spec.network_container.is_some()
+        || spec.ipc_container.is_some()
+        || spec.uts_container.is_some();
     // 加入模式：网络来自 peer（不建也不共享宿主），loopback 由 peer 拉起过。
-    let new_netns = !spec.allow_network && !joining;
+    let new_netns = !spec.allow_network && spec.network_container.is_none() && !joining;
     let unshare_flags = if joining {
-        // user/net 都来自 peer，只自建 mount+pid。**不能**再 CLONE_NEWUSER：
-        // 那会把自己关进一个与 peer netns 无权限关系的兄弟 userns。
-        libc::CLONE_NEWNS | libc::CLONE_NEWPID
+        // 身份来自 peer，**不能**再 CLONE_NEWUSER：那会把自己关进一个与 peer
+        // 的 namespace 无权限关系的兄弟 userns。自建的只有 mount+pid，
+        // 外加那些**没有**从 peer 加入的 namespace——加入哪个就不自建哪个，
+        // 否则 unshare 会立刻把刚 setns 进去的那个覆盖掉。
+        let mut f = libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+        if spec.network_container.is_none() && !spec.allow_network {
+            f |= libc::CLONE_NEWNET;
+        }
+        if spec.ipc_container.is_none() {
+            f |= libc::CLONE_NEWIPC;
+        }
+        if spec.uts_container.is_none() {
+            f |= libc::CLONE_NEWUTS;
+        }
+        f
     } else {
         unshare_flags(spec.allow_network)
     };
@@ -336,57 +358,9 @@ pub(super) fn spawn_isolated(
 
     // --network container:<peer>：fork 前解析目标并打开其 namespace fd。
     // 打开的 fd 本身会钉住 namespace——即使 peer 随后退出，加入方也不会踩空。
-    let join_ns = match spec.network_container.as_deref() {
-        None => None,
-        Some(peer) => {
-            let peer_dir = crate::runstate::resolve_existing(peer)?;
-            if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
-                return Err(crate::error::WboxError::args(format!(
-                    "--network container:{}：目标容器已退出，没有可加入的网络",
-                    peer
-                )));
-            }
-            // 有界等待 peer 的 container.pid 落盘。**不能一看没有就报错**：
-            // `run -d` 在 supervisor 起来那一刻就返回，而 container.pid 由后台
-            // 轮询 /proc 的记录器稍后写入——中间有个真实的竞态窗口。
-            // compose 顺序启动服务时必然撞上（实测第二个服务直接退出）。
-            // 让调用方"稍后重试"是把我们的竞态转嫁给用户。
-            let pid = {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                loop {
-                    if let Some(p) = crate::runstate::container_pid(&peer_dir) {
-                        break p;
-                    }
-                    // 等待期间目标可能退出，那时再等下去也没有意义
-                    if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
-                        return Err(crate::error::WboxError::args(format!(
-                            "--network container:{}：目标容器在等待其网络就绪期间退出了",
-                            peer
-                        )));
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(crate::error::WboxError::args(format!(
-                            "--network container:{}：等待 5 秒后目标仍未记录容器 pid",
-                            peer
-                        )));
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-            };
-            let open = |ns: &str| {
-                std::fs::File::open(format!("/proc/{}/ns/{}", pid, ns)).map_err(|e| {
-                    crate::error::WboxError::spawn(format!(
-                        "--network container:{}：打开目标 namespace '{}' 失败：{}（容器可能刚退出）",
-                        peer, ns, e
-                    ))
-                })
-            };
-            Some(JoinNs {
-                user: open("user")?,
-                net: open("net")?,
-            })
-        }
-    };
+    // `--network`/`--ipc`/`--uts container:<NAME>`：加入既有容器的 namespace。
+    // 三者共用同一条解析与 setns 路径（见 JoinNs 的说明）。
+    let join_ns = resolve_join(spec)?;
     let plan = NsPlan {
         vol_binds,
         join_ns,
@@ -403,6 +377,16 @@ pub(super) fn spawn_isolated(
         new_root,
         limits,
         caps: build_cap_plan(&spec.caps),
+        // 加入了 peer 的 UTS 时不设主机名——那是 peer 的，改它属于越界。
+        hostname: if spec.uts_container.is_some() {
+            Vec::new()
+        } else {
+            // 默认用容器名，与 docker 一致（它用容器 ID 的前 12 位）。
+            // 主机名有长度上限，超了就截断而不是失败：一个太长的容器名不该
+            // 让容器起不来。
+            let h = spec.hostname.clone().unwrap_or_else(|| spec.name.clone());
+            h.into_bytes().into_iter().take(64).collect()
+        },
         seccomp: if spec.seccomp.is_default() {
             Vec::new()
         } else {
@@ -495,8 +479,90 @@ pub(super) fn spawn_isolated(
 /// `--allow-network` 才共享宿主网络栈——与 Windows 侧默认不授
 /// `INTERNET_CLIENT` 能力对齐。单独成函数是为了可测：`spawn_isolated`
 /// 会真的 fork，不便在单测里断言。
+/// 解析三个 `container:<NAME>` 选项，打开要加入的 namespace fd。
+///
+/// **所有目标必须是同一个容器**：加入模式先 `setns` 进目标的 user namespace，
+/// 而一个进程只能在一个 userns 里。指向不同容器时明确报错，而不是挑一个赢家
+/// ——挑赢家等于悄悄忽略另一个，用户会以为两个都生效了。
+fn resolve_join(spec: &RunSpec) -> Result<Option<JoinNs>> {
+    let wanted: [(Option<&str>, &str, libc::c_int); 3] = [
+        (spec.network_container.as_deref(), "net", libc::CLONE_NEWNET),
+        (spec.ipc_container.as_deref(), "ipc", libc::CLONE_NEWIPC),
+        (spec.uts_container.as_deref(), "uts", libc::CLONE_NEWUTS),
+    ];
+    let peers: Vec<&str> = wanted.iter().filter_map(|(p, _, _)| *p).collect();
+    let Some(&peer) = peers.first() else {
+        return Ok(None);
+    };
+    if peers.iter().any(|p| *p != peer) {
+        return Err(crate::error::WboxError::args(
+            "--network/--ipc/--uts container: 指向了不同的容器：加入模式要先进入目标的 \
+             user namespace，而一个进程只能在一个 user namespace 里，故三者必须指向同一个容器",
+        ));
+    }
+    let peer_dir = crate::runstate::resolve_existing(peer)?;
+    if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
+        return Err(crate::error::WboxError::args(format!(
+            "container:{}：目标容器已退出，没有可加入的 namespace",
+            peer
+        )));
+    }
+    // 有界等待 peer 的 container.pid 落盘。**不能一看没有就报错**：
+    // `run -d` 在 supervisor 起来那一刻就返回，而 container.pid 由后台轮询
+    // /proc 的记录器稍后写入——中间有个真实的竞态窗口，compose 顺序启动服务时
+    // 必然撞上（实测第二个服务直接退出）。让调用方"稍后重试"是把我们的竞态
+    // 转嫁给用户。
+    let pid = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(p) = crate::runstate::container_pid(&peer_dir) {
+                break p;
+            }
+            if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
+                return Err(crate::error::WboxError::args(format!(
+                    "container:{}：目标容器在等待其 namespace 就绪期间退出了",
+                    peer
+                )));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(crate::error::WboxError::args(format!(
+                    "container:{}：等待 5 秒后目标仍未记录容器 pid",
+                    peer
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let open = |ns: &str| {
+        std::fs::File::open(format!("/proc/{}/ns/{}", pid, ns)).map_err(|e| {
+            crate::error::WboxError::spawn(format!(
+                "container:{}：打开目标 namespace '{}' 失败：{}（容器可能刚退出）",
+                peer, ns, e
+            ))
+        })
+    };
+    let mut others = Vec::new();
+    for (want, ns, flag) in wanted {
+        if want.is_some() {
+            others.push((open(ns)?, flag));
+        }
+    }
+    Ok(Some(JoinNs {
+        user: open("user")?,
+        others,
+    }))
+}
+
 fn unshare_flags(allow_network: bool) -> libc::c_int {
-    let mut f = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+    // IPC 与 UTS 也要隔离：docker/podman 默认给每个容器独立的这两种 namespace，
+    // 而此前 wbox 让容器直接**共享宿主的**——guest 能看见并操作宿主的 System V
+    // 信号量/共享内存段，也能 sethostname 改掉宿主主机名。这是一个真实的隔离
+    // 缺口，不是"少一个特性"。rootless 下拿得到：新 userns 里有 CAP_SYS_ADMIN。
+    let mut f = libc::CLONE_NEWUSER
+        | libc::CLONE_NEWNS
+        | libc::CLONE_NEWPID
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWUTS;
     if !allow_network {
         f |= libc::CLONE_NEWNET;
     }
@@ -831,8 +897,10 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
         if libc::setns(j.user.as_raw_fd(), libc::CLONE_NEWUSER) != 0 {
             return Err(err());
         }
-        if libc::setns(j.net.as_raw_fd(), libc::CLONE_NEWNET) != 0 {
-            return Err(err());
+        for (f, flag) in &j.others {
+            if libc::setns(f.as_raw_fd(), *flag) != 0 {
+                return Err(err());
+            }
         }
     }
 
@@ -891,6 +959,14 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
     // 那个比对（见 die_with_parent）。
     if die_with_parent(None) != 0 {
         return Err(err());
+    }
+
+    // 4a. 设置容器内主机名。UTS namespace 已在 unshare 时隔离，故这一步
+    //     **不会**碰到宿主的主机名。放在双 fork 之后：孙进程才是最终的 guest
+    //     宿主（中间进程只转发退出码），但 UTS 是从中间进程继承来的同一个，
+    //     在这里设与在中间进程设等价，放这里少一次分支。
+    if !p.hostname.is_empty() {
+        libc::sethostname(p.hostname.as_ptr() as *const libc::c_char, p.hostname.len());
     }
 
     // 4b. 新 netns 里的 loopback 默认 DOWN，拉起来（见 bring_up_loopback）。
