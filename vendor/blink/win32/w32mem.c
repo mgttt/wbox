@@ -1071,6 +1071,17 @@ static uintptr_t W32FindHole(uintptr_t hint, size_t len) {
   return p;
 }
 
+// Discard a mapping whose initial file population failed. This must bypass
+// munmap(), since a registered MAP_SHARED mapping would otherwise write its
+// incomplete contents back to the file.
+static void W32DiscardMapping(uintptr_t a, size_t len) {
+  AcquireSRWLockExclusive(&g_lock);
+  (void)FshareRemove(&g_win->fshare, a, a + len);
+  IvRemove(a, a + len);
+  VirtualFree((LPVOID)a, len, MEM_DECOMMIT);
+  ReleaseSRWLockExclusive(&g_lock);
+}
+
 void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
                 int64_t off) {
   uintptr_t a;
@@ -1169,14 +1180,20 @@ void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
         DWORD error = GetLastError();
         W32ReportMemoryError("VirtualProtect", "file mapping populate", r,
                              len, PAGE_READWRITE, error);
-        munmap(r, len);
+        W32DiscardMapping((uintptr_t)r, len);
         errno = W32ErrFromHost(error);
         return MAP_FAILED;
       }
     }
     while (done < len) {
       ssize_t rc = W32Pread64(fd, p + done, len - done, off + (int64_t)done);
-      if (rc <= 0) break;
+      if (rc < 0) {
+        int err = errno ? errno : EIO;
+        W32DiscardMapping((uintptr_t)r, len);
+        errno = err;
+        return MAP_FAILED;
+      }
+      if (!rc) break;
       done += (size_t)rc;
     }
     if (!(prot & PROT_WRITE)) {
@@ -1187,7 +1204,7 @@ void *W32Mmap64(void *addr, size_t len, int prot, int flags, int fd,
         W32ReportMemoryError("VirtualProtect",
                              "file mapping protection restore", r, len,
                              protection, error);
-        munmap(r, len);
+        W32DiscardMapping((uintptr_t)r, len);
         errno = W32ErrFromHost(error);
         return MAP_FAILED;
       }
