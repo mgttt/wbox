@@ -28,9 +28,6 @@
 
 #include "blink/assert.h"
 #include "blink/atomic.h"
-#if defined(_WIN32) && !defined(__CYGWIN__)
-#include "blink/brokerfs.h"
-#endif
 #include "blink/devfs.h"
 #include "blink/errno.h"
 #include "blink/hostfs.h"
@@ -119,9 +116,6 @@ int VfsInit(const char *prefix) {
   unassert(!VfsRegister(&g_hostfs));
   unassert(!VfsRegister(&g_devfs));
   unassert(!VfsRegister(&g_procfs));
-#if defined(_WIN32) && !defined(__CYGWIN__)
-  unassert(!VfsRegister(&g_brokerfs));
-#endif
 
   dll_init(&g_rootdevice.elem);
   dll_make_first(&g_vfs.devices, &g_rootdevice.elem);
@@ -213,9 +207,6 @@ int VfsInit(const char *prefix) {
     goto cleananddie;
   }
   unassert(!VfsMount("proc", "/proc", "proc", 0, NULL));
-#if defined(_WIN32) && !defined(__CYGWIN__)
-  if (BrokerfsMountConfigured() == -1) goto cleananddie;
-#endif
 
   // Initialize the current working directory
   unassert(getcwd(hostcwd, sizeof(hostcwd)));
@@ -1257,7 +1248,6 @@ int VfsOpen(int dirfd, const char *name, int flags, int mode) {
         ret = -1;
       } else {
         ret = VfsAddFd(out);
-        if (ret == -1) unassert(!VfsFreeInfo(out));
       }
     } else {
       ret = eperm();
@@ -1662,7 +1652,9 @@ int VfsClose(int fd) {
   if (info->device->ops->Close) {
     ret = info->device->ops->Close(info);
   }
-  unassert(!VfsFreeInfo(info));
+  if (ret != -1) {
+    unassert(!VfsFreeInfo(info));
+  }
   return ret;
 }
 

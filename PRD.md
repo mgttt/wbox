@@ -944,13 +944,6 @@ filesystem opcodes
   HostfsInfo.filefd -> VfsInfo -> guest fd`；成功转换后 HANDLE 只由 CRT fd 关闭一次。
   禁止经过 `HostfsGetOptimalDirFdName`、`W32ResolveAt` 或当前 path-based
   `fdopendir`。目录枚举必须等 broker `LOOKUP/READDIR`，不能从 HANDLE 还原宿主路径。
-- `[active: wboxfs product gate]` Windows Blink 已实现独立 `wboxfs` device 与
-  `LOOKUP/OPEN/READDIR` C client：普通文件 HANDLE 由 `_open_osfhandle` 唯一接管，
-  read/seek/mmap 复用 fd 数据面；目录只保存 broker 相对路径与分页状态。supervisor
-  manifest 只含 mount id 与十六进制 guest target，不含宿主路径；当前 CLI 只接受
-  最多 64 个目录 `:ro`，`:rw` 与 Windows 原生程序 volume 继续拒绝。WP.3V 必须在
-  无 AppContainer ACE 的宿主目录验证嵌套 cat/ls、写拒绝、junction 逃逸拒绝后，
-  本门禁才能改为 done。
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、

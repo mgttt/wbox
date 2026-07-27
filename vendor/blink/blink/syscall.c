@@ -3826,11 +3826,7 @@ static i64 Getdents(struct Machine *m, i32 fildes, i64 addr, i64 size,
 #else
     off = -1;
 #endif
-    errno = 0;
-    if (!(ent = VfsReaddir(fd->dirstream))) {
-      if (errno && !i) return -1;
-      break;
-    }
+    if (!(ent = VfsReaddir(fd->dirstream))) break;
     len = strlen(ent->d_name);
     if (len + 1 > sizeof(rec.name)) {
       LOGF("ignoring %zu byte d_name: %s", len, ent->d_name);

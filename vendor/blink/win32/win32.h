@@ -111,27 +111,6 @@ int W32FdClassify(int fd, struct W32FdInfo *out);
 // Authenticate the precisely inherited supervisor channel when present.
 // Returns zero when no broker was configured or after a successful handshake.
 int W32BrokerInit(void);
-struct W32BrokerMetadata {
-  uint32_t mode;
-  uint64_t size;
-  uint64_t inode;
-};
-struct W32BrokerDirPage {
-  uint32_t next_cursor;
-  uint32_t eof;
-  uint32_t count;
-  char **names;
-};
-int W32BrokerLookup(uint32_t mount_id, const char *path,
-                    struct W32BrokerMetadata *out);
-int W32BrokerOpenReadonly(uint32_t mount_id, const char *path,
-                          void **owned_handle,
-                          struct W32BrokerMetadata *metadata);
-int W32BrokerReadDir(uint32_t mount_id, const char *path, uint32_t cursor,
-                     struct W32BrokerDirPage *out);
-void W32BrokerFreeDirPage(struct W32BrokerDirPage *);
-// Takes ownership whether conversion succeeds or fails.
-int W32ImportOwnedHandle(void *owned_handle, int flags);
 int WboxEventfdCreate(unsigned int initval, int flags);
 struct itimerspec;
 int WboxTimerfdCreate(int clockid, int flags);

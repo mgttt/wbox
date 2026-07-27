@@ -1012,7 +1012,6 @@ impl BrokerSession {
                 );
             }
         };
-        let metadata = metadata_from_handle(opened.raw())?;
         let mut remote = std::ptr::null_mut();
         if unsafe {
             DuplicateHandle(
@@ -1028,12 +1027,7 @@ impl BrokerSession {
         {
             return Err(last_error("DuplicateHandle(broker OPEN)"));
         }
-        let mut payload = Vec::with_capacity(32);
-        payload.extend_from_slice(&(remote as usize as u64).to_le_bytes());
-        payload.extend_from_slice(&metadata.mode.to_le_bytes());
-        payload.extend_from_slice(&0u32.to_le_bytes());
-        payload.extend_from_slice(&metadata.size.to_le_bytes());
-        payload.extend_from_slice(&metadata.inode.to_le_bytes());
+        let payload = (remote as usize as u64).to_le_bytes().to_vec();
         let response = Response {
             opcode,
             request_id,
@@ -1629,13 +1623,9 @@ mod tests {
                 let opened = read_response(pipe.raw()).unwrap();
                 assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
                 assert_eq!(opened.request_id, request_id);
-                assert_eq!(opened.payload.len(), 32);
+                assert_eq!(opened.payload.len(), 8);
                 let remote =
-                    u64::from_le_bytes(opened.payload[0..8].try_into().unwrap()) as usize as HANDLE;
-                assert_eq!(
-                    u32::from_le_bytes(opened.payload[8..12].try_into().unwrap()) & 0o170_000,
-                    0o100_000
-                );
+                    u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
                 let remote = OwnedHandle(remote);
                 let mut buffer = [0u8; 64];
                 let mut read = 0;

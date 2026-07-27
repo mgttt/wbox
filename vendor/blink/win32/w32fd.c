@@ -567,21 +567,6 @@ static int W32ToCrt(HANDLE h, int flags) {
   return fd;
 }
 
-int W32ImportOwnedHandle(void *owned_handle, int flags) {
-  HANDLE h = (HANDLE)owned_handle;
-  if (!h || h == INVALID_HANDLE_VALUE) {
-    errno = EBADF;
-    return -1;
-  }
-  if ((flags & O_ACCMODE) != O_RDONLY ||
-      (flags & (O_CREAT | O_EXCL | O_TRUNC | O_APPEND))) {
-    CloseHandle(h);
-    errno = EROFS;
-    return -1;
-  }
-  return W32ToCrt(h, flags);
-}
-
 static HANDLE W32Handle(int fd) {
   if (fd < 0) {
     SetLastError(ERROR_INVALID_HANDLE);

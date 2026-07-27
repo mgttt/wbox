@@ -197,51 +197,6 @@ try {
     }
     Write-Host "PASS WP.3D AppContainer Linux directory enumeration"
 
-    $volumeRoot = Join-Path $sandbox "broker-volume"
-    $volumeOutside = Join-Path $sandbox "broker-outside"
-    New-Item -ItemType Directory -Force -Path `
-        (Join-Path $volumeRoot "nested"), $volumeOutside | Out-Null
-    Set-Content -LiteralPath (Join-Path $volumeRoot "canary.txt") `
-        -Encoding utf8NoBOM -NoNewline -Value "BROKER_VOLUME_OK"
-    Set-Content -LiteralPath (Join-Path $volumeRoot "nested\entry.txt") `
-        -Encoding utf8NoBOM -NoNewline -Value "NESTED_OK"
-    Set-Content -LiteralPath (Join-Path $volumeOutside "outside.txt") `
-        -Encoding utf8NoBOM -NoNewline -Value "MUST_NOT_ESCAPE"
-
-    $volumeSpec = "${volumeRoot}:/mnt/host:ro"
-    $volumeGuest = & $portableWbox run --name product-volume `
-        -v $volumeSpec local.test/wbox-fixture:latest /busybox sh -c `
-        '/busybox cat /mnt/host/canary.txt && /busybox ls /mnt/host/nested && ! echo MUTATE > /mnt/host/new.txt' `
-        2>&1 | Out-String
-    Assert-Exit 0 "WP.3V Windows OCI readonly broker volume" $volumeGuest
-    if ($volumeGuest -notmatch "BROKER_VOLUME_OK" -or
-        $volumeGuest -notmatch "entry.txt") {
-        throw "WP.3V broker volume did not return nested host data: $volumeGuest"
-    }
-    if (Test-Path -LiteralPath (Join-Path $volumeRoot "new.txt")) {
-        throw "WP.3V readonly broker volume modified the host"
-    }
-
-    & cmd.exe /d /c mklink /J (Join-Path $volumeRoot "jump") $volumeOutside | Out-Null
-    Assert-Exit 0 "WP.3V junction setup"
-    $junctionGuest = & $portableWbox run --name product-volume-junction `
-        -v $volumeSpec local.test/wbox-fixture:latest /busybox sh -c `
-        'if /busybox cat /mnt/host/jump/outside.txt; then exit 9; else echo JUNCTION_BLOCKED; fi' `
-        2>&1 | Out-String
-    Assert-Exit 0 "WP.3V broker junction escape denial" $junctionGuest
-    if ($junctionGuest -notmatch "JUNCTION_BLOCKED" -or
-        $junctionGuest -match "MUST_NOT_ESCAPE") {
-        throw "WP.3V junction escaped the broker root: $junctionGuest"
-    }
-
-    $rwSpec = "${volumeRoot}:/mnt/host:rw"
-    $rwGuest = & $portableWbox run --name product-volume-rw `
-        -v $rwSpec local.test/wbox-fixture:latest /busybox true 2>&1 | Out-String
-    if ($LASTEXITCODE -eq 0 -or $rwGuest -notmatch ":ro") {
-        throw "WP.3V Windows OCI :rw must be rejected explicitly: $rwGuest"
-    }
-    Write-Host "PASS WP.3V Windows OCI readonly broker volume and junction denial"
-
     $writeGuest = & $portableWbox run --name product-write local.test/wbox-fixture:latest `
         /busybox sh -c 'echo PRIVATE_WRITE_OK > /probe/private-write && /busybox cat /probe/private-write' `
         2>&1 | Out-String
