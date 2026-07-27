@@ -153,6 +153,16 @@ fn kernel_last_cap() -> u32 {
         .min(63)
 }
 
+/// rootless overlay 在本机是否可用。供 build 决定能不能用硬链接铺基础层
+/// （PRD L5b）——不能的话 RUN 会就地写坏共享 inode，只能退回整份复制。
+pub(crate) fn rootless_overlay_available() -> bool {
+    let scratch = std::env::temp_dir().join(format!("wbox-ovchk-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&scratch);
+    let ok = probe_rootless_overlay(&scratch);
+    let _ = std::fs::remove_dir_all(&scratch);
+    ok
+}
+
 /// 由策略算出落地计划。
 fn build_cap_plan(policy: &crate::caps::CapPolicy) -> CapPlan {
     if policy.is_default() {
@@ -282,7 +292,10 @@ pub(super) fn spawn_isolated(
                 }
                 None
             } else {
-                let layer_dir = crate::runstate::dir_for(&spec.name)?.join("layer");
+                let layer_dir = match spec.overlay_layer_dir.as_ref() {
+                    Some(d) => d.clone(),
+                    None => crate::runstate::dir_for(&spec.name)?.join("layer"),
+                };
                 build_overlay(&prepared.workdir.to_string_lossy(), &layer_dir, spec.verbose)
             };
             Some(build_new_root(prepared, overlay)?)

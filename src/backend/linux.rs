@@ -20,7 +20,7 @@ use super::{Backend, Prepared, RunSpec};
 
 #[cfg(target_os = "linux")]
 #[path = "linux_ns.rs"]
-mod ns;
+pub(super) mod ns;
 /// 资源限额的规划与落实。与 `ns` 的唯一接口是 `LimitPlan`。
 #[cfg(target_os = "linux")]
 #[path = "linux_limits.rs"]

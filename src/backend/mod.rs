@@ -37,6 +37,9 @@ pub(crate) use blink::create_private_rootfs;
 #[cfg(windows)]
 pub(crate) use blink::copy_rootfs_tree;
 pub use linux::{LinuxMode, LinuxNativeBackend};
+/// rootless overlay 是否可用（build 用它决定能否硬链接铺基础层，PRD L5b）。
+#[cfg(target_os = "linux")]
+pub(crate) use linux::ns::rootless_overlay_available;
 pub use native::NativeBackend;
 
 use crate::error::Result;
@@ -152,6 +155,11 @@ pub struct RunSpec {
     /// 普通 `run` 保持默认 false——容器写入不该污染共享镜像缓存（F9.12）。
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub direct_rootfs_writes: bool,
+    /// 显式指定 overlay 可写层目录（PRD L5b）。`None` = 用容器状态目录下的
+    /// `layer/`（F9.12 的默认）。build 需要自己掌控 upper 的位置，
+    /// 因为它要在步骤结束后把 upper 合并回 staging。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub overlay_layer_dir: Option<PathBuf>,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；

@@ -324,6 +324,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         uts_container: opts.uts_container.clone(),
         hostname: opts.hostname.clone(),
         direct_rootfs_writes: false,
+        overlay_layer_dir: None,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }

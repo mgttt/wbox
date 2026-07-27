@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.18 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -47,7 +47,8 @@ F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.14 compose 子集 | CMP.1–CMP.7 | 手写有界 YAML 子集（不引已归档的 serde_yaml）；up 复用 cmd_run 而非另写启动逻辑 |
 | F9.15 IPC/UTS 隔离与共享 | IU.1–IU.7 | 修的是**隔离缺口**：此前容器直接用宿主的 IPC/UTS；顺带发现 exec 没进这两个 ns |
 | F9.16 原始层留存 + 原样回推 | PSH.6–PSH.7 | pull 留一份压缩层，多层镜像 push 回去 digest 不变 |
-| F9.17 构建产物分层 | PSH.8a–PSH.8c | build 产物 = 基础层 + 增量层，push 时基础层被跳过；**磁盘**仍整份复制（ext4 无 reflink，见 L5b）|
+| F9.17 构建产物分层 | PSH.8a–PSH.8c | build 产物 = 基础层 + 增量层，push 时基础层被跳过 |
+| F9.18 FROM 硬链接共享 | OVB.1–OVB.4 | 磁盘共享数据块；靠 COPY unlink-first + RUN 走 overlay 保证基础镜像不被就地改写 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -55,7 +56,7 @@ F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **344 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **126 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **130 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -67,7 +68,7 @@ F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.14）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.18）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push
@@ -79,13 +80,12 @@ F9.1–F9.17 全部落地并有持续门禁。近期这一串是本轮做的：
 说明哪些缺口打算补、哪些永远不补（判断原则：要装驱动 / 要常驻服务 / 要虚拟化
 的一律不补）。新立的两个条目：
 
-- ~~**L5 镜像分层存储**~~：**已完成**（F9.16/F9.17）——pull 保留原始压缩层、
-  多层镜像原样回推 digest 不变、build 产物写成基础层+增量层且 push 时基础层被
-  跳过。
-- **L5b 的磁盘那半**（`partial`）：`FROM` 仍整份复制。**已取证清楚为什么**，
-  别重走：reflink 在 ext4 上 `Operation not supported`（本机实测）；纯 hardlink
-  会让 `RUN` 就地写坏基础镜像缓存；可行方案是 build 的 RUN 走 overlay + 合并
-  （含 overlay whiteout 是字符设备 0:0，与 tar 层的 `.wh.` **不是**一套）。
+- ~~**L5 / L5b 镜像分层存储**~~：**已全部完成**（F9.16–F9.18）——pull 保留原始
+  压缩层、多层镜像原样回推 digest 不变、build 产物写成基础层+增量层且 push 时
+  基础层被跳过、`FROM` 硬链接共享数据块。
+  **改动这块前务必记住那条纪律**：staging 与基础镜像缓存共享 inode，任何写入
+  路径都必须"先 unlink 再落盘"或走 overlay，否则会写坏**别的**镜像。
+  OVB.1 用全文件摘要直接盯这条。
 - ~~**L6 pod**~~：**已评估，结论是不做**。评估过程发现 IPC/UTS 根本没隔离，
   于是先补了 F9.15；补齐后 pod 的三样共享都能单独取得，再抽一层只是换个说法。
 

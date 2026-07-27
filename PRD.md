@@ -142,7 +142,7 @@ wbox
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；`FROM` 仍整份复制，无 overlay |
 | overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
-| 镜像分层存储 | 部分 | F9.16/F9.17：pull 保留原始层、可原样回推；build 产物写成基础层+增量层，push 时基础层被跳过（PSH.8）。**磁盘**仍是整份复制（需 CoW 文件系统，见 L5b）|
+| 镜像分层存储 | 有 | F9.16–F9.18：pull 保留原始层、可原样回推；build 产物 = 基础层+增量层（push 跳过基础层，PSH.8）；`FROM` 硬链接共享数据块（OVB.1–OVB.4）|
 | 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
 | compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
 | pod | 不做 | F9.15 之后 net/IPC/UTS 三种共享都能单独取得，再抽一层 pod 只是换个说法；理由见 §4.9 L6 |
@@ -187,7 +187,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | 未定：Linux 侧靠 `setns`，Windows 侧需要另一套思路，尚未取证 | 待认领 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | `FROM` 的**磁盘**复用 | 网络侧已成（F9.17：push 复用基础层）；磁盘侧需 reflink/overlay，本机 ext4 不支持 reflink，取证见 §4.9 L5b | §4.9 L5b |
+| Q3 Podman | —— | Q3 的 F9 序列已全部完成 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
@@ -811,7 +811,8 @@ F9
 ├── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
 ├── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
 ├── F9.16 原始层留存与原样回推                 —— [done]（门禁 PSH.6–PSH.7）
-└── F9.17 构建产物分层（基础层 + 增量层）      —— [partial] 网络侧已成；磁盘侧受文件系统限制
+├── F9.17 构建产物分层（基础层 + 增量层）      —— [done]（门禁 PSH.8a–PSH.8c）
+└── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1000,7 +1001,28 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
 
-**F9.17 构建产物分层** `[partial]`（门禁 PSH.8a–PSH.8c）。
+**F9.18 `FROM` 硬链接共享基础层** `[done]`（门禁 OVB.1–OVB.4）。
+
+`FROM` 不再按字节整份复制基础 rootfs，改为**硬链接**：两个派生镜像与基础镜像
+共享同一批数据块。实测合计占用 1432KB，而两份之和是 2788KB。
+
+**共享的前提是此后没有任何就地改写**——这条纪律一破就会写坏别的镜像，是最不该
+引入的一类缺陷。三条写入路径逐个封死：
+
+- `COPY`：先 `unlink` 再落盘（`fs::copy` 会 truncate 后就地写，直接改到共享 inode）。
+- `RUN`：走 overlay，写入落在**本步专属的 upper** 里，跑完再合并回 staging。
+  合并时同样先 `unlink`，只对改动过的文件断开硬链接。
+- 合并本身：whiteout（字符设备 0:0）删掉目标；opaque 目录（`user.overlay.opaque`）
+  先清空再递归。这两种形态与 tar 层的 `.wh.` 前缀**不是**一套，判别代码是独立的。
+
+overlay 不可用（内核 <5.11）或 `WBOX_NO_OVERLAY=1` 时**退回整份复制**——
+省磁盘是优化，正确性不能让。
+
+OVB.1 直接对基础镜像 rootfs 取全文件 sha256 摘要，构建前后必须一致；OVB.4 比对
+被 `RUN` 改写文件的 inode，必须与基础镜像的不同。只测"产物内容对"是不够的——
+产物对而基础镜像被改坏，恰恰是这个设计最危险的失败形态。
+
+**F9.17 构建产物分层** `[done]`（门禁 PSH.8a–PSH.8c）。
 
 `build` 的产物不再写空 manifest，而是写成**基础镜像的层 + 一个增量层**。
 于是 push 一个派生镜像时，基础层被 registry 的 `HEAD` 判定已存在而**跳过上传**，
@@ -1468,12 +1490,12 @@ restart, healthcheck}`，`up -d`/`down`/`ps` 三个动词，`depends_on` 只做�
 （`[done]`，PSH.7）；`FROM` 复用基础层时磁盘占用明显低于整份复制（`[todo]`，见
 L5b）。
 
-### L5b `FROM` 复用基础层 `[Linux agent]` `[partial]`
+### L5b `FROM` 复用基础层 `[Linux agent]` `[done]`
 
-**网络侧已完成**（F9.17，门禁 PSH.8）：产物 manifest 引用基础层 + 增量层，
-push 第二个派生镜像时基础层被 `HEAD` 跳过。判据后半条达成。
+**两条判据都已达成**：网络侧 F9.17（push 时基础层被 `HEAD` 跳过，PSH.8b）、
+磁盘侧 F9.18（硬链接共享，实测 1432KB vs 两份之和 2788KB，OVB.3）。
 
-**磁盘侧未完成，且已取证清楚为什么**——这部分是给接手的人省时间的：
+下面保留取证过程，因为它解释了**为什么最终是硬链接 + overlay 而不是别的**：
 
 - **reflink 走不通**：`cp --reflink=always` 在 ext4 上直接
   `Operation not supported`（本机实测，`df -T` 为 ext4）。只有 btrfs/XFS 有。
@@ -1481,9 +1503,9 @@ push 第二个派生镜像时基础层被 `HEAD` 跳过。判据后半条达成�
   按项目规矩（无法在本机验证的不写进产品代码）没有落地。
 - **纯 hardlink 不安全**：`RUN` 的写入会就地修改共享 inode，直接**写坏基础镜像
   缓存**——这是最不该引入的一类缺陷（破坏的是别的镜像，且很晚才会被发现）。
-- **可行但是大改**：让 build 的 `RUN` 走 overlay（lower=hardlink 出来的 staging，
+- **最终采用**：build 的 `RUN` 走 overlay（lower=hardlink 出来的 staging，
   upper=每步一个），步骤结束后把 upper 以"先 unlink 再落盘"的方式合并回 staging，
-  只对改动过的文件断开硬链接。overlay 不可用时退回整份复制，**退回必须出声**。
+  只对改动过的文件断开硬链接。overlay 不可用时退回整份复制。
 
   这条路的两处形态已经实测清楚，接手时不必再试：
   - 删除在 upper 里表现为**字符设备 0:0**（`c--------- 0, 0`），宿主侧

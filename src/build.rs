@@ -375,7 +375,126 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
                 std::os::unix::fs::symlink(&target, &to).map_err(|e| fail("创建链接", &to, e))?;
             }
         } else {
+            // **先删再写**：staging 里的文件可能是与基础镜像缓存共享 inode 的
+            // 硬链接（见 link_tree），`fs::copy` 会 truncate 后就地写，
+            // 那会改到别的镜像的内容——最不该引入的一类缺陷。
+            let _ = std::fs::remove_file(&to);
             std::fs::copy(&from, &to).map_err(|e| fail("复制文件", &from, e))?;
+        }
+    }
+    Ok(())
+}
+
+/// 用**硬链接**把基础 rootfs 铺进 staging（PRD L5b 磁盘侧）。
+///
+/// 目录照建、符号链接照造，普通文件只建硬链接——两个镜像共享同一份数据块，
+/// 磁盘占用近似只有一份。前提是此后**没有任何路径就地改写**这些文件：
+/// `COPY` 与合并都先 `unlink` 再落盘，`RUN` 的写入走 overlay 落在 upper 里。
+/// 这条纪律一旦破了就会写坏基础镜像缓存，故 OVB 门禁直接核对基础镜像未被改动。
+///
+/// 硬链接失败（跨设备等）时退回按字节复制：省磁盘是优化，正确性不能让。
+#[cfg(not(windows))]
+fn link_tree(src: &Path, dst: &Path) -> Result<()> {
+    let fail = |what: &str, p: &Path, e: std::io::Error| {
+        WboxError::args(format!("{} '{}' 失败：{}", what, p.display(), e))
+    };
+    std::fs::create_dir_all(dst).map_err(|e| fail("创建目录", dst, e))?;
+    for ent in std::fs::read_dir(src).map_err(|e| fail("读取目录", src, e))? {
+        let ent = ent.map_err(|e| fail("枚举目录项", src, e))?;
+        let from = ent.path();
+        let to = dst.join(ent.file_name());
+        let ft = ent.file_type().map_err(|e| fail("读取类型", &from, e))?;
+        if ft.is_dir() {
+            link_tree(&from, &to)?;
+        } else if ft.is_symlink() {
+            let target = std::fs::read_link(&from).map_err(|e| fail("读取链接", &from, e))?;
+            let _ = std::fs::remove_file(&to);
+            std::os::unix::fs::symlink(&target, &to).map_err(|e| fail("创建链接", &to, e))?;
+        } else {
+            let _ = std::fs::remove_file(&to);
+            if std::fs::hard_link(&from, &to).is_err() {
+                std::fs::copy(&from, &to).map_err(|e| fail("复制文件", &from, e))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 该路径是不是 overlay 的 whiteout（字符设备 0:0）。
+///
+/// rootless overlay 用它表示"下层的这个条目被删了"，**文件和目录都是这个形态**
+/// （目录要挂载时带 `userxattr` 才行，见 F9.12）。注意它与 tar 层的 `.wh.`
+/// 前缀**不是**一套，两处判别不能互相套用。
+#[cfg(not(windows))]
+fn is_whiteout(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::FileTypeExt;
+    meta.file_type().is_char_device() && meta.rdev() == 0
+}
+
+/// overlay 目录是否被标记为 opaque（其下层内容应整体丢弃）。
+///
+/// `userxattr` 模式下标记写在 `user.overlay.opaque`。不认这个标记的话，
+/// "删掉整个目录再重建"会变成"新旧内容混在一起"。
+#[cfg(not(windows))]
+fn is_opaque(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let name = c"user.overlay.opaque";
+    let mut buf = [0u8; 4];
+    let n = unsafe {
+        libc::getxattr(
+            c.as_ptr(),
+            name.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        )
+    };
+    n > 0 && buf[0] == b'y'
+}
+
+/// 把一次 `RUN` 在 overlay upper 里积下的改动合并回 staging。
+///
+/// 三类条目，与 overlay 的表示一一对应：
+/// - whiteout（字符设备 0:0）→ 删掉 staging 里的同名条目；
+/// - 目录 → staging 建同名目录后递归；带 opaque 标记的先清空；
+/// - 其余 → **先 unlink 再落盘**，只对改动过的文件断开硬链接。
+#[cfg(not(windows))]
+fn merge_overlay_upper(upper: &Path, target: &Path) -> Result<()> {
+    let fail = |what: &str, p: &Path, e: std::io::Error| {
+        WboxError::args(format!("{} '{}' 失败：{}", what, p.display(), e))
+    };
+    if !upper.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(target).map_err(|e| fail("创建目录", target, e))?;
+    for ent in std::fs::read_dir(upper).map_err(|e| fail("读取目录", upper, e))? {
+        let ent = ent.map_err(|e| fail("枚举目录项", upper, e))?;
+        let from = ent.path();
+        let to = target.join(ent.file_name());
+        let meta = std::fs::symlink_metadata(&from).map_err(|e| fail("读取元数据", &from, e))?;
+        if is_whiteout(&meta) {
+            let _ = std::fs::remove_file(&to);
+            let _ = std::fs::remove_dir_all(&to);
+        } else if meta.is_dir() {
+            if is_opaque(&from) {
+                let _ = std::fs::remove_dir_all(&to);
+            }
+            merge_overlay_upper(&from, &to)?;
+        } else {
+            let _ = std::fs::remove_file(&to);
+            let _ = std::fs::remove_dir_all(&to);
+            // 同一文件系统，rename 是搬移不是复制——不额外占磁盘
+            if std::fs::rename(&from, &to).is_err() {
+                if meta.file_type().is_symlink() {
+                    let t = std::fs::read_link(&from).map_err(|e| fail("读取链接", &from, e))?;
+                    std::os::unix::fs::symlink(&t, &to).map_err(|e| fail("创建链接", &to, e))?;
+                } else {
+                    std::fs::copy(&from, &to).map_err(|e| fail("复制文件", &from, e))?;
+                }
+            }
         }
     }
     Ok(())
@@ -520,6 +639,10 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
 
     // 记住基础镜像目录：构建结束后要按它算增量层（PRD L5b）。
     let mut base_image_dir: Option<std::path::PathBuf> = None;
+    // 基础 rootfs 是否以硬链接铺开。为真时 staging 与基础镜像共享 inode，
+    // 所有写入路径都必须遵守"先 unlink / 走 overlay"的纪律。
+    #[allow(unused_mut)]
+    let mut linked_base = false;
     let mut cfg = ConfigAccum::default();
     for (idx, ins) in instructions.iter().enumerate() {
         let step = idx + 1;
@@ -550,7 +673,21 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
                 // 若后面有缓存命中，这份基础 rootfs 会被命中层整体覆盖；
                 // 仍然先铺一份，保证"无命中"与"部分命中"两条路径起点一致。
-                copy_build_tree(&base_dir.join("rootfs"), &rootfs)?;
+                // 硬链接铺基础层（PRD L5b）：两个镜像共享数据块，磁盘近似
+                // 只占一份。前提是此后没有任何就地改写——`COPY` 与 overlay
+                // 合并都先 unlink，`RUN` 的写入落在 overlay upper 里。
+                // 三个条件缺一不可，任一不满足就退回按字节整份复制。
+                #[cfg(not(windows))]
+                {
+                    linked_base = std::env::var_os("WBOX_NO_OVERLAY").is_none()
+                        && crate::backend::rootless_overlay_available();
+                }
+                if linked_base {
+                    #[cfg(not(windows))]
+                    link_tree(&base_dir.join("rootfs"), &rootfs)?;
+                } else {
+                    copy_build_tree(&base_dir.join("rootfs"), &rootfs)?;
+                }
                 base_image_dir = Some(base_dir.clone());
                 // 继承基础镜像的 config，再让后续指令覆盖
                 if let Some(base_cfg) = crate::oci::config::ImageConfig::load(&base_dir)? {
@@ -583,6 +720,19 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             Instruction::Workdir(w) => cfg.workdir = Some(w.clone()),
             Instruction::Cmd(c) => cfg.cmd = Some(c.clone()),
             Instruction::Entrypoint(e) => cfg.entrypoint = Some(e.clone()),
+            Instruction::Run(cmd) if linked_base => {
+                println!("[{}/{}] RUN {}", step, instructions.len(), cmd);
+                // staging 与基础镜像共享 inode，RUN 绝不能就地写：让它写进
+                // 本步专属的 overlay upper，跑完再合并回来（只对改动过的文件
+                // 断开硬链接）。合并失败要让整个 build 失败——半合并的 staging
+                // 是错的内容，比构建失败糟得多。
+                let layer = build_dir.join(format!(".wbox-step-{}", step));
+                let _ = std::fs::remove_dir_all(&layer);
+                run_step_with(&rootfs, cmd, &cfg, Some(&layer))?;
+                #[cfg(not(windows))]
+                merge_overlay_upper(&layer.join("upper"), &rootfs)?;
+                let _ = std::fs::remove_dir_all(&layer);
+            }
             Instruction::Run(cmd) => {
                 println!("[{}/{}] RUN {}", step, instructions.len(), cmd);
                 run_step(&rootfs, cmd, &cfg)?;
@@ -762,13 +912,25 @@ fn write_layered_manifest(
 /// **直接复用运行期的容器路径**（同一个 backend、同一套 namespace 与限额），
 /// 所以构建期与运行期的隔离强度一致，不存在"构建时能做、运行时不能"的错位。
 fn run_step(rootfs: &Path, cmd: &str, cfg: &ConfigAccum) -> Result<()> {
+    run_step_with(rootfs, cmd, cfg, None)
+}
+
+/// `layer_dir` 为 `Some` 时走 overlay：RUN 的写入落在该目录的 `upper/` 里，
+/// 由调用方在步骤结束后合并回 staging（PRD L5b）。这样 staging 里与基础镜像
+/// 共享 inode 的硬链接**不会被就地改写**，基础镜像缓存才是安全的。
+fn run_step_with(
+    rootfs: &Path,
+    cmd: &str,
+    cfg: &ConfigAccum,
+    layer_dir: Option<&Path>,
+) -> Result<()> {
     use crate::backend::{Backend, RunSpec};
     let spec = RunSpec {
         name: format!("wbox-build-{}", std::process::id()),
         allow_network: true, // RUN 常要装包；与 docker build 默认一致
-        // RUN 的写入就是构建产物，必须直落 staging rootfs；套 overlay 会把
-        // 效果引到别处（F9.12 的可写层只保护**运行期**的共享缓存）。
-        direct_rootfs_writes: true,
+        // 不走 overlay 时，RUN 的写入必须直落 staging rootfs——那就是构建产物。
+        direct_rootfs_writes: layer_dir.is_none(),
+        overlay_layer_dir: layer_dir.map(|p| p.to_path_buf()),
         workdir: rootfs.to_path_buf(),
         cmd: vec!["/bin/sh".to_string(), "-c".to_string(), cmd.to_string()],
         env: cfg.env.clone(),

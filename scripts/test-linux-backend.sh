@@ -655,6 +655,70 @@ else
 fi
 
 echo
+echo "=== OVB 构建期基础层复用（PRD L5b 磁盘侧）==="
+
+# 判据两条，缺一不可：
+#   1. 磁盘真省下来（两个镜像共享 inode）；
+#   2. **基础镜像缓存逐字节不变**——硬链接共享的前提是没有任何就地改写，
+#      纪律破了就会写坏别的镜像，那是最不该引入的一类缺陷，必须直接取证。
+OVBCTX=$WORK/ovbctx
+mkdir -p "$OVBCTX"
+printf 'ADDED\n' > "$OVBCTX/new.txt"
+mkdir -p "$CACHE/rootfs/ovbdir" && printf 'indir\n' > "$CACHE/rootfs/ovbdir/x"
+printf 'original\n' > "$CACHE/rootfs/ovbkeep.txt"
+cat > "$OVBCTX/Dockerfile" <<'OVBEOF'
+FROM lbetest
+COPY new.txt /new.txt
+RUN /bin/sh -c 'echo modified > /ovbkeep.txt; rm -rf /ovbdir; echo made > /ovbrun.txt'
+OVBEOF
+basesum=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+bout=$(HOME=$WORK/home "$WBOX_ABS" build -t ovbderived:v1 "$OVBCTX" 2>&1); brc=$?
+aftersum=$(find "$CACHE/rootfs" -type f -exec sha256sum {} \; | sort | sha256sum)
+OVBD=$WORK/home/.wbox/images/registry-1.docker.io/library_ovbderived/v1/rootfs
+
+if [ "$brc" -eq 0 ] && [ "$basesum" = "$aftersum" ] \
+   && [ "$(cat "$CACHE/rootfs/ovbkeep.txt")" = "original" ] && [ -d "$CACHE/rootfs/ovbdir" ]; then
+  report PASS "OVB.1 构建派生镜像后基础镜像缓存逐字节不变"
+else
+  report FAIL "OVB.1 基础镜像完整性" "rc=$brc 摘要变了=$([ "$basesum" = "$aftersum" ] && echo 否 || echo 是) keep=$(cat "$CACHE/rootfs/ovbkeep.txt" 2>/dev/null)"
+fi
+
+# 产物内容：COPY 新增、RUN 改写、RUN 删目录，三样都要对
+if [ "$(cat "$OVBD/new.txt" 2>/dev/null)" = "ADDED" ] \
+   && [ "$(cat "$OVBD/ovbkeep.txt" 2>/dev/null)" = "modified" ] \
+   && [ "$(cat "$OVBD/ovbrun.txt" 2>/dev/null)" = "made" ] \
+   && [ ! -d "$OVBD/ovbdir" ]; then
+  report PASS "OVB.2 产物内容正确（COPY 新增 / RUN 改写 / RUN 删目录都生效）"
+else
+  report FAIL "OVB.2 产物内容" "new=$(cat "$OVBD/new.txt" 2>/dev/null) keep=$(cat "$OVBD/ovbkeep.txt" 2>/dev/null) run=$(cat "$OVBD/ovbrun.txt" 2>/dev/null) 目录仍在=$([ -d "$OVBD/ovbdir" ] && echo 是 || echo 否)"
+fi
+
+# 磁盘：合计（共享 inode 只算一次）必须明显小于两份之和
+b1=$(du -s "$CACHE/rootfs" | cut -f1)
+b2=$(du -s "$OVBD" | cut -f1)
+both=$(du -sc "$CACHE/rootfs" "$OVBD" | tail -1 | cut -f1)
+sum=$((b1 + b2))
+i1=$(stat -c '%i' "$CACHE/rootfs/bin/busybox" 2>/dev/null)
+i2=$(stat -c '%i' "$OVBD/bin/busybox" 2>/dev/null)
+if [ -n "$i1" ] && [ "$i1" = "$i2" ] && [ "$both" -lt $((sum * 3 / 4)) ]; then
+  report PASS "OVB.3 磁盘共享生效（合计 ${both}KB，两份之和 ${sum}KB；未改文件 inode 相同）"
+else
+  report FAIL "OVB.3 磁盘共享" "合计=${both}KB 两份之和=${sum}KB inode $i1 vs $i2"
+fi
+
+# 改过的文件必须已断开硬链接，否则就是写到了基础镜像里
+k1=$(stat -c '%i' "$CACHE/rootfs/ovbkeep.txt" 2>/dev/null)
+k2=$(stat -c '%i' "$OVBD/ovbkeep.txt" 2>/dev/null)
+if [ -n "$k1" ] && [ "$k1" != "$k2" ]; then
+  report PASS "OVB.4 被 RUN 改写的文件已断开硬链接（写入未回流基础镜像）"
+else
+  report FAIL "OVB.4 写时断链" "inode $k1 vs $k2（相同说明就地改写了共享 inode）"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" rmi ovbderived:v1 >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/ovbdir" "$CACHE/rootfs/ovbkeep.txt"
+
+echo
 echo "=== V 卷挂载（PRD F9.1）==="
 
 VOLSRC=$WORK/volsrc
