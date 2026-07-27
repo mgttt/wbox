@@ -83,7 +83,7 @@ wbox
 | 象限 | 参照物 | 现状 | 主要差距 |
 |---|---|---|---|
 | Windows 宿主 × Windows 程序 | Sandboxie-Plus | AppContainer + Job：能力/完整性级别隔离、默认断网、进程树回收、`exec` | **无文件系统写重定向、无注册表虚拟化**；无命名沙箱的持久化存储 |
-| Windows 宿主 × Linux 镜像 | WSL2 / Podman / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离（AppContainer 套模拟器） | 无每容器可写层、卷挂载、端口映射、镜像构建；当前纯用户态性能低于虚拟化后端 |
+| Windows 宿主 × Linux 镜像 | WSL2 / Podman / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离；每次运行使用私有可写 rootfs | 私有层首版为全量复制；无卷挂载、端口映射、镜像构建；当前纯用户态性能低于虚拟化后端 |
 | Linux 宿主 × Linux 镜像 | Podman / Docker | rootless user/PID/mount/net namespace + cgroup v2 + OCI pull/run + 生命周期；已支持 bind volume | 无端口映射、镜像构建/push、compose、restart policy |
 | Linux 宿主 × Windows 程序 | Wine | 复用 Linux 隔离层调用系统 Wine | 不自带 Wine（依赖宿主安装）；无 wineprefix 管理；GUI 未覆盖 |
 
@@ -122,7 +122,7 @@ S1 运行不受信任或行为未知的 Windows CLI
 S2 在 Windows 上运行 Linux OCI 镜像
 ├── 从 registry 拉取并校验镜像
 ├── 合并 Entrypoint/Cmd/Env/WorkingDir
-├── 给 AppContainer 下放 rootfs 只读执行权限
+├── 共享 rootfs 缓存保持只读，运行前创建容器 SID 专属可写副本
 └── 由 wbox-linux 执行 Linux x86-64 ELF
 
 S3 在 Linux 上运行宿主程序或 Linux 镜像
@@ -351,7 +351,7 @@ F4
 ├── F4.5 快照式 fork、exec、管道、shell 作业
 ├── F4.6 DNS、TCP/UDP、AF_UNIX 和 apt/wget 基础链路
 ├── F4.7 guest fd/VFS fd 在 fork 后保持命名空间一致
-└── F4.8 每容器临时可写层，退出清理且不修改共享镜像缓存
+└── F4.8 `[done]` 每容器临时可写层，退出清理且不修改共享镜像缓存
 ```
 
 直接运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
@@ -432,8 +432,16 @@ SQLite 初始化后反复打开 `rpmdb.sqlite-shm`，CPU 时间约 1.1 秒；下
 CI 30259159700 与回灌 artifact 证明 `F_GETLK` 回归通过，`dnf5` 不再超时；
 它随后立即暴露 F4.8：AppContainer 对共享 rootfs 只有读执行权限，创建
 `/root/.local/state` 或写 `dnf5.log` 返回 `EACCES`。共享镜像缓存不得直接授予
-guest 写权限；必须提供按容器隔离、退出可清理的临时可写层后，才能把 Fedora
-`dnf5 --version` 标为端到端通过。
+guest 写权限。F4.8 首版在取得容器注册锁后，把缓存复制到
+`~/.wbox/run/<name>/rootfs`，只向该 profile 的确定性 AppContainer SID 授予
+修改权。前台退出自动清理；后台退出保留到 `wbox rm`；`--rm` 立即清理。
+`WP.3W/WP.3WB` 分别裁决前台写入、缓存不变、自动清理与后台保留/显式删除。
+
+Windows 实机复测中，Fedora 42 `dnf5 --version` 首次 rc0 并列出完整插件，
+耗时约 43.9 秒；Python 3.12.13 import（含跨层 symlink 链）约 20.6 秒，
+Ubuntu 24.04 glibc shell 约 21.9 秒，均 rc0，退出后无状态目录。首版全量复制
+保证 create/write/rename/delete 的正确语义，但启动成本和磁盘放大明显；后续
+可替换为完整 copy-up/whiteout 的稀疏层，不能退回修改共享缓存。
 
 Python 四层镜像暴露两个独立问题：
 

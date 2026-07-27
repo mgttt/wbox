@@ -56,7 +56,10 @@ Job Object 提供：
 
 `BlinkBackend` 定位同目录的 `wbox-linux.exe` 或 `WBOX_LINUX` 指定文件，
 将 OCI rootfs 作为 `BLINK_PREFIX`，再经相同 AppContainer/Job 启动链执行。
-rootfs 在启动前通过 ACL 给 AppContainer 读取和执行权限。
+镜像缓存只向 AppContainer 提供读取执行权限；Windows 运行前在容器状态目录
+创建完整的私有 rootfs 副本，并只向该 profile 的确定性 SID 授予修改权。
+前台退出随状态登记清理，后台实例保留到 `rm`。全量复制是语义正确的首版，
+后续稀疏层必须保持相同生命周期、cache isolation 与 write/rename/delete 契约。
 
 `wbox-linux` 是 blink 的 Win32 移植。它维护两层 fd：
 
