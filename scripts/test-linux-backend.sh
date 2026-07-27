@@ -628,9 +628,14 @@ fi
 # P.15 stop 必须收走**整棵进程树**，不能只杀掉直接子进程。guest 里故意再起
 # 几个孙进程；判据沿用 L3 的思路——按 comm 精确数，不用 pgrep -f（那会把
 # wbox 自己的 argv 也算进去，本地就误报过一次）。
-sleeps() { ps -eo comm,args --no-headers | awk '$1=="sleep" && /777/' | wc -l; }
+# 标记必须**每次运行唯一**：这里按脚本自身 pid 派生一个睡眠时长。用固定值
+# （原先是 777）会被上一次**中断**的运行留下的残留进程污染——实测踩过：
+# 一次超时中断后，下一次 before 数到 6、after 数到 3，报出一个并不存在的
+# "收树失败"。判据本身被污染，比功能坏掉更难查。
+SLEEPMARK=$((700 + $$ % 90))
+sleeps() { ps -eo comm,args --no-headers | awk -v m="$SLEEPMARK" '$1=="sleep" && index($0,m)' | wc -l; }
 HOME=$PSHOME "$WBOX_ABS" run -d --name tree \
-  -- /bin/sh -c 'sleep 777 & sleep 777 & sleep 777; wait' >/dev/null 2>&1
+  -- /bin/sh -c "sleep $SLEEPMARK & sleep $SLEEPMARK & sleep $SLEEPMARK; wait" >/dev/null 2>&1
 sleep 2
 before=$(sleeps)
 HOME=$PSHOME "$WBOX_ABS" stop tree >/dev/null 2>&1; strc=$?
