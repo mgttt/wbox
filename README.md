@@ -45,7 +45,7 @@ Portable Windows 发布包包含两个文件：
 | CPU/内存/进程数限制 | Job Object | cgroup v2，受限时明确回退或拒绝 |
 | 默认网络 | AppContainer 无网络 capability | 独立空 netns |
 | 进程树清理 | Job kill-on-close | namespace/PDEATHSIG |
-| 后台运行与生命周期 | `--detach` / `ps` / `logs` / `stop` / `rm`（端到端门禁尚未覆盖 Windows）| 同左，已进门禁 |
+| 后台运行与生命周期 | `--detach` / `ps` / `logs` / `stop` / `rm` | 同左，另有 `exec` |
 
 后台容器：`--detach` 起，`ps` 看，`logs` 读输出（容器跑完仍可读），
 `stop` 停整棵进程树，`rm` 清记录。日志体积有上限，截断处会写明。
@@ -56,8 +56,8 @@ Portable Windows 发布包包含两个文件：
 但**端到端的后台流程目前只在 Linux 有门禁**，Windows 上尚未逐条验证过。
 
 当前不提供文件系统 overlay、注册表虚拟化、端口映射、GUI 桌面隔离、驱动隔离，
-也不提供 `exec`（进入运行中的容器）——Linux 可 `setns`，Windows 没有对应原语，
-是否实现取决于取证结果。
+`exec`（进入运行中的容器）**只在 Linux 宿主可用**：Linux 走 `setns`，
+Windows 没有对应原语，可行性取证见 PRD §4.9 W2。
 
 ## 文档
 

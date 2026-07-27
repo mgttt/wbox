@@ -324,6 +324,10 @@ fn spawn_with_state(
     if supervised {
         spawn_log_watchdog(crate::runstate::dir_for(&spec.name)?);
     }
+    // 容器内 pid 的记录对前台/后台都要做：`exec` 附着的是运行中的容器，
+    // 前台容器同样可以被另一个终端 exec 进去。
+    #[cfg(target_os = "linux")]
+    crate::runstate::spawn_container_pid_recorder(spec.name.clone());
     let rc = b.spawn(spec, prepared);
     if supervised {
         // 退出后再收一次尾。这条不是冗余：看门狗每 500ms 才看一眼，而一个

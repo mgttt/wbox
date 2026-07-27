@@ -216,6 +216,7 @@ fn purge_dir(dir: &Path) {
     // 日志也要删：留着会让 remove_dir 因非空而失败，状态目录就永远清不掉
     let _ = std::fs::remove_file(dir.join(LOG_STDOUT));
     let _ = std::fs::remove_file(dir.join(LOG_STDERR));
+    let _ = std::fs::remove_file(dir.join(CONTAINER_PID));
     let _ = std::fs::remove_dir(dir);
 }
 
@@ -809,4 +810,70 @@ mod kill_tests {
         // 极大的 pid 在两个平台都几乎不可能被占用
         assert!(!terminate_pid(4_000_000_000, Kill::Forceful));
     }
+}
+
+/// 记录**容器内**进程的 pid，供 `wbox exec` 用 `setns` 附着（PRD §4.9 L1）。
+///
+/// 与 [`Entry::pid`] 必须分清：那个是 **supervisor（wbox 自己）**的 pid，
+/// 留在宿主 namespace，是 `stop` 要终止的对象；这里记的是**已经进了容器
+/// namespace** 的那个进程，是 `exec` 要附着的对象。混用会让 `exec` 附到宿主上，
+/// 隔离形同虚设。
+/// 只在 Linux 编译：唯一的调用者 [`spawn_container_pid_recorder`] 是 Linux 专有，
+/// 而 `exec` 本身也只在 Linux 可用（Windows 见 PRD §4.9 W2）。
+#[cfg(target_os = "linux")]
+pub fn record_container_pid(name: &str, pid: u32) {
+    let Ok(dir) = dir_for(name) else { return };
+    let _ = std::fs::write(dir.join(CONTAINER_PID), pid.to_string());
+}
+
+/// 读回 [`record_container_pid`] 写下的 pid。
+pub fn container_pid(dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(dir.join(CONTAINER_PID))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+pub const CONTAINER_PID: &str = "container.pid";
+
+/// 起一个线程，在容器进程出现后把它的 pid 记下来。
+///
+/// # 为什么要轮询，而不是直接取 `Command::spawn()` 的返回值
+///
+/// **`cmd.spawn()` 在容器退出之前根本不返回**——这是实测结论，不是推测。
+/// PID namespace 需要双 fork：`pre_exec` 里 `unshare(CLONE_NEWPID)` 之后再
+/// fork 一次，中间进程负责转发退出码、**永不 exec**。而 Rust 的
+/// `Command::spawn()` 要等那根 CLOEXEC 错误管道读到 EOF 才返回，管道写端正握
+/// 在这个不 exec 的中间进程手里，于是 EOF 只在容器结束时才到来。
+///
+/// 这个坑很会骗人：短命容器上一切"看起来正常"，因为你总是在它结束之后才去看
+/// 文件；只有用长命容器并在**运行中**检查才会暴露。
+///
+/// 于是改为从宿主侧观察：中间进程就是 `Command::spawn` fork 出来的**直接子
+/// 进程**，读 `/proc/<self>/task/<self>/children` 即可拿到，不必等 spawn 返回。
+/// supervisor 此刻没有别的子进程（看门狗是线程不是进程），所以第一个就是它。
+///
+/// 记的是**中间进程**而非它 fork 出的孙进程：中间进程已经在新的
+/// user/mount/net namespace 里，而 PID namespace 可经
+/// `/proc/<pid>/ns/pid_for_children` 取到——四个 namespace 从这一个 pid 全都
+/// 够得着（`unshare(CLONE_NEWPID)` 对调用者自己不生效，故它的 `ns/pid` 仍是
+/// 宿主的，必须用 `pid_for_children`）。
+#[cfg(target_os = "linux")]
+pub fn spawn_container_pid_recorder(name: String) {
+    std::thread::spawn(move || {
+        let me = std::process::id();
+        let path = format!("/proc/{}/task/{}/children", me, me);
+        // 上界 ~30s：容器起不来就算了，`exec` 会因缺 pid 明确报错，
+        // 总好过一个永不退出的线程。
+        for _ in 0..600 {
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                if let Some(pid) = s.split_whitespace().next().and_then(|t| t.parse().ok()) {
+                    record_container_pid(&name, pid);
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
 }

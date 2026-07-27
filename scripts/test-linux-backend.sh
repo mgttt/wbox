@@ -622,6 +622,49 @@ else
   report FAIL "P.18 stop 不存在容器" "本应报错却成功"
 fi
 
+# ---- F8.4 exec（Linux 侧，PRD §4.9 L1）----
+
+HOME=$PSHOME "$WBOX_ABS" run -d --name ebox -- /bin/sleep 40 >/dev/null 2>&1
+sleep 2
+
+# P.19 exec 必须进容器的 **PID 视图**。这条最容易假通过：只 setns 不再 fork
+# 时命令照样能跑、netns 也对，唯独 $$ 是宿主的大号 pid——即"看着进去了，其实
+# 没进"。setns(CLONE_NEWPID) 与 unshare 同理，只对之后创建的子进程生效。
+epid=$(HOME=$PSHOME "$WBOX_ABS" exec ebox -- /bin/sh -c 'echo $$' 2>&1 | tr -d '\r')
+if [ -n "$epid" ] && [ "$epid" -lt 100 ] 2>/dev/null; then
+  report PASS "P.19 exec 进入容器 PID 视图（\$\$=$epid，非宿主大号 pid）"
+else
+  report FAIL "P.19 exec PID 视图" "得到 '\$\$'=$epid（期望容器内小号）"
+fi
+
+# P.20 exec 必须与容器同一 netns，否则"进容器"只是错觉
+hostnet=$(readlink /proc/self/ns/net)
+enet=$(HOME=$PSHOME "$WBOX_ABS" exec ebox -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tr -d '\r')
+if [ -n "$enet" ] && [ "$enet" != "$hostnet" ]; then
+  report PASS "P.20 exec 与容器同一 netns（≠ 宿主）"
+else
+  report FAIL "P.20 exec netns" "exec=$enet 宿主=$hostnet（不该相同）"
+fi
+
+# P.21 退出码原样转发（双 fork 的中间进程要正确回传，容易漏）
+HOME=$PSHOME "$WBOX_ABS" exec ebox -- /bin/sh -c 'exit 7' >/dev/null 2>&1
+if [ $? -eq 7 ]; then
+  report PASS "P.21 exec 退出码转发 (7)"
+else
+  report FAIL "P.21 exec 退出码" "得到 $?（期望 7）"
+fi
+
+# P.22 容器已退出时必须**明确拒绝**。放行的后果不是报错而是更糟：命令会跑在
+# 宿主上，而用户以为它在容器里。
+HOME=$PSHOME "$WBOX_ABS" stop ebox >/dev/null 2>&1
+eout=$(HOME=$PSHOME "$WBOX_ABS" exec ebox -- /bin/true 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eout" | grep -q "已退出"; then
+  report PASS "P.22 exec 对已退出容器明确拒绝"
+else
+  report FAIL "P.22 exec 拒绝已退出" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 150)"
+fi
+HOME=$PSHOME "$WBOX_ABS" rm ebox >/dev/null 2>&1
+
 # P.14 前台容器没有日志文件时，要说清楚"只有 --detach 才落盘"，
 # 不能让用户以为容器没有输出。
 HOME=$PSHOME "$WBOX_ABS" run --name fglog -- /bin/echo hi >/dev/null 2>&1

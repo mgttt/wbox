@@ -8,6 +8,7 @@
 //! 全部为纯逻辑（不直接调 Win32），跨平台可编译、可在 Linux 沙箱单测。
 
 pub mod args;
+pub mod exec;
 pub mod image;
 pub mod logs;
 pub mod ps;
@@ -34,6 +35,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
   wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
   wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
+  wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（仅 Linux 宿主）
   wbox --help | -h
   wbox --version
 
@@ -83,6 +85,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("image") => image::cmd_image(&args[1..]),
         Some("ps") => ps::cmd_ps(&args[1..]),
         Some("logs") => logs::cmd_logs(&args[1..]),
+        Some("exec") => exec::cmd_exec(&args[1..]),
         Some("rm") => rm::cmd_rm(&args[1..]),
         Some("stop") => stop::cmd_stop(&args[1..]),
         Some("--help") | Some("-h") | Some("help") => {
@@ -99,7 +102,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         ))),
         None => {
             print!("{}", USAGE);
-            Err(WboxError::args("缺少子命令（run / image / ps / rm / stop / logs）"))
+            Err(WboxError::args("缺少子命令（run / image / ps / rm / stop / logs / exec）"))
         }
     }
 }
