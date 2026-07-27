@@ -2061,6 +2061,77 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== MS 多阶段构建（PRD F9.39）==="
+
+MSH=$WORK/mshome
+rm -rf "$MSH" && mkdir -p "$MSH" "$WORK/msctx"
+MSD=$MSH/.wbox/images/registry-1.docker.io/library_mstest/latest
+mkdir -p "$MSD/rootfs/bin"
+cp "$BUSYBOX" "$MSD/rootfs/bin/busybox"
+for a in sh echo cat test; do ln -sf busybox "$MSD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":""}}' > "$MSD/config.json"
+echo '[]' > "$MSD/layers.json"; echo '{}' > "$MSD/manifest.json"
+
+cat > "$WORK/msctx/Dockerfile" <<'DF'
+FROM mstest AS builder
+ENV STAGE_A_ONLY=yes
+RUN /bin/sh -c 'echo built-in-A > /artifact.txt'
+FROM mstest
+COPY --from=builder /artifact.txt /from-a.txt
+ENV FINAL=1
+DF
+mout=$(HOME=$MSH "$WBOX_ABS" build -t ms:1 -f "$WORK/msctx/Dockerfile" "$WORK/msctx" 2>&1); mrc=$?
+
+# 多阶段的**全部意义**是：把 A 阶段的产物拿过来，但不把 A 阶段本身带进最终镜像。
+mgot=$(HOME=$MSH "$WBOX_ABS" run --rm ms:1 /bin/cat /from-a.txt 2>&1 | tail -1)
+mleak=$(HOME=$MSH "$WBOX_ABS" run --rm ms:1 \
+  /bin/sh -c 'test -e /artifact.txt && echo LEAKED || echo CLEAN' 2>&1 | tail -1)
+if [ "$mrc" -eq 0 ] && [ "$mgot" = "built-in-A" ] && [ "$mleak" = "CLEAN" ]; then
+  report PASS "MS.1 COPY --from 取到前一阶段产物，且该阶段本身未进最终镜像"
+else
+  report FAIL "MS.1 多阶段产物" "rc=$mrc 取到='$mgot' 泄漏检查='$mleak'"
+fi
+
+# 每个阶段的 config 独立：A 阶段的 ENV 不该出现在最终镜像里
+MSCFG=$MSH/.wbox/images/registry-1.docker.io/library_ms/1/config.json
+if grep -q 'FINAL=1' "$MSCFG" 2>/dev/null && ! grep -q 'STAGE_A_ONLY' "$MSCFG" 2>/dev/null; then
+  report PASS "MS.2 各阶段 config 独立（A 阶段的 ENV 未漏进最终镜像）"
+else
+  report FAIL "MS.2 阶段 config 隔离" "config: $(cat "$MSCFG" 2>/dev/null | head -c 200)"
+fi
+
+# 阶段临时目录要清掉，否则镜像缓存旁边会堆一堆半成品 rootfs
+if ! ls -d "$MSH/.wbox/images/registry-1.docker.io/library_ms/".wbox-stage-* >/dev/null 2>&1; then
+  report PASS "MS.3 构建结束后阶段临时目录已清理"
+else
+  report FAIL "MS.3 阶段目录残留" "$(ls -d "$MSH/.wbox/images/registry-1.docker.io/library_ms/".wbox-stage-* 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 引用不存在的阶段要点名说清，而不是报一个与真实原因无关的错
+printf 'FROM mstest\nCOPY --from=nope /a /b\n' > "$WORK/msctx/D2"
+mout=$(HOME=$MSH "$WBOX_ABS" build -t ms:2 -f "$WORK/msctx/D2" "$WORK/msctx" 2>&1); mrc=$?
+if [ "$mrc" -ne 0 ] && printf '%s' "$mout" | grep -q '未定义的阶段'; then
+  report PASS "MS.4 引用未定义阶段时点名报错"
+else
+  report FAIL "MS.4 未定义阶段" "rc=$mrc 输出: $(printf '%s' "$mout" | head -c 150)"
+fi
+
+# 多阶段时禁用前缀缓存（跨阶段复用快照会是**错的**缓存），且要说出来；
+# 单阶段的缓存则必须照常工作——别把这条一起关掉了。
+printf 'FROM mstest\nRUN /bin/sh -c "echo x > /y"\n' > "$WORK/msctx/D3"
+HOME=$MSH "$WBOX_ABS" build -t ms:3 -f "$WORK/msctx/D3" "$WORK/msctx" >/dev/null 2>&1
+mcached=$(HOME=$MSH "$WBOX_ABS" build -t ms:3 -f "$WORK/msctx/D3" "$WORK/msctx" 2>&1 | grep -c CACHED)
+mnote=$(HOME=$MSH "$WBOX_ABS" build -t ms:1 -f "$WORK/msctx/Dockerfile" "$WORK/msctx" 2>&1 | grep -c '禁用构建缓存')
+if [ "$mcached" -ge 1 ] && [ "$mnote" -ge 1 ]; then
+  report PASS "MS.5 多阶段禁用缓存并出声，单阶段缓存照常命中"
+else
+  report FAIL "MS.5 缓存策略" "单阶段 CACHED 次数=$mcached 多阶段提示次数=$mnote"
+fi
+
+HOME=$MSH "$WBOX_ABS" rmi ms:1 >/dev/null 2>&1
+rm -rf "$MSH" "$WORK/msctx"
+
+echo
 echo "=== AF ADD 与 ps --filter（PRD F9.38）==="
 
 AFH=$WORK/afhome
@@ -2095,14 +2166,15 @@ else
   report FAIL "AF.2 ADD 远程 URL" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
 fi
 
-# COPY --from 认得写法但尚未实现：必须明确拒绝，不能当成普通 COPY
-# ——当成普通 COPY 找得到同名文件的话，会悄悄打包错的东西。
-printf 'FROM aftest\nCOPY --from=builder /a /b\n' > "$WORK/afctx/D3"
+# `COPY --from` 的源在**那个阶段的 rootfs 内**，相对路径没有可解释的基准点，
+# 必须在解析期就拒绝——放行的话会去构建上下文里找，报一个与真实原因无关的错。
+# （多阶段构建本身的语义由 MS 组覆盖。）
+printf 'FROM aftest\nCOPY --from=builder relative/path /b\n' > "$WORK/afctx/D3"
 aout=$(HOME=$AFH "$WBOX_ABS" build -t afx:1 -f "$WORK/afctx/D3" "$WORK/afctx" 2>&1); arc=$?
-if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '多阶段构建'; then
-  report PASS "AF.3 COPY --from 明确拒绝（不静默当成普通 COPY）"
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '必须是该阶段内的绝对路径'; then
+  report PASS "AF.3 COPY --from 的相对路径源被拒绝（没有可解释的基准点）"
 else
-  report FAIL "AF.3 COPY --from" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
+  report FAIL "AF.3 COPY --from 相对路径" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
 fi
 
 # ADD 的源内容变了，缓存必须失效——只哈希指令文本的话会把旧内容烤进镜像

@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.38 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.39 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -69,6 +69,7 @@ F9.1–F9.38 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.36 `--entrypoint`/`--env-file`/四条指令 | EP.1–EP.7 | `--entrypoint ""` 是清空、与「没给」不同；覆盖后不回落镜像 Cmd；env-file 不做展开不去引号；`ARG` 不进 config（常带凭证） |
 | F9.37 容器内工作目录 | WD.1–WD.5 | 修掉镜像 `WorkingDir` 与 `-w` 双双被静默丢掉；根因是 `RunSpec.workdir` 被重载（镜像模式下它是 rootfs 路径）；自动创建必须**换根后**做，否则写进共享镜像缓存 |
 | F9.38 `ADD` / `ps --filter` | AF.1–AF.7 | `ADD` 看内容认 tar（不看扩展名）；远程 URL 明确不做；**新指令要同步 `step_key` 与 `mutating`**，否则源改了不失效、把旧内容烤进镜像；`--filter` 复用 `status::label` 同一口径 |
+| F9.39 多阶段构建 | MS.1–MS.5 | 实现是「每个 `FROM` 切换产物目录」而非重构成多次构建，指令执行那段一个字没动；多阶段禁用前缀缓存（跨阶段复用是**错的**缓存）；判据两条：产物拿到了 **且** 中间阶段没进最终镜像 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
@@ -140,6 +141,16 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 薄包装的代价不是多几行，是**多一个可以忘记更新的地方**。合并成一个函数、
 把新参数写成必填的 `Option`，编译器就会把所有调用点逼出来。
 
+### 给「已记录的差异」配门禁，是为了将来能提醒你改文档
+
+上一轮 `COPY --from` 还没实现，我配了 AF.3 断言它**明确拒绝**。这一轮把它实现了，
+AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不支持』现在是谎话了」。
+门禁在这里的作用不是断言「这样是对的」，而是**锁住已写进文档的行为**，
+让实现和文档不能各走各的。（PZ.6 那条 `exec` 进暂停容器的差异同理。）
+
+红了之后要做的是**更新断言去覆盖新的真实约束**（AF.3 改成盯「`--from` 的源必须
+是绝对路径」），而不是删掉了事。
+
 ### 加新指令时，别忘了缓存那两处判定
 
 给 Dockerfile 加 `ADD` 时，加进 `Instruction` 枚举、加解析、加执行——都很自然。
@@ -195,7 +206,7 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **414 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **227 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **232 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -207,7 +218,7 @@ docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不�
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.38）；唯一明确未实现的是多阶段构建（见 PRD §2.4.3）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.39），多阶段构建也已补上。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

@@ -1,8 +1,8 @@
 //! `wbox build`：Dockerfile 子集构建（`PRD.md` F9.3）。
 //!
 //! 只实现自用场景够用的子集：`FROM` / `RUN` / `COPY` / `ENV` / `WORKDIR` /
-//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG` / `ADD`。
-//! **多阶段构建（`COPY --from`）认得写法但明确拒绝**——见该处说明。
+//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG` / `ADD`，
+//! 以及**多阶段构建**（`FROM <镜像> AS <名字>` + `COPY --from=<名字>`，F9.39）。
 //! **未实现的指令一律明确报错**，不静默跳过——静默跳过会产出一个"看着构建成功、
 //! 其实少做了事"的镜像，比构建失败难查得多。
 //!
@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 /// Dockerfile 里的一条指令（已解析）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
-    From(String),
+    /// `FROM <镜像> [AS <阶段名>]`。`as_name` 供多阶段构建的 `COPY --from` 引用。
+    From { image: String, as_name: Option<String> },
     Run(String),
     /// `COPY [--from=<阶段>] <src> <dst>`：
     /// `from_stage` 为 `None` 时 src 相对构建上下文；为 `Some(名字)` 时
@@ -87,7 +88,25 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
         match upper.as_str() {
             "FROM" => {
                 need("基础镜像")?;
-                out.push(Instruction::From(rest.to_string()));
+                // `FROM x AS name`：AS 不区分大小写（docker 同此）
+                let mut it = rest.split_whitespace();
+                let image = it.next().unwrap_or_default().to_string();
+                let as_name = match (it.next(), it.next()) {
+                    (Some(kw), Some(name)) if kw.eq_ignore_ascii_case("AS") => {
+                        Some(name.to_string())
+                    }
+                    (None, _) => None,
+                    (Some(other), _) => {
+                        return Err(WboxError::args(format!(
+                            "FROM 只支持 `FROM <镜像> [AS <阶段名>]`，多出的 '{}' 无法解析",
+                            other
+                        )))
+                    }
+                };
+                if it.next().is_some() {
+                    return Err(WboxError::args("FROM 的参数过多（用法 FROM <镜像> [AS <阶段名>]）"));
+                }
+                out.push(Instruction::From { image, as_name });
             }
             "RUN" => {
                 need("命令")?;
@@ -111,15 +130,13 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
                 if it.next().is_some() {
                     return Err(WboxError::args("COPY 暂只支持单个 src（多源未实现）"));
                 }
-                if from_stage.is_some() {
-                    // 认得这个写法但**还没实现**，所以明确拒绝而不是当成普通 COPY
-                    // ——当成普通 COPY 会去构建上下文里找同名文件，找不到就报一个
-                    // 与真实原因无关的错，找得到更糟（悄悄打包了错的东西）。
-                    return Err(WboxError::args(
-                        "COPY --from（多阶段构建）尚未实现：它要求把每个 FROM 分成\
-                         独立阶段各建一棵 rootfs，属 run_build 的结构性改造，\
-                         列在 PRD §2.4.3 的下一步里。当前请拆成两次 build + 一次 COPY",
-                    ));
+                if from_stage.is_some() && !src.starts_with('/') {
+                    // `--from` 的源在**那个阶段的 rootfs 内**，不是构建上下文里，
+                    // 所以必须是绝对路径。相对路径没有可解释的基准点。
+                    return Err(WboxError::args(format!(
+                        "COPY --from 的源 '{}' 必须是该阶段内的绝对路径",
+                        src
+                    )));
                 }
                 out.push(Instruction::Copy {
                     src: src.to_string(),
@@ -226,7 +243,7 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
         }
     }
     match out.first() {
-        Some(Instruction::From(_)) => Ok(out),
+        Some(Instruction::From { .. }) => Ok(out),
         Some(_) => Err(WboxError::args("Dockerfile 的第一条指令必须是 FROM")),
         None => Err(WboxError::args("Dockerfile 为空")),
     }
@@ -476,7 +493,10 @@ ENTRYPOINT ["/app/app.sh"]
 CMD ["--help"]
 "#;
         let got = parse_dockerfile(df).unwrap();
-        assert_eq!(got[0], Instruction::From("alpine:3.20".into()));
+        assert_eq!(
+            got[0],
+            Instruction::From { image: "alpine:3.20".into(), as_name: None }
+        );
         assert_eq!(
             got[1],
             Instruction::Env { key: "FOO".into(), value: "bar".into() }
@@ -819,6 +839,10 @@ fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
     // **`ADD` 必须和 `COPY` 一起列在这里**：只哈希指令文本的话，源文件改了键不变，
     // 后续步骤会命中旧快照，把**旧内容悄悄烤进镜像**——构建"成功"，内容是错的。
     let src = match ins {
+        // `COPY --from=<阶段>` 的源在**那个阶段的产物里**，不在构建上下文里——
+        // 拿去 `resolve_context_path` 会直接报"源不可用"。它的内容由前面那些
+        // 指令决定，而那些指令已经进了累加的键链，所以这里跳过是安全的。
+        Instruction::Copy { from_stage: Some(_), .. } => None,
         Instruction::Copy { src, .. } | Instruction::Add { src, .. } => Some(src),
         _ => None,
     };
@@ -913,7 +937,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     let build_dir = staging.0.clone();
     #[cfg(not(windows))]
     let build_dir = out_dir.clone();
-    let rootfs = build_dir.join("rootfs");
+    // 最终阶段的产物目录。多阶段构建时前面几个阶段各建到自己的临时目录，
+    // 只有最后一个阶段写到这里——它才是这次 build 的输出。
+    let final_build_dir = build_dir.clone();
+    let mut build_dir = build_dir;
+    let mut rootfs = build_dir.join("rootfs");
 
     // ---- 分层缓存：先算出每步的键，再找**最长的已缓存前缀** ----
     //
@@ -934,13 +962,37 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             Instruction::Run(_) | Instruction::Copy { .. } | Instruction::Add { .. }
         )
     };
+    // 每条指令属于第几个阶段（`FROM` 开一个新阶段）。
+    let mut stage_of: Vec<usize> = Vec::with_capacity(instructions.len());
+    let mut stage_count = 0usize;
+    for ins in &instructions {
+        if matches!(ins, Instruction::From { .. }) {
+            stage_count += 1;
+        }
+        stage_of.push(stage_count.saturating_sub(1));
+    }
+    let multi_stage = stage_count > 1;
+
     let mut resume_from = 0usize;
-    for idx in (0..instructions.len()).rev() {
-        if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
-            resume_from = idx + 1;
-            break;
+    if multi_stage {
+        // **多阶段时先禁用前缀缓存**。缓存键是沿指令序列累加的，跨阶段复用快照
+        // 会把 A 阶段的 rootfs 恢复到 B 阶段头上——那是**错的**缓存，
+        // 而错的缓存比没有缓存糟得多（构建"成功"，内容是别的阶段的）。
+        // 宁可不缓存；等阶段内独立键做出来再打开。
+        println!("wbox: 多阶段构建（{} 个阶段），本次禁用构建缓存", stage_count);
+    } else {
+        for idx in (0..instructions.len()).rev() {
+            if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
+                resume_from = idx + 1;
+                break;
+            }
         }
     }
+    // 阶段名 → 该阶段产物 rootfs，供 `COPY --from` 取用。
+    let mut stage_roots: std::collections::HashMap<String, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    // 非最终阶段的临时目录，构建结束后清掉
+    let mut stage_dirs: Vec<std::path::PathBuf> = Vec::new();
 
     // 记住基础镜像目录：构建结束后要按它算增量层（PRD L5b）。
     let mut base_image_dir: Option<std::path::PathBuf> = None;
@@ -962,7 +1014,29 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             continue;
         }
         match ins {
-            Instruction::From(base) => {
+            Instruction::From { image: base, as_name } => {
+                // 切到本阶段自己的产物目录。最后一个阶段写最终目录，
+                // 前面的各写一个临时目录（`COPY --from` 从那里取）。
+                let this_stage = stage_of[idx];
+                if this_stage + 1 < stage_count {
+                    let dir = final_build_dir
+                        .with_file_name(format!(
+                            ".wbox-stage-{}-{}",
+                            std::process::id(),
+                            this_stage
+                        ));
+                    build_dir = dir.clone();
+                    stage_dirs.push(dir);
+                } else {
+                    build_dir = final_build_dir.clone();
+                }
+                rootfs = build_dir.join("rootfs");
+                // 每个阶段的 config 独立：A 阶段的 ENV/CMD 不该漏进 B 阶段，
+                // 最终镜像只该带最后一个阶段的配置（docker 同此语义）。
+                cfg = ConfigAccum::default();
+                if let Some(name) = as_name {
+                    stage_roots.insert(name.clone(), rootfs.clone());
+                }
                 let base_ref = crate::oci::ImageRef::parse(base, None)?;
                 let base_dir = crate::oci::image_dir(&base_ref)?;
                 if !base_dir.join("rootfs").is_dir() {
@@ -971,7 +1045,10 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                         base, base
                     )));
                 }
-                println!("[{}/{}] FROM {}", step, instructions.len(), base);
+                match as_name {
+                    Some(n) => println!("[{}/{}] FROM {} AS {}", step, instructions.len(), base, n),
+                    None => println!("[{}/{}] FROM {}", step, instructions.len(), base),
+                }
                 // 重建输出目录：残留的上一次构建会让结果不可复现
                 let _ = std::fs::remove_dir_all(&build_dir);
                 std::fs::create_dir_all(&build_dir)
@@ -1000,9 +1077,37 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     cfg.workdir = base_cfg.working_dir.clone();
                 }
             }
-            Instruction::Copy { src, dst, .. } => {
-                println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst);
-                let from = resolve_context_path(&opts.context, src)?;
+            Instruction::Copy { src, dst, from_stage } => {
+                match from_stage {
+                    Some(st) => println!(
+                        "[{}/{}] COPY --from={} {} {}",
+                        step, instructions.len(), st, src, dst
+                    ),
+                    None => println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst),
+                }
+                let from = match from_stage {
+                    // 从某个阶段取：源在**那个阶段的 rootfs 内**。
+                    // 走 `resolve_rootfs_path` 是为了复用同一份 `..` 逃逸校验——
+                    // 阶段名是 Dockerfile 给的，路径却可能是拼出来的。
+                    Some(st) => {
+                        let root = stage_roots.get(st.as_str()).ok_or_else(|| {
+                            WboxError::args(format!(
+                                "COPY --from={} 引用了未定义的阶段（阶段要先用 \
+                                 `FROM <镜像> AS {}` 声明，且必须在本条之前）",
+                                st, st
+                            ))
+                        })?;
+                        let p = resolve_rootfs_path(root, src)?;
+                        if !p.exists() {
+                            return Err(WboxError::args(format!(
+                                "COPY --from={}：该阶段里没有 '{}'",
+                                st, src
+                            )));
+                        }
+                        p
+                    }
+                    None => resolve_context_path(&opts.context, src)?,
+                };
                 let to = resolve_rootfs_path(&rootfs, dst)?;
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)
@@ -1115,6 +1220,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
         crate::backend::copy_rootfs_tree(&rootfs, &out_dir.join("rootfs"))?;
+    }
+
+    // 阶段临时目录只在构建期有用，留着会在镜像缓存旁边堆一堆半成品 rootfs
+    for d in &stage_dirs {
+        let _ = std::fs::remove_dir_all(d);
     }
 
     std::fs::write(out_dir.join("config.json"), cfg.to_json())
