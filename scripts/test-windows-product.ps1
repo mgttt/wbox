@@ -8,6 +8,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($null -ne (Get-Variable PSStyle -ErrorAction SilentlyContinue)) {
+    $PSStyle.OutputRendering = "PlainText"
+}
 
 function Resolve-ExistingFile([string]$Path, [string]$Label) {
     $resolved = Resolve-Path -LiteralPath $Path -ErrorAction Stop
@@ -20,6 +23,31 @@ function Resolve-ExistingFile([string]$Path, [string]$Label) {
 function Assert-Exit([int]$Expected, [string]$Label, [string]$Details = "") {
     if ($LASTEXITCODE -ne $Expected) {
         throw "$Label failed: expected rc=$Expected, got rc=$LASTEXITCODE`n$Details"
+    }
+}
+
+function Remove-Ansi([string]$Text) {
+    $pattern = [string][char]27 + '\[[0-?]*[ -/]*[@-~]'
+    return [regex]::Replace($Text, $pattern, "")
+}
+
+function Invoke-WboxParent(
+    [string]$FilePath,
+    [string]$Arguments,
+    [string]$Label
+) {
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.Arguments = $Arguments
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if (-not $process.WaitForExit(15000)) {
+        $process.Kill()
+        throw "$Label parent did not exit within 15 seconds"
+    }
+    if ($process.ExitCode -ne 0) {
+        throw "$Label failed: rc=$($process.ExitCode)"
     }
 }
 
@@ -80,6 +108,8 @@ $stopName = "product-stop"
 $stopPids = @()
 $killName = "product-kill"
 $killPids = @()
+$createName = "product-create"
+$createPids = @()
 $execName = "product-exec"
 $crashName = "product-crash"
 $writeBgName = "product-write-bg"
@@ -524,9 +554,11 @@ while ($true) {
     }
     Write-Host "PASS WP.15 stop terminates the shared Job and concurrent exec"
 
-    $deadExec = & $portableWbox exec $execName -- cmd.exe /d /c "echo SHOULD_NOT_RUN" 2>&1 | Out-String
+    $deadExecRecords = & $portableWbox exec $execName -- cmd.exe /d /c "echo SHOULD_NOT_RUN" 2>&1
     $deadExecRc = $LASTEXITCODE
-    if ($deadExecRc -eq 0 -or $deadExec -notmatch "已退出") {
+    $deadExec = ($deadExecRecords | ForEach-Object { $_.ToString() }) -join "`n"
+    $deadExecPlain = Remove-Ansi $deadExec
+    if ($deadExecRc -eq 0 -or $deadExecPlain -notmatch "exec") {
         throw "WP.16 exec on an exited container was not rejected clearly: rc=$deadExecRc`n$deadExec"
     }
     & $portableWbox rm $execName 2>&1 | Out-Null
@@ -671,6 +703,67 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     $killPids = @()
     Write-Host "PASS WP.20 kill immediately removes the complete Windows Job tree"
 
+    # WP.21 create must not execute anything. start then consumes the saved
+    # configuration, and an exited container must be startable again.
+    $createGuestPidFile = Join-Path $stopWork "create-guest.pid"
+    $createChildPidFile = Join-Path $stopWork "create-child.pid"
+    $created = & $portableWbox container create --name $createName --workdir $stopWork -- `
+        powershell.exe -NoLogo -NoProfile -NonInteractive -File $workloadScript `
+        -GuestPidFile $createGuestPidFile -ChildPidFile $createChildPidFile 2>&1 | Out-String
+    Assert-Exit 0 "WP.21 create native workload" $created
+    if ((Test-Path -LiteralPath $createGuestPidFile -PathType Leaf) -or
+        (Test-Path -LiteralPath $createChildPidFile -PathType Leaf)) {
+        throw "WP.21 create executed the workload before start"
+    }
+    $createdState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($createdState -notmatch "(?m)^$([regex]::Escape($createName))\s+created\s+0\s+") {
+        throw "WP.21 created container state is wrong: $createdState"
+    }
+    Write-Host "PASS WP.21A create persists configuration without executing the workload"
+
+    Invoke-WboxParent $portableWbox "container start $createName" "WP.21 first start"
+    Write-Host "INFO WP.21 first start returned"
+    $createGuestPid = Wait-PidFile $createGuestPidFile 15
+    $createChildPid = Wait-PidFile $createChildPidFile 15
+    $createMetaFile = Join-Path $testHome ".wbox\run\$createName\meta.json"
+    if ($null -eq $createGuestPid -or $null -eq $createChildPid -or
+        -not (Test-Path -LiteralPath $createMetaFile -PathType Leaf)) {
+        throw "WP.21 timed out waiting for first start PID markers"
+    }
+    $createSupervisorPid = [int]((Get-Content -LiteralPath $createMetaFile -Raw | ConvertFrom-Json).pid)
+    $createPids = @($createSupervisorPid, $createGuestPid, $createChildPid)
+    Write-Host "INFO WP.21 first process generation observed"
+    & $portableWbox kill $createName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.21 kill first started generation"
+    if (-not (Wait-ProcessesExited $createPids 15)) {
+        throw "WP.21 first started generation left PID(s) alive: $($createPids -join ', ')"
+    }
+    Write-Host "PASS WP.21B first started process generation was fully reclaimed"
+
+    Remove-Item -LiteralPath $createGuestPidFile, $createChildPidFile -Force
+    Invoke-WboxParent $portableWbox "start $createName" "WP.21 second start"
+    Write-Host "INFO WP.21 second start returned"
+    $createGuestPid2 = Wait-PidFile $createGuestPidFile 15
+    $createChildPid2 = Wait-PidFile $createChildPidFile 15
+    if ($null -eq $createGuestPid2 -or $null -eq $createChildPid2 -or
+        -not (Test-Path -LiteralPath $createMetaFile -PathType Leaf)) {
+        throw "WP.21 timed out waiting for second start PID markers"
+    }
+    $createSupervisorPid2 = [int]((Get-Content -LiteralPath $createMetaFile -Raw | ConvertFrom-Json).pid)
+    $createPids = @($createSupervisorPid2, $createGuestPid2, $createChildPid2)
+    if ($createSupervisorPid2 -eq $createSupervisorPid -or $createGuestPid2 -eq $createGuestPid) {
+        throw "WP.21 second start did not create a new process generation"
+    }
+    & $portableWbox kill $createName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.21 kill second started generation"
+    if (-not (Wait-ProcessesExited $createPids 15)) {
+        throw "WP.21 second started generation left PID(s) alive: $($createPids -join ', ')"
+    }
+    & $portableWbox rm $createName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.21 rm created record"
+    $createPids = @()
+    Write-Host "PASS WP.21 create does not execute; start runs and reruns saved configuration"
+
     if ($null -ne $guestFailure) {
         throw $guestFailure
     }
@@ -689,6 +782,8 @@ finally {
         & $portableWbox rm $waitName 2>&1 | Out-Null
         & $portableWbox kill $killName 2>&1 | Out-Null
         & $portableWbox rm $killName 2>&1 | Out-Null
+        & $portableWbox kill $createName 2>&1 | Out-Null
+        & $portableWbox rm $createName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {
@@ -696,6 +791,11 @@ finally {
         }
     }
     foreach ($processId in $killPids) {
+        if (Test-ProcessAlive $processId) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    foreach ($processId in $createPids) {
         if (Test-ProcessAlive $processId) {
             Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }

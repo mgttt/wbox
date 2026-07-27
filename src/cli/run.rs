@@ -224,9 +224,7 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     let opts = parse_run_args(args)?;
     // 这两条必须在 --detach 分叉**之前**：否则父进程照常返回容器名，真正的
     // 拒绝只会写进 supervisor 的日志里，用户还以为起成功了。
-    crate::portfwd::reject_if_unsupported(&opts.ports)?;
-    crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
-    crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)?;
+    validate_options(&opts)?;
 
     // --detach：把自己再拉起一份作为 supervisor，父进程立刻返回。
     // 容器的存活由 supervisor 持有（Job kill-on-close / PDEATHSIG 都绑在它身上），
@@ -268,6 +266,99 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     }
 }
 
+fn validate_options(opts: &RunOptions) -> Result<()> {
+    crate::portfwd::reject_if_unsupported(&opts.ports)?;
+    crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
+    crate::portfwd::reject_conflicting_network(&opts.ports, opts.allow_network)
+}
+
+pub(crate) struct CreatedSummary {
+    pub name: String,
+    pub args: Vec<String>,
+    pub cmd: Vec<String>,
+    pub target: String,
+    pub exec_context: crate::runstate::ExecContext,
+}
+
+/// 解析并验证 `create` 的运行配置，但不启动 workload 或创建 Windows 私有 rootfs。
+pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
+    let opts = parse_run_args(args)?;
+    if opts.detach {
+        return Err(WboxError::args(
+            "create 不接受 -d/--detach：容器会保持 created，执行 start 后才进入后台",
+        ));
+    }
+    validate_options(&opts)?;
+    let name = opts
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
+    let mut saved_args = args.to_vec();
+    if opts.name.is_none() {
+        saved_args.splice(0..0, ["--name".to_string(), name.clone()]);
+    }
+    let target = backend::classify_target(opts.positional.as_deref())?;
+
+    match target {
+        RunTarget::Native => {
+            backend::reject_volumes_if_unsupported(&opts.volumes)?;
+            let mut cmd = opts.positional.clone().into_iter().collect::<Vec<_>>();
+            cmd.extend(opts.cmd.iter().cloned());
+            backend::require_cmd(&cmd)?;
+            let workdir = match &opts.workdir {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => std::env::current_dir()
+                    .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
+            };
+            if !workdir.is_dir() {
+                return Err(WboxError::args(format!(
+                    "工作目录 '{}' 不存在或不是目录",
+                    workdir.display()
+                )));
+            }
+            Ok(CreatedSummary {
+                name,
+                args: saved_args,
+                cmd,
+                target: NATIVE_TARGET.to_string(),
+                exec_context: crate::runstate::ExecContext {
+                    allow_network: opts.allow_network,
+                    workdir: workdir.to_string_lossy().into_owned(),
+                },
+            })
+        }
+        RunTarget::Image(iref) => {
+            backend::reject_volumes_if_unsupported(&opts.volumes)?;
+            let dir = ensure_image_cached(&opts, &iref)?;
+            let config = oci::config::ImageConfig::load(&dir)?;
+            let cmd = config
+                .as_ref()
+                .map(|value| value.merged_command(&opts.cmd))
+                .unwrap_or_else(|| opts.cmd.clone());
+            if cmd.is_empty() {
+                return Err(WboxError::args(format!(
+                    "镜像 '{}' 未声明 Entrypoint/Cmd，请显式给出命令",
+                    iref.repo_tag()
+                )));
+            }
+            Ok(CreatedSummary {
+                name,
+                args: saved_args,
+                cmd,
+                target: iref.qualified_ref(),
+                exec_context: crate::runstate::ExecContext {
+                    allow_network: opts.allow_network,
+                    workdir: opts
+                        .workdir
+                        .clone()
+                        .or_else(|| config.and_then(|value| value.working_dir))
+                        .unwrap_or_else(|| "/".to_string()),
+                },
+            })
+        }
+    }
+}
+
 /// `--detach` 的父进程：建好状态目录与日志，脱离地拉起 supervisor，然后返回。
 ///
 /// 日志文件由**父进程**创建并作为子进程的 stdio 传下去——子进程登记时因此要走
@@ -277,7 +368,19 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
         .name
         .clone()
         .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
-    let mut reservation = crate::runstate::reserve_detached(&name)?;
+    let reservation = crate::runstate::reserve_detached(&name)?;
+    let mut effective_args = args.to_vec();
+    if opts.name.is_none() {
+        effective_args.splice(0..0, ["--name".to_string(), name.clone()]);
+    }
+    spawn_reserved(name, &effective_args, reservation)
+}
+
+pub(crate) fn spawn_reserved(
+    name: String,
+    args: &[String],
+    mut reservation: crate::runstate::DetachedReservation,
+) -> Result<u32> {
     let dir = reservation.dir();
     let out = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDOUT)?;
     let err = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDERR)?;
@@ -286,10 +389,6 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
         .map_err(|e| WboxError::args(format!("定位 wbox 自身可执行文件失败：{}", e)))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("run");
-    // 默认名必须作为 wbox 选项放在镜像参数之前；镜像后的参数全部属于 guest。
-    if opts.name.is_none() {
-        cmd.arg("--name").arg(&name);
-    }
     // 原样透传参数，只摘掉 --detach 自己（否则子进程会再脱离一次，无限套娃）
     for a in args {
         if a != "--detach" && a != "-d" {
@@ -498,11 +597,16 @@ fn ensure_image_defaults(env: &mut Vec<(String, String)>) {
     }
 }
 
-/// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
-fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
-    let dir = oci::image_dir(&iref)?;
+fn ensure_image_cached(opts: &RunOptions, iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
+    let dir = oci::image_dir(iref)?;
     if !dir.join("rootfs").is_dir() {
-        oci::pull(&iref.repo_tag(), "linux", "amd64", Some(&iref.registry), opts.verbose)?;
+        oci::pull(
+            &iref.repo_tag(),
+            "linux",
+            "amd64",
+            Some(&iref.registry),
+            opts.verbose,
+        )?;
         if !dir.join("rootfs").is_dir() {
             return Err(WboxError::registry(format!(
                 "pull 后仍未找到镜像缓存 '{}'，无法运行",
@@ -510,6 +614,12 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             )));
         }
     }
+    Ok(dir)
+}
+
+/// 镜像模式：消费 config.json，经 BlinkBackend（wbox-linux 模拟）执行。
+fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
+    let dir = ensure_image_cached(opts, &iref)?;
 
     // 消费 image config：Env 注入、Entrypoint/Cmd 按 docker 规则合并、
     // WorkingDir 记录（guest 路径映射由 wbox-linux 侧落地，当前仅展示）。

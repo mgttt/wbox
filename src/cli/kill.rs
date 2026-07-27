@@ -48,6 +48,12 @@ fn parse<'a>(args: &'a [String]) -> Result<KillOptions<'a>> {
 fn kill_one(name: &str) -> Result<()> {
     let locked = runstate::lock_existing(name)?;
     let dir = locked.dir.clone();
+    if runstate::liveness(&dir) == Liveness::Created {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 尚未启动（状态为 created）",
+            name
+        )));
+    }
     if runstate::liveness(&dir) == Liveness::Exited {
         return Err(WboxError::args(format!("容器 '{}' 已退出", name)));
     }

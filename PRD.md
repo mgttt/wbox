@@ -226,7 +226,7 @@ S4 在 Linux 上运行 Windows CLI
 |---|---|---|---|
 | F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`WN.1-WN.8`、L/H；退出码已有行为断言 |
 | F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | G3 | `WP.3` 持续覆盖离线缓存到 Linux guest；pull 失败原子性仍缺门禁 |
-| F1.7 Docker/Podman 基础 CLI 兼容 | `src/cli` | G0 | 别名与参数解析单测；仍缺从兼容命令到 workload 的 G3 门禁 |
+| F1.7 Docker/Podman 基础 CLI 兼容 | `src/cli` | G3/G4 部分 | 别名与参数解析单测；生命周期兼容命令进入 P.25/WP.21，其他新增项仍须逐项进入产品门禁 |
 | F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
 | F2.3 Windows 网络放行 | `token.rs` | G3 | `WNET.1-WNET.4` 对照宿主、默认拒绝和 `--allow-network` |
 | F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
@@ -246,6 +246,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
 | F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
+| F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | 待本批 G3/G4 | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动 |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -270,6 +271,9 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.16`：已退出容器明确拒绝 `exec`。
 - `WP.17`：强杀 supervisor 后，主 guest 与 exec guest 均由
   `KILL_ON_JOB_CLOSE` 回收。
+- `WP.19/WP.20`：`top` 只列 Job 内 guest，`kill` 立即回收完整 Job 进程树。
+- `WP.21`：`container create` 不执行 Windows workload；`container start` 启动，
+  退出后再次 `start` 必须产生一代全新的 supervisor/guest/child 进程树。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -310,7 +314,8 @@ F1
     ├── F1.7.7 `exec NAME COMMAND [ARG...]` 不强制要求 `--` 分隔
     ├── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
     ├── F1.7.9 `kill [-s KILL] NAME...` 立即终止，不经过 stop 宽限期
-    └── F1.7.10 `top NAME` 列出隔离单元成员，不混入 wbox supervisor
+    ├── F1.7.10 `top NAME` 列出隔离单元成员，不混入 wbox supervisor
+    └── F1.7.11 `create [RUN OPTIONS]` 保存配置但不运行，`start NAME...` 启动或重启
 ```
 
 验收：
@@ -333,6 +338,8 @@ wbox
 │   ├── 工作目录/卷：-w、--workdir、-v host:guest[:ro|:rw]（Linux 宿主）
 │   ├── 网络：--network none|host
 │   └── wbox 扩展：--memory、--cpu-pct、--max-procs、--allow-network
+├── create [run 兼容子集] IMAGE|-- PROGRAM [ARG...]
+├── start NAME...
 ├── pull IMAGE              -> image pull IMAGE
 ├── images                  -> image list
 ├── rmi IMAGE               -> image rm IMAGE
@@ -347,7 +354,7 @@ wbox
 ├── kill [-s KILL|SIGKILL|9] NAME...
 ├── top NAME
 ├── container
-│   └── ls|inspect|wait|logs|exec|rm|stop|kill|top
+│   └── create|start|ls|inspect|wait|logs|exec|rm|stop|kill|top
 └── rm NAME...
 ```
 
@@ -604,7 +611,7 @@ F6
 
 ### F8 运维型容器生命周期 `[active]`
 
-`--detach`、`wbox ps/stop/rm/logs/exec/wait/inspect`。这是 wbox 离"能当 harness 的长期
+`create/start`、`--detach`、`wbox ps/stop/rm/logs/exec/wait/inspect`。这是 wbox 离"能当 harness 的长期
 环境"最近的一组能力；基础链路已经实现，当前重点是持续门禁与平台差异收敛。
 
 四个前置问题的设计答复如下：
@@ -677,8 +684,19 @@ Linux 进程树或 Windows 命名 Job；跨平台子集只接受 `KILL/SIGKILL/9
 namespace owner PID。否则重启策略表面成功，管理面与网络面却仍指向已经退出的
 上一代容器。
 
-**F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.24 覆盖完整生命周期；
-Windows 由 WP.6–WP.20 覆盖 detach、ps、logs、stop、rm、kill/top 与原生 exec，其中
+**F8.e create/start 状态机**。`create` 完成镜像解析、必要的 pull 与参数验证，
+把运行参数保存到 `create.json`，但不得创建 workload、owner 锁或运行时 PID。
+状态必须显示为 `created`、PID 为 0。`start` 在状态根操作锁内原子领取保存配置，
+先转成 detached reservation，再启动 supervisor；并发 `start` 只能有一个成功。
+supervisor 登记前失败必须恢复 `created`，不得留下假 running。登记后的退出状态为
+`exited`，保存配置仍在，因此可再次 `start`；带 `--rm` 的配置退出后按约定删除。
+`stop/kill/top/exec/wait` 对 created 状态明确拒绝，`rm` 可删除 created 记录。
+
+`create.json` 会持久化显式 `-e` 参数，Linux 权限必须为 0600；不得把宿主隐式环境
+或 registry 凭证写入 `meta.json`。使用者不应把长期凭证直接放在命令参数中。
+
+**F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.25 覆盖完整生命周期；
+Windows 由 WP.6–WP.21 覆盖 detach、ps、logs、stop、rm、kill/top、create/start 与原生 exec，其中
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
 OCI/Blink exec 不在承诺范围，必须明确拒绝。
 
@@ -705,6 +723,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
 | F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
 | F8.6 `[done]` | `kill` + `top` | Linux P.23/P.24；Windows WP.19/WP.20；Windows `top` 查询 Job 成员，`kill` 清空三层进程树 |
+| F8.7 `[active]` | `create` + `start` | Rust 原子状态机与 CLI 测试已实现；Linux P.25、Windows WP.21 待本批 main CI 裁决后标 done |
 
 ### F9 对标能力补齐 `[planned]`
 

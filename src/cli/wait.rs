@@ -13,7 +13,14 @@ fn wait_one(name: &str) -> Result<u32> {
                 name
             )));
         }
-        if runstate::liveness(&dir) == Liveness::Exited {
+        let state = runstate::liveness(&dir);
+        if state == Liveness::Created {
+            return Err(WboxError::args(format!(
+                "容器 '{}' 尚未启动（状态为 created）",
+                name
+            )));
+        }
+        if state == Liveness::Exited {
             return runstate::read_exit_code(&dir).ok_or_else(|| {
                 WboxError::args(format!(
                     "容器 '{}' 已退出，但该记录没有退出码（可能来自旧版或异常崩溃）",

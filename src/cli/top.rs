@@ -21,6 +21,12 @@ fn parse(args: &[String]) -> Result<&str> {
 pub fn cmd_top(args: &[String]) -> Result<u32> {
     let name = parse(args)?;
     let locked = runstate::lock_existing(name)?;
+    if runstate::liveness(&locked.dir) == Liveness::Created {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 尚未启动（状态为 created）",
+            name
+        )));
+    }
     if runstate::liveness(&locked.dir) == Liveness::Exited {
         return Err(WboxError::args(format!("容器 '{}' 已退出", name)));
     }

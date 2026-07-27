@@ -11,8 +11,12 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         .ok_or_else(|| WboxError::args(format!("容器 '{}' 的 meta.json 缺失或不可读", name)))?;
     let liveness = runstate::liveness(&dir);
     let running = liveness == Liveness::Running;
-    let status = if running { "running" } else { "exited" };
-    let exit_code = if running {
+    let status = match liveness {
+        Liveness::Created => "created",
+        Liveness::Running => "running",
+        Liveness::Exited => "exited",
+    };
+    let exit_code = if liveness != Liveness::Exited {
         serde_json::Value::Null
     } else {
         runstate::read_exit_code(&dir)
@@ -43,6 +47,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         "State": {
             "Status": status,
             "Running": running,
+            "Paused": false,
             "ExitCode": exit_code,
             "Pid": if running { entry.pid } else { 0 },
             "StartedAtUnix": entry.created_unix,

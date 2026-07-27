@@ -936,6 +936,33 @@ else
 fi
 HOME=$PSHOME "$WBOX_ABS" rm ebox >/dev/null 2>&1
 
+# P.25 create 只保存配置，start 才执行；exited 后同一配置可再次启动。
+create_marker=$WORK/create-start.marker
+rm -f "$create_marker"
+cout=$(HOME=$PSHOME "$WBOX_ABS" container create --name cstart --workdir "$WORK" \
+  -- /bin/sh -c 'echo STARTED >> create-start.marker; sleep 30' 2>&1); crc=$?
+if [ "$crc" -eq 0 ] && [ ! -e "$create_marker" ] \
+   && HOME=$PSHOME "$WBOX_ABS" ps -a | grep -q "cstart.*created.*0"; then
+  report PASS "P.25A create 保存配置但不执行 workload"
+else
+  report FAIL "P.25A create" "rc=$crc marker=$(test -e "$create_marker" && echo yes || echo no) 输出: $(printf '%s' "$cout" | head -c 150)"
+fi
+HOME=$PSHOME "$WBOX_ABS" container start cstart >/dev/null 2>&1
+sleep 2
+first=$(grep -c STARTED "$create_marker" 2>/dev/null || true)
+HOME=$PSHOME "$WBOX_ABS" kill cstart >/dev/null 2>&1
+HOME=$PSHOME "$WBOX_ABS" start cstart >/dev/null 2>&1
+sleep 2
+second=$(grep -c STARTED "$create_marker" 2>/dev/null || true)
+if [ "$first" -eq 1 ] && [ "$second" -eq 2 ] \
+   && HOME=$PSHOME "$WBOX_ABS" ps | grep -q "cstart.*running"; then
+  report PASS "P.25B start 可运行并重启同一保存配置（$first → $second）"
+else
+  report FAIL "P.25B start/rerun" "marker 次数 $first → $second；状态: $(HOME=$PSHOME "$WBOX_ABS" ps -a | tr '\n' ' ' | head -c 150)"
+fi
+HOME=$PSHOME "$WBOX_ABS" kill cstart >/dev/null 2>&1
+HOME=$PSHOME "$WBOX_ABS" rm cstart >/dev/null 2>&1
+
 # P.14 前台容器没有日志文件时，要说清楚"只有 --detach 才落盘"，
 # 不能让用户以为容器没有输出。
 HOME=$PSHOME "$WBOX_ABS" run --name fglog -- /bin/echo hi >/dev/null 2>&1

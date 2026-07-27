@@ -9,6 +9,7 @@
 
 pub mod args;
 pub mod build;
+pub mod create;
 pub mod exec;
 pub mod image;
 pub mod inspect;
@@ -18,6 +19,7 @@ pub mod ps;
 pub mod rm;
 pub mod stop;
 pub mod run;
+pub mod start;
 pub mod top;
 pub mod wait;
 
@@ -33,6 +35,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox images                                      `wbox image list` 的兼容别名
   wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
+  wbox create [RUN OPTIONS] IMAGE|-- PROGRAM        保存容器配置但不启动
+  wbox start <NAME>...                              启动 created/exited 容器
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
   wbox image list | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
@@ -102,6 +106,8 @@ fn is_known_command(command: &str) -> bool {
         command,
         "run"
             | "build"
+            | "create"
+            | "start"
             | "pull"
             | "images"
             | "rmi"
@@ -121,6 +127,8 @@ fn is_known_command(command: &str) -> bool {
 
 fn cmd_container(args: &[String]) -> Result<u32> {
     match args.first().map(String::as_str) {
+        Some("create") => create::cmd_create(&args[1..]),
+        Some("start") => start::cmd_start(&args[1..]),
         Some("list") | Some("ls") => ps::cmd_ps(&args[1..]),
         Some("inspect") => inspect::cmd_container_inspect(&args[1..]),
         Some("wait") => wait::cmd_wait(&args[1..]),
@@ -131,11 +139,11 @@ fn cmd_container(args: &[String]) -> Result<u32> {
         Some("kill") => kill::cmd_kill(&args[1..]),
         Some("top") => top::cmd_top(&args[1..]),
         Some(other) => Err(WboxError::args(format!(
-            "未知 container 子命令 '{}'（支持 ls / inspect / wait / logs / exec / rm / stop / kill / top）",
+            "未知 container 子命令 '{}'（支持 create / start / ls / inspect / wait / logs / exec / rm / stop / kill / top）",
             other
         ))),
         None => Err(WboxError::args(
-            "container 缺少子命令（ls / inspect / wait / logs / exec / rm / stop / kill / top）",
+            "container 缺少子命令（create / start / ls / inspect / wait / logs / exec / rm / stop / kill / top）",
         )),
     }
 }
@@ -179,6 +187,8 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
     }
     match args.first().map(|s| s.as_str()) {
         Some("run") => run::cmd_run(&args[1..]),
+        Some("create") => create::cmd_create(&args[1..]),
+        Some("start") => start::cmd_start(&args[1..]),
         Some("build") => build::cmd_build(&args[1..]),
         Some("pull") => image::cmd_image_pull(&args[1..]),
         Some("images") => image::cmd_image_list(&args[1..]),
@@ -211,7 +221,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         None => {
             print!("{}", USAGE);
             Err(WboxError::args(
-                "缺少子命令（run / image / container / ps / inspect / wait / rm / stop / kill / top / logs / exec）",
+                "缺少子命令（run / create / start / image / container / ps / inspect / wait / rm / stop / kill / top / logs / exec）",
             ))
         }
     }
@@ -237,9 +247,13 @@ mod tests {
     fn dispatch_accepts_docker_style_command_help() {
         for args in [
             vec!["run", "--help"],
+            vec!["create", "--help"],
+            vec!["start", "--help"],
             vec!["build", "--help"],
             vec!["pull", "-h"],
             vec!["image", "pull", "--help"],
+            vec!["container", "create", "--help"],
+            vec!["container", "start", "--help"],
             vec!["container", "inspect", "--help"],
             vec!["wait", "--help"],
             vec!["help", "run"],

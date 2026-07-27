@@ -43,7 +43,7 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         if all.is_empty() {
             println!("没有已登记的容器。");
         } else {
-            println!("没有运行中的容器（有 {} 条已退出记录，用 -a 查看）。", all.len());
+            println!("没有运行中的容器（有 {} 条非运行记录，用 -a 查看）。", all.len());
         }
         return Ok(0);
     }
@@ -55,6 +55,7 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
     println!("{:<20} {:<10} {:<8} {:<10} 命令", "名称", "状态", "PID", "已运行");
     for (e, l) in rows {
         let state = match l {
+            Liveness::Created => "created",
             Liveness::Running => "running",
             Liveness::Exited => "exited",
         };

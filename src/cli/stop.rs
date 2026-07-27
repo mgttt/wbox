@@ -55,6 +55,12 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
     let locked = runstate::lock_existing(opts.name)?;
     let dir = locked.dir.clone();
+    if runstate::liveness(&dir) == Liveness::Created {
+        return Err(WboxError::args(format!(
+            "容器 '{}' 尚未启动（状态为 created）",
+            opts.name
+        )));
+    }
     if runstate::liveness(&dir) == Liveness::Exited {
         // 已经停了不算错：stop 的意图是"让它别再跑"，这个状态已经满足。
         // 报错只会让 `wbox stop x || true` 这类脚本写得别扭。

@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 const OPERATION_LOCK: &str = ".operations.lock";
 const DETACHED_RESERVATION: &str = ".detached-reservation";
+const CREATED_MARKER: &str = ".created";
+const CREATE_CONFIG: &str = "create.json";
 const EXIT_CODE: &str = "exit-code";
 const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -132,6 +134,8 @@ impl Entry {
 /// 容器存活状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
+    /// 已保存配置但尚无运行中的 owner
+    Created,
     /// 锁被占住 → 有活着的 owner
     Running,
     /// 锁能拿到 → owner 已消失（正常退出没来得及清理，或崩溃）
@@ -204,6 +208,9 @@ pub fn liveness(dir: &Path) -> Liveness {
     // 预留期间必须按 Running 处理，否则并发 run/rm 会把它正在准备的目录删掉。
     if dir.join(DETACHED_RESERVATION).is_file() {
         return Liveness::Running;
+    }
+    if dir.join(CREATED_MARKER).is_file() {
+        return Liveness::Created;
     }
     let lock = dir.join("lock");
     if !lock.exists() {
@@ -281,7 +288,11 @@ impl Drop for DetachedReservation {
         if let Ok(_operation_lock) = lock_operations(root) {
             let reservation = self.dir.join(DETACHED_RESERVATION);
             if std::fs::read_to_string(&reservation).ok().as_deref() == Some(&self.token) {
-                purge_dir(&self.dir);
+                if self.dir.join(CREATE_CONFIG).is_file() {
+                    restore_created_dir(&self.dir);
+                } else {
+                    purge_dir(&self.dir);
+                }
             }
         }
     }
@@ -289,16 +300,25 @@ impl Drop for DetachedReservation {
 
 /// 在根操作锁内检查旧状态、清理已退出残留并预留 detached 名称。
 pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_RESERVATION: AtomicU64 = AtomicU64::new(1);
-
     let dir = dir_for(name)?;
     let root = dir
         .parent()
         .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
     let _operation_lock = lock_operations(root)?;
     if dir.exists() {
+        if dir.join(CREATE_CONFIG).is_file() {
+            return Err(WboxError::args(format!(
+                "容器名 '{}' 已有可 start 的保存配置；请执行 `wbox start {}` 或先 rm",
+                name, name
+            )));
+        }
         match liveness(&dir) {
+            Liveness::Created => {
+                return Err(WboxError::args(format!(
+                    "容器名 '{}' 已由 create 使用；请执行 `wbox start {}` 或先 rm",
+                    name, name
+                )));
+            }
             Liveness::Running => {
                 return Err(WboxError::args(format!(
                     "容器名 '{}' 正在使用中。换个 --name，或先停掉正在运行的那个",
@@ -310,12 +330,7 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
     }
     std::fs::create_dir_all(&dir)
         .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
-    let token = format!(
-        "{}-{}-{}",
-        std::process::id(),
-        now_unix(),
-        NEXT_RESERVATION.fetch_add(1, Ordering::Relaxed)
-    );
+    let token = next_reservation_token();
     std::fs::write(dir.join(DETACHED_RESERVATION), &token)
         .map_err(|e| WboxError::args(format!("写入 detached 预留令牌失败：{}", e)))?;
     Ok(DetachedReservation {
@@ -323,6 +338,142 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
         token,
         armed: true,
     })
+}
+
+fn next_reservation_token() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_RESERVATION: AtomicU64 = AtomicU64::new(1);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        now_unix(),
+        NEXT_RESERVATION.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// 保存一个尚未运行的容器配置。配置文件只对当前用户可见；显式 `-e` 值会像
+/// Docker/Podman 的容器配置一样持久化，因此调用方不应把长期凭证放进参数。
+pub fn create_pending(
+    name: &str,
+    args: &[String],
+    cmd: &[String],
+    target: &str,
+    exec_context: Option<ExecContext>,
+) -> Result<()> {
+    let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
+    if dir.exists() {
+        return Err(WboxError::args(format!(
+            "容器名 '{}' 已存在；请换名或先执行 `wbox rm {}`",
+            name, name
+        )));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
+    let result = (|| {
+        let config = serde_json::json!({
+            "schema": 1,
+            "run_args": args,
+        });
+        let config_path = dir.join(CREATE_CONFIG);
+        std::fs::write(&config_path, config.to_string())
+            .map_err(|e| WboxError::args(format!("写 create.json 失败：{}", e)))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| WboxError::args(format!("限制 create.json 权限失败：{}", e)))?;
+        }
+        let entry = Entry {
+            name: name.to_string(),
+            pid: 0,
+            created_unix: now_unix(),
+            cmd: cmd.to_vec(),
+            target: target.to_string(),
+            stopping: false,
+            exec_context,
+        };
+        let mut meta = serde_json::from_str::<serde_json::Value>(&entry.to_json())
+            .map_err(|e| WboxError::args(format!("生成 created 元数据失败：{}", e)))?;
+        meta["lifecycle"] = serde_json::Value::String("created".to_string());
+        std::fs::write(dir.join("meta.json"), meta.to_string())
+            .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
+        std::fs::write(dir.join(CREATED_MARKER), b"")
+            .map_err(|e| WboxError::args(format!("写 created 状态标记失败：{}", e)))
+    })();
+    if result.is_err() {
+        purge_dir(&dir);
+    }
+    result
+}
+
+fn read_create_args(dir: &Path) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string(dir.join(CREATE_CONFIG))
+        .map_err(|_| WboxError::args("容器没有可重用的 create 配置"))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| WboxError::args(format!("create.json 不可读：{}", e)))?;
+    value
+        .get("run_args")
+        .and_then(|args| args.as_array())
+        .ok_or_else(|| WboxError::args("create.json 缺少 run_args"))?
+        .iter()
+        .map(|arg| {
+            arg.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| WboxError::args("create.json 的 run_args 含非字符串值"))
+        })
+        .collect()
+}
+
+/// 删除一次运行产生的临时状态，但保留 create 配置与展示元数据。
+fn restore_created_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name == CREATE_CONFIG || name == "meta.json" || name == CREATED_MARKER {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(path);
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let _ = std::fs::write(dir.join(CREATED_MARKER), b"");
+}
+
+/// 原子领取 created/exited 容器的保存配置，转换为 detached 启动预留。
+pub fn activate_created(name: &str) -> Result<(Vec<String>, DetachedReservation)> {
+    let dir = dir_for(name)?;
+    let root = dir
+        .parent()
+        .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+    let _operation_lock = lock_operations(root)?;
+    if !dir.exists() {
+        return Err(missing_record(name));
+    }
+    if liveness(&dir) == Liveness::Running {
+        return Err(WboxError::args(format!("容器 '{}' 已在运行", name)));
+    }
+    let args = read_create_args(&dir)?;
+    restore_created_dir(&dir);
+    let token = next_reservation_token();
+    std::fs::write(dir.join(DETACHED_RESERVATION), &token)
+        .map_err(|e| WboxError::args(format!("写 start 预留令牌失败：{}", e)))?;
+    Ok((
+        args,
+        DetachedReservation {
+            dir,
+            token,
+            armed: true,
+        },
+    ))
 }
 
 /// supervisor 在开始 pull/prepare 前接过清理责任；若尚未完成登记就报错退出，
@@ -512,6 +663,10 @@ pub fn register_with_context(
             WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
         })?;
         write_meta(&dir, name, cmd, target, exec_context)?;
+        if dir.join(CREATED_MARKER).is_file() {
+            std::fs::remove_file(dir.join(CREATED_MARKER))
+                .map_err(|e| WboxError::args(format!("切换 created 状态失败：{}", e)))?;
+        }
         std::fs::remove_file(&reservation)
             .map_err(|e| WboxError::args(format!("接管 detached 预留失败：{}", e)))?;
         return Ok(Registration {
@@ -522,7 +677,19 @@ pub fn register_with_context(
         });
     }
     if dir.exists() {
+        if dir.join(CREATE_CONFIG).is_file() {
+            return Err(WboxError::args(format!(
+                "容器名 '{}' 已有可 start 的保存配置；请执行 `wbox start {}` 或先 rm",
+                name, name
+            )));
+        }
         match liveness(&dir) {
+            Liveness::Created => {
+                return Err(WboxError::args(format!(
+                    "容器名 '{}' 已由 create 使用；请执行 `wbox start {}` 或先 rm",
+                    name, name
+                )));
+            }
             Liveness::Running => {
                 return Err(WboxError::args(format!(
                     // 别在这里建议 `wbox rm`：已退出的残留在上面就被自动复用了，
@@ -709,7 +876,7 @@ pub fn remove(name: &str) -> Result<()> {
             "容器 '{}' 仍在运行，拒绝删除记录（rm 不会停掉它）",
             name
         ))),
-        Liveness::Exited => {
+        Liveness::Created | Liveness::Exited => {
             #[cfg(test)]
             pause_remove_after_liveness_for_test();
             purge_dir(&dir);
@@ -863,6 +1030,62 @@ mod tests {
             assert!(dir.exists());
         }
         assert!(!dir.exists(), "未登记的 supervisor 退出后必须清理预留");
+    }
+
+    #[test]
+    fn created_config_transitions_atomically_and_can_start_again() {
+        let _home = TempHome::new("created-lifecycle");
+        let args = vec![
+            "--name".to_string(),
+            "saved".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+        ];
+        create_pending(
+            "saved",
+            &args,
+            &["echo".to_string()],
+            "(native)",
+            None,
+        )
+        .unwrap();
+        let dir = dir_for("saved").unwrap();
+        assert_eq!(liveness(&dir), Liveness::Created);
+        assert_eq!(read_create_args(&dir).unwrap(), args);
+
+        let (loaded, reservation) = activate_created("saved").unwrap();
+        assert_eq!(loaded, args);
+        assert_eq!(liveness(&dir), Liveness::Running);
+        assert!(activate_created("saved").is_err(), "并发 start 必须被挡住");
+        drop(reservation);
+        assert_eq!(
+            liveness(&dir),
+            Liveness::Created,
+            "启动前失败应恢复 created"
+        );
+
+        let (_, mut reservation) = activate_created("saved").unwrap();
+        let token = reservation.token().to_string();
+        let reg = register_with_context(
+            "saved",
+            &["echo".to_string()],
+            "(native)",
+            true,
+            None,
+            Some(&token),
+        )
+        .unwrap();
+        reservation.disarm();
+        assert_eq!(liveness(&dir), Liveness::Running);
+        assert!(!dir.join(CREATED_MARKER).exists());
+        drop(reg);
+        assert_eq!(liveness(&dir), Liveness::Exited);
+
+        let (_, reservation) = activate_created("saved").unwrap();
+        assert_eq!(liveness(&dir), Liveness::Running);
+        drop(reservation);
+        assert_eq!(liveness(&dir), Liveness::Created);
+        remove("saved").unwrap();
     }
 
     /// 已亡的残留可以被同名容器复用——否则崩过一次就再也用不了这个名字。
