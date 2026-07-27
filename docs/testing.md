@@ -103,6 +103,17 @@ scripts/test-windows-product.ps1 `
 `wbox run <image>` 到 AppContainer、Blink 和 Linux ELF 的完整路径。任何前置
 缺失或执行失败都直接 FAIL，不允许 SKIP。
 
+### 2.6 Windows 原生程序矩阵
+
+```powershell
+scripts/test-windows-native.ps1 -Wbox target/debug/wbox.exe
+```
+
+该矩阵只使用 Windows 自带程序与本地临时目录，不依赖公网。它覆盖 `cmd.exe`、
+Windows PowerShell、`hostname.exe`、`whoami.exe`、子进程、显式可写工作目录、
+退出码转发和 `ps --all` 状态清理。网络拒绝/放行属于独立行为门禁，不以该矩阵
+通过替代。
+
 ## 3. 已知失败基线
 
 机器可读基线是 `tests/known-failures.txt`，说明与修复历史在

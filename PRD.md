@@ -127,9 +127,9 @@ S4 在 Linux 上运行 Windows CLI
 
 | 需求 | 实现入口 | 已有最高证据 | 持续门禁 / 缺口 |
 |---|---|---|---|
-| F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`smoke-windows`、L/H；退出码已有行为断言 |
+| F1.1/F1.5/F1.6 原生运行、退出码、帮助 | `src/cli`、`src/error.rs` | G3 Windows/Linux | Rust tests、`WN.1-WN.8`、L/H；退出码已有行为断言 |
 | F1.2/F1.3/F1.4 镜像运行、pull、管理 | `src/cli/run.rs`、`src/oci` | pull=G2，run=缺 G3 | 新 `WP.3` 必须覆盖离线缓存到 Linux guest |
-| F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WP.1` |
+| F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
 | F2.3 Windows 网络放行 | `token.rs` | G0 | 只有 SID 构造；缺默认拒绝与 `--allow-network` 实际连接对照 |
 | F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
 | F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G2 | 缺杀死 wbox 后后代 PID 消失的 Windows 门禁 |
@@ -155,6 +155,14 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.3`：只用最终两个 exe 和仓库内静态 ELF，从本地缓存执行 Linux guest。
 - `WP.4`：bundle 中不存在运行时 DLL 或仓库路径依赖。
 - `WP.5`：前台正常退出后状态目录无运行记录。
+
+`WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
+
+- `WN.1-WN.4`：`cmd.exe`、Windows PowerShell、`hostname.exe`、`whoami.exe`。
+- `WN.5`：AppContainer 内启动并等待子进程。
+- `WN.6`：显式授权的工作目录可写，且宿主能读取结果。
+- `WN.7`：非零 workload 退出码原样返回。
+- `WN.8`：所有前台运行完成后 `ps --all` 无状态残留。
 
 ### F1 CLI 与运行目标分派 `[active]`
 
