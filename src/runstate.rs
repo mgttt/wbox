@@ -159,7 +159,7 @@ pub fn liveness(dir: &Path) -> Liveness {
 pub struct Registration {
     dir: PathBuf,
     /// 持有到 drop 为止；这个句柄就是"我还活着"的证据
-    _lock: File,
+    lock: Option<File>,
 }
 
 impl Registration {
@@ -174,8 +174,9 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        // 先删 meta 再删目录；锁文件由 File 关闭后一并删除。
+        // Windows 不允许删除仍被打开的锁文件，因此必须先显式关闭句柄。
         // 任何一步失败都不 panic——清理失败顶多留下一条 Exited 记录。
+        drop(self.lock.take());
         let _ = std::fs::remove_file(self.dir.join("meta.json"));
         let _ = std::fs::remove_file(self.dir.join("lock"));
         let _ = std::fs::remove_dir(&self.dir);
@@ -205,7 +206,10 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
     std::fs::create_dir_all(&dir)
         .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
     let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
-        WboxError::args(format!("无法独占容器 '{}' 的锁文件（是否有并发的 wbox？）", name))
+        WboxError::args(format!(
+            "无法独占容器 '{}' 的锁文件（是否有并发的 wbox？）",
+            name
+        ))
     })?;
     let entry = Entry {
         name: name.to_string(),
@@ -216,7 +220,10 @@ pub fn register(name: &str, cmd: &[String], target: &str) -> Result<Registration
     };
     std::fs::write(dir.join("meta.json"), entry.to_json())
         .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
-    Ok(Registration { dir, _lock: lock })
+    Ok(Registration {
+        dir,
+        lock: Some(lock),
+    })
 }
 
 fn now_unix() -> u64 {
