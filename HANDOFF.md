@@ -115,6 +115,18 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
   一次性读全也能凑够行数——那证明不了跟随。改成同时断言命令自身耗时 > 0，
   才是真的在验「它等到了后来才产生的输出」。
 
+### 扫查也会扫到「没问题」——那同样是结论
+
+这一轮扫了四处，两处有问题（`NetworkMode` 少一态、状态标签有三份），两处干净：
+`inspect` 的 `Config.Image` 拿去 `wbox run` 能跑通，`top`/`wait` 在暂停容器上行为
+合理。**干净的结论要留下来**，否则下一个人还会再扫一遍。
+
+扫到的第三类是「行为与对标物不同，但那是设计取舍」：`wbox exec` 进一个暂停中的
+容器**会成功**，docker 那里会挂住（wbox 用 SIGSTOP，exec 起的新进程没收到过它；
+docker 用 cgroup freezer，新进程一进 cgroup 就被冻住）。这种不该改代码去迎合，
+而该**写进 PRD 并配一条门禁**——门禁在这里的作用不是断言「这样是对的」，
+而是：哪天实现换成 freezer，它会红，提醒去改文档，而不是让文档悄悄变成谎话。
+
 ### 一个屡试屡中的找 bug 手法
 
 最近两轮的缺陷都是同一类，且都不是「功能没做」，而是「做了，但输出/状态是假的」：
@@ -137,7 +149,7 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 ### 当前基线（接手时应能复现）
 
 - `cargo test --locked` → **402 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **201 PASS / 0 FAIL / 1 SKIP**
+- `scripts/test-linux-backend.sh` → **202 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净

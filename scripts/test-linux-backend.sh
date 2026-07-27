@@ -1876,6 +1876,17 @@ else
   report FAIL "PZ.4 暂停可见性" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
 fi
 
+# **一条如实记录下来的差异**（PRD F9.21）：wbox 用 SIGSTOP 而非 cgroup freezer，
+# 所以 exec 起的**新**进程没收到过 SIGSTOP，进得去；docker 那里会挂住。
+# 把它钉成门禁不是因为它"对"，而是因为它是 PRD 里写明的行为——哪天实现换成
+# freezer，这条会红，提醒去改文档，而不是让文档悄悄变成谎话。
+pout=$(timeout 10 env HOME=$WORK/home "$WBOX_ABS" exec pzc -- /bin/echo EXEC_OK 2>&1); prc=$?
+if [ "$prc" -eq 0 ] && printf '%s' "$pout" | grep -q EXEC_OK; then
+  report PASS "PZ.6 exec 进暂停容器可用（信号方案的已知差异，PRD 已写明）"
+else
+  report FAIL "PZ.6 暂停期 exec" "rc=$prc 输出: $(printf '%s' "$pout" | tr '\n' '|' | head -c 120)"
+fi
+
 pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
 sleep 1
 after=$(cat "$PZFILE" 2>/dev/null)
