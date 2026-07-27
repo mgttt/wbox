@@ -16,6 +16,7 @@
 //! 否则会把镜像里那份"已经被删掉的"旧文件拷出去，而用户以为拿到的是容器现状。
 
 use crate::error::{Result, WboxError};
+use crate::layers::ContainerLayers;
 use crate::runstate;
 use std::path::{Path, PathBuf};
 
@@ -93,66 +94,9 @@ pub fn cmd_cp(args: &[String]) -> Result<u32> {
     }
 }
 
-/// 容器的分层：(upper, 镜像 rootfs)。
-fn layers(container: &str) -> Result<(PathBuf, Option<PathBuf>)> {
-    let dir = runstate::resolve_existing(container)?;
-    let upper = dir.join("layer").join("upper");
-    if !upper.is_dir() {
-        return Err(WboxError::args(format!(
-            "容器 '{}' 没有 overlay 可写层，cp 无法取得它的文件系统视图：\
-             宿主程序模式不换根，或本机内核不支持 rootless overlay 而回退了共享写入（PRD F9.12）",
-            container
-        )));
-    }
-    let lower = runstate::read_meta(&dir)
-        .and_then(|m| m.exec_context.map(|c| PathBuf::from(c.workdir)));
-    Ok((upper, lower))
-}
-
-/// 在分层视图里解析一个容器内路径。
-fn resolve_in_container(
-    upper: &Path,
-    lower: Option<&Path>,
-    guest: &str,
-) -> Result<PathBuf> {
-    let up = crate::build::resolve_rootfs_path(upper, guest)?;
-    if let Ok(meta) = std::fs::symlink_metadata(&up) {
-        if is_whiteout(&meta) {
-            // 容器把它删了。拷镜像里那份旧的出去，用户会以为拿到的是容器现状。
-            return Err(WboxError::args(format!(
-                "容器内 '{}' 已被删除（overlay whiteout）",
-                guest
-            )));
-        }
-        return Ok(up);
-    }
-    let low = lower.ok_or_else(|| {
-        WboxError::args(format!("容器内找不到 '{}'（且该容器没有镜像下层）", guest))
-    })?;
-    let lp = crate::build::resolve_rootfs_path(low, guest)?;
-    if lp.symlink_metadata().is_ok() {
-        return Ok(lp);
-    }
-    Err(WboxError::args(format!("容器内找不到 '{}'", guest)))
-}
-
-fn is_whiteout(meta: &std::fs::Metadata) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        use std::os::unix::fs::MetadataExt;
-        meta.file_type().is_char_device() && meta.rdev() == 0
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        false
-    }
-}
-
 fn copy_out(container: &str, guest: &str, host: &Path) -> Result<u32> {
-    let (upper, lower) = layers(container)?;
-    let src = resolve_in_container(&upper, lower.as_deref(), guest)?;
+    let layers = ContainerLayers::resolve(container, "cp 无法取得它的文件系统视图")?;
+    let src = layers.lookup(guest)?;
     // 目标是已存在的目录时，按 cp 的习惯拷进去而不是覆盖它
     let dst = if host.is_dir() {
         host.join(src.file_name().unwrap_or_default())
@@ -171,9 +115,9 @@ fn copy_in(container: &str, host: &Path, guest: &str) -> Result<u32> {
             host.display()
         )));
     }
-    let (upper, _) = layers(container)?;
+    let layers = ContainerLayers::resolve(container, "cp 无法取得它的文件系统视图")?;
     // 写只写 upper：镜像下层是共享只读的，往那里写会污染别的容器（F9.12）
-    let mut dst = crate::build::resolve_rootfs_path(&upper, guest)?;
+    let mut dst = crate::build::resolve_rootfs_path(&layers.upper, guest)?;
     // 目标以 `/` 结尾、或容器内已是目录时，拷进去而不是覆盖
     if guest.ends_with('/') || dst.is_dir() {
         dst = dst.join(host.file_name().unwrap_or_default());
@@ -252,42 +196,16 @@ mod tests {
     }
 
     /// 没有 overlay 层时报错并说清原因；静默拷镜像的内容会让用户以为那是容器现状。
+    ///
+    /// 分层解析本身（upper 遮 lower、whiteout、两层都没有）由 `crate::layers`
+    /// 的单测覆盖——那是它的职责，在这里再抄一遍只会有两份要一起改的断言。
     #[test]
     fn missing_overlay_layer_is_explained() {
         let _home = TempHome::new("cpnolayer");
         let dir = runstate::dir_for("c").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
-        let m = format!("{}", layers("c").unwrap_err());
+        let m = format!("{}", copy_out("c", "/x", Path::new("/tmp/x")).unwrap_err());
         assert!(m.contains("overlay"), "{}", m);
-    }
-
-    /// 分层解析的顺序：upper 优先，upper 没有才落到镜像下层；两层都没有要报错。
-    ///
-    /// whiteout（字符设备 0:0）那一支需要 `mknod`，普通测试进程建不出来，
-    /// 由门禁的 CP 组在真容器里覆盖——这里不假装测过。
-    #[cfg(unix)]
-    #[test]
-    fn upper_shadows_lower_and_missing_is_an_error() {
-        let base = std::env::temp_dir().join(format!("wbox-cp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let (upper, lower) = (base.join("upper"), base.join("lower"));
-        std::fs::create_dir_all(&upper).unwrap();
-        std::fs::create_dir_all(&lower).unwrap();
-        std::fs::write(lower.join("f"), b"old").unwrap();
-        // 镜像里有、upper 里没有 → 从下层取
-        assert_eq!(
-            resolve_in_container(&upper, Some(&lower), "/f").unwrap(),
-            lower.join("f")
-        );
-        // upper 里也有 → 取 upper 那份
-        std::fs::write(upper.join("f"), b"new").unwrap();
-        assert_eq!(
-            resolve_in_container(&upper, Some(&lower), "/f").unwrap(),
-            upper.join("f")
-        );
-        // 两层都没有 → 报错，不能悄悄返回一个不存在的路径
-        assert!(resolve_in_container(&upper, Some(&lower), "/nope").is_err());
-        assert!(resolve_in_container(&upper, None, "/nope").is_err());
-        let _ = std::fs::remove_dir_all(&base);
+        assert!(m.contains("cp 无法取得"), "错误里要说清是哪件事做不成：{}", m);
     }
 }

@@ -23,6 +23,7 @@ pub mod run;
 pub mod start;
 mod commit;
 mod cp;
+mod export;
 mod stats;
 mod pause;
 mod diff;
@@ -45,6 +46,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
   wbox cp <NAME>:<路径> <宿主路径>                 容器与宿主间拷贝（反向亦可，见 PRD F9.23）
   wbox stats [NAME...]                             容器实时资源占用（仅 Linux，见 PRD F9.24）
+  wbox export -o <FILE> <NAME>                     把容器当前文件系统打成裸 tar（见 PRD F9.25）
+  wbox import -t <IMAGE[:TAG]> <FILE>              从裸 rootfs tar 造一个镜像
   wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
   wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
   wbox images                                      `wbox image list` 的兼容别名
@@ -167,6 +170,8 @@ const VERBS: &[(&str, Scope, Handler)] = &[
     ("stats", Scope::Container, stats::cmd_stats),
     ("pause", Scope::Container, pause::cmd_pause),
     ("unpause", Scope::Container, pause::cmd_unpause),
+    ("export", Scope::Container, export::cmd_export),
+    ("import", Scope::Top, export::cmd_import),
     ("build", Scope::Top, build::cmd_build),
     ("compose", Scope::Top, compose::cmd_compose),
     ("pull", Scope::Top, image::cmd_image_pull),

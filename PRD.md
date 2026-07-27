@@ -124,6 +124,7 @@ wbox
 | `diff` / `commit` / `cp` | 不做 | 三者都读 overlay 可写层（F9.12），Windows 侧没有那一层；一律明确报错并说清原因 |
 | `stats` | 不做 | 占用数据取自 cgroup / `/proc`，Windows 要另走 Job object 的记账接口，尚未实现（F9.24）|
 | `pause` / `unpause` | 不做 | 靠向容器内每个进程发信号实现（F9.21），Windows 进程组语义不同，需另行设计 |
+| `export` | 不做 | 同上：要 overlay 可写层才能取到容器文件系统。`import` **不受此限**，它只解 tar 造镜像，两平台一致 |
 
 **这一格是四象限里差距最大的**，且差距的主因不是工作量而是架构前提：
 不装驱动就做不到驱动级别的重定向完整性。
@@ -147,7 +148,8 @@ wbox
 | restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
 | `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
-| `diff` / `commit` / `cp` / `stats` / `pause` | 不做 | 同 Q1：分别依赖 overlay 可写层、cgroup·`/proc`、信号语义，Windows 侧均无对应原语，一律明确报错 |
+| `diff` / `commit` / `cp` / `stats` / `pause` / `export` | 不做 | 同 Q1：分别依赖 overlay 可写层、cgroup·`/proc`、信号语义，Windows 侧均无对应原语，一律明确报错 |
+| `import` | 有 | 只解 tar 造镜像，不碰容器运行期，两平台同一实现 |
 | `save` / `load` | 有 | F9.22 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | systemd / 服务 | 不做 | 非目标 |
 
@@ -166,6 +168,7 @@ wbox
 | `save` / `load` | 有 | F9.22：镜像打包成 tar 离线搬运，含原始层故搬过去仍可原样 push（门禁 SL.1–SL.6）|
 | `cp` | 有 | F9.23：宿主与容器双向拷贝，走 overlay 分层视图故不必 `setns`、容器已退出也能取（门禁 CP.1–CP.6）|
 | `stats` | 有 | F9.24：有专属 cgroup 时读内核记账，没有则按 `/proc` 逐进程累加并**标注来源**（门禁 ST.1–ST.5）|
+| `export` / `import` | 有 | F9.25：容器文件系统的**裸** tar（与 `save`/`load` 搬的东西不同，见下）；import 收任意来源归档故只挡穿越、全部落在 `rootfs/` 下（门禁 EX.1–EX.7）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -206,7 +209,7 @@ wbox
 | overlay 可写层 | 不适用 | F9.12 只对镜像模式（换根）有意义；wine 目标不换根 |
 | `stats` | 有 | 走 `/proc` 那条路，不依赖换根也不依赖 cgroup；已实测宿主模式容器能取到 CPU/内存/进程数（F9.24）|
 | `pause` / `unpause` | 有 | 同样只需进程树，与 Q3 同一实现（F9.21）|
-| `diff` / `commit` / `cp` | 不适用 | 三者都要 overlay 可写层，而 wine 目标不换根——没有"相对镜像改了什么"这个问题；命令会明确报错说明是宿主程序模式，不是静默给空结果 |
+| `diff` / `commit` / `cp` / `export` | 不适用 | 四者都要 overlay 可写层，而 wine 目标不换根——没有"相对镜像改了什么"这个问题；命令会明确报错说明是宿主程序模式，不是静默给空结果 |
 
 ### 2.4.1 每格的下一步
 
@@ -220,7 +223,7 @@ wbox
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.24 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.25 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
@@ -887,7 +890,8 @@ F9
 ├── F9.21 `pause` / `unpause`                  —— [partial] 信号实现，非 freezer
 ├── F9.22 `save` / `load` 离线搬运镜像          —— [done]（门禁 SL.1–SL.6）
 ├── F9.23 `wbox cp` 宿主↔容器拷贝             —— [done]（仅 Linux，门禁 CP.1–CP.6）
-└── F9.24 `wbox stats` 实时资源占用           —— [done]（仅 Linux，门禁 ST.1–ST.5）
+├── F9.24 `wbox stats` 实时资源占用           —— [done]（仅 Linux，门禁 ST.1–ST.5）
+└── F9.25 `export` / `import` 容器文件系统    —— [done]（export 仅 Linux，门禁 EX.1–EX.7）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1019,6 +1023,39 @@ Windows 侧工作。
 判据是**行为**而非返回码：容器不停往宿主可见的文件写计数，pause 后计数必须
 冻住、unpause 后必须重新增长（PZ.1/PZ.2）。只断言"pause 返回 0"证明不了任何事
 ——信号发出去了不等于进程真停了。
+
+**F9.25 `wbox export` / `import`** `[done]`（export 仅 Linux，门禁 EX.1–EX.7）。
+容器文件系统的裸 tar 搬运。
+
+**先分清它和 `save`/`load`（F9.22）不是一回事**——docker 的用户也常搞混，所以
+两边的错误信息都写明白：
+
+| | 搬的是什么 | 带不带历史/配置 |
+|---|---|---|
+| `save` / `load` | **镜像** | 带：manifest、config、原始压缩层，load 回来还能原样 push |
+| `export` / `import` | **容器的当前文件系统** | 不带：一棵 rootfs 压成 tar，层历史被压平 |
+
+`export` 的用途是"把这个容器现在的样子交出去"——交给不装 wbox 的人，或塞进别的
+构建流程，要的正是没有 wbox 特有结构的裸 tar（EX.3 盯这条）。
+
+**实现上几乎没有新东西**：容器的完整文件系统 = 镜像下层 + overlay upper 合并，
+而这件事 `ContainerLayers::materialize` 已经做了（`commit` 用的是同一个）。
+所以 export = 物化到暂存目录 + 打 tar。**不**在打包侧边遍历分层边写——那要把
+whiteout/opaque 的合并规则再实现一遍，两份规则迟早不一致。暂存目录无论成败都要
+收拾（EX.4）：留着会在容器状态目录里悄悄多吃一份完整 rootfs。
+
+**import 的安全约束比 load 更强**。`load` 收的是 wbox 自己产的结构，可以按白名单
+认顶层；`import` 收的是任意来源的 rootfs tar，顶层是 `bin`/`etc`/`usr` 里的哪些
+由归档决定，**无从白名单化**。能守住的只有两条——不许绝对路径、不许 `..`——
+加上一律拼到 `rootfs/` 之下。两条合起来，归档里的任何路径都拼不出 `rootfs/`
+以外的位置。EX.7 用真造出来的穿越归档取证，不是只测解析函数。
+
+**单条目解包失败不中止整个归档**：裸 rootfs 里常有本机建不出来的条目（设备节点
+要 root、属主可能不存在）。中止的话绝大多数 rootfs 都 import 不进来——那才是真正
+无用的行为。但一个条目都没成功则报错，并指出带身份的归档该用 `load`。
+
+**如实写空的 entrypoint/cmd**：裸 rootfs 里确实没有这些信息，编一个 `/bin/sh`
+进去会让 `wbox run <镜像>` 表现得像是镜像自带的默认命令，而它其实是 wbox 猜的。
 
 **F9.24 `wbox stats`** `[done]`（仅 Linux，门禁 ST.1–ST.5）。容器的实时资源占用。
 

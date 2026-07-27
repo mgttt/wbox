@@ -18,6 +18,7 @@ mod error;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod oci;
 mod build;
+mod layers;
 // capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；
 // 落地在 backend/linux_ns.rs。
 mod caps;

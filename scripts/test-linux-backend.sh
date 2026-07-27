@@ -2030,6 +2030,96 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== EX wbox export / import（PRD F9.25）==="
+
+# export 导出的必须是**合并后的容器现状**：改过的以容器为准、删掉的不能复活、
+# 新增的要在。只断言"tar 非空"证明不了任何事——把镜像原样打一份也非空。
+mkdir -p "$CACHE/rootfs/exetc"
+printf 'from-image\n' > "$CACHE/rootfs/exetc/conf"
+printf 'from-image\n' > "$CACHE/rootfs/exetc/doomed"
+HOME=$WORK/home "$WBOX_ABS" run -d --name exc lbetest -- \
+  /bin/sh -c 'echo from-container > /exetc/conf; rm /exetc/doomed; echo x > /exadded.txt; sleep 30' >/dev/null 2>&1
+sleep 2
+
+EXTAR=$WORK/exported.tar
+eout=$(HOME=$WORK/home "$WBOX_ABS" export -o "$EXTAR" exc 2>&1); erc=$?
+if [ "$erc" -eq 0 ] && [ -s "$EXTAR" ]; then
+  report PASS "EX.1 export 产出非空归档"
+else
+  report FAIL "EX.1 export" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 150)"
+fi
+
+# 判据落在归档内容上：三类改动都要正确体现
+EXD=$WORK/exdump
+rm -rf "$EXD" && mkdir -p "$EXD"
+tar -xf "$EXTAR" -C "$EXD" 2>/dev/null
+if [ "$(cat "$EXD/exetc/conf" 2>/dev/null)" = "from-container" ] \
+   && [ -f "$EXD/exadded.txt" ] \
+   && [ ! -e "$EXD/exetc/doomed" ]; then
+  report PASS "EX.2 导出的是合并后的容器现状（改动生效、新增在、删除未复活）"
+else
+  report FAIL "EX.2 分层合并" "conf=$(cat "$EXD/exetc/conf" 2>/dev/null) 新增=$([ -f "$EXD/exadded.txt" ] && echo 有 || echo 无) 删除的还在=$([ -e "$EXD/exetc/doomed" ] && echo 是 || echo 否)"
+fi
+
+# 导出的是**裸 rootfs**，不该带 wbox 自己的结构（那是 save 的事）
+if [ ! -e "$EXD/wbox-image.json" ] && [ ! -d "$EXD/rootfs" ] && [ -d "$EXD/exetc" ]; then
+  report PASS "EX.3 导出的是裸 rootfs（顶层直接是 /bin、/etc，无 wbox 特有结构）"
+else
+  report FAIL "EX.3 裸 rootfs 形态" "顶层: $(ls "$EXD" 2>/dev/null | tr '\n' ' ' | head -c 120)"
+fi
+
+# 暂存目录必须收拾干净：留着会在容器状态目录里悄悄多吃一份完整 rootfs
+EXSTATE=$WORK/home/.wbox/run/exc/export-staging
+if [ ! -e "$EXSTATE" ]; then
+  report PASS "EX.4 export 后不留物化暂存目录"
+else
+  report FAIL "EX.4 暂存清理" "$EXSTATE 仍在（会悄悄吃掉一份磁盘）"
+fi
+
+# 往返：import 回来的镜像要**真能跑**，且带着容器当时的改动。
+# 落到干净 HOME 才证明归档自带全部内容，而不是靠原机器的缓存。
+EXHOME=$WORK/exhome
+mkdir -p "$EXHOME"
+eout=$(HOME=$EXHOME "$WBOX_ABS" import -t exmine:v1 "$EXTAR" 2>&1); erc=$?
+vout=$(HOME=$EXHOME "$WBOX_ABS" run --rm --name exrun exmine:v1 -- \
+  /bin/sh -c 'cat /exetc/conf; test -e /exetc/doomed && echo STILL || echo DELETED' 2>&1)
+if [ "$erc" -eq 0 ] \
+   && printf '%s' "$vout" | grep -qx 'from-container' \
+   && printf '%s' "$vout" | grep -qx 'DELETED'; then
+  report PASS "EX.5 export→import 往返后镜像可运行且保留容器当时的改动"
+else
+  report FAIL "EX.5 往返" "import rc=$erc 运行输出: $(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+# import 缺 -t 要报错并指出带身份的归档该用 load——这两条命令最容易被搞混
+eout=$(HOME=$EXHOME "$WBOX_ABS" import "$EXTAR" 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eout" | grep -q 'wbox load'; then
+  report PASS "EX.6 import 缺 -t 时报错并指出 save 归档该用 load"
+else
+  report FAIL "EX.6 缺 -t" "rc=$erc 输出: $(printf '%s' "$eout" | head -c 150)"
+fi
+
+# 路径穿越：裸 tar 是任意来源的外部输入，这是这条链路唯一真正危险的东西
+EVIL=$WORK/evil.tar
+( cd "$WORK" && printf 'pwned\n' > evilfile && tar -cf "$EVIL" --transform 's|^evilfile|../../../../tmp/wbox-pwned|' evilfile 2>/dev/null )
+if [ -s "$EVIL" ]; then
+  rm -f /tmp/wbox-pwned
+  eout=$(HOME=$EXHOME "$WBOX_ABS" import -t evil:v1 "$EVIL" 2>&1); erc=$?
+  if [ "$erc" -ne 0 ] && [ ! -e /tmp/wbox-pwned ]; then
+    report PASS "EX.7 import 拒绝路径穿越归档且未落盘到 rootfs 之外"
+  else
+    report FAIL "EX.7 路径穿越" "rc=$erc 穿越文件落盘=$([ -e /tmp/wbox-pwned ] && echo 是 || echo 否)"
+  fi
+  rm -f /tmp/wbox-pwned
+else
+  report SKIP "EX.7 路径穿越" "本机 tar 不支持 --transform，造不出穿越归档"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" kill exc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm exc >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/exetc" "$EXD" "$EXTAR" "$EVIL"
+
+echo
 echo "=== SL save / load（PRD F9.22）==="
 
 SLTAR=$WORK/saved.tar
