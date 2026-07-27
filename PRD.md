@@ -1368,7 +1368,7 @@ TODO-PLAN
 ├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
-├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 结构性分析已完成，剩 2 条实机取证
+├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 分析已完成+实验已设计，只剩照跑
 ├── W5 Q2 端口映射 -p 的可行性取证           [Linux agent] 已完成：语义不适用
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
@@ -1468,7 +1468,52 @@ blink 加一层用户态网络栈，那是另一个数量级的工作。
 2. `%LOCALAPPDATA%\Packages\<pkg>` 这类 per-package 存储，对**非 UWP** 的
    AppContainer 进程是否真的自动可写；若是，它能否充当"沙箱私有写入区"。
 
-这两条都必须在真实 Windows 上测，读代码定不了。
+这两条都必须在真实 Windows 上测，读代码定不了。**但实验已经设计好了**——
+下面是可直接照跑的步骤与判据，接手的人不必再自己设计，跑完把结论填回
+§2.4 Q1 即可。
+
+#### 取证步骤 A：UAC VirtualStore 在 AppContainer 下还生不生效
+
+VirtualStore 是 Windows 给**旧版应用**的一层免费"看似写成功"：无 manifest 的
+32 位程序写 `%ProgramFiles%` / `HKLM\Software` 时，OS 会悄悄改写到
+`%LOCALAPPDATA%\VirtualStore\...`。若它在 AppContainer 下仍生效，那 Q1 就
+**白得一部分重定向**，值得如实记入 §2.4；若不生效，"只能拒绝"的结论就钉死了。
+
+```powershell
+# 1) 造一个会触发 VirtualStore 的目标路径（需管理员建一次，之后只读即可）
+$probe = "$env:ProgramFiles\wbox-vstore-probe"; New-Item -ItemType Directory -Force $probe
+
+# 2) 在容器内写它。用 cmd 而不是 PowerShell：PowerShell 自带 manifest，
+#    会被排除在 VirtualStore 之外，测出来是假阴性。
+wbox run --name w3a -- cmd.exe /c "echo hello > `"$probe\probe.txt`""
+
+# 3) 三处逐个看
+Test-Path "$probe\probe.txt"                                   # 真实位置
+Test-Path "$env:LOCALAPPDATA\VirtualStore\Program Files\wbox-vstore-probe\probe.txt"
+Get-ChildItem "$env:LOCALAPPDATA\Packages" -Filter "*wbox*" -ErrorAction SilentlyContinue
+```
+
+**判据**：
+- 真实位置有文件 → 隔离本身漏了，**这是缺陷**，优先修，别急着谈重定向。
+- `VirtualStore` 下有文件 → VirtualStore 生效，Q1 记为"部分：旧版应用白得
+  重定向，其余仍是拒绝"，并写明只覆盖无 manifest 的程序。
+- 两处都没有、命令报写入失败 → 结论就是"只能拒绝"，把 §2.4 Q1 那格钉死。
+
+#### 取证步骤 B：per-package 存储对非 UWP 的 AppContainer 进程是否自动可写
+
+```powershell
+# 容器内尝试写自己的 per-package 目录（路径由 AppContainer SID 决定，
+# 先让容器自己打印它看得见的 LOCALAPPDATA，再试写）
+wbox run --name w3b -- cmd.exe /c "echo %LOCALAPPDATA% & echo x > `"%LOCALAPPDATA%\wbox-probe.txt`""
+```
+
+**判据**：容器内写成功且宿主用户的 `%LOCALAPPDATA%` **没有**多出这个文件
+→ 说明 AppContainer 把它重定向到了 per-package 存储，那就是一块现成的
+"沙箱私有写入区"，可以据此设计 F9.4 的最小版本。写失败或落到宿主真实路径
+→ 这条路也不通，与步骤 A 的结论合并即可。
+
+**两步都要在同一台机器上跑，并把原始输出贴进本节**——结论比推测值钱，
+而没有原始输出的结论下一个人还得重跑一遍。
 
 ### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[done]`
 

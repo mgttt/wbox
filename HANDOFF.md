@@ -146,7 +146,10 @@ Dockerfile 子集解析器一致。
   默认就拒绝，`acl.rs` 是在**打开**口子）；重定向那一档差的是**介入点**——Q2 有
   Blink VFS 在路径上，Q1 的原生 PE 程序发真 NT 调用，架构里没有任何东西经手，
   不注入挂钩就无从重定向。剩两条必须实机测：AppContainer 下 UAC VirtualStore
-  还生不生效、per-package 存储对非 UWP 进程是否自动可写。
+  还生不生效、per-package 存储对非 UWP 进程是否自动可写。**实验已经设计好并写进
+  §4.9 W3**（含 PowerShell 步骤与逐条判据，注意用 `cmd.exe` 而不是 PowerShell
+  ——后者自带 manifest 会被排除在 VirtualStore 外，测出假阴性），接手的人照跑、
+  把原始输出和结论填回 §2.4 Q1 即可。
 - 自定义 bridge 网络 / 内建 DNS —— rootless 下要 slirp4netns/pasta 级常驻网络栈，
   与"免安装、无服务"（§2.2）冲突。
 - 镜像**分层**存储（`FROM`/pull 仍整份复制）。注意它与 F9.12 的**运行期**可写层是
