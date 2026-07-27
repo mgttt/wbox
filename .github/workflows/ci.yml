@@ -327,6 +327,12 @@ jobs:
         env:
           WBOX_LBE_REQUIRE: '1'
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
+      # 取证步骤，**不判定成败**（continue-on-error）：cgroup v2 首选路径至今
+      # 无任何环境覆盖，先拿证据再决定怎么改，不靠猜。runner 有 v2 但委派未开，
+      # 这里用 sudo 造一个已委派子树，比较两种层级布局。详见 §10.5「覆盖缺口」。
+      - name: 取证 —— cgroup v2 委派下的层级布局（不判定成败）
+        continue-on-error: true
+        run: scripts/probe-cgroup2.sh target/debug/wbox
 
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
