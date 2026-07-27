@@ -873,6 +873,11 @@ request header
 ├── magic:u32 / version:u16 / opcode:u16
 ├── request_id:u64 / payload_len:u32 / flags:u32
 └── payload_len、连接数、并发请求数均有固定硬上限
+
+filesystem opcodes
+├── LOOKUP(mount_id, relative_path) -> mode / size / inode
+├── OPEN(mount_id, O_RDONLY, relative_path) -> duplicated HANDLE
+└── READDIR(mount_id, cursor, relative_path) -> next_cursor / eof / UTF-8 names
 ```
 
 - `[done: transport component gate]` 采用 message-mode named pipe 并启用
@@ -915,6 +920,13 @@ request header
   session；真机 child 连续两次打开并读取同一 canary。若 remote HANDLE 已复制但响应
   写回失败，supervisor 用 `DUPLICATE_CLOSE_SOURCE` 从目标进程撤销该 HANDLE，避免
   错误路径只能等进程退出才回收。
+- `[done: directory protocol gate]` `LOOKUP` 与分页 `READDIR` 已实现。目录和文件
+  元数据来自已逐组件安全打开的 HANDLE；枚举使用
+  `NtQueryDirectoryFile(FileNamesInformation)`，不调用 `FindFirstFile`，也不把
+  HANDLE 还原成宿主路径。目录项排序后按 cursor 分页，每帧仍受 4096 字节上限，
+  单目录最多 65536 项/16 MiB UTF-8 名称。真机 AppContainer child 已验证根目录与
+  嵌套目录 `LOOKUP/READDIR`，500 项单测验证分页恢复。Blink `brokerfs` 尚未接线，
+  因此 Windows `-v` 仍不可开放。
 - broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
   host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，
