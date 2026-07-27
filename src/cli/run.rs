@@ -28,6 +28,8 @@ pub struct RunOptions {
     pub env: Vec<(String, String)>,
     /// 后台运行：立即返回，容器由脱离的 supervisor 进程持有（PRD F8.2）
     pub detach: bool,
+    /// Docker/Podman `--rm`：后台容器退出后也删除状态记录与日志。
+    pub auto_remove: bool,
     /// `-v host:guest[:ro]` 卷挂载（PRD F9.1）
     pub volumes: Vec<backend::VolumeMount>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
@@ -50,6 +52,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         env_pass_all: false,
         env: Vec::new(),
         detach: false,
+        auto_remove: false,
         volumes: Vec::new(),
         positional: None,
         cmd: Vec::new(),
@@ -112,9 +115,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
                 };
             }
             "--keep-profile" => opts.keep_profile = true,
-            // docker 风格显式清理：v1 默认即为退出即删（profile RAII 删除 +
-            // Job KILL_ON_JOB_CLOSE），接受并等价于默认（与 --no-network 同为显式默认）。
-            "--rm" => opts.keep_profile = false,
+            "--rm" => opts.auto_remove = true,
             "--interactive" => opts.detach = false, // 显式前台（默认）
             "--detach" | "-d" => opts.detach = true,
             "--volume" | "-v" => {
@@ -259,16 +260,15 @@ fn spawn_detached(opts: &RunOptions, args: &[String]) -> Result<u32> {
         .map_err(|e| WboxError::args(format!("定位 wbox 自身可执行文件失败：{}", e)))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("run");
+    // 默认名必须作为 wbox 选项放在镜像参数之前；镜像后的参数全部属于 guest。
+    if opts.name.is_none() {
+        cmd.arg("--name").arg(&name);
+    }
     // 原样透传参数，只摘掉 --detach 自己（否则子进程会再脱离一次，无限套娃）
     for a in args {
         if a != "--detach" && a != "-d" {
             cmd.arg(a);
         }
-    }
-    // 名字必须固定下来：默认名取自 pid，父子 pid 不同会各自算出不同的名字，
-    // 于是父进程建的日志目录和子进程登记的目录对不上。
-    if opts.name.is_none() {
-        cmd.arg("--name").arg(&name);
     }
     cmd.env(SUPERVISED_ENV, "1")
         .stdin(std::process::Stdio::null())
@@ -337,6 +337,7 @@ fn spawn_with_state(
     spec: &backend::RunSpec,
     prepared: &backend::Prepared,
     target: &str,
+    auto_remove: bool,
 ) -> Result<u32> {
     // 记 spec.cmd（用户要跑的 guest 命令）而不是 prepared.cmd：后者可能已被
     // 插入 wine/wbox-linux 前缀，对着 ps 看反而认不出自己起的是什么。
@@ -370,6 +371,14 @@ fn spawn_with_state(
         crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDERR);
     }
     drop(reg);
+    if supervised && auto_remove {
+        if let Err(cleanup) = crate::runstate::remove(&spec.name) {
+            if rc.is_ok() {
+                return Err(cleanup);
+            }
+            eprintln!("wbox: 警告：--rm 清理容器 '{}' 失败：{}", spec.name, cleanup);
+        }
+    }
     rc
 }
 
@@ -388,14 +397,14 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET)
+            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET, opts.auto_remove)
         }
         // Unsupported 也走 NativeBackend：它的 spawn 已经会给出明确的
         // "只能在 Windows 宿主上执行"错误，不必再重复一份文案。
         _ => {
             let backend = backend::NativeBackend;
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET)
+            spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET, opts.auto_remove)
         }
     }
 }
@@ -444,12 +453,12 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         backend::ImageBackendKind::Blink => {
             let backend = BlinkBackend;
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag())
+            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag(), opts.auto_remove)
         }
         backend::ImageBackendKind::LinuxNative => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag())
+            spawn_with_state(&backend, &spec, &prepared, &iref.repo_tag(), opts.auto_remove)
         }
     }
 }
@@ -629,13 +638,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_rm_flag_accepted_as_explicit_default() {
-        // --rm 等价默认：退出即清理（keep_profile=false）
+    fn parse_rm_enables_lifecycle_auto_remove() {
         let o = parse(&["--rm", "--", "x"]).unwrap();
         assert!(!o.keep_profile);
-        // 与 --keep-profile 同现后者覆盖（声明顺序生效）
+        assert!(o.auto_remove);
+        // profile 生命周期与容器记录生命周期相互独立。
         let o = parse(&["--rm", "--keep-profile", "--", "x"]).unwrap();
         assert!(o.keep_profile);
+        assert!(o.auto_remove);
     }
 
     #[test]

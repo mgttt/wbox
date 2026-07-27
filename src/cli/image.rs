@@ -3,7 +3,6 @@
 use crate::error::{Result, WboxError};
 use crate::backend;
 use crate::oci;
-use std::io::BufRead;
 
 /// `wbox image` 子命令：pull / list / show / rm。
 pub fn cmd_image(args: &[String]) -> Result<u32> {
@@ -47,15 +46,14 @@ fn remove_cached_image(iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
-/// `wbox image rm <REF> [--yes]`：删除已 pull 镜像的本地缓存。
-/// 保护性确认：默认在 stderr 提示并要求 stdin 输入 y/yes；
-/// `--yes`/`-y` 跳过确认（脚本场景）。用户取消返回 0（未删除任何内容）。
+/// `wbox image rm <REF>`：删除已 pull 镜像的本地缓存。
+/// 与 Docker/Podman 一致默认直接删除；`-f/--force` 和旧 `-y/--yes`
+/// 作为兼容选项接受。当前尚无镜像依赖跟踪，因此 force 与默认行为相同。
 pub(super) fn cmd_image_rm(args: &[String]) -> Result<u32> {
-    let mut yes = false;
     let mut positional: Vec<String> = Vec::new();
     for a in args {
         match a.as_str() {
-            "--yes" | "-y" => yes = true,
+            "--force" | "-f" | "--yes" | "-y" => {}
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!("未知选项 '{}'", other)));
             }
@@ -64,34 +62,6 @@ pub(super) fn cmd_image_rm(args: &[String]) -> Result<u32> {
     }
     let image_ref = super::args::take_single_positional(&positional, "image rm 缺少镜像引用")?;
     let iref = oci::ImageRef::parse(&image_ref, None)?;
-
-    // 先确认缓存存在，避免对未 pull 的引用做无谓确认。
-    let dir = oci::image_dir(&iref)?;
-    if !dir.is_dir() {
-        return Err(WboxError::registry(format!(
-            "镜像 '{}' 未 pull（缓存目录 '{}' 不存在），无需删除",
-            iref.repo_tag(),
-            dir.display()
-        )));
-    }
-
-    if !yes {
-        eprint!(
-            "wbox: 确认删除镜像 '{}' 的本地缓存（{}）？[y/N] ",
-            iref.repo_tag(),
-            dir.display()
-        );
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(|e| WboxError::args(format!("读取确认输入失败：{}", e)))?;
-        let answer = line.trim().to_ascii_lowercase();
-        if answer != "y" && answer != "yes" {
-            println!("wbox: 已取消，未删除任何内容");
-            return Ok(0);
-        }
-    }
 
     let dir = remove_cached_image(&iref)?;
     println!("wbox: 已删除 {}（{}）", iref.repo_tag(), dir.display());
@@ -229,12 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn image_rm_removes_planted_cache_with_yes() {
+    fn image_rm_removes_planted_cache_by_default() {
         let home = TempHome::new("rm-yes");
         let dir = home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
         assert!(dir.is_dir());
-        // --yes 跳过确认；删除后缓存目录消失
-        cmd_image_rm(&["fake:latest".to_string(), "--yes".to_string()]).unwrap();
+        cmd_image_rm(&["fake:latest".to_string()]).unwrap();
         assert!(!dir.exists());
         drop(home);
     }
@@ -242,8 +211,7 @@ mod tests {
     #[test]
     fn image_rm_uncached_ref_is_registry_error() {
         let home = TempHome::new("rm-uncached");
-        // 未 pull：即使 --yes 也报"未 pull"（不做无谓确认）
-        let e = cmd_image_rm(&["nope:0.1".to_string(), "--yes".to_string()]).unwrap_err();
+        let e = cmd_image_rm(&["nope:0.1".to_string(), "--force".to_string()]).unwrap_err();
         assert!(format!("{}", e).contains("未 pull"), "{}", e);
         drop(home);
     }

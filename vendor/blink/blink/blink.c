@@ -105,6 +105,11 @@ Config: ./configure MODE=" BUILD_MODE " " CONFIG_ARGUMENTS "\n"
 
 _Alignas(1) static const char USAGE[] =
     " [-" OPTS "] PROG [ARGS...]\n"
+#if defined(_WIN32) && !defined(__CYGWIN__) && defined(WBOX_BUILD_VERSION)
+    "\n"
+    "wbox-linux.exe is wbox's internal Linux ELF runtime.\n"
+    "Use wbox.exe for pull, images, run, ps, logs, stop, rm, and exec.\n"
+#endif
     "Options:\n"
     "  -h                   help\n"
 #ifndef DISABLE_JIT
@@ -499,6 +504,11 @@ int main(int argc, char *argv[]) {
     WriteErrorString(": command not found: ");
     WriteErrorString(argv[optind_]);
     WriteErrorString("\n");
+#if defined(_WIN32) && !defined(__CYGWIN__) && defined(WBOX_BUILD_VERSION)
+    WriteErrorString(
+        "hint: wbox-linux.exe is the internal ELF runtime; "
+        "use wbox.exe for container commands\n");
+#endif
     exit(EXIT_FAILURE_EXEC_FAILED);
   }
   argv[optind_] = g_pathbuf;
