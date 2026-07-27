@@ -61,12 +61,43 @@ wbox
 
 ### 2.3 非目标
 
-- `[out]` VM、Hyper-V、Windows Container/Silo 的替代实现。
-- `[out]` 文件系统 overlay、注册表重定向或 minifilter 驱动。
-- `[out]` GUI/DirectX/COM/Windows 服务和内核驱动工作负载。
-- `[out]` 完整网络命名空间、NAT、端口映射和流量策略。
-- `[out]` Docker daemon API、镜像构建、Compose 或 Kubernetes 兼容。
+范围随 §2.4 的对标基线做过一次调整：原先列为 `[out]` 的**文件系统重定向、
+端口映射、镜像构建**已被对标要求拉回范围内（见 §2.4 的差距表），因此从这里
+移出。仍然不做的是：
+
+- `[out]` VM、Hyper-V、Windows Container/Silo 的替代实现——wbox 的前提就是
+  这些都用不了。
+- `[out]` **内核驱动**（含 minifilter）。这条不只是"暂不做"：它划定了
+  §2.4 中 Windows 程序沙箱的**能力上限**，见那里的说明。
+- `[out]` GUI/DirectX/COM/Windows 服务工作负载（Wine 下的 GUI 另议）。
+- `[out]` Kubernetes 兼容与 Docker daemon 的线协议兼容——对标的是 **CLI 与
+  运行时行为**，不是做一个 drop-in 的 daemon。
 - `[out]` 未声明的弱化运行；缺少隔离前置时不得悄悄直接执行。
+
+### 2.4 对标基线
+
+四个象限各有明确的参照物。**列出参照物不等于承诺功能对等**——每格都写明
+当前能力与差距，能力上限受 §2.3 约束时也如实标注。
+
+| 象限 | 参照物 | 现状 | 主要差距 |
+|---|---|---|---|
+| Windows 宿主 × Windows 程序 | Sandboxie-Plus | AppContainer + Job：能力/完整性级别隔离、默认断网、进程树回收、`exec` | **无文件系统写重定向、无注册表虚拟化**；无命名沙箱的持久化存储 |
+| Windows 宿主 × Linux 镜像 | WSL2 / Docker Desktop | `wbox-linux` 用户态执行 OCI 镜像，双层隔离（AppContainer 套模拟器） | 无卷挂载、端口映射、镜像构建；**性能与 WSL2 不可比** |
+| Linux 宿主 × Linux 镜像 | Podman / Docker | rootless user/PID/mount/net namespace + cgroup v2 + OCI pull/run + 完整生命周期 | 无卷挂载、端口映射、镜像构建/push、compose、restart policy |
+| Linux 宿主 × Windows 程序 | Wine | 复用 Linux 隔离层调用系统 Wine | 不自带 Wine（依赖宿主安装）；无 wineprefix 管理；GUI 未覆盖 |
+
+**两条必须说破的天花板**，否则"对标"只是口号：
+
+1. **Windows 程序沙箱达不到 Sandboxie-Plus 的隔离强度。** Sandboxie 用
+   minifilter 驱动做文件/注册表重定向，而 wbox 明确不装驱动（§2.3，也是
+   "免安装、不要管理员权限"这一前提的直接后果）。用户态能做到的是
+   AppContainer 的能力裁剪 + 目录 ACL + per-package 存储；**写重定向的完整性
+   弱于驱动方案**。可以缩小差距，不能宣称等价。
+2. **Windows 上跑 Linux 镜像的性能与 WSL2 不是一个量级。** 没有虚拟化时靠
+   用户态解释/JIT，定位是"没有 VT-x/WSL2 时仍然能跑"，不是性能对标。
+
+对标的推进顺序按**跨象限收益**排：卷挂载与端口映射在三个象限同时有用，
+镜像构建只影响两个，Windows 文件系统重定向只影响一个且受天花板限制。
 
 ## 3. 用户与场景
 
@@ -525,6 +556,36 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
 | F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
 
+### F9 对标能力补齐 `[planned]`
+
+按 §2.4 的**跨象限收益**排序，不按实现难度排。每项都要能落到门禁上，
+否则又会变成"README 宣传了但没人跑过"的那类条目（F4.3 的教训）。
+
+```text
+F9
+├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— 三个象限都受益
+├── F9.2 端口映射 `-p`                        —— 两个象限，需要先有可用网络栈
+├── F9.3 镜像构建（Dockerfile 子集）          —— 两个象限
+└── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
+```
+
+**F9.1 卷 / 绑定挂载**（下一个该做的）。理由是跨象限收益最高：Linux 原生
+容器、Windows 上的 Linux 镜像、Wine 场景都要把宿主目录递进容器；harness
+想把工作区交给容器也全靠它。Linux 侧在已有 mount namespace 里加 bind mount
+即可，是现成隔离层的自然延伸。要定的语义：只读/读写、宿主路径必须存在
+（还是自动创建）、与 `pivot_root` 的先后顺序、以及**不得让 `-v /` 这类写法
+把整个宿主递进去**（安全断言，要进门禁）。
+
+**F9.2 端口映射**。当前默认是空 netns，映射需要先有 veth/slirp 之类的
+用户态网络方案（rootless 下不能建网桥）。**先取证再排期**，别先写 CLI 旗标。
+
+**F9.3 镜像构建**。只做 Dockerfile 子集（FROM/RUN/COPY/ENV/CMD/ENTRYPOINT）
+就能覆盖多数自用场景；RUN 直接复用现成的容器执行路径。
+
+**F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
+Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
+Windows 侧工作。
+
 ## 4.9 [TODO-PLAN] 跨宿主协作交接点
 
 本节是**给另一台宿主上的 agent 看的工作面**。约定很简单：谁的宿主谁验证，
@@ -540,7 +601,8 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 TODO-PLAN
 ├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
-└── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
+├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
+└── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
 ```
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
@@ -554,6 +616,25 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 长命 detached 启动输出。supervisor 可能继承 native-command 管道句柄，调用方
 会等待 EOF 直到容器退出。门禁改为按短命父 wbox 的进程句柄等待退出，不捕获
 该管道；这条约束属于测试基础设施，不改变产品 detach 语义。
+
+### W3 F9.4 Windows 文件系统写重定向的可行性取证 `[Windows agent]`
+
+**背景**。§2.4 把 Sandboxie-Plus 列为 Windows 程序沙箱的参照物，而它的核心
+能力——文件/注册表写重定向——是用 **minifilter 驱动**实现的。wbox 明确不装
+驱动（§2.3），这是"免安装、不要管理员权限"这一产品前提的直接后果，不是懒得做。
+
+**要取证的是：用户态能逼近到什么程度。** 候选路径（未验证，供挑选）：
+
+1. AppContainer 的 per-package 存储（`%LOCALAPPDATA%\Packages\<pkg>`）能否
+   充当"沙箱私有写入区"，以及非 UWP 的普通进程写系统路径时实际会落到哪里。
+2. 目录 ACL + 只读授权把宿主敏感路径挡在外面（`acl.rs` 已有基础）。代价是
+   **只能拒绝、不能重定向**——程序拿到的是写失败，而不是"看似写成功"。
+   对某些工作负载这是可接受的，对另一些则会直接崩，取证时要区分。
+3. 注册表侧有无不依赖驱动的虚拟化手段；若没有，如实记为不可达。
+
+**做完的标准**：给出"能做到哪一档"的结论与依据，并**直接改写 §2.4 那一格的
+差距描述**。结论允许是"用户态只能拒绝、做不到重定向"——那同样是有价值的结论，
+它让 README 不必再对 Sandboxie 含糊其辞。
 
 ### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[done]`
 

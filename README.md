@@ -35,6 +35,19 @@ Portable Windows 发布包包含两个文件：
 
 `wbox --help` 是 CLI 参数的唯一权威文本源。
 
+## 对标基线
+
+| 象限 | 参照物 | 差距 |
+|---|---|---|
+| Windows × Windows 程序 | Sandboxie-Plus | 无文件系统写重定向、无注册表虚拟化 |
+| Windows × Linux 镜像 | WSL2 / Docker Desktop | 无卷挂载/端口映射/构建；性能不可比 |
+| Linux × Linux 镜像 | Podman / Docker | 无卷挂载/端口映射/构建/compose |
+| Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖 |
+
+两条硬天花板：wbox **不装内核驱动**，所以 Windows 程序沙箱达不到 Sandboxie
+（minifilter）级别的写重定向完整性；没有虚拟化时 Windows 上跑 Linux 镜像靠
+用户态执行，**性能与 WSL2 不是一个量级**。详见 [PRD.md](PRD.md) §2.4。
+
 ## 能力边界
 
 | 能力 | Windows 宿主 | Linux 宿主 |
