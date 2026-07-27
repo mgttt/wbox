@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.18 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.19 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -49,14 +49,15 @@ F9.1–F9.18 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.16 原始层留存 + 原样回推 | PSH.6–PSH.7 | pull 留一份压缩层，多层镜像 push 回去 digest 不变 |
 | F9.17 构建产物分层 | PSH.8a–PSH.8c | build 产物 = 基础层 + 增量层，push 时基础层被跳过 |
 | F9.18 FROM 硬链接共享 | OVB.1–OVB.4 | 磁盘共享数据块；靠 COPY unlink-first + RUN 走 overlay 保证基础镜像不被就地改写 |
+| F9.19 `wbox diff` | DF.1–DF.3 | 直接读 overlay upper 得出 A/C/D，不扫全树；无 overlay 层时报错而非打印空清单 |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **344 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **130 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **350 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **133 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净

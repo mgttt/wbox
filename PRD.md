@@ -137,6 +137,7 @@ wbox
 | rootless 运行 | 有 | user/PID/mount/net/**IPC/UTS** namespace（F9.15 补齐后两个）|
 | 资源限额 | 有 | cgroup v2 首选，受限时明确回退或拒绝 |
 | `run/exec/ps/logs/stop/kill/top/rm/inspect/wait` | 有 | F8 全套；`kill`（F1.7.9）与 `top`（F1.7.10）为后补 |
+| `diff` | 有 | F9.19：A/C/D 与 docker 对齐；直接读 overlay upper，不扫全树（门禁 DF.1–DF.3）|
 | `--detach` | 有 | |
 | 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
@@ -813,7 +814,8 @@ F9
 ├── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
 ├── F9.16 原始层留存与原样回推                 —— [done]（门禁 PSH.6–PSH.7）
 ├── F9.17 构建产物分层（基础层 + 增量层）      —— [done]（门禁 PSH.8a–PSH.8c）
-└── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
+├── F9.18 FROM 硬链接共享基础层                —— [done]（仅 Linux，门禁 OVB.1–OVB.4）
+└── F9.19 `wbox diff` 列出容器改动             —— [done]（仅 Linux，门禁 DF.1–DF.3）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -1008,6 +1010,24 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.19 `wbox diff`** `[done]`（门禁 DF.1–DF.3）。列出容器相对镜像改动了什么，
+输出格式与 `docker diff` 一致（`A`/`C`/`D` + 容器内路径）。
+
+**这一格几乎是 F9.12 白送的**：容器对 `/` 的所有写入都落在 overlay 的 upper 里，
+**upper 的内容就是答案**，不必扫描整棵 rootfs 去比对——那既慢又要拿到镜像原树。
+判别规则与 build 侧的合并逻辑同源（字符设备 0:0 = 删除），两处不会各自漂移。
+
+两个容易做错的地方：
+
+- **镜像里已有的目录不报**。overlay 会为"改了某个子项"而在 upper 里建同名目录，
+  把它们都报成 `C` 会让输出塞满噪音。只有目录**本身是新增的**才报 `A`。
+- **没有 overlay 层时报错，不打印空清单**。宿主程序模式不换根、内核不支持时
+  回退了共享写入，这两种情况都拿不出这个答案；空清单会被读成"没改过"，
+  那是把"不知道"说成了"没有"（DF.3）。
+
+`.wbox_oldroot` 是 pivot_root 的暂存目录、必然出现在 upper 里，已滤掉——
+把自己的实现细节混进用户看的答案里，等于让用户替我们记住内部约定（DF.2）。
 
 **F9.18 `FROM` 硬链接共享基础层** `[done]`（门禁 OVB.1–OVB.4）。
 

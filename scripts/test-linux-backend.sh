@@ -1696,6 +1696,51 @@ HOME=$WORK/home "$WBOX_ABS" kill iupeer >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm iupeer iuhost iuh2 >/dev/null 2>&1
 
 echo
+echo "=== DF wbox diff（PRD F9.19）==="
+
+# 三类改动一次测全：A 新增、C 改动、D 删除。只测其中一类会漏掉分类逻辑的错——
+# 而分类错的表现是"清单看着有内容"，很容易蒙混过去。
+mkdir -p "$CACHE/rootfs/dfetc"
+printf 'orig\n' > "$CACHE/rootfs/dfetc/conf"
+printf 'gone\n' > "$CACHE/rootfs/dfetc/todelete"
+HOME=$WORK/home "$WBOX_ABS" run -d --name dfc lbetest -- \
+  /bin/sh -c 'echo new > /dfetc/conf; rm /dfetc/todelete; echo x > /dfnew.txt; sleep 20' >/dev/null 2>&1
+sleep 2
+dout=$(HOME=$WORK/home "$WBOX_ABS" diff dfc 2>&1); drc=$?
+if [ "$drc" -eq 0 ] \
+   && printf '%s' "$dout" | grep -qx 'A /dfnew.txt' \
+   && printf '%s' "$dout" | grep -qx 'C /dfetc/conf' \
+   && printf '%s' "$dout" | grep -qx 'D /dfetc/todelete'; then
+  report PASS "DF.1 diff 正确区分新增/改动/删除（A/C/D，与 docker 对齐）"
+else
+  report FAIL "DF.1 三类改动" "rc=$drc 输出: $(printf '%s' "$dout" | tr '\n' ' ' | head -c 200)"
+fi
+
+# wbox 自己的换根暂存目录不该出现在用户看的清单里——那是实现细节，
+# 混进答案里等于让用户替我们记住内部约定。
+if ! printf '%s' "$dout" | grep -q '.wbox_oldroot'; then
+  report PASS "DF.2 内部产物 .wbox_oldroot 不出现在 diff 输出中"
+else
+  report FAIL "DF.2 内部产物泄漏" "输出: $(printf '%s' "$dout" | tr '\n' ' ' | head -c 160)"
+fi
+HOME=$WORK/home "$WBOX_ABS" kill dfc >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm dfc >/dev/null 2>&1
+
+# 宿主程序模式没有 overlay 层，拿不出这个答案：必须报错而不是打印空清单
+# ——空清单会被读成"没改过"，那是把"不知道"说成了"没有"。
+HOME=$WORK/home "$WBOX_ABS" run -d --name dfhost -- /bin/sleep 10 >/dev/null 2>&1
+sleep 1
+dout=$(HOME=$WORK/home "$WBOX_ABS" diff dfhost 2>&1); drc=$?
+if [ "$drc" -ne 0 ] && printf '%s' "$dout" | grep -q "宿主程序模式"; then
+  report PASS "DF.3 无 overlay 层时报错并说明原因（不打印空清单）"
+else
+  report FAIL "DF.3 无 overlay 层" "rc=$drc 输出: $(printf '%s' "$dout" | head -c 160)"
+fi
+HOME=$WORK/home "$WBOX_ABS" kill dfhost >/dev/null 2>&1
+HOME=$WORK/home "$WBOX_ABS" rm dfhost >/dev/null 2>&1
+rm -rf "$CACHE/rootfs/dfetc"
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。
