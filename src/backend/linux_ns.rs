@@ -725,6 +725,21 @@ fn write_limits(spec: &RunSpec, target: &std::path::Path) -> Option<Vec<String>>
         let v = (l.memory_mb * 1024 * 1024).to_string();
         std::fs::write(target.join("memory.max"), &v).ok()?;
         wrote.push(format!("memory.max={}", v));
+        // **必须同时封掉 swap**，否则 `--memory` 在两条路径上的含义不一样：
+        // `RLIMIT_AS` 直接让分配失败，而 `memory.max` 只限**常驻内存**，
+        // 超出的页会被换出去，程序照跑不误。门禁实测抓到过：同一条
+        // `--memory 16`，rlimit 路径下 64MB 分配失败，cgroup 路径下却成功
+        // （runner 开着 swap）。同一条命令在不同宿主上强度不同，正是
+        // PRD F5 一致性要求禁止的。
+        //
+        // 文件不存在 = 内核没开 swap 记账 = 本来就没有 swap 逃逸，跳过即可；
+        // 存在却写不进去则放弃 cgroup 方案——宁可退回 rlimit，也不要一个
+        // 名不副实的"内存上限"。
+        let swap_max = target.join("memory.swap.max");
+        if swap_max.exists() {
+            std::fs::write(&swap_max, "0").ok()?;
+            wrote.push("memory.swap.max=0".to_string());
+        }
     }
     if l.max_procs > 0 {
         std::fs::write(target.join("pids.max"), l.max_procs.to_string()).ok()?;
@@ -811,29 +826,11 @@ fn try_cgroup_plan(
         return abandon();
     }
 
-    let mut wrote = Vec::new();
-    if l.memory_mb > 0 {
-        let v = (l.memory_mb * 1024 * 1024).to_string();
-        if std::fs::write(target.join("memory.max"), &v).is_err() {
-            return abandon();
-        }
-        wrote.push(format!("memory.max={}", v));
-    }
-    if l.max_procs > 0 {
-        if std::fs::write(target.join("pids.max"), l.max_procs.to_string()).is_err() {
-            return abandon();
-        }
-        wrote.push(format!("pids.max={}", l.max_procs));
-    }
-    if l.cpu_pct > 0 {
-        // cpu.max 格式："<quota_us> <period_us>"；period 取默认 100ms
-        let period = 100_000u64;
-        let quota = period * u64::from(l.cpu_pct) / 100;
-        if std::fs::write(target.join("cpu.max"), format!("{} {}", quota, period)).is_err() {
-            return abandon();
-        }
-        wrote.push(format!("cpu.max={}/{}", quota, period));
-    }
+    // 与策略 A 共用同一个写入函数：两条路径的限额语义必须**逐字节一致**，
+    // 各写各的迟早会漂（比如只在一边封了 swap）。
+    let Some(wrote) = write_limits(spec, &target) else {
+        return abandon();
+    };
     if spec.verbose {
         verbose_kv("限额（cgroup v2）", wrote.join(" "));
         verbose_kv("cgroup（guest）", target.display());

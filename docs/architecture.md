@@ -169,6 +169,15 @@ wbox: cgroup（wbox 自身） = .../run/supervisor/wbox-supervisor
 `cgroup.procs` 的 `EACCES` 本身不能证明 no-internal-process 规则。
 `scripts/probe-cgroup2.sh` 只有在确认进程实际迁移成功后才对布局下结论。
 
+`--memory` 在 cgroup 路径下必须同时写 `memory.swap.max=0`。否则两条路径的
+含义不同：`RLIMIT_AS` 直接让分配失败，而 `memory.max` 只限**常驻内存**，
+超出的页会被换出去，程序照跑不误。门禁实测抓到过这一点——同一条
+`--memory 16`，rlimit 路径下 64MB 分配失败，cgroup 路径下却成功（runner 开着
+swap）。同一条命令在不同宿主上强度不同，正是一致性要求禁止的。
+`memory.swap.max` 不存在（内核未开 swap 记账）时跳过即可，本来就没有 swap
+逃逸；存在却写不进去则放弃 cgroup 方案，宁可退回 rlimit，也不要一个名不副实
+的"内存上限"。两条策略共用同一个写入函数，避免各写各的日久漂移。
+
 仅当语义等价时允许 rlimit 回退。例如累计 CPU 秒数不等价于 CPU 百分比；
 特权进程的 `RLIMIT_NPROC` 也不能可靠限制进程数。不能满足时明确拒绝。
 
