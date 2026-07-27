@@ -93,6 +93,9 @@ jobs:
       - name: 冒烟 —— AppContainer 内跑 cmd.exe（隔离链路真机验证）
         shell: pwsh
         run: scripts/test-windows-native.ps1 -Wbox target/debug/wbox.exe
+      - name: 网络行为门禁 —— 默认断网 / 显式放行
+        shell: pwsh
+        run: scripts/test-windows-network.ps1 -Wbox target/debug/wbox.exe
       # 镜像拉取真机验证：registry（docker.m.daocloud.io）不可达/被墙时
       # 记 ::warning:: 标黄，exit /b 0 不红；其余链路（HTTP/TLS/解包/ACL）
       # 一旦跑通即给出真机信号。严格失败场景由仓库内单测覆盖。
