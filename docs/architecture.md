@@ -104,6 +104,12 @@ cgroup 的写权限、控制器下发和 no-internal-process 规则，不能仅�
 因此受限 target 必须是 wbox 所在 supervisor leaf 的兄弟，而不能是其子节点。
 当前代码尚未完成这一布局改造，cgroup v2 首选路径仍无产品级覆盖。
 
+改造时必须一并修掉一个既有缺陷：`try_cgroup_plan` 只在失败路径
+（`abandon()`）删除刚创建的 cgroup 目录，成功路径从不清理。即每成功执行一次
+`wbox run` 就在宿主留下一个空的 `wbox-<pid>` 目录，而 cgroup v2 不会自动回收。
+该泄漏至今未被观察到，只是因为成功路径在任何环境都没有执行过；布局改对之后
+会立即显现。这是通读代码发现的，测试不会报——零覆盖的路径不能默认其正确。
+
 取证还要区分权限与规则错误：迁移进程要求对源和目标的共同祖先有写权限，
 `cgroup.procs` 的 `EACCES` 本身不能证明 no-internal-process 规则。
 `scripts/probe-cgroup2.sh` 只有在确认进程实际迁移成功后才对布局下结论。
