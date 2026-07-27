@@ -694,7 +694,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 F9
 ├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
-├── F9.3 镜像构建（Dockerfile 子集）          —— [verify]（Linux 已完成，Windows 待 CI）
+├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux + Windows）
 └── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
 ```
 
@@ -762,7 +762,7 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 
 **能力边界：只覆盖 TCP。** UDP 与 ICMP 这套做不了，README 与 `--help` 都写明了。
 
-**F9.3 镜像构建** `[verify]`（Linux 门禁 B.1–B.4 已完成；Windows WP.18 待 CI）。
+**F9.3 镜像构建** `[done]`（Linux 门禁 B.1–B.6；Windows 门禁 WP.18）。
 `wbox build -t NAME[:TAG] [-f Dockerfile] <上下文>`，子集为
 `FROM/RUN/COPY/ENV/WORKDIR/CMD/ENTRYPOINT`。
 
@@ -808,7 +808,7 @@ TODO-PLAN
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
-├── W4 build 在 Windows 宿主的可行性          [Windows agent] 待 CI
+├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 └── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
 ```
 
@@ -877,7 +877,7 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
 退出，不会被掩盖。
 
-### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[verify]`
+### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 
 Windows 已能执行 F9.3 子集。`FROM` 先复制到 staging rootfs，`RUN` 复用
 AppContainer + Blink 运行路径并默认授予网络 capability；每一步使用临时容器记录，
@@ -891,7 +891,7 @@ Windows symlink 复制复用 Blink 的逃逸约束。Linux `/etc/...` 根路径�
 
 WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重建必须命中
 `CACHED`；运行产物必须同时输出 COPY/RUN 标记，并断言基础镜像未被修改、staging
-无残留。本机已通过；CI 通过后将本节与 F9.3 恢复为 `[done]`。
+无残留。本机与 CI 30265370299 均已通过。
 
 ### L2 Wine 象限的 `wineprefix` 隔离 `[Linux agent]` `[done]`
 
