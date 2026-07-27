@@ -141,9 +141,12 @@ Dockerfile 子集解析器一致。
 
 ### 明确不做的（别去做，PRD 已列为天花板/非目标）
 
-- Windows 侧文件系统写重定向做到 Sandboxie 级别 —— 要 minifilter 驱动，撞天花板一。
-  用户态能逼近到什么程度是 §4.9 **W3，属 Windows agent**，且结论允许是"只能拒绝、
-  不能重定向"。
+- Windows 侧文件系统写重定向做到 Sandboxie 级别 —— §4.9 **W3**。**结构性分析已
+  完成**（读本仓库代码即可得）：拒绝那一档已经免费成立（AppContainer + Low IL
+  默认就拒绝，`acl.rs` 是在**打开**口子）；重定向那一档差的是**介入点**——Q2 有
+  Blink VFS 在路径上，Q1 的原生 PE 程序发真 NT 调用，架构里没有任何东西经手，
+  不注入挂钩就无从重定向。剩两条必须实机测：AppContainer 下 UAC VirtualStore
+  还生不生效、per-package 存储对非 UWP 进程是否自动可写。
 - 自定义 bridge 网络 / 内建 DNS —— rootless 下要 slirp4netns/pasta 级常驻网络栈，
   与"免安装、无服务"（§2.2）冲突。
 - 镜像**分层**存储（`FROM`/pull 仍整份复制）。注意它与 F9.12 的**运行期**可写层是

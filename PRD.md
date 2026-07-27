@@ -89,12 +89,12 @@ wbox
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 进程隔离与降权 | 有 | AppContainer SID + 低完整性级别 |
+| 进程隔离与降权 | 有 | AppContainer SID + 低完整性级别；**默认拒绝**访问用户目录，rootfs 要显式授 ACE 才读得到（`acl.rs`）|
 | 默认断网 | 有 | 不授 `INTERNET_CLIENT` capability |
 | 资源限额（内存/CPU/进程数）| 有 | Job Object；Sandboxie 本身反而不强调这块 |
 | 进程树可靠回收 | 有 | Job `KILL_ON_JOB_CLOSE` |
 | 生命周期（ps/stop/kill/top/rm/logs/exec/inspect/wait）| 有 | F8 全套，含 F1.7.9 `kill` 与 F1.7.10 `top` |
-| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动；wbox 不装驱动（天花板一）。取证见 §4.9 W3 |
+| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动。**结构性原因**：原生 PE 程序发真 NT 调用，wbox 架构里没有介入点（对比 Q2 有 Blink VFS）；不注入就无从重定向。已兑现的是「拒绝 + 显式授权」，见 §4.9 W3 |
 | **注册表虚拟化** | **不做** | 同上 |
 | 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念；随 §4.9 W3 的结论而定 |
 | 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子，撞天花板一 |
@@ -1368,7 +1368,7 @@ TODO-PLAN
 ├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
 ├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
-├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 待认领
+├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 结构性分析已完成，剩 2 条实机取证
 ├── W5 Q2 端口映射 -p 的可行性取证           [Linux agent] 已完成：语义不适用
 ├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
 ├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
@@ -1434,6 +1434,41 @@ blink 加一层用户态网络栈，那是另一个数量级的工作。
 **做完的标准**：给出"能做到哪一档"的结论与依据，并**直接改写 §2.4 那一格的
 差距描述**。结论允许是"用户态只能拒绝、做不到重定向"——那同样是有价值的结论，
 它让 README 不必再对 Sandboxie 含糊其辞。
+
+---
+
+**结构性分析（Linux agent 读本仓库代码得出，不需要 Windows 机器）。**
+它不替代实机取证，但把剩下要测的东西收窄了一大截：
+
+*拒绝那一档已经成立，而且是免费的。* `acl.rs` 的文档说得很清楚：AppContainer
+令牌 + Low 完整性级别下，子进程**默认读不到** `%USERPROFILE%\.wbox\...\rootfs`，
+必须显式授 `ALL APPLICATION PACKAGES` 的读 ACE 才行。换句话说，
+**默认姿态就是拒绝**——我们的 `grant_read_recursive` / `grant_modify_recursive_for_profile`
+是在**打开**口子，不是在关。所以候选路径 2（ACL 拒绝）不必再取证：它已经是
+现状，且不装驱动。
+
+*重定向那一档，差的是"介入点"，不是 API。* 这一条是两个象限的结构差异：
+
+- **Q2（Linux 镜像）有介入点**：guest 的每次文件操作都过 Blink 的 VFS
+  （`vfs.c` / `hostfs.c`），所以 Windows 侧的 `-v` 才可能靠 broker + VFS 数据面
+  做出来——那正是 Windows agent 在推进的路。
+- **Q1（原生 Windows 程序）没有介入点**：PE 程序发的是真的 NT 系统调用，
+  wbox 的架构里没有任何东西在这条路径上。要重定向就得往目标进程里注入并挂钩
+  API，那是与 minifilter 完全不同的一套代价（逐 API 覆盖、易被绕过、
+  与 AppContainer 的注入限制冲突），**不是"换个 Win32 调用"就能做的**。
+
+*因此结论的大致形状可以先写下来*：Q1 的写重定向在"不装驱动 + 不注入"的前提下
+**做不到**；能兑现的是"拒绝 + 显式授权"，即当前状态。
+
+**留给实机取证的只剩两个具体问题**（其余已被上面收敛掉）：
+
+1. AppContainer 下，**旧版应用的 UAC 文件/注册表虚拟化**（`VirtualStore`）
+   还生不生效？若生效，那是 OS 免费给的一层"看似写成功"，值得如实记入 §2.4，
+   哪怕它只覆盖一部分程序。
+2. `%LOCALAPPDATA%\Packages\<pkg>` 这类 per-package 存储，对**非 UWP** 的
+   AppContainer 进程是否真的自动可写；若是，它能否充当"沙箱私有写入区"。
+
+这两条都必须在真实 Windows 上测，读代码定不了。
 
 ### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[done]`
 
