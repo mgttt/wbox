@@ -474,4 +474,7 @@ finally {
         $env:HOST_ONLY_MARKER = $savedMarker
     }
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    # Cleanup intentionally probes names that may already have been removed.
+    # Do not let the last ignored native rc become the script's process rc.
+    $global:LASTEXITCODE = 0
 }

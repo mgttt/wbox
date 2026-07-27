@@ -53,7 +53,7 @@ fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
 
 pub fn cmd_stop(args: &[String]) -> Result<u32> {
     let opts = parse(args)?;
-    let mut locked = runstate::lock_existing(opts.name)?;
+    let locked = runstate::lock_existing(opts.name)?;
     let dir = locked.dir.clone();
     if runstate::liveness(&dir) == Liveness::Exited {
         // 已经停了不算错：stop 的意图是"让它别再跑"，这个状态已经满足。
@@ -94,6 +94,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
 
     #[cfg(windows)]
     {
+        let mut locked = locked;
         locked.mark_stopping()?;
         // 必须直接终止命名 Job。只杀 supervisor 并依赖 KILL_ON_JOB_CLOSE 不够：
         // 并发 exec 控制器可能仍持有同一 Job 的另一个 handle。

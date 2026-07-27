@@ -567,6 +567,11 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 
 `WP.13-WP.17` 已在 Windows 实机通过，待 main CI 后改为 `[done]`。
 
+首次 main CI 中 WP.1–WP.17 全部打印 PASS，但 job 仍返回 1：`finally` 为兜底清理
+已删除的记录，最后一次 `wbox rm` 的预期非零码残留成整个 PowerShell 脚本的退出
+码。门禁现于 finally 末尾显式清零被忽略的清理码；真正的断言失败仍通过 throw
+退出，不会被掩盖。
+
 ### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 
 **已实现**（`wbox exec <NAME> -- <CMD>`），门禁 P.19–P.22。两个坑都是实测才

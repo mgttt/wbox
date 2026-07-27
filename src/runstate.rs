@@ -478,6 +478,7 @@ pub struct LockedEntry {
 impl LockedEntry {
     /// 在状态操作锁保护下发布停止意图。发布后新的 `exec` 必须拒绝附着；
     /// 调用方应在释放本锁前终止平台生命周期对象。
+    #[cfg(windows)]
     pub fn mark_stopping(&mut self) -> Result<()> {
         if !self.entry.stopping {
             self.entry.stopping = true;
