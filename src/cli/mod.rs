@@ -46,34 +46,34 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox compose [-f FILE] [-p NAME] up -d|down|ps    多容器编排子集（仅 Linux，见 PRD F9.14）
   wbox diff <NAME>                                 列出容器相对镜像改动了哪些文件（仅 Linux）
   wbox commit <NAME> <IMAGE[:TAG]>                 把容器改动固化成新镜像（仅 Linux，见 PRD F9.20）
-  wbox pause|unpause <NAME>                        暂停/恢复容器（仅 Linux，见 PRD F9.21）
+  wbox pause|unpause <NAME>...                     暂停/恢复容器（仅 Linux，见 PRD F9.21）
   wbox cp <NAME>:<路径> <宿主路径>                 容器与宿主间拷贝（反向亦可，见 PRD F9.23）
   wbox stats [NAME...]                             容器实时资源占用（仅 Linux，见 PRD F9.24）
   wbox export -o <FILE> <NAME>                     把容器当前文件系统打成裸 tar（见 PRD F9.25）
   wbox import -t <IMAGE[:TAG]> <FILE>              从裸 rootfs tar 造一个镜像
   wbox save -o <FILE> <IMAGE>                      把镜像打包成 tar（离线搬运，见 PRD F9.22）
   wbox load -i <FILE> [-t <IMAGE>]                 从 tar 还原镜像
-  wbox images                                      `wbox image list` 的兼容别名
-  wbox rmi [-f] <REF>                              `wbox image rm` 的兼容别名
+  wbox images [-q]                                 `wbox image list` 的兼容别名（-q 只出引用）
+  wbox rmi [-f] <REF>...                           `wbox image rm` 的兼容别名（可给多个）
   wbox build -t NAME[:TAG] [-f Dockerfile] <上下文目录>   从 Dockerfile 子集构建镜像
   wbox create [RUN OPTIONS] IMAGE|-- PROGRAM        保存容器配置但不启动
   wbox start <NAME>...                              启动 created/exited 容器
   wbox restart [-t <秒>] <NAME>...                  停掉再按原配置起来（见 PRD F9.26）
   wbox image pull <REF> [--os linux] [--arch amd64] [--registry <HOST>] [-V]
-  wbox image list | image ls
+  wbox image list [-q] | image ls
   wbox image show <REF>                            打印已 pull 镜像的 config 摘要
   wbox image inspect <REF>...                      输出本地镜像的机器可读 JSON
-  wbox image rm [-f] <REF>                         删除已 pull 镜像的本地缓存
-  wbox ps [-a]                                     列出已登记的容器（-a 含已退出的残留）
+  wbox image rm [-f] <REF>...                      删除已 pull 镜像的本地缓存
+  wbox ps [-a] [-q]                                列出已登记的容器（-a 含已退出的残留；-q 只出名字）
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
-  wbox stop <NAME> [--timeout <秒>]                停掉运行中的容器（先请求退出，超时则强制）
+  wbox stop [--timeout <秒>] <NAME>...             停掉运行中的容器（先请求退出，超时则强制）
   wbox kill [-s KILL] <NAME>...                    立即强制终止运行中的容器
   wbox top <NAME>                                  列出容器隔离单元内的进程
-  wbox rm <NAME>...                                删除已退出的容器记录（运行中的会拒绝）
+  wbox rm [-f] <NAME>...                           删除容器记录（默认拒绝运行中的；-f 先停再删）
   wbox rename <旧名> <新名>                        给未运行的容器改名（见 PRD F9.27）
   wbox prune [-f]                                  批量清掉已退出的容器记录（不加 -f 只列清单）
-  wbox logs <NAME> [--stderr]                      读取 --detach 容器的输出
+  wbox logs [-f] [--tail N] [--stderr] <NAME>       读取 --detach 容器的输出（-f 持续跟随，见 PRD F9.28）
   wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
   wbox --help | -h
   wbox --version

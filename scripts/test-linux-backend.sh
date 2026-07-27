@@ -1865,6 +1865,17 @@ else
   report FAIL "PZ.1 pause 冻结" "rc=$prc 停后立即=$during 再过 1 秒=$still（应相同）"
 fi
 
+# 暂停状态必须**看得见**。此前 pause 是真停了（PZ.1 已证），但 ps 仍显示
+# "running"、inspect 的 Paused 写死 false——用户没有任何办法把暂停的容器和正常
+# 跑的区分开，而 docker 用户会拿 .State.Paused 去写脚本（F9.32）。
+pzps=$(HOME=$WORK/home "$WBOX_ABS" ps | awk '$1=="pzc"{print $2}')
+pzins=$(HOME=$WORK/home "$WBOX_ABS" inspect pzc 2>&1 | grep '"Paused"')
+if [ "$pzps" = "paused" ] && printf '%s' "$pzins" | grep -q true; then
+  report PASS "PZ.4 暂停状态在 ps 与 inspect 里都看得见"
+else
+  report FAIL "PZ.4 暂停可见性" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
+fi
+
 pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
 sleep 1
 after=$(cat "$PZFILE" 2>/dev/null)
@@ -1872,6 +1883,15 @@ if [ "$prc" -eq 0 ] && [ -n "$after" ] && [ "$after" != "$still" ]; then
   report PASS "PZ.2 unpause 后容器恢复工作（计数 $still → $after）"
 else
   report FAIL "PZ.2 unpause 恢复" "rc=$prc 暂停时=$still 恢复 1 秒后=$after（应不同）"
+fi
+
+# 恢复后状态也要跟着变回去——只会往一个方向变的"状态"等于没有状态
+pzps=$(HOME=$WORK/home "$WBOX_ABS" ps | awk '$1=="pzc"{print $2}')
+pzins=$(HOME=$WORK/home "$WBOX_ABS" inspect pzc 2>&1 | grep '"Paused"')
+if [ "$pzps" = "running" ] && printf '%s' "$pzins" | grep -q false; then
+  report PASS "PZ.5 unpause 后状态变回 running（可逆，不是单向标记）"
+else
+  report FAIL "PZ.5 状态可逆" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
 fi
 HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
@@ -2028,6 +2048,246 @@ fi
 
 HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
+
+echo
+echo "=== INS inspect 如实反映挂载与端口（PRD F9.33）==="
+
+# 判据是**inspect 说的和容器实际有的一致**。此前 Mounts 写死 []、端口根本没出现，
+# 容器明明挂着卷、发布着端口，inspect 却说没有——给一个恒空的字段比不给更糟，
+# docker 用户会拿 .Mounts / .HostConfig.PortBindings 去写脚本。
+INSH=$WORK/inshome
+rm -rf "$INSH" && mkdir -p "$INSH" "$WORK/insdata"
+HOME=$INSH "$WBOX_ABS" run -d --name insc -v "$WORK/insdata:/mnt/data:ro" -p 18099:80 \
+  -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+
+# 先确认容器**真的**挂上了——不然下面比对的是两个都为空的东西
+insreal=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'mount | grep -c /mnt/data' 2>&1 | tail -1)
+insj=$(HOME=$INSH "$WBOX_ABS" inspect insc 2>&1)
+if [ "$insreal" = "1" ] \
+   && printf '%s' "$insj" | grep -q '"Destination": "/mnt/data"' \
+   && printf '%s' "$insj" | grep -q '"RW": false'; then
+  report PASS "INS.1 inspect 的 Mounts 反映真实挂载（含 :ro）"
+else
+  report FAIL "INS.1 Mounts" "容器内挂载数=$insreal Mounts 段: $(printf '%s' "$insj" | grep -A6 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+fi
+
+if printf '%s' "$insj" | grep -q '"80/tcp"' && printf '%s' "$insj" | grep -q '"HostPort": "18099"'; then
+  report PASS "INS.2 inspect 的 PortBindings 反映 -p 发布的端口"
+else
+  report FAIL "INS.2 PortBindings" "$(printf '%s' "$insj" | grep -A5 PortBindings | tr '\n' ' ' | head -c 160)"
+fi
+
+# 没挂卷的容器要如实是空，不能反过来凭空造出条目
+HOME=$INSH "$WBOX_ABS" run -d --name insplain -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+insj=$(HOME=$INSH "$WBOX_ABS" inspect insplain 2>&1)
+if printf '%s' "$insj" | grep -q '"Mounts": \[\]'; then
+  report PASS "INS.3 没挂卷的容器 Mounts 如实为空"
+else
+  report FAIL "INS.3 空 Mounts" "$(printf '%s' "$insj" | grep -A4 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+fi
+
+HOME=$INSH "$WBOX_ABS" rm -f $(HOME=$INSH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+rm -rf "$INSH" "$WORK/insdata"
+
+echo
+echo "=== IMQ images -q / rmi 多引用（PRD F9.31）==="
+
+# 判据是**列出来的名字喂得回去**。此前 IMAGE 列印的是缓存目录名
+# （library_lbetest），照抄去 rmi 会得到「镜像 'library/library_lbetest' 未 pull」
+# ——列出来的名字谁都用不了，而表面上命令是成功的。
+iout=$(HOME=$WORK/home "$WBOX_ABS" images 2>&1)
+if printf '%s' "$iout" | grep -q 'library/lbetest:latest' \
+   && ! printf '%s' "$iout" | awk '$2=="library_lbetest"{f=1} END{exit !f}'; then
+  report PASS "IMQ.1 images 的 IMAGE 列给的是可直接使用的引用（非缓存目录名）"
+else
+  report FAIL "IMQ.1 IMAGE 列" "输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+
+# -q 只出引用：表头、说明行混进去都会被当成镜像引用传下去
+iout=$(HOME=$WORK/home "$WBOX_ABS" images -q 2>&1); irc=$?
+ibad=$(printf '%s\n' "$iout" | grep -vc ':')
+if [ "$irc" -eq 0 ] && printf '%s' "$iout" | grep -qx 'library/lbetest:latest' && [ "$ibad" -eq 0 ]; then
+  report PASS "IMQ.2 images -q 只出引用（无表头、无说明行）"
+else
+  report FAIL "IMQ.2 images -q" "rc=$irc 输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+
+# 端到端：照抄 -q 的输出去 rmi（多引用），在**独立 HOME** 里做，
+# 免得把别的组还要用的 lbetest 镜像删掉。
+IMH=$WORK/imqhome
+rm -rf "$IMH" && mkdir -p "$IMH"
+for n in library_d1 library_d2 org_team_app; do
+  mkdir -p "$IMH/.wbox/images/registry-1.docker.io/$n/latest/rootfs"
+  echo '[]' > "$IMH/.wbox/images/registry-1.docker.io/$n/latest/layers.json"
+done
+iout=$(HOME=$IMH "$WBOX_ABS" rmi $(HOME=$IMH "$WBOX_ABS" images -q) 2>&1); irc=$?
+ileft=$(HOME=$IMH "$WBOX_ABS" images -q 2>&1 | grep -c ':')
+if [ "$irc" -eq 0 ] && [ "$ileft" -eq 0 ]; then
+  report PASS "IMQ.3 wbox rmi \$(wbox images -q) 清空缓存（含多级仓库名 org/team/app）"
+else
+  report FAIL "IMQ.3 rmi 多引用" "rc=$irc 剩余=$ileft 输出: $(printf '%s' "$iout" | tr '\n' '|' | head -c 200)"
+fi
+rm -rf "$IMH"
+
+echo
+echo "=== RMF ps -q / rm -f（PRD F9.29）==="
+
+# 这一组只碰状态记录，不需要镜像；用独立 HOME + 宿主程序模式，与别的组无关。
+RFH=$WORK/rfhome
+rm -rf "$RFH" && mkdir -p "$RFH"
+HOME=$RFH "$WBOX_ABS" run -d --name rf1 -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$RFH "$WBOX_ABS" run -d --name rf2 -- /bin/echo done >/dev/null 2>&1
+sleep 2
+
+# -q 是给脚本用的：**只能出名字**。空表说明、表头混进去都会被当成容器名传下去。
+fout=$(HOME=$RFH "$WBOX_ABS" ps -aq 2>&1); frc=$?
+fbad=$(printf '%s\n' "$fout" | grep -vcE '^(rf1|rf2)$')
+if [ "$frc" -eq 0 ] && [ "$(printf '%s\n' "$fout" | wc -l)" -eq 2 ] && [ "$fbad" -eq 0 ]; then
+  report PASS "RMF.1 ps -aq 只出名字（无表头、无说明行）"
+else
+  report FAIL "RMF.1 ps -aq" "rc=$frc 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 默认视图（不带 -a）的 -q 只列运行中的
+fout=$(HOME=$RFH "$WBOX_ABS" ps -q 2>&1)
+if [ "$(printf '%s\n' "$fout" | grep -c .)" -eq 1 ] && printf '%s' "$fout" | grep -qx rf1; then
+  report PASS "RMF.2 ps -q 只列运行中的容器"
+else
+  report FAIL "RMF.2 ps -q" "输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 120)"
+fi
+
+# 不带 -f 时必须拒绝运行中的容器，且**记录还在**——这是 rm 的核心约定
+fout=$(HOME=$RFH "$WBOX_ABS" rm rf1 2>&1); frc=$?
+if [ "$frc" -ne 0 ] && HOME=$RFH "$WBOX_ABS" ps | awk '$1=="rf1"{f=1} END{exit !f}'; then
+  report PASS "RMF.3 不带 -f 时拒绝删运行中的容器（记录与进程都还在）"
+else
+  report FAIL "RMF.3 默认拒绝" "rc=$frc 输出: $(printf '%s' "$fout" | head -c 150)"
+fi
+
+# -f 要**先停再删**：判据不只是记录没了，还要求那棵进程树真的没了——
+# 只删记录不停进程会留下没人管得到的孤儿，而 ps 从此看不见它。
+# 判活**不能用 `kill -0`**：僵尸进程（已死、尚未被回收）照样返回成功。
+# 本机 PID 1 不回收孤儿，supervisor 被 setsid 脱离后死掉就会停在 Z 状态，
+# 于是 `kill -0` 会把一个已经死了的进程报成活着——第一版判据就是这么假红的。
+# 改看 /proc/<pid>/stat 的状态字段：Z 视为已死，取不到（进程没了）同样视为已死。
+alive() {
+  [ -r "/proc/$1/stat" ] || return 1
+  # comm 字段可能含空格和括号，从最后一个 ')' 之后切
+  st=$(sed -e 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$st" ] && [ "$st" != "Z" ]
+}
+rfpid=$(HOME=$RFH "$WBOX_ABS" ps | awk '$1=="rf1"{print $3}')
+fout=$(HOME=$RFH "$WBOX_ABS" rm -f rf1 2>&1); frc=$?
+sleep 1
+if [ "$frc" -eq 0 ] \
+   && ! HOME=$RFH "$WBOX_ABS" ps -a | awk '$1=="rf1"{f=1} END{exit !f}' \
+   && ! alive "$rfpid"; then
+  report PASS "RMF.4 rm -f 先停再删（supervisor pid $rfpid 已终止，记录也没了）"
+else
+  report FAIL "RMF.4 rm -f" "rc=$frc pid $rfpid 仍在运行=$(alive "$rfpid" && echo 是 || echo 否) 输出: $(printf '%s' "$fout" | head -c 120)"
+fi
+
+# 组合起来就是 docker 用户的清场惯用法
+HOME=$RFH "$WBOX_ABS" run -d --name rf3 -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+HOME=$RFH "$WBOX_ABS" rm -f $(HOME=$RFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+fout=$(HOME=$RFH "$WBOX_ABS" ps -aq 2>&1)
+if [ -z "$(printf '%s' "$fout" | tr -d '[:space:]')" ]; then
+  report PASS "RMF.5 wbox rm -f \$(wbox ps -aq) 清场干净"
+else
+  report FAIL "RMF.5 清场惯用法" "残留: $(printf '%s' "$fout" | tr '\n' '|' | head -c 120)"
+fi
+
+# stop / pause 也要收多个名字：`kill`/`rm`/`start` 早就收多个，唯独它俩只收一个
+# 是纯粹的不一致——同一批容器能一起 kill 却不能一起 stop，用户没法从别的命令
+# 推断出这条例外（F9.30）。
+for n in mn1 mn2 mn3; do
+  HOME=$RFH "$WBOX_ABS" run -d --name $n -- /bin/sleep 30 >/dev/null 2>&1
+done
+sleep 2
+fout=$(HOME=$RFH "$WBOX_ABS" stop mn1 mn2 mn3 2>&1); frc=$?
+sleep 1
+fleft=$(HOME=$RFH "$WBOX_ABS" ps -q 2>&1 | grep -c '^mn')
+if [ "$frc" -eq 0 ] && [ "$fleft" -eq 0 ]; then
+  report PASS "RMF.6 stop 一次收多个容器名（三个全停下）"
+else
+  report FAIL "RMF.6 stop 多名" "rc=$frc 仍在运行=$fleft 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 单个容器失败时，主错误要给**真正的原因**，而不是"1 个容器未成功"这种汇总
+fout=$(HOME=$RFH "$WBOX_ABS" pause mn1 2>&1); frc=$?
+if [ "$frc" -ne 0 ] && printf '%s' "$fout" | grep -q '已退出' \
+   && ! printf '%s' "$fout" | grep -q '共 1 个'; then
+  report PASS "RMF.7 单个容器失败时直接给原因（不套无信息量的汇总）"
+else
+  report FAIL "RMF.7 单容器错误信息" "rc=$frc 输出: $(printf '%s' "$fout" | tr '\n' '|' | head -c 150)"
+fi
+
+HOME=$RFH "$WBOX_ABS" rm -f $(HOME=$RFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+rm -rf "$RFH"
+
+echo
+echo "=== LG wbox logs -f / --tail（PRD F9.28）==="
+
+# 这一组不需要镜像（只读状态目录里的日志文件），用独立 HOME + 宿主程序模式，
+# 与别的组彻底不相干。
+LGH=$WORK/lghome
+rm -rf "$LGH" && mkdir -p "$LGH"
+HOME=$LGH "$WBOX_ABS" run -d --name lgc -- \
+  /bin/sh -c 'for i in 1 2 3 4 5 6 7 8; do echo line$i; sleep 0.7; done' >/dev/null 2>&1
+
+# --tail：只要最后几行，且不能把结尾的换行当成一整行（那会让 --tail 1 输出空行）
+sleep 2
+lout=$(HOME=$LGH "$WBOX_ABS" logs --tail 2 lgc 2>&1)
+lcnt=$(printf '%s\n' "$lout" | grep -c '^line')
+if [ "$lcnt" -eq 2 ] && printf '%s' "$lout" | grep -q 'line'; then
+  report PASS "LG.1 --tail N 只输出最后 N 行（实得 $lcnt 行）"
+else
+  report FAIL "LG.1 --tail" "行数=$lcnt 输出: $(printf '%s' "$lout" | tr '\n' '|' | head -c 120)"
+fi
+
+# --follow 的判据是**它真的等到了后来才产生的输出**。
+# 跟随必须在容器退出后自行结束（否则这里会一直挂到 timeout）——
+# 用 timeout 兜底，但正常路径不该触发它。
+# 容器整段输出跨约 5.6 秒，跟随从第 2 秒起接手，故必然要等 3 秒以上——
+# 判据取 >=1 秒是留足余量，不是卡在临界点上。
+# 还要证明它**确实等了**：只数行数的话，若容器早已跑完，一次性读全也能凑够
+# 8 行——那证明不了跟随。所以同时要求这条命令自身耗时明显大于 0。
+lt0=$(date +%s)
+lfout=$(timeout 20 env HOME=$LGH "$WBOX_ABS" logs -f lgc 2>&1); lfrc=$?
+lt1=$(date +%s)
+lwait=$((lt1 - lt0))
+lfcnt=$(printf '%s\n' "$lfout" | grep -c '^line')
+if [ "$lfrc" -eq 0 ] && [ "$lfcnt" -eq 8 ] && [ "$lwait" -ge 1 ]; then
+  report PASS "LG.2 -f 真的等到了后续输出（收齐 8 行，等待 ${lwait}s）"
+elif [ "$lfrc" -eq 0 ] && [ "$lfcnt" -eq 8 ]; then
+  report FAIL "LG.2 -f 跟随" "收齐 8 行但没等待（${lwait}s）——容器可能早已跑完，这一轮没真正验到跟随"
+elif [ "$lfrc" -eq 124 ]; then
+  report FAIL "LG.2 -f 自行结束" "容器已退出但跟随没结束（被 timeout 杀掉）"
+else
+  report FAIL "LG.2 -f 跟随" "rc=$lfrc 行数=$lfcnt（期望 8）"
+fi
+
+# 容器最后一段输出不能丢：跟随循环若"先读后判活"，会漏掉两者之间写下的内容，
+# 而那一段往往正是失败原因。上面收齐 8 行已覆盖，这里再单独盯住末行。
+if printf '%s\n' "$lfout" | grep -qx 'line8'; then
+  report PASS "LG.3 跟随不丢容器退出前的最后一行输出"
+else
+  report FAIL "LG.3 末行完整性" "输出尾部: $(printf '%s' "$lfout" | tail -c 80 | tr '\n' '|')"
+fi
+
+# 已退出的容器加 -f 必须立即返回，不能挂住等一个永远不会来的写入
+lfout=$(timeout 10 env HOME=$LGH "$WBOX_ABS" logs -f lgc 2>&1); lfrc=$?
+if [ "$lfrc" -eq 0 ]; then
+  report PASS "LG.4 对已退出容器 -f 立即返回（不挂住）"
+else
+  report FAIL "LG.4 已退出容器 -f" "rc=$lfrc（124 = 被 timeout 杀掉，说明挂住了）"
+fi
+
+HOME=$LGH "$WBOX_ABS" rm lgc >/dev/null 2>&1
+rm -rf "$LGH"
 
 echo
 echo "=== RN wbox rename / prune（PRD F9.27）==="

@@ -39,27 +39,48 @@ impl Action {
     }
 }
 
-fn parse<'a>(args: &'a [String], verb: &str) -> Result<&'a str> {
-    let mut name: Option<&str> = None;
-    for a in args {
-        match a.as_str() {
-            other if other.starts_with('-') => {
-                return Err(WboxError::args(format!(
-                    "{}: 未知参数 '{}'（用法：wbox {} <NAME>）",
-                    verb, other, verb
-                )))
-            }
-            other => {
-                if name.is_some() {
-                    return Err(WboxError::args(format!("{}: 一次只能操作一个容器", verb)));
-                }
-                name = Some(other);
-            }
+/// 收**一个或多个**容器名，与 `kill`/`stop`/`rm` 一致。
+///
+/// 一批容器要一起暂停时，逐个敲命令中间会有可观的时间差；能一次给全，
+/// 至少把这个差压到最小。
+fn parse<'a>(args: &'a [String], verb: &str) -> Result<Vec<&'a str>> {
+    super::args::take_container_names(args, verb)
+}
+
+/// 这个容器现在是不是被 `pause` 停住了。
+///
+/// # 从 `/proc` 的真相判，不记账
+///
+/// 记一个"我 pause 过"的标记文件是更省事的做法，但那份账会过期：容器进程可能被
+/// 别的途径 `SIGCONT` 起来，或者整个退掉又换了个 pid。这里直接看容器里的进程
+/// 处于什么状态——`T` 就是被停住了。与 `liveness` 靠锁文件而不是靠 pid 判活
+/// 是同一条思路：**能从系统真相直接读出来的，就不要另记一份账**。
+///
+/// 判据是"有进程，且**每一个**都处于 `T`"：`pause` 是给整棵进程树发 SIGSTOP 的，
+/// 只有部分停住说明它并非处于 pause 状态（可能是 guest 自己里面有进程被停）。
+#[cfg(target_os = "linux")]
+pub(super) fn is_paused(dir: &std::path::Path) -> bool {
+    let Some(root) = runstate::container_pid(dir) else {
+        return false;
+    };
+    let pids = super::top::container_pids(root);
+    let mut seen = 0usize;
+    for pid in pids {
+        match super::top::proc_state(pid) {
+            // 读不到 = 进程刚退出，不参与判断
+            None => continue,
+            Some('T') => seen += 1,
+            Some(_) => return false,
         }
     }
-    name.ok_or_else(|| {
-        WboxError::args(format!("{}: 缺少容器名（用法：wbox {} <NAME>）", verb, verb))
-    })
+    seen > 0
+}
+
+/// Windows 侧没有 `pause`（F9.21 只在 Linux 可用），因此永远不是暂停态。
+/// 如实返回 false，而不是让调用方各自去猜。
+#[cfg(not(target_os = "linux"))]
+pub(super) fn is_paused(_dir: &std::path::Path) -> bool {
+    false
 }
 
 pub fn cmd_pause(args: &[String]) -> Result<u32> {
@@ -71,14 +92,18 @@ pub fn cmd_unpause(args: &[String]) -> Result<u32> {
 }
 
 fn run(args: &[String], action: Action) -> Result<u32> {
-    let name = parse(args, action.verb())?;
-    let dir = runstate::resolve_existing(name)?;
-    // 已退出的容器没有可停的进程。明确报错而不是静默成功——静默成功会让
-    // 脚本以为容器还在、还能 unpause 回来。
-    if runstate::liveness(&dir) == Liveness::Exited {
-        return Err(runstate::already_exited(name));
-    }
-    apply(name, &dir, action)
+    let names = parse(args, action.verb())?;
+    let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    // 回显在 `apply` 里（Linux 分支成功时打名字），故这里 Echo::Nothing。
+    super::args::each_named(&owned, action.verb(), super::args::Echo::Nothing, |name| {
+        let dir = runstate::resolve_existing(name)?;
+        // 已退出的容器没有可停的进程。明确报错而不是静默成功——静默成功会让
+        // 脚本以为容器还在、还能 unpause 回来。
+        if runstate::liveness(&dir) == Liveness::Exited {
+            return Err(runstate::already_exited_for(name, action.verb()));
+        }
+        apply(name, &dir, action).map(|_| ())
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -128,11 +153,16 @@ mod tests {
     use super::*;
     use crate::testenv::TempHome;
 
+    /// 收一个或多个名字——与 `kill`/`stop`/`rm` 一致。一批容器要一起暂停时，
+    /// 逐个敲命令中间会有可观的时间差。
     #[test]
-    fn parse_requires_exactly_one_name() {
-        assert_eq!(parse(&["c".to_string()], "pause").unwrap(), "c");
+    fn parse_takes_one_or_more_names() {
+        assert_eq!(parse(&["c".to_string()], "pause").unwrap(), vec!["c"]);
+        assert_eq!(
+            parse(&["a".to_string(), "b".to_string()], "pause").unwrap(),
+            vec!["a", "b"]
+        );
         assert!(parse(&[], "pause").is_err());
-        assert!(parse(&["a".to_string(), "b".to_string()], "pause").is_err());
         assert!(parse(&["-x".to_string()], "pause").is_err());
     }
 

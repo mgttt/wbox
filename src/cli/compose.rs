@@ -147,25 +147,21 @@ fn down(o: &Options) -> Result<u32> {
     // 逆序停：依赖方先走，被依赖的后走，与启动顺序相反。
     // 单个服务停不掉不该让整轮中断——down 的意图是"尽量都清掉"，
     // 一个已经手工删过的容器不该挡住其余的清理。
-    let mut failed = 0u32;
-    for svc in project.services.iter().rev() {
-        let name = project.container_name(&svc.name);
-        if let Err(e) = super::stop::cmd_stop(std::slice::from_ref(&name)) {
-            eprintln!("wbox: 停止 '{}' 失败：{}", name, e);
-            failed += 1;
-            continue;
-        }
-        if let Err(e) = super::rm::cmd_rm(std::slice::from_ref(&name)) {
-            eprintln!("wbox: 删除 '{}' 失败：{}", name, e);
-            failed += 1;
-        }
-    }
-    if failed > 0 {
-        return Err(WboxError::args(format!(
-            "compose down：{} 个服务未能完全清理（详见上面的说明）",
-            failed
-        )));
-    }
+    // 与 rm/prune/restart 共用 `args::each_named`：一个服务清不掉不该让整轮中断
+    // ——down 的意图是"尽量都清掉"，一个已经手工删过的容器不该挡住其余的清理。
+    // 这里不回显每个名字：整轮结束有一句总结，逐个回显只是噪音。
+    let names: Vec<String> = project
+        .services
+        .iter()
+        .rev()
+        .map(|svc| project.container_name(&svc.name))
+        .collect();
+    super::args::each_named(&names, "清理", super::args::Echo::Nothing, |name| {
+        let one = [name.to_string()];
+        super::stop::cmd_stop(&one)?;
+        super::rm::cmd_rm(&one)?;
+        Ok(())
+    })?;
     println!("wbox: compose down 完成（项目 {}）", project.name);
     Ok(0)
 }

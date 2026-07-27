@@ -93,7 +93,7 @@ fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
         )));
     }
     if state == Liveness::Exited {
-        return Err(runstate::already_exited(name));
+        return Err(runstate::already_exited_for(name, " exec"));
     }
     let pid = runstate::container_pid(&dir).ok_or_else(|| {
         WboxError::args(format!(
@@ -115,7 +115,7 @@ fn exec_existing(name: &str, cmd: &[&str]) -> Result<u32> {
         )));
     }
     if state == Liveness::Exited {
-        return Err(runstate::already_exited(name));
+        return Err(runstate::already_exited_for(name, " exec"));
     }
     if locked.entry.stopping {
         return Err(WboxError::args(format!(
@@ -330,6 +330,7 @@ mod tests {
             Some(runstate::ExecContext {
                 allow_network: false,
                 workdir: std::env::temp_dir().to_string_lossy().into_owned(),
+                ..Default::default()
             }),
             None,
         )

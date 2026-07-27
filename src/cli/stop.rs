@@ -15,8 +15,13 @@ struct StopOptions<'a> {
     timeout: u64,
 }
 
-fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
-    let mut name: Option<&str> = None;
+/// `stop` 的命令行：一个 `--timeout` 加**一个或多个**容器名。
+///
+/// 收多个是补出来的：`kill`/`rm`/`start`/`wait` 早就收多个，唯独 `stop` 只收一个
+/// ——同一批容器能一起 kill 却不能一起 stop，是纯粹的不一致，用户没法从别的命令
+/// 推断出这条例外。
+fn parse_many(args: &[String]) -> Result<(Vec<&str>, u64)> {
+    let mut names = Vec::new();
     let mut timeout = DEFAULT_TIMEOUT_SECS;
     let mut i = 0;
     while i < args.len() {
@@ -32,28 +37,37 @@ fn parse<'a>(args: &'a [String]) -> Result<StopOptions<'a>> {
             }
             other if other.starts_with('-') => {
                 return Err(WboxError::args(format!(
-                    "stop: 未知参数 '{}'（用法：wbox stop <NAME> [--timeout <秒>]）",
+                    "stop: 未知参数 '{}'（用法：wbox stop [--timeout <秒>] <NAME>...）",
                     other
                 )))
             }
-            other => {
-                if name.is_some() {
-                    return Err(WboxError::args("stop: 一次只能停一个容器"));
-                }
-                name = Some(other);
-            }
+            other => names.push(other),
         }
         i += 1;
     }
-    let name = name.ok_or_else(|| {
-        WboxError::args("stop: 缺少容器名（用法：wbox stop <NAME> [--timeout <秒>]）")
-    })?;
-    Ok(StopOptions { name, timeout })
+    if names.is_empty() {
+        return Err(WboxError::args(
+            "stop: 缺少容器名（用法：wbox stop [--timeout <秒>] <NAME>...）",
+        ));
+    }
+    Ok((names, timeout))
 }
 
 pub fn cmd_stop(args: &[String]) -> Result<u32> {
-    let opts = parse(args)?;
-    stop_with(&opts, Say::Name)
+    let (names, timeout) = parse_many(args)?;
+    let owned: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    // 回显交给 `stop_with` 自己（它还要区分"已经是停止状态"那种情形），
+    // 所以这里用 Echo::Nothing——否则同一个名字会打两遍。
+    super::args::each_named(&owned, "停止", super::args::Echo::Nothing, |name| {
+        stop_with(
+            &StopOptions {
+                name,
+                timeout,
+            },
+            Say::Name,
+        )
+        .map(|_| ())
+    })
 }
 
 /// 停容器时要不要把容器名打出来。
@@ -191,20 +205,27 @@ mod tests {
     use crate::testenv::TempHome;
 
     #[test]
-    fn parse_reads_name_and_timeout() {
+    fn parse_reads_names_and_timeout() {
         let a = ["c1".to_string()];
-        assert_eq!(parse(&a).unwrap().timeout, DEFAULT_TIMEOUT_SECS);
+        let (names, timeout) = parse_many(&a).unwrap();
+        assert_eq!(names, vec!["c1"]);
+        assert_eq!(timeout, DEFAULT_TIMEOUT_SECS);
+
         let b = ["c1".to_string(), "--timeout".to_string(), "3".to_string()];
-        let o = parse(&b).unwrap();
-        assert_eq!(o.name, "c1");
-        assert_eq!(o.timeout, 3);
-        assert!(parse(&[]).is_err());
-        assert!(parse(&["--timeout".to_string()]).is_err(), "缺取值应报错");
+        let (names, timeout) = parse_many(&b).unwrap();
+        assert_eq!(names, vec!["c1"]);
+        assert_eq!(timeout, 3);
+
+        // 多个名字要收下——`kill`/`rm` 早就收多个，stop 不该是例外
+        let c = ["a".to_string(), "b".to_string()];
+        assert_eq!(parse_many(&c).unwrap().0, vec!["a", "b"]);
+
+        assert!(parse_many(&[]).is_err());
+        assert!(parse_many(&["--timeout".to_string()]).is_err(), "缺取值应报错");
         assert!(
-            parse(&["c".to_string(), "-t".to_string(), "x".to_string()]).is_err(),
+            parse_many(&["c".to_string(), "-t".to_string(), "x".to_string()]).is_err(),
             "非数字应报错"
         );
-        assert!(parse(&["a".to_string(), "b".to_string()]).is_err());
     }
 
     /// 停一个已经停了的容器不该报错——否则 `wbox stop x` 在脚本里没法幂等使用。

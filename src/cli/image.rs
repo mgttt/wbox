@@ -27,13 +27,27 @@ pub fn cmd_image(args: &[String]) -> Result<u32> {
 
 /// `wbox image list` / `image ls` / 顶级 `images` 的统一入口。
 pub(super) fn cmd_image_list(args: &[String]) -> Result<u32> {
-    if let Some(other) = args.first() {
-        return Err(WboxError::args(format!(
-            "image list 不支持参数 '{}'",
-            other
-        )));
+    let mut quiet = false;
+    for a in args {
+        match a.as_str() {
+            "-q" | "--quiet" => quiet = true,
+            other => {
+                return Err(WboxError::args(format!(
+                    "image list 不支持参数 '{}'（支持 -q/--quiet）",
+                    other
+                )))
+            }
+        }
     }
-    oci::list()
+    if !quiet {
+        return oci::list();
+    }
+    // 与 `ps -q` 同一意图：给脚本用，**只出引用**，表头与说明一律不出——
+    // 它们会被命令替换当成镜像引用传下去。配合 `wbox rmi $(wbox images -q)`。
+    for r in oci::list_refs()? {
+        println!("{}", r.reference);
+    }
+    Ok(0)
 }
 
 /// 删除镜像的本地缓存目录（`rm` 的纯操作部分，与确认提示分离以便测试）。
@@ -66,12 +80,17 @@ pub(super) fn cmd_image_rm(args: &[String]) -> Result<u32> {
             _ => positional.push(a.clone()),
         }
     }
-    let image_ref = super::args::take_single_positional(&positional, "image rm 缺少镜像引用")?;
-    let iref = oci::ImageRef::parse(&image_ref, None)?;
-
-    let dir = remove_cached_image(&iref)?;
-    println!("wbox: 已删除 {}（{}）", iref.repo_tag(), dir.display());
-    Ok(0)
+    if positional.is_empty() {
+        return Err(WboxError::args("image rm 缺少镜像引用"));
+    }
+    // 收多个引用，好让 `wbox rmi $(wbox images -q)` 成立；一个删不掉不中断其余的
+    // ——与容器侧 `rm`/`prune` 共用同一条批处理路径。
+    super::args::each_named(&positional, "删除镜像", super::args::Echo::Nothing, |r| {
+        let iref = oci::ImageRef::parse(r, None)?;
+        let dir = remove_cached_image(&iref)?;
+        println!("wbox: 已删除 {}（{}）", iref.repo_tag(), dir.display());
+        Ok(())
+    })
 }
 
 /// `wbox image show <REF>`：打印已 pull 镜像的 config.json 摘要。

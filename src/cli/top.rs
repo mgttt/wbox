@@ -129,6 +129,17 @@ pub(super) fn container_pids(root: u32) -> Vec<u32> {
     out
 }
 
+/// `/proc/<pid>/stat` 的状态字符（`R`/`S`/`T`/`Z`…）。进程没了返回 `None`。
+///
+/// **必须从最后一个 `)` 之后开始切**：comm 字段里可能有空格和括号，
+/// 按空格切会整体错位，读到的"状态"其实是别的字段。
+#[cfg(target_os = "linux")]
+pub(super) fn proc_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close = stat.rfind(')')?;
+    stat.get(close + 2..)?.split_whitespace().next()?.chars().next()
+}
+
 #[cfg(target_os = "linux")]
 fn linux_process_tree(root: u32) -> Vec<ProcessRow> {
     use std::collections::{HashMap, HashSet};
@@ -229,6 +240,16 @@ mod tests {
         )
         .unwrap();
         assert!(cmd_top(&["dead".to_string()]).is_err());
+    }
+
+    /// 本进程当然是在跑的（`R` 或 `S`），不该被读成 `T`（暂停）。
+    /// 这条同时钉住字段偏移：comm 含空格时按空格切会读到别的字段。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_state_reads_a_running_process() {
+        let st = proc_state(std::process::id()).unwrap();
+        assert!(matches!(st, 'R' | 'S'), "本进程状态应是 R/S，得到 {}", st);
+        assert_eq!(proc_state(u32::MAX), None, "不存在的 pid 应返回 None");
     }
 
     #[cfg(target_os = "linux")]

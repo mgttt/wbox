@@ -33,7 +33,7 @@ Windows 机器上。约定：
 
 ### 已完成（Linux 侧，Q3 对标 Podman/Docker）
 
-F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
+F9.1–F9.33 全部落地并有持续门禁。近期这一串是本轮做的：
 
 | 特性 | 门禁 | 一句话要点 |
 |---|---|---|
@@ -58,9 +58,22 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 | F9.25 `export`/`import` | EX.1–EX.7 | 与 `save`/`load` 搬的东西不同（裸 rootfs vs 镜像）；import 收任意来源归档，顶层无从白名单化，只能挡穿越 + 全落 `rootfs/` 下 |
 | F9.26 `wbox restart` | RT.1–RT.7 | 顺带补了真实缺口：`run -d` 的容器此前不记启动配置，退出后连 `start` 都不行；`run-args.json` 与 `create.json` 必须分开，后者的存在本身是「该走 start」的标记 |
 | F9.27 `rename`/`prune` | RN.1–RN.6 | rename 只对未运行容器开放（名字被用在可写层路径、默认主机名、Windows Job object 上，改名改不到这些）；prune 默认只列清单，`created` 不在清理范围 |
+| F9.28 `logs -f`/`--tail` | LG.1–LG.4 | 跟随必须认日志截断（超上限会清零重写），否则之后静默哑掉；循环里先判活再读，反了会丢容器退出前的最后一段输出 |
+| F9.29 `ps -q`/`rm -f` | RMF.1–RMF.5 | 一起补才凑齐 `rm -f $(ps -aq)` 清场惯用法；`-q` 只出名字（说明行会被当成容器名传下去）；`-f` 复用 stop 那条路 |
+| F9.30 多容器名一致性 | RMF.6–RMF.7 | `stop`/`pause`/`unpause` 也收多个名字；单个容器失败时返回原始错误而非无信息量的汇总；共用措辞里不塞调用方专属动词 |
+| F9.31 `images -q`/`rmi` 多引用 | IMQ.1–IMQ.3 | 修掉 IMAGE 列印缓存目录名（照抄去 rmi 用不了）；还原引用后**往返校验**才采用；枚举从打印里拆出成 `oci::list_refs` |
+| F9.32 暂停状态可见 | PZ.4–PZ.5 | 修掉 `inspect` 的 `Paused` 写死 false、`ps` 把暂停容器显示成 running；状态从 `/proc` 的 `T` 实测而不是记账（账会过期） |
+| F9.33 inspect 的挂载与端口 | INS.1–INS.3 | 修掉 `Mounts` 写死 `[]`、端口不出现；`ExecContext` 加 `volumes`/`ports`，新字段缺失按空处理（用 `?` 会让旧记录整条读不出来） |
 
 另外做了一次抽象收敛：七处"仅 Linux 可用"检查收敛到
 `WboxError::require_linux(configured, flag, why)`（`src/error.rs`）。
+
+CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器名、不收选项"的
+解析各写过一遍、措辞互不相同（同一件事用户能看到好几种说法）；
+`rm`/`prune`/`restart`/`compose down` 里"一个失败不中断后面的"这条取舍也各实现了
+一遍。收敛成 `args::take_container_names` 与 `args::each_named`。
+**收敛时踩到一条**：`rm` 有个测试断言的是旧措辞（"未能删除"），换共享措辞后红了
+——那条断言本该盯行为而不是文案，已改成断言"运行中的容器记录确实还在"。
 
 另一次收敛在 CLI 分发层：顶层分发、`container` 分发、`wbox help` 的主题判定、
 给用户看的动词清单，四份清单原本各写各的，**已经漂开了**——`diff`/`commit`/
@@ -76,7 +89,7 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 `resolve`（一处措辞，调用方只说"我要干什么"）、`lookup`（读先 upper 后 lower，
 认 whiteout）、`materialize`（硬链接铺下层 + 合并 upper，commit 与 export 共用）。
 
-### 写门禁本身也会踩的两个坑（本轮各踩一次）
+### 写门禁本身也会踩的坑（都是实际踩过的）
 
 - **别跟别的组共用 HOME 做破坏性操作**。`prune -f` 会清掉该 HOME 下所有已退出
   记录；跟别的组共用 `$WORK/home` 就会顺手扫掉它们的残留，制造跨组干扰。
@@ -86,11 +99,39 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
   已翻成 exited。直接 kill 完就 rm，偶发会留下还在跑的容器污染后面按 `ps`
   判断的用例（RT 组实测偶发红一次）。收尾要**轮询真实状态**再 rm，
   固定 sleep 睡多久都只是猜。
+- **跑门禁前必须 `cargo build`**。门禁跑的是 `target/debug/wbox` 这个**文件**，
+  而 `cargo test` 只构建测试二进制、不更新它。改完代码只跑 test 就跑门禁，
+  测的是上一版程序——实测因此整组红过一次，报的是「未知参数」这种一看就知道
+  跑错了版本的错。
+- **判活别用 `kill -0`**。僵尸进程（已死、尚未被回收）照样返回成功。本机 PID 1
+  不回收孤儿，`run -d` 的 supervisor 被 setsid 脱离后死掉就停在 `Z` 状态，
+  于是 `kill -0` 把一个已经死了的进程报成活着——RMF.4 第一版就是这么假红的
+  （产品没问题，判据错了）。改看 `/proc/<pid>/stat` 的状态字段，`Z` 视为已死。
+- **判据要能排除「碰巧成立」**。LG.2 起初只数行数，可万一容器早已跑完，
+  一次性读全也能凑够行数——那证明不了跟随。改成同时断言命令自身耗时 > 0，
+  才是真的在验「它等到了后来才产生的输出」。
+
+### 一个屡试屡中的找 bug 手法
+
+最近两轮的缺陷都是同一类，且都不是「功能没做」，而是「做了，但输出/状态是假的」：
+
+- `wbox images` 印的镜像名喂不回给 `rmi`（F9.31）；
+- `wbox pause` 真停住了，但 `ps` 说 running、`inspect` 的 `Paused` 写死 false（F9.32）；
+- 容器明明挂着卷、发布着端口，`inspect` 的 `Mounts` 写死 `[]`、端口根本不出现（F9.33）。
+
+手法很简单，值得固定下来：**凡是命令打印出来的标识符，实测能不能喂回给别的命令；
+凡是结构化输出里的字段，实测它能不能随真实状态变**。两条都不看代码，只看真实行为——
+写死的字面量在代码里看着毫不起眼（`"Paused": false`、`"Mounts": []` 谁都会一眼扫过），
+一跑就露馅。
+
+配套的一条：**比对前先确认"真实那一侧"非空**。拿 inspect 的 Mounts 去比对时，
+要先 `mount | grep -c` 确认容器真挂上了，否则比的是两个都为空的东西，什么也证明不了。
+再补一条反向用例（没挂卷时如实为空），免得修完变成凭空造条目。
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --locked` → **391 passed / 0 failed**
-- `scripts/test-linux-backend.sh` → **180 PASS / 0 FAIL / 1 SKIP**
+- `cargo test --locked` → **401 passed / 0 failed**
+- `scripts/test-linux-backend.sh` → **199 PASS / 0 FAIL / 1 SKIP**
   （SKIP 是 cgroup v2 首选路径，需 `WBOX_LBE_CGROUP=1` + 已委派子树）
 - `cargo clippy --locked --all-targets -- -D warnings` → 干净
 - `cargo clippy --locked --target x86_64-pc-windows-gnu --all-targets -- -D warnings` → 干净
@@ -102,7 +143,7 @@ F9.1–F9.27 全部落地并有持续门禁。近期这一串是本轮做的：
 
 ## 3. 下一步做什么
 
-**Q3 的 F9 序列已全部做完**（F9.1–F9.27）。剩下的都在天花板之外或属另一象限：
+**Q3 的 F9 序列已全部做完**（F9.1–F9.33）。剩下的都在天花板之外或属另一象限：
 
 - **镜像分层存储**（`FROM`/pull 仍整份复制）。注意与 F9.12 的运行期可写层是
   两件事。要做的话得让缓存额外保存原始压缩层 blob，牵动 pull/build/overlay/push

@@ -71,26 +71,12 @@ pub fn cmd_prune(args: &[String]) -> Result<u32> {
         // 这类写法不至于误报。
         return Ok(0);
     }
-    // 逐个删、逐个报，不一遇错就中断（与 `rm` 同一取舍）：中断会让用户以为
-    // 一条都没删掉，而实际上前面几条已经删了。
-    let mut failed = 0usize;
-    for n in &names {
-        match runstate::remove(n) {
-            Ok(()) => println!("{}", n),
-            Err(e) => {
-                eprintln!("wbox: 删除 '{}' 失败：{}", n, e);
-                failed += 1;
-            }
-        }
-    }
-    if failed > 0 {
-        return Err(WboxError::args(format!(
-            "{} 条记录未能删除（共 {} 条）",
-            failed,
-            names.len()
-        )));
-    }
-    Ok(0)
+    // 逐个删、逐个报，不一遇错就中断——这条取舍与 `rm`/`restart` 共用同一份
+    // 实现（`args::each_named`）：中断会让用户以为一条都没删掉，
+    // 而实际上前面几条已经删了。
+    super::args::each_named(&names, "删除", super::args::Echo::Name, |n| {
+        runstate::remove(n)
+    })
 }
 
 #[cfg(test)]

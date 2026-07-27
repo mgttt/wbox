@@ -11,8 +11,12 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         .ok_or_else(|| WboxError::args(format!("容器 '{}' 的 meta.json 缺失或不可读", name)))?;
     let liveness = runstate::liveness(&dir);
     let running = liveness == Liveness::Running;
+    // `Paused` 原本写死 false——那比没有这个字段更糟：docker 用户会拿
+    // `.State.Paused` 去写脚本，而它结构性地永远为假。改成从 /proc 实测。
+    let paused = running && super::pause::is_paused(&dir);
     let status = match liveness {
         Liveness::Created => "created",
+        Liveness::Running if paused => "paused",
         Liveness::Running => "running",
         Liveness::Exited => "exited",
     };
@@ -23,6 +27,45 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
             .map(serde_json::Value::from)
             .unwrap_or(serde_json::Value::Null)
     };
+    // `Mounts` 与端口原本是写死的空数组／缺席——容器明明挂着卷、发布着端口，
+    // `inspect` 却说没有。docker 用户读 `.Mounts` 与 `.HostConfig.PortBindings`，
+    // 给一个恒空的字段比不给更糟。
+    let ctx = entry.exec_context.as_ref();
+    let mounts: Vec<serde_json::Value> = ctx
+        .map(|c| c.volumes.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|v| {
+            // 记录形如 `host:guest` 或 `host:guest:ro`。从右往左剥模式，
+            // 免得把 Windows 盘符冒号当成分隔符（与 `-v` 的解析同一取舍）。
+            let (rest, ro) = match v.strip_suffix(":ro") {
+                Some(r) => (r, true),
+                None => (v.strip_suffix(":rw").unwrap_or(v), false),
+            };
+            let (host, guest) = rest.rsplit_once(':').unwrap_or((rest, ""));
+            serde_json::json!({
+                "Type": "bind",
+                "Source": host,
+                "Destination": guest,
+                "RW": !ro,
+            })
+        })
+        .collect();
+    let port_bindings: serde_json::Map<String, serde_json::Value> = ctx
+        .map(|c| c.ports.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| {
+            let (host, guest) = p.split_once(':')?;
+            Some((
+                // docker 的键形如 "80/tcp"。wbox 的 -p 只支持 TCP（F9.2），
+                // 写死 tcp 是如实的，不是偷懒。
+                format!("{}/tcp", guest),
+                serde_json::json!([{ "HostIp": "", "HostPort": host }]),
+            ))
+        })
+        .collect();
+
     let (network_mode, workdir) = entry
         .exec_context
         .as_ref()
@@ -47,7 +90,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         "State": {
             "Status": status,
             "Running": running,
-            "Paused": false,
+            "Paused": paused,
             "ExitCode": exit_code,
             "Pid": if running { entry.pid } else { 0 },
             "StartedAtUnix": entry.created_unix,
@@ -59,8 +102,9 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         },
         "HostConfig": {
             "NetworkMode": network_mode,
+            "PortBindings": port_bindings,
         },
-        "Mounts": [],
+        "Mounts": mounts,
         "Wbox": {
             "SchemaVersion": 1,
             "StateDir": dir.to_string_lossy(),
@@ -182,6 +226,42 @@ pub fn cmd_inspect(args: &[String]) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    /// `Mounts` 与 `PortBindings` 原本是写死的空值——容器明明挂着卷、发布着端口，
+    /// inspect 却说没有。给一个恒空的字段比不给更糟：docker 用户会拿它写脚本。
+    #[test]
+    fn mounts_and_ports_reflect_the_recorded_context() {
+        let _home = crate::testenv::TempHome::new("inspectmounts");
+        let dir = crate::runstate::dir_for("c").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::json!({
+                "name": "c", "pid": 1, "created_unix": 1,
+                "cmd": ["x"], "target": "t",
+                "exec_context": {
+                    "allow_network": false,
+                    "workdir": "/",
+                    "volumes": ["/h/data:/mnt/data:ro", "/h/rw:/mnt/rw"],
+                    "ports": ["18080:80"],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let v = super::container_value("c").unwrap();
+        let mounts = v["Mounts"].as_array().unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0]["Source"], "/h/data");
+        assert_eq!(mounts[0]["Destination"], "/mnt/data");
+        assert_eq!(mounts[0]["RW"], false, ":ro 要如实反映成只读");
+        assert_eq!(mounts[1]["RW"], true, "没写 :ro 的是可写");
+        // -p 只支持 TCP（F9.2），键写死 tcp 是如实的
+        assert_eq!(
+            v["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"],
+            "18080"
+        );
+    }
+
     use super::*;
     use crate::testenv::TempHome;
 
@@ -220,6 +300,7 @@ mod tests {
             Some(runstate::ExecContext {
                 allow_network: false,
                 workdir: "/".into(),
+                ..Default::default()
             }),
             Some(&token),
         )
