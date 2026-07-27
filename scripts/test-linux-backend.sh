@@ -941,6 +941,87 @@ else
 fi
 
 echo
+echo "=== NC 容器间共享网络（PRD F9.11）==="
+
+# NC.1 加入方与目标必须在**同一个** netns（inode 相同），且不是宿主的。
+# 三方比对缺一不可：只比 A=B 会漏掉"两者都错进了宿主网络"的情况。
+HOME=$WORK/home "$WBOX_ABS" run -d --name ncpeer -- /bin/sleep 30 >/dev/null 2>&1
+sleep 1
+nsA=$(timeout 10 env HOME=$WORK/home "$WBOX_ABS" exec ncpeer -- readlink /proc/self/ns/net 2>/dev/null)
+nsB=$(timeout 10 env HOME=$WORK/home "$WBOX_ABS" run --rm --name ncjoin --network container:ncpeer -- readlink /proc/self/ns/net 2>/dev/null)
+nsH=$(readlink /proc/self/ns/net)
+if [ -n "$nsA" ] && [ "$nsA" = "$nsB" ] && [ "$nsA" != "$nsH" ]; then
+  report PASS "NC.1 --network container: 加入同一 netns（且非宿主网络）"
+else
+  report FAIL "NC.1 netns 一致性" "peer=$nsA joiner=$nsB host=$nsH"
+fi
+
+# NC.2 **行为**判据：两容器经 localhost 真的互通。目标容器里起 TCP 监听，
+# 加入方连 127.0.0.1——这正是 docker `--network container:` 的核心用途
+# （sidecar 模式）。宿主模式容器可见宿主文件系统，python3 直接可用。
+if command -v python3 >/dev/null 2>&1; then
+  NC_LISTEN='
+import socket
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",9188)); s.listen(5)
+while True:
+    c,_=s.accept(); c.sendall(b"PEER_SAYS_HI\n"); c.close()
+'
+  HOME=$WORK/home "$WBOX_ABS" run -d --name ncsrv -- python3 -c "$NC_LISTEN" >/dev/null 2>&1
+  sleep 2
+  got=$(timeout 10 env HOME=$WORK/home "$WBOX_ABS" run --rm --name nccli --network container:ncsrv -- python3 -c "
+import socket
+try:
+    s=socket.create_connection(('127.0.0.1',9188),timeout=4)
+    print(s.recv(100).decode().strip())
+except Exception as e:
+    print('ERR:%s' % type(e).__name__)
+" 2>&1)
+  if printf '%s' "$got" | grep -q PEER_SAYS_HI; then
+    report PASS "NC.2 两容器经 localhost 互通（sidecar 模式成立）"
+  else
+    report FAIL "NC.2 localhost 互通" "加入方收到: $(printf '%s' "$got" | head -c 120)"
+  fi
+  HOME=$WORK/home "$WBOX_ABS" stop ncsrv >/dev/null 2>&1
+  HOME=$WORK/home "$WBOX_ABS" rm ncsrv >/dev/null 2>&1
+else
+  absent "NC.2 localhost 互通" "缺 python3（容器内监听夹具）"
+fi
+
+# NC.3 三种组合冲突都要在参数层报错：网络来源、端口发布位置、身份映射
+# 各只能有一个出处，静默让一方胜出会把另一方变成谎言。
+ncout=$(HOME=$WORK/home "$WBOX_ABS" run --network container:ncpeer -p 8080:80 -- /bin/true 2>&1); ncrc=$?
+if [ "$ncrc" -ne 0 ] && printf '%s' "$ncout" | grep -q "拥有网络的容器"; then
+  report PASS "NC.3a --network container: 与 -p 冲突时报错"
+else
+  report FAIL "NC.3a -p 冲突" "rc=$ncrc 输出: $(printf '%s' "$ncout" | head -c 150)"
+fi
+ncout=$(HOME=$WORK/home "$WBOX_ABS" run --network container:ncpeer --user 5 -- /bin/true 2>&1); ncrc=$?
+if [ "$ncrc" -ne 0 ] && printf '%s' "$ncout" | grep -q "user namespace"; then
+  report PASS "NC.3b --network container: 与 --user 冲突时报错"
+else
+  report FAIL "NC.3b --user 冲突" "rc=$ncrc 输出: $(printf '%s' "$ncout" | head -c 150)"
+fi
+ncout=$(HOME=$WORK/home "$WBOX_ABS" run --network container:ncpeer --allow-network -- /bin/true 2>&1); ncrc=$?
+if [ "$ncrc" -ne 0 ] && printf '%s' "$ncout" | grep -q "网络只能来自一个地方"; then
+  report PASS "NC.3c --network container: 与 --allow-network 冲突时报错"
+else
+  report FAIL "NC.3c --allow-network 冲突" "rc=$ncrc 输出: $(printf '%s' "$ncout" | head -c 150)"
+fi
+
+# NC.4 目标已退出时要明确拒绝——那时没有网络可加入，静默起一个断网容器
+# 会让 sidecar 悄悄失联。
+HOME=$WORK/home "$WBOX_ABS" kill ncpeer >/dev/null 2>&1
+sleep 1
+ncout=$(HOME=$WORK/home "$WBOX_ABS" run --network container:ncpeer -- /bin/true 2>&1); ncrc=$?
+if [ "$ncrc" -ne 0 ] && printf '%s' "$ncout" | grep -q "已退出"; then
+  report PASS "NC.4 目标容器已退出时明确拒绝"
+else
+  report FAIL "NC.4 已退出的目标" "rc=$ncrc 输出: $(printf '%s' "$ncout" | head -c 150)"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm ncpeer >/dev/null 2>&1
+
+echo
 echo "=== P 容器状态与 ps（PRD F8.1）==="
 
 # 状态目录写在 HOME 下，hrun/run 都已把 HOME 指到 $WORK，天然与宿主隔离。

@@ -65,7 +65,8 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
                      把宿主端口转发到容器内端口（**仅 TCP**，仅 Linux 宿主）
   -v, --volume <HOST:GUEST[:ro|:rw]>
                      Linux 宿主 bind volume；宿主路径必须存在，禁止覆盖容器根
-  --network <MODE>  兼容模式：none = 默认断网；host = 等价 --allow-network
+  --network <MODE>  none = 默认断网；host = 等价 --allow-network；
+                    container:<NAME> = 加入该容器的网络，经 localhost 互通（仅 Linux）
   --allow-network   放行网络（Win: 授予 INTERNET_CLIENT；Linux: 不建 netns）。默认断网
   --no-network      显式声明断网（默认行为，预留）
   -e, --env <K=V>   注入显式环境变量；可重复；不支持仅写 K 继承宿主值

@@ -86,6 +86,20 @@ struct NsPlan {
     /// seccomp 过滤器程序（PRD F9.9），fork 前构造好。空 = 不装。
     /// 子进程里不能分配，BPF 指令序列必须在这之前就备齐。
     seccomp: Vec<libc::sock_filter>,
+    /// `--network container:<NAME>`（PRD F9.11）：加入既有容器的 namespace，
+    /// 而不是自建。fd 在 fork 前打开——子进程里不能做路径解析。
+    ///
+    /// **user 与 net 必须一起加入**。netns 的 setns 要求在其**属主 userns**
+    /// 里有 CAP_SYS_ADMIN；自建 userns 后与目标的 userns 互为兄弟，拿不到
+    /// 那个权限。先 setns 进目标 userns（同宿主 uid 即有权限），才进得了它的
+    /// netns——与 `wbox exec` 是同一条已验证的路径。
+    join_ns: Option<JoinNs>,
+}
+
+/// `--network container:` 模式要加入的目标 namespace 文件句柄。
+struct JoinNs {
+    user: std::fs::File,
+    net: std::fs::File,
 }
 
 /// capability 裁剪的**预算好**形式。fork 后的子进程不能分配、不能读文件，
@@ -237,8 +251,16 @@ pub(super) fn spawn_isolated(
     // 网络：默认**不给**（新建空 network namespace），与 Windows 侧不授
     // INTERNET_CLIENT 能力的默认一致。PRD F5 一致性要求同一条命令
     // 在两个宿主上默认隔离强度相同，故这里不能"Linux 上顺便继承宿主网络"。
-    let new_netns = !spec.allow_network;
-    let unshare_flags = unshare_flags(spec.allow_network);
+    let joining = spec.network_container.is_some();
+    // 加入模式：网络来自 peer（不建也不共享宿主），loopback 由 peer 拉起过。
+    let new_netns = !spec.allow_network && !joining;
+    let unshare_flags = if joining {
+        // user/net 都来自 peer，只自建 mount+pid。**不能**再 CLONE_NEWUSER：
+        // 那会把自己关进一个与 peer netns 无权限关系的兄弟 userns。
+        libc::CLONE_NEWNS | libc::CLONE_NEWPID
+    } else {
+        unshare_flags(spec.allow_network)
+    };
 
     // rootless 映射：把宿主当前 uid/gid 映射成容器内的 root。
     // 写 gid_map 之前必须先写 setgroups=deny，否则内核拒绝（CVE-2014-8989 之后的加固）。
@@ -279,8 +301,41 @@ pub(super) fn spawn_isolated(
         ));
     }
 
+    // --network container:<peer>：fork 前解析目标并打开其 namespace fd。
+    // 打开的 fd 本身会钉住 namespace——即使 peer 随后退出，加入方也不会踩空。
+    let join_ns = match spec.network_container.as_deref() {
+        None => None,
+        Some(peer) => {
+            let peer_dir = crate::runstate::resolve_existing(peer)?;
+            if crate::runstate::liveness(&peer_dir) == crate::runstate::Liveness::Exited {
+                return Err(crate::error::WboxError::args(format!(
+                    "--network container:{}：目标容器已退出，没有可加入的网络",
+                    peer
+                )));
+            }
+            let pid = crate::runstate::container_pid(&peer_dir).ok_or_else(|| {
+                crate::error::WboxError::args(format!(
+                    "--network container:{}：目标未记录容器 pid（可能刚启动，稍后重试）",
+                    peer
+                ))
+            })?;
+            let open = |ns: &str| {
+                std::fs::File::open(format!("/proc/{}/ns/{}", pid, ns)).map_err(|e| {
+                    crate::error::WboxError::spawn(format!(
+                        "--network container:{}：打开目标 namespace '{}' 失败：{}（容器可能刚退出）",
+                        peer, ns, e
+                    ))
+                })
+            };
+            Some(JoinNs {
+                user: open("user")?,
+                net: open("net")?,
+            })
+        }
+    };
     let plan = NsPlan {
         vol_binds,
+        join_ns,
         p_setgroups: cstr("/proc/self/setgroups")?,
         p_uid_map: cstr("/proc/self/uid_map")?,
         p_gid_map: cstr("/proc/self/gid_map")?,
@@ -302,7 +357,9 @@ pub(super) fn spawn_isolated(
     };
 
     if spec.verbose {
-        let ns_list = if new_netns {
+        let ns_list = if joining {
+            "mount+pid namespace（user+net 来自 --network container: 的目标）"
+        } else if new_netns {
             "user+mount+pid+net namespace（rootless）"
         } else {
             "user+mount+pid namespace（rootless，共享宿主网络）"
@@ -592,20 +649,37 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //    namespace 后，宿主 cgroup 文件的写入会因 uid 映射被拒。
     apply_limits(&p.limits)?;
 
+    // 1b. `--network container:` 加入模式：先进目标的 user+net namespace，
+    //     **必须在 unshare 之前**。顺序的道理见 JoinNs 的说明——netns 的
+    //     setns 要求在其属主 userns 内有 CAP_SYS_ADMIN。
+    if let Some(j) = p.join_ns.as_ref() {
+        use std::os::unix::io::AsRawFd;
+        if libc::setns(j.user.as_raw_fd(), libc::CLONE_NEWUSER) != 0 {
+            return Err(err());
+        }
+        if libc::setns(j.net.as_raw_fd(), libc::CLONE_NEWNET) != 0 {
+            return Err(err());
+        }
+    }
+
     // 2. 建 user + mount + pid (+ net) namespace。user namespace 让非 root 也能
     //    获得新 mount/net namespace 内的 CAP_SYS_ADMIN（rootless 的关键）。
+    //    加入模式下 flags 里没有 CLONE_NEWUSER/NEWNET——身份与网络都来自 peer。
     if libc::unshare(p.unshare_flags) != 0 {
         return Err(err());
     }
     // 3. 身份映射。顺序不能反：gid_map 之前必须 setgroups=deny。
-    if write_proc_self(p.p_setgroups.as_ptr(), b"deny") != 0 {
-        return Err(err());
-    }
-    if write_proc_self(p.p_uid_map.as_ptr(), &p.uid_map) != 0 {
-        return Err(err());
-    }
-    if write_proc_self(p.p_gid_map.as_ptr(), &p.gid_map) != 0 {
-        return Err(err());
+    //    加入模式跳过：peer 的 userns 已写过映射，重写会 EPERM。
+    if p.join_ns.is_none() {
+        if write_proc_self(p.p_setgroups.as_ptr(), b"deny") != 0 {
+            return Err(err());
+        }
+        if write_proc_self(p.p_uid_map.as_ptr(), &p.uid_map) != 0 {
+            return Err(err());
+        }
+        if write_proc_self(p.p_gid_map.as_ptr(), &p.gid_map) != 0 {
+            return Err(err());
+        }
     }
 
     // 4. PID namespace 只对**之后**创建的进程生效，故再 fork 一次：

@@ -134,6 +134,10 @@ pub struct RunSpec {
     /// **supervisor 侧**关注点，故与它们并列放在这里。
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub health: Option<crate::health::HealthSpec>,
+    /// `--network container:<NAME>`（PRD F9.11，仅 Linux 宿主）：不建新 netns，
+    /// 而是加入该容器的 user+net namespace。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub network_container: Option<String>,
     /// 打印隔离配置摘要
     pub verbose: bool,
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
@@ -600,7 +604,7 @@ pub fn reject_volumes_if_unsupported(volumes: &[VolumeMount]) -> Result<()> {
         return Ok(());
     }
     Err(crate::error::WboxError::args(
-        "-v 卷挂载目前只在 Linux 宿主可用：Windows 侧需要文件系统重定向，         而那要 minifilter 驱动（PRD §2.4 天花板一，取证见 §4.9 W3）",
+        "-v 卷挂载目前只在 Linux 宿主可用：Windows 侧需要文件系统重定向，而那要 minifilter 驱动（PRD §2.4 天花板一，取证见 §4.9 W3）",
     ))
 }
 
@@ -789,6 +793,105 @@ pub fn reject_user_if_unsupported(user: Option<UserSpec>) -> Result<()> {
         "--user 目前只在 Linux 宿主可用：它靠 user namespace 的 uid/gid 映射实现，\
          Windows 侧的 AppContainer 没有对应语义",
     ))
+}
+
+// ---------------------------------------------------------------------------
+// `--network container:`（PRD F9.11）
+// ---------------------------------------------------------------------------
+
+/// 校验 `--network container:<peer>` 的组合合法性。
+///
+/// 三个冲突都属于"两个来源在争同一件事"，静默让一方胜出会把另一方变成谎言：
+///
+/// - `--allow-network`/`--network host`：网络只能来自一个地方——peer 或宿主。
+/// - `-p`：端口转发线程要 setns 进**本容器自己**的 netns，加入模式下那是
+///   peer 的网络；要发布端口应加在拥有网络的那个容器上。
+/// - `--user`：加入模式复用 peer 的 user namespace，uid 映射是 peer 建立的，
+///   本容器写不了第二份。
+pub fn reject_network_container_conflicts(
+    peer: Option<&str>,
+    allow_network: bool,
+    ports: &[crate::portfwd::PortMap],
+    user: Option<UserSpec>,
+) -> Result<()> {
+    use crate::error::WboxError;
+    let Some(peer) = peer else { return Ok(()) };
+    if !cfg!(target_os = "linux") {
+        return Err(WboxError::args(
+            "--network container: 目前只在 Linux 宿主可用：它靠加入目标容器的network namespace 实现，Windows 侧没有对应原语",
+        ));
+    }
+    if allow_network {
+        return Err(WboxError::args(format!(
+            "--network container:{} 与 --allow-network/--network host 冲突：网络只能来自一个地方（目标容器或宿主）",
+            peer
+        )));
+    }
+    if !ports.is_empty() {
+        return Err(WboxError::args(format!(
+            "--network container:{} 与 -p 冲突：本容器没有自己的网络可发布，请把 -p 加在拥有网络的容器 '{}' 上",
+            peer, peer
+        )));
+    }
+    if user.is_some() {
+        return Err(WboxError::args(format!(
+            "--network container:{} 与 --user 冲突：加入模式复用目标容器的user namespace，uid 映射由它建立，本容器无法另写一份",
+            peer
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod network_container_tests {
+    use super::*;
+
+    fn pm() -> crate::portfwd::PortMap {
+        crate::portfwd::parse_port("8080:80").unwrap()
+    }
+
+    #[test]
+    fn no_peer_is_always_fine() {
+        assert!(reject_network_container_conflicts(None, true, &[pm()], Some(UserSpec { uid: 1, gid: 1 })).is_ok());
+    }
+
+    /// 三种冲突各自要报错并说清**为什么**——静默让一方胜出会把另一方变成谎言。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn each_conflict_is_rejected_with_reason() {
+        let m = format!(
+            "{}",
+            reject_network_container_conflicts(Some("a"), true, &[], None).unwrap_err()
+        );
+        assert!(m.contains("网络只能来自一个地方"), "{}", m);
+
+        let m = format!(
+            "{}",
+            reject_network_container_conflicts(Some("a"), false, &[pm()], None).unwrap_err()
+        );
+        assert!(m.contains("拥有网络的容器"), "{}", m);
+
+        let m = format!(
+            "{}",
+            reject_network_container_conflicts(
+                Some("a"), false, &[], Some(UserSpec { uid: 5, gid: 5 })
+            )
+            .unwrap_err()
+        );
+        assert!(m.contains("user namespace"), "{}", m);
+
+        assert!(reject_network_container_conflicts(Some("a"), false, &[], None).is_ok());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn rejected_off_linux_with_reason() {
+        let m = format!(
+            "{}",
+            reject_network_container_conflicts(Some("a"), false, &[], None).unwrap_err()
+        );
+        assert!(m.contains("只在 Linux"), "{}", m);
+    }
 }
 
 #[cfg(test)]

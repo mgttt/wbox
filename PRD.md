@@ -136,7 +136,8 @@ wbox
 | compose / pod | 无 | |
 | restart policy | 有 | F9.6：`no`/`on-failure[:N]`/`always`（门禁 R.1–R.4）|
 | healthcheck | 有 | F9.10：`--health-cmd` + interval/retries/start-period（门禁 HC.1–HC.5）|
-| 自定义网络、容器间通信、内建 DNS | 无 | 当前只有"空 netns"与"共享宿主网络"两档 |
+| 容器间通信 | 部分 | F9.11：`--network container:<NAME>` 共享 netns、localhost 互通（门禁 NC.1–NC.4）|
+| 自定义 bridge 网络、内建 DNS | 无 | rootless 下需要 slirp4netns/pasta 级的常驻用户态网络栈，与"免安装、无服务"（§2.2）冲突 |
 | `--user UID[:GID]` | 部分 | F9.7：数字 id 生效（门禁 U.1–U.4）；**只映射一个 id**，用户名不支持 |
 | `--cap-add` / `--cap-drop` | 有 | F9.8：先 drop 后 add，含 `ALL`（门禁 CAP.1–CAP.5）|
 | seccomp | 部分 | F9.9：**拒绝名单**（门禁 SEC.1–SEC.6）；docker 用的是允许名单，二者边界强度不同 |
@@ -745,7 +746,8 @@ F9
 ├── F9.7 `--user UID[:GID]`                   —— [partial] 仅 Linux，只映射一个 id
 ├── F9.8 `--cap-add` / `--cap-drop`           —— [done]（仅 Linux，门禁 CAP.1–CAP.5）
 ├── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
-└── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
+├── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
+└── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
 ```
 
 **F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
@@ -840,6 +842,31 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
 Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
 Windows 侧工作。
+
+**F9.11 `--network container:<NAME>`** `[done]`（门禁 NC.1–NC.4）。加入既有
+容器的网络，两容器经 localhost 互通——docker 同名模式的核心用途（sidecar）。
+
+**为什么 user 和 net 必须一起加入**，这是 rootless 下的关键约束：netns 的
+`setns` 要求在其**属主 userns** 内有 `CAP_SYS_ADMIN`。自建 userns 后与目标的
+userns 互为兄弟，拿不到那个权限；先 `setns` 进目标 userns（同宿主 uid 即有
+权限），才进得了它的 netns——与 `wbox exec` 是同一条已验证的路径。加入方随后
+只 `unshare(NEWNS|NEWPID)`，身份映射沿用 peer 的（不能也不需要重写，重写会
+EPERM）。
+
+由此的组合约束都在参数层报错，理由是"每样东西只能有一个出处"：
+
+- 与 `--allow-network`/`--network host` 冲突：网络来自 peer 或宿主，二选一。
+- 与 `-p` 冲突：本容器没有自己的网络可发布，`-p` 应加在拥有网络的容器上。
+- 与 `--user` 冲突：加入模式复用 peer 的 userns，uid 映射由它建立。
+
+目标 namespace 的 fd 在 fork 前打开，fd 本身会钉住 namespace——peer 随后退出
+也不会让加入方踩空；但目标**已退出**时明确拒绝（NC.4），静默起一个断网容器
+会让 sidecar 悄悄失联。
+
+**边界如实记**：这不是自定义 bridge。加入方与 peer 共享同一个 lo，端口空间
+也是同一个；真正的多容器网络（每容器独立 IP、互相路由、内建 DNS）在 rootless
+下需要 slirp4netns/pasta 级的常驻用户态网络栈，与"免安装、无服务"（§2.2）
+冲突，列为不做。
 
 **F9.10 健康检查** `[done]`（门禁 HC.1–HC.5）。`--health-cmd` 开启，
 `--health-interval` / `--health-retries` / `--health-start-period` 调参，

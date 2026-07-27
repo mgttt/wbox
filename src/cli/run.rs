@@ -46,6 +46,9 @@ pub struct RunOptions {
     pub seccomp_deny: Vec<String>,
     /// `--health-*`（PRD F9.10，仅 Linux）。`None` = 没开健康检查。
     pub health: Option<crate::health::HealthSpec>,
+    /// `--network container:<NAME>`（PRD F9.11，仅 Linux）：加入既有容器的
+    /// netns，两容器经 localhost 互通。
+    pub network_container: Option<String>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
@@ -75,6 +78,7 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         cap_add: Vec::new(),
         seccomp_deny: Vec::new(),
         health: None,
+        network_container: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -126,16 +130,25 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--no-network" => opts.allow_network = false, // 显式默认，预留
             "--network" => {
                 let mode = super::args::take_value(args, &mut i, "--network")?;
-                opts.allow_network = match mode.as_str() {
-                    "none" => false,
-                    "host" => true,
-                    _ => {
-                        return Err(WboxError::args(format!(
-                            "--network 仅支持 none 或 host，得到 '{}'",
-                            mode
-                        )));
+                if let Some(peer) = mode.strip_prefix("container:") {
+                    if peer.is_empty() {
+                        return Err(WboxError::args(
+                            "--network container: 缺少容器名（用法 container:<NAME>）",
+                        ));
                     }
-                };
+                    opts.network_container = Some(peer.to_string());
+                } else {
+                    opts.allow_network = match mode.as_str() {
+                        "none" => false,
+                        "host" => true,
+                        _ => {
+                            return Err(WboxError::args(format!(
+                                "--network 仅支持 none / host / container:<NAME>，得到 '{}'",
+                                mode
+                            )));
+                        }
+                    };
+                }
             }
             "--keep-profile" => opts.keep_profile = true,
             "--rm" => opts.auto_remove = true,
@@ -271,6 +284,7 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         // 真失败也只会退化成"不装过滤器"，故用 unwrap_or_default 而非 expect。
         seccomp: crate::seccomp::SeccompPolicy::resolve(&opts.seccomp_deny).unwrap_or_default(),
         health: opts.health.clone(),
+        network_container: opts.network_container.clone(),
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
     }
@@ -336,6 +350,12 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
     crate::seccomp::reject_if_unsupported(&seccomp)?;
     crate::seccomp::reject_unsupported_arch(&seccomp)?;
     crate::seccomp::reject_self_defeating(&seccomp)?;
+    backend::reject_network_container_conflicts(
+        opts.network_container.as_deref(),
+        opts.allow_network,
+        &opts.ports,
+        opts.user,
+    )?;
     crate::health::reject_if_unsupported(opts.health.as_ref())?;
     if let Some(h) = opts.health.as_ref() {
         crate::health::validate(h)?;
