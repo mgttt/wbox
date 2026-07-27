@@ -68,6 +68,22 @@ fn not_ready_error(detail: String) -> WboxError {
 /// 保证 guest 程序能解析域名（blink 的 socket 直通宿主网络栈）。
 pub const DEFAULT_DNS: &str = "223.5.5.5";
 
+/// Blink 的 VFS 初始化会挂载内建的 `/dev` 与 `/proc`。AppContainer 只有
+/// rootfs 的读执行权限，不能在降权后创建缺失目录，因此必须由 wbox 预建。
+fn ensure_vfs_mountpoints(rootfs: &Path) -> Result<()> {
+    for name in ["dev", "proc"] {
+        let path = rootfs.join(name);
+        std::fs::create_dir_all(&path).map_err(|e| {
+            WboxError::registry(format!(
+                "创建 Blink VFS 挂载点 '{}' 失败：{}",
+                path.display(),
+                e
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 /// 确保 rootfs 内存在 `/etc/resolv.conf`；缺失（或为空文件）时写入公共 DNS。
 /// 已存在且有内容的 resolv.conf 不覆盖（用户/镜像自定义优先）。
 /// 返回是否发生了注入。纯文件操作，Windows/Linux 宿主通用。
@@ -116,6 +132,7 @@ impl Backend for BlinkBackend {
             super::verbose_kv("Linux 后端模拟器", format!("{}（{}）", exe.display(), src));
             super::verbose_kv("rootfs", rootfs.display());
         }
+        ensure_vfs_mountpoints(rootfs)?;
         // rootfs 网络可用性：缺失/空的 /etc/resolv.conf 注入公共 DNS，
         // 使 guest 程序（apt/wget 等）开箱即可解析域名。
         if ensure_resolv_conf(rootfs)? && spec.verbose {
@@ -284,6 +301,15 @@ mod tests {
         assert!(content.contains(DEFAULT_DNS), "{}", content);
         // 幂等：已存在且有内容则不再注入
         assert!(!ensure_resolv_conf(&rootfs).unwrap());
+        let _ = std::fs::remove_dir_all(&rootfs);
+    }
+
+    #[test]
+    fn creates_vfs_mountpoints_for_minimal_rootfs() {
+        let rootfs = temp_rootfs("mountpoints");
+        ensure_vfs_mountpoints(&rootfs).unwrap();
+        assert!(rootfs.join("dev").is_dir());
+        assert!(rootfs.join("proc").is_dir());
         let _ = std::fs::remove_dir_all(&rootfs);
     }
 

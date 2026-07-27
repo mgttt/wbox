@@ -138,14 +138,14 @@ S4 在 Linux 上运行 Windows CLI
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
 | F4.1 静态 `wbox-linux.exe` | build script | G1 | CI 构建后直跑；G4 两文件 bundle 由 `WP.3` 裁决 |
 | F4.2-F4.7 ELF/syscall/fork/network/fd | `vendor/blink` | G1 | `test-matrix.sh`、guest C 套件均直接跑模拟器 |
-| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | 缺 G3 | `WP.3`: `wbox run local.test/...`，当前人工实测未通过 |
+| F4 Windows 完整 Linux guest 路径 | `BlinkBackend` + F2/F3/F4 | 缺 G3 | `WP.3`：CI artifact 直跑成功；AppContainer 内执行 BusyBox 时 rc=139 |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
 | F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
 | F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
 | F6.1-F6.3/F6.5 PE/Wine 分派 | `wine.rs` | G3 | W.1/W.2/W.4/W.5 |
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
-| F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 Linux | P.1-P.5；Windows 清理修复待 CI 验证，`WP.5` 检查 `ps --all` 无残留 |
+| F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 Linux | P.1-P.5；Windows Rust 已绿，`WP.5` 检查 `ps --all`，但目前被 WP.3 提前阻断 |
 | F8.2-F8.4 detach/logs/stop/rm/exec | 未实现 | 无 | planned |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
@@ -352,7 +352,7 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 
 | 期 | 范围 | 验收 |
 |---|---|---|
-| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5 已覆盖 Linux；Windows 清理修复待 CI 验证，且 WP.5 尚未进入成功门禁 |
+| F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5 已覆盖 Linux；Windows Rust 已验证清理修复，WP.5 尚未跑到成功终点 |
 | F8.2 | `--detach` + `logs` | detach 后前台立即返回且容器仍在跑；`logs` 拿到完整输出；超上限时截断可见 |
 | F8.3 | `stop` / `rm` | `stop` 后进程树无残留（复用 L3 的后代 pid 判定）；`rm` 拒绝删存活容器 |
 | F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
@@ -393,15 +393,23 @@ F8.a 判活，把这类标为 `exited`，不假装还在。重名：目标存活
 |---|---|---|
 | Windows 原生容器 | active | 原生启动 G3 通过；网络放行、资源超限和进程树回收缺行为门禁 |
 | OCI pull/cache/config | active | Rust 单测与 Windows pull 通过；真实 rootfs 链接和原子缓存存在缺口 |
-| Windows Linux guest | active | G1 guest 组件覆盖充分；公开 `wbox run <image>` G3 尚未通过 |
+| Windows Linux guest | active | CI 30235107088：WP.1/WP.2 通过；WP.3 在 AppContainer 内执行 BusyBox 时 0xC0000005/rc139，同一静态 artifact 直跑为 rc0 |
 | Windows shell 矩阵 | component-only | 43 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
-| Rust 主机逻辑 | G0 complete | 最近记录 198 pass、0 fail；不能外推产品状态 |
+| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 209 pass、0 fail；不能外推产品状态 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
 | 后台生命周期管理 | active | F8.1 已实现但当前 Windows job 未绿；F8.2-F8.4 未实现 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
+
+Windows Linux guest 当前交接信息：最小 rootfs 原先缺少 `/dev`、`/proc`，导致
+AppContainer 无写权限时 VFS 初始化失败；`BlinkBackend` 已改为降权前预建。
+越过该点后，CI 构建的静态 `wbox-linux.exe` 在 AppContainer 内加载 BusyBox
+仍于 guest 入口 `0x4038b1` 崩溃（host `0xC0000005`，fault address `-1`）。
+同一 exe、同一 BusyBox、同一 `BLINK_PREFIX` 在 Windows 宿主直接运行 rc=0；
+`-j` 禁用 JIT、`--env-pass-all` 和额外 `codeGeneration` capability 均未改变
+崩溃，因此后三者不是已证实的修复方向。
 
 ## 7. 里程碑与时间线
 

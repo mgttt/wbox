@@ -81,12 +81,16 @@ try {
     Write-Host "PASS WP.2 Windows environment filter product path"
 
     $guest = & $portableWbox run --name product-guest local.test/wbox-fixture:latest 2>&1 | Out-String
-    Assert-Exit 0 "WP.3 Windows OCI-to-Linux product path" $guest
-    if ($guest -notmatch "PRODUCT_E2E_OK") {
-        throw "Windows OCI-to-Linux product path did not produce its marker: $guest"
+    $guestRc = $LASTEXITCODE
+    $guestFailure = $null
+    if ($guestRc -ne 0) {
+        $guestFailure = "WP.3 Windows OCI-to-Linux product path failed: rc=$guestRc`n$guest"
+    } elseif ($guest -notmatch "PRODUCT_E2E_OK") {
+        $guestFailure = "WP.3 Windows OCI-to-Linux product path did not produce its marker: $guest"
+    } else {
+        Write-Host "PASS WP.3 Windows OCI-to-Linux product path"
+        Write-Host "PASS WP.4 portable two-executable bundle"
     }
-    Write-Host "PASS WP.3 Windows OCI-to-Linux product path"
-    Write-Host "PASS WP.4 portable two-executable bundle"
 
     $ps = & $portableWbox ps --all 2>&1 | Out-String
     Assert-Exit 0 "post-run state inspection" $ps
@@ -94,6 +98,9 @@ try {
         throw "normal foreground runs left a state record: $ps"
     }
     Write-Host "PASS WP.5 normal-run state cleanup"
+    if ($null -ne $guestFailure) {
+        throw $guestFailure
+    }
 }
 finally {
     if ($null -eq $savedUserProfile) {
