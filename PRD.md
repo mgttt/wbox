@@ -423,6 +423,13 @@ Linux 先 `SIGTERM` 后 `SIGKILL`（默认给 10 秒，`--timeout` 可调）。
 `stop` 对已停止的容器**幂等**（不报错），否则 `wbox stop x` 在脚本里没法用；
 但停一个**不存在**的容器仍然报错——那是"没这个东西"，与"已经停了"是两回事。
 
+**F8 的覆盖现状（如实记录）**。F8.1–F8.3 的端到端门禁（P.1–P.18）**只在
+Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现——锁语义
+（`lock_reflects_owner_liveness`）与进程终止（`terminate_actually_kills`），
+它们由 windows runner 真跑；但 `--detach` → `ps` → `logs` → `stop` 这条完整
+链路在 Windows 上**没有逐条验证过**。补 Windows 端到端门禁（例如扩展
+`scripts/test-windows-product.ps1`）是 F8 收尾前该做的事，不应默认两侧等价。
+
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
 `exec` 存疑：Linux 可 `setns` 进已有 namespace；Windows 没有"进入已有容器"
 的原语，只能用同一 profile + 同一 Job 另起进程。因 wbox 本就不做文件系统

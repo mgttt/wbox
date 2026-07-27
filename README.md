@@ -20,6 +20,12 @@ cargo build --release
 # OCI 镜像
 .\target\release\wbox.exe image pull ubuntu:24.04
 .\target\release\wbox.exe run ubuntu:24.04 -- bash
+
+# 后台运行
+.\target\release\wbox.exe run -d --name job1 ubuntu:24.04 -- bash -c "echo hi"
+.\target\release\wbox.exe ps -a
+.\target\release\wbox.exe logs job1
+.\target\release\wbox.exe rm job1
 ```
 
 Portable Windows 发布包包含两个文件：
@@ -39,9 +45,19 @@ Portable Windows 发布包包含两个文件：
 | CPU/内存/进程数限制 | Job Object | cgroup v2，受限时明确回退或拒绝 |
 | 默认网络 | AppContainer 无网络 capability | 独立空 netns |
 | 进程树清理 | Job kill-on-close | namespace/PDEATHSIG |
+| 后台运行与生命周期 | `--detach` / `ps` / `logs` / `stop` / `rm`（端到端门禁尚未覆盖 Windows）| 同左，已进门禁 |
+
+后台容器：`--detach` 起，`ps` 看，`logs` 读输出（容器跑完仍可读），
+`stop` 停整棵进程树，`rm` 清记录。日志体积有上限，截断处会写明。
+`stop` 在 Linux 上先 `SIGTERM` 再 `SIGKILL`；Windows 无 `SIGTERM` 等价物，
+直接强制终止。
+
+两侧代码同一套，Windows 侧的存活判定与进程终止有单测在 windows runner 上真跑；
+但**端到端的后台流程目前只在 Linux 有门禁**，Windows 上尚未逐条验证过。
 
 当前不提供文件系统 overlay、注册表虚拟化、端口映射、GUI 桌面隔离、驱动隔离，
-也不提供 `ps/stop/exec/logs` 等后台容器生命周期管理。
+也不提供 `exec`（进入运行中的容器）——Linux 可 `setns`，Windows 没有对应原语，
+是否实现取决于取证结果。
 
 ## 文档
 
