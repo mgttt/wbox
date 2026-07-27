@@ -119,8 +119,12 @@ TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
 
 for b in "$WORK"/t_*; do
   name=$(basename "$b")
-  # 容器模式下 guest 的 cwd 是 /，用例二进制就在 / 下
-  if [ -n "${WBOX_PREFIX:-}" ]; then rel=/$name; else rel=./$name; fi
+  # **一律用 ./name，不要写成 /name。** MSYS2 会把看起来像 POSIX 绝对路径的
+  # 参数自动改写成宿主路径（`/t_foo` -> `D:/a/_temp/msys64/t_foo`），于是
+  # guest 拿到一个根本不存在的路径，21 个用例全以 rc=127 假失败——PRD §4.9
+  # 开头记的就是这个坑，这里又踩了一次。相对路径 MSYS2 不动。
+  # 容器模式下 guest 的 cwd 是 /，`./name` 解析到 <prefix>/name，效果相同。
+  rel=./$name
   case $name in
     t_stress*) [ "$SKIP_SLOW" = 1 ] && { report SKIP "$name" "slow (--skip-slow)"; continue; } ;;
   esac

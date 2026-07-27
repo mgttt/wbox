@@ -22,6 +22,10 @@ fn usage() -> String {
     format!(
         "wbox-linux {VERSION} —— x86-64 Linux 用户态模拟器（纯 Rust）
 
+This is the internal Linux ELF runtime of wbox. It is not the container CLI:
+Use wbox.exe for containers, images and isolation. Running guests directly
+through this executable bypasses AppContainer/Job isolation.
+
 用法：
   wbox-linux [选项] [--] <程序> [参数...]
 
