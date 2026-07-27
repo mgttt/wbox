@@ -887,9 +887,12 @@ request header
   `HELLO/PING`；`register_rejects_process_outside_target_job` 与
   `register_rejects_different_appcontainer_sid` 分别裁决 rogue Job 与错误 profile。
   codec 同时拒绝错误版本、长度不一致和超过 4096 字节的 payload。
-- 当前已实现 opcode 为 `HELLO`、`PING`；下一数据面 opcode `OPEN` 只接受 mount id、Linux open
-  flags/mode 与相对路径；Win32 access mask 由 broker allowlist 映射，不接收 guest
-  原始 access mask。只读 mount 在 broker 与 VFS 两层都拒绝写/创建/截断。
+- 当前 transport 已实现 `HELLO`、`PING`；`OPEN` 帧解析组件也已落地，只接受非零
+  mount id、Linux flags/mode 与 UTF-8 相对路径，并在任何宿主 open 前拒绝绝对路径、
+  空组件、`.`/`..`、反斜杠、冒号、非法 UTF-8 和超过 1024 字节的路径。首个数据面
+  仅允许 `O_RDONLY` 既有文件；Win32 access mask 由 broker allowlist 映射，不接收
+  guest 原始 access mask。逐组件 `NtCreateFile` 与 HANDLE 返回仍未接通，不能据此
+  宣称 Windows `-v` 可用。只读 mount 最终在 broker 与 VFS 两层都拒绝写/创建/截断。
 - broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
   host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，

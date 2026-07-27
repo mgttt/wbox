@@ -39,6 +39,9 @@ const PIPE_BUFFER: u32 = 8192;
 
 const OP_HELLO: u16 = 1;
 const OP_PING: u16 = 2;
+const OP_OPEN: u16 = 3;
+const OPEN_FIXED_LEN: usize = 12;
+const MAX_RELATIVE_PATH: usize = 1024;
 
 const STATUS_OK: i32 = 0;
 const STATUS_PROTOCOL: i32 = -71; // Linux EPROTO
@@ -67,6 +70,61 @@ enum DecodeError {
     Version,
     PayloadTooLarge,
     PayloadSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenRequest {
+    mount_id: u32,
+    linux_flags: u32,
+    mode: u32,
+    components: Vec<String>,
+}
+
+impl OpenRequest {
+    fn decode(request: &Request) -> std::result::Result<Self, &'static str> {
+        if request.opcode != OP_OPEN || request.flags != 0 {
+            return Err("opcode/flags");
+        }
+        if request.payload.len() <= OPEN_FIXED_LEN {
+            return Err("missing path");
+        }
+        let mount_id = u32::from_le_bytes(request.payload[0..4].try_into().unwrap());
+        let linux_flags = u32::from_le_bytes(request.payload[4..8].try_into().unwrap());
+        let mode = u32::from_le_bytes(request.payload[8..12].try_into().unwrap());
+        if mount_id == 0 {
+            return Err("mount id");
+        }
+        // First data-plane slice is existing-file read-only. Unsupported write/create flags
+        // are rejected before any host object is opened.
+        if linux_flags != 0 || mode != 0 {
+            return Err("open flags");
+        }
+        let path_bytes = &request.payload[OPEN_FIXED_LEN..];
+        if path_bytes.len() > MAX_RELATIVE_PATH {
+            return Err("path too long");
+        }
+        let path = std::str::from_utf8(path_bytes).map_err(|_| "path utf8")?;
+        if path.starts_with('/') || path.contains('\\') || path.contains(':') || path.contains('\0')
+        {
+            return Err("path syntax");
+        }
+        let mut components = Vec::new();
+        for component in path.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err("path component");
+            }
+            components.push(component.to_string());
+        }
+        if components.is_empty() {
+            return Err("missing path");
+        }
+        Ok(Self {
+            mount_id,
+            linux_flags,
+            mode,
+            components,
+        })
+    }
 }
 
 impl Request {
@@ -636,6 +694,52 @@ mod tests {
             Response::decode(&response.encode_header(), response.payload.clone()).unwrap(),
             response
         );
+    }
+
+    fn open_request(path: &[u8], mount_id: u32, flags: u32, mode: u32) -> Request {
+        let mut payload = Vec::with_capacity(OPEN_FIXED_LEN + path.len());
+        payload.extend_from_slice(&mount_id.to_le_bytes());
+        payload.extend_from_slice(&flags.to_le_bytes());
+        payload.extend_from_slice(&mode.to_le_bytes());
+        payload.extend_from_slice(path);
+        Request {
+            opcode: OP_OPEN,
+            request_id: 9,
+            flags: 0,
+            payload,
+        }
+    }
+
+    #[test]
+    fn open_request_accepts_only_normalized_read_only_relative_paths() {
+        let parsed = OpenRequest::decode(&open_request(b"dir/canary.txt", 7, 0, 0)).unwrap();
+        assert_eq!(parsed.mount_id, 7);
+        assert_eq!(parsed.components, ["dir", "canary.txt"]);
+
+        for path in [
+            b"".as_slice(),
+            b"/absolute",
+            b"../escape",
+            b"dir/../escape",
+            b"dir/./file",
+            b"dir//file",
+            b"dir\\file",
+            b"C:drive",
+        ] {
+            assert!(
+                OpenRequest::decode(&open_request(path, 7, 0, 0)).is_err(),
+                "must reject {:?}",
+                String::from_utf8_lossy(path)
+            );
+        }
+        assert!(OpenRequest::decode(&open_request(b"file", 0, 0, 0)).is_err());
+        assert!(OpenRequest::decode(&open_request(b"file", 7, 1, 0)).is_err());
+        assert!(OpenRequest::decode(&open_request(b"file", 7, 0, 0o644)).is_err());
+        assert!(
+            OpenRequest::decode(&open_request(&vec![b'a'; MAX_RELATIVE_PATH + 1], 7, 0, 0))
+                .is_err()
+        );
+        assert!(OpenRequest::decode(&open_request(&[0xff], 7, 0, 0)).is_err());
     }
 
     #[test]
