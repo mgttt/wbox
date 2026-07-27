@@ -6,8 +6,9 @@
 use crate::error::{Result, WboxError};
 use crate::token::{self, OwnedHandle};
 use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_PIPE_CONNECTED,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
+    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+    ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    HLOCAL, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -648,7 +649,7 @@ impl BrokerSession {
             },
         )?;
         if ping_status == STATUS_OK && expect_open {
-            self.serve_open()?;
+            self.serve_open_loop()?;
         }
         unsafe {
             FlushFileBuffers(self.pipe.raw());
@@ -661,8 +662,14 @@ impl BrokerSession {
         }
     }
 
-    fn serve_open(&self) -> Result<()> {
-        let request = read_request(self.pipe.raw())?;
+    fn serve_open_loop(&self) -> Result<()> {
+        while let Some(request) = read_request_or_disconnect(self.pipe.raw())? {
+            self.serve_open(request)?;
+        }
+        Ok(())
+    }
+
+    fn serve_open(&self, request: Request) -> Result<()> {
         let request_id = request.request_id;
         let opcode = request.opcode;
         let parsed = match OpenRequest::decode(&request) {
@@ -720,21 +727,75 @@ impl BrokerSession {
             return Err(last_error("DuplicateHandle(broker OPEN)"));
         }
         let payload = (remote as usize as u64).to_le_bytes().to_vec();
-        write_response(
-            self.pipe.raw(),
-            &Response {
-                opcode,
-                request_id,
-                status: STATUS_OK,
-                payload,
-            },
-        )
+        let response = Response {
+            opcode,
+            request_id,
+            status: STATUS_OK,
+            payload,
+        };
+        if let Err(write_error) = write_response(self.pipe.raw(), &response) {
+            let mut reclaimed = std::ptr::null_mut();
+            let cleanup = unsafe {
+                DuplicateHandle(
+                    self.process.raw(),
+                    remote,
+                    GetCurrentProcess(),
+                    &mut reclaimed,
+                    0,
+                    0,
+                    DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if cleanup == 0 {
+                return Err(WboxError::spawn(format!(
+                    "{}；撤销目标进程 broker OPEN HANDLE 也失败：GetLastError={}",
+                    write_error,
+                    unsafe { GetLastError() }
+                )));
+            }
+            drop(OwnedHandle(reclaimed));
+            return Err(write_error);
+        }
+        Ok(())
     }
 }
 
 fn read_request(pipe: HANDLE) -> Result<Request> {
+    read_request_or_disconnect(pipe)?.ok_or_else(|| WboxError::spawn("broker 请求提前 EOF"))
+}
+
+fn read_request_or_disconnect(pipe: HANDLE) -> Result<Option<Request>> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
-    read_exact(pipe, &mut header)?;
+    let mut read = 0u32;
+    let ok = unsafe {
+        ReadFile(
+            pipe,
+            header.as_mut_ptr(),
+            header.len() as u32,
+            &mut read,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_BROKEN_PIPE || error == ERROR_NO_DATA {
+            return Ok(None);
+        }
+        return Err(WboxError::spawn(format!(
+            "ReadFile(broker request header) 失败，GetLastError={}",
+            error
+        )));
+    }
+    if read == 0 {
+        return Ok(None);
+    }
+    if read as usize != header.len() {
+        return Err(WboxError::spawn(format!(
+            "broker 请求 header 截断：{} != {}",
+            read,
+            header.len()
+        )));
+    }
     let payload_len = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(WboxError::spawn(format!(
@@ -747,6 +808,7 @@ fn read_request(pipe: HANDLE) -> Result<Request> {
         read_exact(pipe, &mut payload)?;
     }
     Request::decode(&header, payload)
+        .map(Some)
         .map_err(|e| WboxError::spawn(format!("broker 请求帧无效：{:?}", e)))
 }
 
@@ -1127,32 +1189,38 @@ mod tests {
         assert_eq!(ping.request_id, 2);
 
         if let Ok(path) = std::env::var("WBOX_TEST_BROKER_OPEN_PATH") {
-            write_request(pipe.raw(), &open_request(path.as_bytes(), 1, 0, 0)).unwrap();
-            let opened = read_response(pipe.raw()).unwrap();
-            assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
-            assert_eq!(opened.payload.len(), 8);
-            let remote = u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
-            let remote = OwnedHandle(remote);
-            let mut buffer = [0u8; 64];
-            let mut read = 0;
-            assert_ne!(
-                unsafe {
-                    ReadFile(
-                        remote.raw(),
-                        buffer.as_mut_ptr(),
-                        buffer.len() as u32,
-                        &mut read,
-                        std::ptr::null_mut(),
-                    )
-                },
-                0
-            );
-            assert_eq!(
-                &buffer[..read as usize],
-                std::env::var("WBOX_TEST_BROKER_OPEN_EXPECTED")
-                    .unwrap()
-                    .as_bytes()
-            );
+            for request_id in [3, 4] {
+                let mut request = open_request(path.as_bytes(), 1, 0, 0);
+                request.request_id = request_id;
+                write_request(pipe.raw(), &request).unwrap();
+                let opened = read_response(pipe.raw()).unwrap();
+                assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
+                assert_eq!(opened.request_id, request_id);
+                assert_eq!(opened.payload.len(), 8);
+                let remote =
+                    u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
+                let remote = OwnedHandle(remote);
+                let mut buffer = [0u8; 64];
+                let mut read = 0;
+                assert_ne!(
+                    unsafe {
+                        ReadFile(
+                            remote.raw(),
+                            buffer.as_mut_ptr(),
+                            buffer.len() as u32,
+                            &mut read,
+                            std::ptr::null_mut(),
+                        )
+                    },
+                    0
+                );
+                assert_eq!(
+                    &buffer[..read as usize],
+                    std::env::var("WBOX_TEST_BROKER_OPEN_EXPECTED")
+                        .unwrap()
+                        .as_bytes()
+                );
+            }
         }
     }
 

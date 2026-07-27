@@ -910,6 +910,10 @@ request header
   volume 读取 canary，`readonly_mount_rejects_intermediate_junction_escape` 证明
   junction 外部 canary 不可达。Blink fd-backed hostfs 尚未消费该 HANDLE，不能据此
   宣称 Windows `-v` 可用。只读 mount 最终在 broker 与 VFS 两层都拒绝写/创建/截断。
+  `[done: OPEN session gate]` 认证后的 session 可串行处理多个 `OPEN`，正常断线结束
+  session；真机 child 连续两次打开并读取同一 canary。若 remote HANDLE 已复制但响应
+  写回失败，supervisor 用 `DUPLICATE_CLOSE_SOURCE` 从目标进程撤销该 HANDLE，避免
+  错误路径只能等进程退出才回收。
 - broker 必须由实际 supervisor 持有。detached 启动时短命父进程不得持有通道；
   restart 必须轮换 generation 并使旧 session 失效；后续 `exec` 通过 owner-only
   host control pipe 把挂起 PID 与新的 connected client HANDLE 附着到同一 broker，
