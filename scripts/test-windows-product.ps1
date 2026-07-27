@@ -78,6 +78,8 @@ $savedMarker = $env:HOST_ONLY_MARKER
 $portableWbox = $null
 $stopName = "product-stop"
 $stopPids = @()
+$execName = "product-exec"
+$crashName = "product-crash"
 
 try {
     New-Item -ItemType Directory -Force -Path $bundle, $rootfs | Out-Null
@@ -290,6 +292,149 @@ while ($true) {
     }
     Write-Host "PASS WP.12 rm cleans the stopped record"
 
+    # WP.13-WP.16 gate the Windows-native exec subset. It deliberately accepts
+    # the Docker/Podman positional form without a mandatory `--`.
+    $execWork = Join-Path $sandbox "exec-work"
+    New-Item -ItemType Directory -Force -Path $execWork | Out-Null
+    & icacls.exe $execWork /grant "*S-1-15-2-1:(OI)(CI)(M)" /T /C | Out-Null
+    Assert-Exit 0 "WP.13 exec workload ACL setup"
+
+    $execLaunchInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $execLaunchInfo.FileName = $portableWbox
+    $execLaunchInfo.UseShellExecute = $false
+    $execLaunchInfo.CreateNoWindow = $true
+    @(
+        "run", "-d", "--name", $execName, "--workdir", $execWork, "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", "[Threading.Thread]::Sleep(120000)"
+    ) | ForEach-Object { [void]$execLaunchInfo.ArgumentList.Add($_) }
+    $execLauncher = [System.Diagnostics.Process]::Start($execLaunchInfo)
+    if (-not $execLauncher.WaitForExit(15000)) {
+        $execLauncher.Kill()
+        throw "WP.13 detached exec workload parent did not exit within 15 seconds"
+    }
+    if ($execLauncher.ExitCode -ne 0) {
+        throw "WP.13 detached exec workload launch failed: rc=$($execLauncher.ExitCode)"
+    }
+
+    $execSeen = $false
+    foreach ($i in 1..50) {
+        $execPs = & $portableWbox ps 2>&1 | Out-String
+        if ($execPs -match "(?m)^$([regex]::Escape($execName))\s+running\s+") {
+            $execSeen = $true
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    if (-not $execSeen) {
+        throw "WP.13 detached native container never became running: $execPs"
+    }
+
+    $execMarker = Join-Path $execWork "exec-result.txt"
+    & $portableWbox exec $execName powershell.exe -NoLogo -NoProfile -NonInteractive `
+        -Command "[IO.File]::WriteAllText('exec-result.txt','EXEC_WINDOWS_OK')"
+    Assert-Exit 0 "WP.13 Windows native exec marker"
+    if (-not (Test-Path -LiteralPath $execMarker -PathType Leaf) -or
+        (Get-Content -LiteralPath $execMarker -Raw).Trim() -ne "EXEC_WINDOWS_OK") {
+        throw "WP.13 exec did not write its marker in the inherited workdir"
+    }
+    Write-Host "PASS WP.13 Windows native exec accepts Docker/Podman positional syntax"
+
+    & $portableWbox exec $execName -- cmd.exe /d /c "exit 23"
+    if ($LASTEXITCODE -ne 23) {
+        throw "WP.14 exec exit forwarding failed: expected rc=23, got rc=$LASTEXITCODE"
+    }
+    Write-Host "PASS WP.14 Windows native exec forwards the guest exit code"
+
+    $longExecInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $longExecInfo.FileName = $portableWbox
+    $longExecInfo.UseShellExecute = $false
+    $longExecInfo.CreateNoWindow = $true
+    @(
+        "exec", $execName, "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", "[Threading.Thread]::Sleep(120000)"
+    ) | ForEach-Object { [void]$longExecInfo.ArgumentList.Add($_) }
+    $longExec = [System.Diagnostics.Process]::Start($longExecInfo)
+    Start-Sleep -Milliseconds 800
+    if ($longExec.HasExited) {
+        throw "WP.15 concurrent exec exited before stop: rc=$($longExec.ExitCode)"
+    }
+
+    & $portableWbox stop $execName --timeout 5 2>&1 | Out-Null
+    Assert-Exit 0 "WP.15 stop with concurrent exec"
+    if (-not $longExec.WaitForExit(10000)) {
+        $longExec.Kill()
+        throw "WP.15 stop did not release the concurrent exec controller"
+    }
+    if ($longExec.ExitCode -eq 0) {
+        throw "WP.15 interrupted exec unexpectedly returned rc=0"
+    }
+    Write-Host "PASS WP.15 stop terminates the shared Job and concurrent exec"
+
+    $deadExec = & $portableWbox exec $execName -- cmd.exe /d /c "echo SHOULD_NOT_RUN" 2>&1 | Out-String
+    $deadExecRc = $LASTEXITCODE
+    if ($deadExecRc -eq 0 -or $deadExec -notmatch "已退出") {
+        throw "WP.16 exec on an exited container was not rejected clearly: rc=$deadExecRc`n$deadExec"
+    }
+    & $portableWbox rm $execName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.16 rm exec record"
+    Write-Host "PASS WP.16 exec rejects an exited container"
+
+    # An exec controller must close its Job handle immediately after attaching.
+    # Otherwise killing the supervisor would no longer trigger KILL_ON_JOB_CLOSE.
+    $crashGuestPidFile = Join-Path $execWork "crash-guest.pid"
+    $crashExecPidFile = Join-Path $execWork "crash-exec.pid"
+    $crashLaunchInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $crashLaunchInfo.FileName = $portableWbox
+    $crashLaunchInfo.UseShellExecute = $false
+    $crashLaunchInfo.CreateNoWindow = $true
+    @(
+        "run", "-d", "--name", $crashName, "--workdir", $execWork, "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        "[IO.File]::WriteAllText('crash-guest.pid',[string]`$PID);[Threading.Thread]::Sleep(120000)"
+    ) | ForEach-Object { [void]$crashLaunchInfo.ArgumentList.Add($_) }
+    $crashLauncher = [System.Diagnostics.Process]::Start($crashLaunchInfo)
+    if (-not $crashLauncher.WaitForExit(15000)) {
+        $crashLauncher.Kill()
+        throw "WP.17 detached crash workload parent did not exit within 15 seconds"
+    }
+    if ($crashLauncher.ExitCode -ne 0) {
+        throw "WP.17 detached crash workload launch failed: rc=$($crashLauncher.ExitCode)"
+    }
+    $crashGuestPid = Wait-PidFile $crashGuestPidFile 15
+    if ($null -eq $crashGuestPid) {
+        throw "WP.17 main guest did not publish its PID"
+    }
+
+    $crashExecInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $crashExecInfo.FileName = $portableWbox
+    $crashExecInfo.UseShellExecute = $false
+    $crashExecInfo.CreateNoWindow = $true
+    @(
+        "exec", $crashName, "powershell.exe", "-NoLogo", "-NoProfile",
+        "-NonInteractive", "-Command",
+        "[IO.File]::WriteAllText('crash-exec.pid',[string]`$PID);[Threading.Thread]::Sleep(120000)"
+    ) | ForEach-Object { [void]$crashExecInfo.ArgumentList.Add($_) }
+    $crashExecController = [System.Diagnostics.Process]::Start($crashExecInfo)
+    $crashExecPid = Wait-PidFile $crashExecPidFile 15
+    $crashMetaFile = Join-Path $testHome ".wbox\run\$crashName\meta.json"
+    if ($null -eq $crashExecPid -or -not (Test-Path -LiteralPath $crashMetaFile -PathType Leaf)) {
+        throw "WP.17 exec guest or supervisor metadata did not appear"
+    }
+    $crashSupervisorPid = [int]((Get-Content -LiteralPath $crashMetaFile -Raw | ConvertFrom-Json).pid)
+    Stop-Process -Id $crashSupervisorPid -Force
+    if (-not (Wait-ProcessesExited @($crashSupervisorPid, $crashGuestPid, $crashExecPid) 15)) {
+        throw "WP.17 supervisor crash left a guest alive"
+    }
+    if (-not $crashExecController.WaitForExit(10000)) {
+        $crashExecController.Kill()
+        throw "WP.17 exec controller did not observe its guest termination"
+    }
+    & $portableWbox rm $crashName 2>&1 | Out-Null
+    Assert-Exit 0 "WP.17 rm crashed record"
+    Write-Host "PASS WP.17 supervisor crash closes the Job and all attached guests"
+
     if ($null -ne $guestFailure) {
         throw $guestFailure
     }
@@ -298,6 +443,10 @@ finally {
     if ($null -ne $portableWbox -and (Test-Path -LiteralPath $portableWbox -PathType Leaf)) {
         & $portableWbox stop $stopName 2>&1 | Out-Null
         & $portableWbox rm $stopName 2>&1 | Out-Null
+        & $portableWbox stop $execName 2>&1 | Out-Null
+        & $portableWbox rm $execName 2>&1 | Out-Null
+        & $portableWbox stop $crashName 2>&1 | Out-Null
+        & $portableWbox rm $crashName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {

@@ -138,7 +138,7 @@ S4 在 Linux 上运行 Windows CLI
 | F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
 | F2.3 Windows 网络放行 | `token.rs` | G3 | `WNET.1-WNET.4` 对照宿主、默认拒绝和 `--allow-network` |
 | F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
-| F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G2 | 缺杀死 wbox 后后代 PID 消失的 Windows 门禁 |
+| F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G4 | WP.9、WP.15、WP.17 分别覆盖 stop、并发 exec 与 supervisor 崩溃后的整树回收 |
 | F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
@@ -152,8 +152,8 @@ S4 在 Linux 上运行 Windows CLI
 | F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
-| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；Windows stop 门禁本地通过，待 main CI |
-| F8.4 exec | `src/cli/exec.rs` | G3 Linux | P.19-P.22；Windows W2 取证/实现进行中 |
+| F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；Windows 本地通过，待 main CI |
+| F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17 本地通过，待 main CI |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -169,6 +169,12 @@ S4 在 Linux 上运行 Windows CLI
 - `WP.10`：重复 `stop` 已退出容器保持幂等。
 - `WP.11`：`stop` 未知名称明确失败。
 - `WP.12`：`rm` 删除 stopped 记录。
+- `WP.13`：Windows 原生 `exec` 接受 Docker/Podman 位置参数形状并继承工作目录。
+- `WP.14`：Windows 原生 `exec` 原样返回 guest 退出码。
+- `WP.15`：并发长命 `exec` 时，`stop` 清空共享 Job 且控制器正常收尾。
+- `WP.16`：已退出容器明确拒绝 `exec`。
+- `WP.17`：强杀 supervisor 后，主 guest 与 exec guest 均由
+  `KILL_ON_JOB_CLOSE` 回收。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -206,7 +212,8 @@ F1
     ├── F1.7.4 `ps -a`、`rm <NAME>...` 保持常见命令形状
     ├── F1.7.5 `run --name/-w/--workdir/--rm` 接受常见参数拼法
     ├── F1.7.6 `run --network none|host` 映射 wbox 的默认断网与网络放行
-    └── F1.7.7 未实现参数必须明确拒绝，禁止静默忽略
+    ├── F1.7.7 `exec NAME COMMAND [ARG...]` 不强制要求 `--` 分隔
+    └── F1.7.8 未实现参数必须明确拒绝，禁止静默忽略
 ```
 
 验收：
@@ -236,6 +243,7 @@ wbox
 │   ├── show IMAGE
 │   └── rm IMAGE
 ├── ps [-a|--all]
+├── exec NAME [--] COMMAND [ARG...]
 └── rm NAME...
 ```
 
@@ -338,7 +346,7 @@ rootfs 条目存在、宿主目录不可见后转绿，不再依赖解析 `ls` �
 修复后，Win32 私有匿名映射直接由 `W32Mmap64` 在 guest 虚拟地址窗口内 commit，
 只有需要 snapshot-fork 文件身份的共享匿名映射保留临时文件路径；页表与映射
 保护失败也会明确报错，不再进入未定义行为。CI `30238223406` 的
-`WP.1-WP.12` 本地全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
+`WP.1-WP.17` 本地全部通过。同一 CI artifact 在 Windows 实机经 `wbox run` 启动
 Alpine 3.20 的 `/bin/sh`，执行 `uname` 与读取 `/etc/alpine-release` 均为 rc0。
 
 G 组本身也永久补上了这块覆盖——`wbox run <镜像>` 走的就是这条路，此前零覆盖。
@@ -419,10 +427,9 @@ F6
 ### F8 运维型容器生命周期 `[active]`
 
 `--detach`、`wbox ps/stop/rm/logs/exec`。这是 wbox 离"能当 harness 的长期
-环境"最近的一块短板：目前只能前台跑一次性任务，harness 想"起一个容器再往里
-发若干命令"做不到。
+环境"最近的一组能力；基础链路已经实现，当前重点是持续门禁与平台差异收敛。
 
-四个前置问题的设计答复如下（尚未实现，先定契约再动手）：
+四个前置问题的设计答复如下：
 
 **F8.a 跨进程发现**（已实现，`src/runstate.rs`）。状态目录
 `~/.wbox/run/<name>/`，内含 `meta.json` 与 `lock`。存活判定**不靠 pid**——
@@ -480,18 +487,17 @@ Linux 先 `SIGTERM` 后 `SIGKILL`（默认给 10 秒，`--timeout` 可调）。
 `stop` 对已停止的容器**幂等**（不报错），否则 `wbox stop x` 在脚本里没法用；
 但停一个**不存在**的容器仍然报错——那是"没这个东西"，与"已经停了"是两回事。
 
-**F8 的覆盖现状（如实记录）**。F8.1–F8.3 的端到端门禁（P.1–P.18）**只在
-Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现——锁语义
-（`lock_reflects_owner_liveness`）与进程终止（`terminate_actually_kills`），
-它们由 windows runner 真跑；但 `--detach` → `ps` → `logs` → `stop` 这条完整
-链路在 Windows 上**没有逐条验证过**。补 Windows 端到端门禁（例如扩展
-`scripts/test-windows-product.ps1`）是 F8 收尾前该做的事，不应默认两侧等价。
+**F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.22 覆盖完整生命周期；
+Windows 由 WP.6–WP.17 覆盖 detach、ps、logs、stop、rm 与原生 exec，其中
+WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
+OCI/Blink exec 不在承诺范围，必须明确拒绝。
 
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
-`exec` 存疑：Linux 可 `setns` 进已有 namespace；Windows 没有"进入已有容器"
-的原语，只能用同一 profile + 同一 Job 另起进程。因 wbox 本就不做文件系统
-虚拟化，两者实际差异比听上去小，但**这是设计假设不是结论**，需先取证再定，
-不得想当然对齐。
+`exec` 只能部分对齐：Linux 进入已有 namespace；Windows 原生目标重新使用同一
+AppContainer SID、网络 capability 与命名 Job，并继承记录的工作目录。Windows
+OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 exec 也不继承
+原 run 的自定义环境：状态文件刻意不落环境变量或凭证；需要这类语义时应由未来
+的 supervisor 控制通道传递，而不是把秘密写入 `meta.json`。
 
 分期与验收（每期都要有持续执行的门禁断言，理由见 §6 的覆盖教训）：
 
@@ -500,7 +506,7 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 | F8.1 `[active]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态已有 G0 回归，待 main CI |
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
-| F8.4 | `exec` | 先出 Windows 侧可行性取证，再决定是否实现；不可行则明确记为两侧不对齐 |
+| F8.4 `[active]` | `exec` | Linux P.19-P.22 已完成；Windows 原生可对齐子集 WP.13-WP.17 本地通过，待 main CI；Windows OCI/Blink 明确拒绝 |
 
 ## 4.9 [TODO-PLAN] 跨宿主协作交接点
 
@@ -516,7 +522,7 @@ Linux 执行**。Windows 侧目前只有单测覆盖两处平台相关实现—�
 ```text
 TODO-PLAN
 ├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已实现，待 CI
-├── W2 F8.4 exec 的 Windows 可行性取证        [Windows agent]
+├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已实现，待 CI
 └── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
 ```
 
@@ -532,22 +538,34 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 会等待 EOF 直到容器退出。门禁改为按短命父 wbox 的进程句柄等待退出，不捕获
 该管道；这条约束属于测试基础设施，不改变产品 detach 语义。
 
-### W2 F8.4 `exec` 的 Windows 可行性取证 `[Windows agent]`
+### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[implemented]`
 
-**问题**。Linux 可 `setns` 进已有 namespace；Windows **没有"进入已有容器"的
-原语**。可行的近似是：用同一 AppContainer profile SID + 加入同一个 Job 另起
-一个进程。
+**结论：只能部分对齐，原生目标可实现，OCI/Blink 目标不可可靠实现。**
 
-**需要取证的点**：
+Windows 原生 exec 派生运行中容器的同一 AppContainer SID，按记录重建
+INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Job 后再恢复。
+因此隔离身份、网络策略和 Job 资源限额对齐；工作目录从不含秘密的
+`exec_context` 重建。wbox 原生模式本就不做文件系统虚拟化，所以文件系统仍是
+同一组经 ACL 授权的宿主路径。
 
-1. 能否用容器名拿到那个 Job（Job 可命名，`OpenJobObjectW`）并
-   `AssignProcessToJobObject` 把新进程塞进去。
-2. 新进程用同一 profile SID 起来后，看到的文件系统/网络视角与原容器是否一致。
-   wbox 本就不做文件系统虚拟化，**两者差异可能比听上去小——但这是假设不是结论**。
-3. 资源限额是否自然继承（同 Job 即同限额）。
+环境变量不写入状态文件，避免把 token、密码和调用方秘密落盘，因此当前 exec
+只使用最小清洗环境，不继承原 `run -e`。Windows OCI/Blink 还需要重建 rootfs、
+镜像 Env 与 guest 工作目录，当前状态记录不足以兑现，CLI 必须明确拒绝，不能
+退化为在宿主执行。
 
-**做完的标准**：给出"可以对齐 / 只能部分对齐 / 无法对齐"的结论与依据。
-**不可行就如实记为两侧不对齐**，不要为了凑齐而造一个语义不同的 `exec`。
+并发契约：
+
+1. `meta.json` 的 `running/stopping` 阶段由状态操作锁保护；stop 或主进程自然
+   退出先发布 stopping，再清空 Job，后续 exec 一律拒绝。
+2. detached 状态可能早于命名 Job 出现；exec/stop 只对
+   `ERROR_FILE_NOT_FOUND` 做两秒有界等待，其他 Win32 错误立即暴露。
+3. exec 控制器只在“创建挂起进程 -> 加入 Job -> 恢复”期间持有 Job handle，
+   随即关闭。supervisor 保持唯一生命周期所有权，WP.17 以强杀 supervisor
+   后主 guest 与 exec guest 均消失为证。
+4. CLI 接受 `wbox exec NAME COMMAND [ARG...]` 与可选 `--`；COMMAND 开始后
+   `-` 开头参数全部原样透传，贴近 Docker/Podman 的基础位置语义。
+
+`WP.13-WP.17` 已在 Windows 实机通过，待 main CI 后改为 `[done]`。
 
 ### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 
@@ -614,14 +632,14 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.12 本地通过；资源超限仍缺行为门禁，WP.8-WP.12 待 main CI |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地通过；资源超限仍缺行为门禁，WP.8-WP.17 待 main CI |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | CI 30238223406：WP.1-WP.5 全通过；同一 artifact 实机运行 Alpine 3.20 `/bin/sh` 为 rc0 |
 | Windows shell 矩阵 | component-only | 46 pass、0 fail、1 skip；只证明 wbox-linux 组件 |
-| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 242 pass、0 fail、1 个公网测试 ignored |
+| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | active | F8.1-F8.3 已实现；Linux P.6-P.18 持续覆盖，Windows WP.6-WP.12 本地通过待 CI；F8.4 Linux 已完成、Windows 进行中 |
+| 后台生命周期管理 | active | Linux P.6-P.22 持续覆盖；Windows WP.6-WP.17 本地通过待 CI；F8.4 原生 exec 已实现，Windows OCI/Blink exec 明确不支持 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -663,8 +681,8 @@ WP.3 保留为 required 门禁，后续任何 AppContainer、rootfs 或 Blink �
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[active]` 继续补齐 wbox-linux fork 后 fd、socket 和资源失败回滚边界。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[active]` Windows stop 门禁已实现待 CI；继续完成 F8.4 `exec` 的 Windows
-   可行性取证与可对齐子集。
+4. `[active]` Windows stop 与原生 exec 门禁已实现待 CI；下一步补资源超限
+   workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
 
 ## 8. 验收与发布
 
