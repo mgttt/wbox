@@ -6,6 +6,63 @@
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 里程碑以功能线回溯标注（项目以 trunk 滚动开发，tag 自 v1.0-rc 起）。
 
+## [未发布] —— 全 Rust 化第二步：承载产品语义的第三方 crate 换成第一方实现
+
+**里程碑：镜像管理链路上的第三方实现只剩 TLS 一处，且已切好接缝。**
+
+§2.2.1 的口径从「不许有 C/C++」收紧为「承载产品能力的实现必须是第一方
+Rust」。删掉 `vendor/blink` 达成的是前者；`serde_json` 解析 manifest、
+`sha2` 算 blob digest、`flate2` 解层、`tar` 解包、`ureq` 跑 registry 协议
+——它们都是纯 Rust，却全都承载着镜像管理的核心语义。
+
+### 变更
+
+- **新 crate `crates/wbox-codec`（零依赖）**，取代五个第三方 crate：
+  - `serde_json` → `json`：只做动态 `Value` 一档。与 `serde_json` 逐字对齐
+    三条**字节级**约定（键按字典序、紧凑输出无空白、非 ASCII 不转义）——
+    它们决定 config/manifest 的 sha256，也就是镜像 digest。
+  - `sha2` → `sha256`：另含 HMAC。
+  - `base64` → `base64`：解码严格（凭证与证书场景不容宽松解码）。
+  - `flate2` + `miniz_oxide` → `deflate`：解码器完整支持 stored / 固定 /
+    动态 Huffman 三种块；编码器只做固定 Huffman + 哈希链最长匹配。
+    gzip 不写 mtime，层的字节可复现。
+  - `tar` → `tar`：读侧吃 GNU 长名/长链接、PAX、ustar prefix、base-256 size。
+- **新 crate `crates/wbox-http`**，取代 `ureq`：HTTP/1.1、chunked、3xx 重定向、
+  明文代理隧道（`HTTPS_PROXY`/`NO_PROXY`）、`SSL_CERT_FILE` 追加根证书。
+  三条安全规则有专项断言：跨主机重定向丢弃 `Authorization`、响应体上限、
+  头部 CR/LF 注入拒绝。
+- **`anyhow` → `src/fault.rs`**（约 120 行）。
+- **依赖棘轮**：`replaced_third_party_crates_cannot_come_back` 盯住这几个
+  crate 不得回流；`wbox-codec` 另有一条盯自己的依赖表必须为空。
+
+### 仍是第三方的
+
+- **TLS**（`rustls` + `rustls-rustcrypto`）：**需要人拍板**，见 PRD §4.9 L10
+  与 `docs/rust-rewrite.md` §5.1。自己写意味着自己写 X25519、AES-GCM、
+  RSA/ECDSA 验签与 X.509 链校验——未经审计、非常量时间的密码学。
+  接缝是 `transport.rs::connect_tls` 一个函数，这条待决不阻塞其它工作。
+- `libc` / `windows-sys`：平台 ABI 声明，§2.2.1 第一档明确允许。
+
+### 已验证
+
+- `cargo test --workspace` → 656 passed / 0 failed
+  （wbox 422 + wbox-codec 40 + wbox-http 27 + 引擎 167）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净。
+- `scripts/test-linux-backend.sh` → 232 PASS / 0 FAIL / 2 SKIP（含
+  `PSH.1`–`PSH.8c` 的 push/pull 闭环，打到 python stub registry）。
+- **端到端**：`wbox pull alpine:3.20` 从 Docker Hub 成功——匿名 Bearer token
+  → 跨主机重定向到 CDN → 动态 Huffman 解压真实层 → sha256 校验 → tar 解包；
+  随后 `wbox run` 起容器执行 busybox 成功。这条路径一次性验证了全部六个
+  自实现模块。
+
+### 文档
+
+- `PRD.md` §2.2.1 重写成两档口径；§2.4 Q2 表按当前 Rust 引擎的实测状态更新
+  （原先仍写「迁移中/历史 Blink 路径」）；Blink 时代的三段取证加了显式标注，
+  避免与当前引擎的实测状态冲突；§4.9 新增 L10（TLS 待决）与 W10，
+  `[TODO-WINDOW]` 树补上 R8。
+- `docs/rust-rewrite.md` 新增 §5（第二轮替换的取舍）与 §5.1（TLS 三个选项）。
+
 ## [未发布] —— 全 Rust 化：模拟器重写 + 去掉 C 依赖
 
 **里程碑：wbox 不再包含任何参与产品构建的 C/C++ 代码。**

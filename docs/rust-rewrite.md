@@ -13,6 +13,9 @@
 | OCI registry 的 TLS | `native-tls`：Linux 链接系统 **OpenSSL**（第三方 C 库），Windows 走 schannel | `rustls` + `rustls-rustcrypto`，**纯 Rust** |
 | CI 构建 wbox-linux | windows runner 上装 MSYS2 + MinGW-w64 gcc 编 C11+GNU 扩展 | `cargo build -p wbox-linux`，**CI 不再需要任何 C 工具链** |
 | 后端模块名 | `backend::blink` / `BlinkBackend` | `backend::emu` / `EmuBackend` |
+| JSON / SHA-256 / Base64 / gzip / tar | `serde_json`、`sha2`、`base64`、`flate2`、`tar` 五个第三方 crate | `crates/wbox-codec`，**第一方、零依赖** |
+| 错误上下文链 | `anyhow` | `src/fault.rs`，约 120 行 |
+| HTTP 客户端 | `ureq` | `crates/wbox-http`，第一方（TLS 传输除外） |
 
 整个仓库现在没有任何 `.c` / `.cc` / `.cpp` 参与产品构建。仍在仓库里的
 非 Rust 文件只有两类，都不链接进产品：
@@ -155,22 +158,72 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 `tests/known-failures.txt`；门禁靠基线判定，新回归照样变红。
 安全相关的 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通且不在基线内**。
 
-## 5. TLS 依赖的取舍（需要复核）
+## 5. 第二轮：从"没有 C"收紧到"第一方实现"
 
-为满足"不引第三方 C/C++"，TLS 换成 `rustls` + `rustls-rustcrypto`。
-rustls 的**默认** provider（`aws-lc-rs`、`ring`）都带 C 与汇编源码，
-所以只能走 `rustls-no-provider` + 纯 Rust provider 这条路。
+`vendor/blink` 删除之后，仓库里确实没有 C 了。但 §2.2.1 的口径随后收紧为
+**承载产品能力的实现必须是第一方 Rust**——按这条口径，下面这些第三方 crate
+同样要换掉，因为它们承载的正是镜像管理的核心语义：
 
-**需要注意**：`rustls-rustcrypto` 当前版本是 `0.0.2-alpha`，其 README 明确
-说尚未经过安全审计。这是"纯 Rust"与"密码学实现成熟度"之间的真实取舍：
+| 原依赖 | 它承载的产品语义 | 现在 |
+|---|---|---|
+| `serde_json` | manifest / config / 运行状态记录的解析与序列化 | `wbox_codec::json` |
+| `sha2` | blob digest 校验、构建缓存键 | `wbox_codec::sha256` |
+| `base64` | registry 的 Basic 认证、PEM 解码 | `wbox_codec::base64` |
+| `flate2` + `miniz_oxide` | 层的 gzip 压缩/解压 | `wbox_codec::deflate` |
+| `tar` | 层与归档的打包/解包 | `wbox_codec::tar` |
+| `anyhow` | 错误上下文链 | `src/fault.rs` |
+| `ureq` | registry 的 HTTP 传输、重定向、超时与上限 | `wbox-http` |
 
-- 现状（本次改动）：整棵依赖树无 C，密码学实现是 alpha 阶段的 crate。
-- 备选：回到 `native-tls`（Linux 链接系统 OpenSSL），成熟度高但引入 C 库。
+### 贯穿这几个模块的一条取舍
 
-受影响面仅限 `wbox image pull/push` 的 registry HTTPS，不涉及容器隔离本身。
-已验证 `wbox image pull alpine:3.20` 走这条链路成功（匿名 token 认证 +
-blob 下载 + sha256 校验 + 解包）。若判断成熟度优先级高于"纯 Rust"，
-改回 `native-tls` 只需动 `Cargo.toml` 与 `src/oci/registry.rs::new()` 一处。
+**解码方向面对的是外部输入**（registry 给的 manifest、别人压的层、别人打的
+tar），所以要完整、要对畸形输入报错、要有资源上界；**编码方向面对的是自己的
+输出**，只要合法且对端能读，简单可靠优先。具体落点：
+
+- `deflate` 的**解码器**支持 stored / 固定 / 动态 Huffman 三种块（真实层是
+  zlib 压的动态块），**编码器**只做固定 Huffman + 哈希链最长匹配。
+- `json` 的解析器有嵌套深度上限（网络输入可能是敌意构造的深层嵌套）。
+- `tar` 的读侧吃 GNU 长名/长链接、PAX、ustar prefix、base-256 size；
+  写侧走 USTAR + GNU 扩展。
+- `wire` 对响应头总量、头条数、响应体字节数三项都设了硬上限。
+
+### 三条不能变的字节级约定
+
+换实现时最容易在不知不觉中改掉、后果又最严重的是这三条：
+
+1. **JSON 对象键按字典序输出**（`serde_json` 默认的 `BTreeMap` 行为）。
+   config/manifest 的字节 sha256 之后就是镜像 digest，键序一变 digest 就变，
+   本地缓存与已推上去的镜像会对不上。
+2. **紧凑 JSON 不含任何空白，非 ASCII 不转义。**
+3. **gzip 不写 mtime**，同样输入两次压出来逐字节相同（层可复现）。
+
+### 端到端取证
+
+`wbox pull alpine:3.20` 走完整链路成功：匿名 Bearer token 认证 → 跨主机
+重定向到 CDN → 动态 Huffman 解压真实层 → sha256 校验 → tar 解包 → 随后
+`wbox run` 起容器执行 busybox。这条路径同时验证了上面六个模块。
+
+## 5.1 TLS：仓库里最后一处第三方实现（需要人拍板）
+
+HTTP 协议层已经是第一方（`crates/wbox-http`），但 **TLS 仍是 `rustls` +
+`rustls-rustcrypto`**。接缝是 `wbox-http/src/transport.rs` 的 `connect_tls`
+一个函数。
+
+为什么停在这里：自己写 TLS 意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签与
+X.509 链校验。那是**未经审计、非常量时间**的密码学，与"少一个第三方 crate"
+要放在一起权衡——这不是工作量问题，是取舍问题，需要人拍板。
+
+已知的成熟度问题照旧：`rustls-rustcrypto` 当前是 `0.0.2-alpha`，README 明说
+未经安全审计。三个选项：
+
+| 选项 | 得到 | 代价 |
+|---|---|---|
+| A 自己写 TLS 1.3 客户端 | 100% 第一方，仓库里再无第三方实现 | 自写密码学，同样未经审计，且非常量时间 |
+| B 维持现状（rustls + rustls-rustcrypto） | 有人审视过的协议实现 | 密码学 provider 是 alpha；仍有第三方 crate |
+| C 回到 `native-tls` | 成熟度最高 | Linux 上链接系统 OpenSSL，违反"无 C" |
+
+受影响面**仅限 `wbox pull/push` 的 registry HTTPS**，不涉及容器隔离本身。
+无论选哪个，改动都只落在 `transport.rs` 一个文件加 `Cargo.toml`。
 
 ## 6. 运行期开关
 
@@ -181,6 +234,8 @@ blob 下载 + sha256 校验 + 解包）。若判断成熟度优先级高于"纯 
 | `WBOX_TRACE=1` | 打印每条指令的寄存器状态（极慢，只用于定位） |
 | `WBOX_MAX_INSNS=N` | 指令数上限，超出按 SIGXCPU 终止（0 = 不限） |
 | `wbox-linux --version` | 版本号 |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | registry 请求的代理（https 走 CONNECT 隧道，TLS 仍是端到端） |
+| `SSL_CERT_FILE` | 追加根证书（企业私有 CA）。**只追加不替换**内置根 |
 
 不设 `WBOX_PREFIX` 时是**直通模式**：guest 的 `/` 就是宿主 `/`，工作目录继承
 宿主的，行为像一个普通进程。设了就是容器语义：guest 从自己的根开始，

@@ -6,8 +6,9 @@
 //!    向 realm 匿名请求 token（GET，query 带 service/scope），缓存后重试；
 //! 3. blob 拉取同理（`/v2/<repo>/blobs/<digest>`）。
 //!
-//! 依赖 ureq（阻塞式）+ rustls + rustls-rustcrypto，不引入 tokio。
-//! 整条 TLS 链路是纯 Rust，没有需要编译或链接的 C 代码。
+//! HTTP 走自实现的 `wbox-http`（阻塞式，无 tokio）。跨主机重定向丢弃
+//! `Authorization`、响应体上限、头部注入拒绝这几条都在那边，本文件只负责
+//! registry 协议本身（Bearer 流程、凭证发放规则、digest 语义）。
 
 use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
@@ -26,47 +27,27 @@ const ACCEPT_MANIFEST: &str = concat!(
 /// 一次 registry 会话：保存 host、HTTP agent 与（可选的）匿名 Bearer token。
 pub struct RegistryClient {
     registry: String,
-    agent: ureq::Agent,
+    http: wbox_http::Client,
     token: std::cell::RefCell<Option<String>>,
 }
 
-/// HTTP GET 结果（状态码 + 响应头 + body 字节）。
-struct HttpResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
+/// HTTP 响应就用 `wbox-http` 的那一个类型。
+///
+/// 这里**不再包一层同形状的结构体**：两个只差名字的类型意味着每加一个字段
+/// 都要记得同步两处，而漏改一处不会有任何东西提醒你。
+type HttpResponse = wbox_http::Response;
 
 impl RegistryClient {
     /// 构造指定 registry 主机的客户端。
     pub fn new(registry: &str) -> Self {
-        // TLS 栈是**全 Rust** 的：rustls 协议实现 + rustls-rustcrypto 提供
-        // 密码学原语（RustCrypto 系列，纯 Rust）。这样整棵依赖树里不再有
-        // 需要编译或链接的 C 代码——原先的 native-tls 在 Linux 上会链接
-        // 系统 OpenSSL（第三方 C 库）。
-        //
-        // 之所以不用 rustls 的默认 provider：aws-lc-rs 与 ring 都带 C 和
-        // 汇编源码，同样违反"不引第三方 C"这条约束。
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .tls_config(
-                ureq::tls::TlsConfig::builder()
-                    .unversioned_rustls_crypto_provider(std::sync::Arc::new(
-                        rustls_rustcrypto::provider(),
-                    ))
-                    .build(),
-            )
-            // registry 对未认证请求就是用 401 回话的，4xx/5xx 必须当成正常
-            // 响应交给上层判断，不能被库变成 Err——否则拿不到
-            // WWW-Authenticate 头，匿名 token 流程整个走不通。
-            .http_status_as_error(false)
-            .timeout_connect(Some(std::time::Duration::from_secs(15)))
-            .timeout_global(Some(std::time::Duration::from_secs(300))) // 大层下载放宽
-            .user_agent(concat!("wbox/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
+        let http = wbox_http::Client::new(concat!("wbox/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            // 大层下载放宽；这是**每次读写**的超时而不是整体超时。
+            .io_timeout(std::time::Duration::from_secs(300))
+            .max_body(MAX_RESPONSE_BYTES);
         Self {
             registry: registry.to_string(),
-            agent,
+            http,
             token: std::cell::RefCell::new(None),
         }
     }
@@ -103,8 +84,7 @@ impl RegistryClient {
         content_type: Option<&str>,
         body: Option<&[u8]>,
     ) -> crate::error::Result<HttpResponse> {
-        // 先把要发的头收集好，再按 method 分派——ureq 3 的 GET/HEAD 与
-        // PUT/POST 是两个不同的 builder 类型（有无请求体），没法先统一构造。
+        // 先把要发的头收集好，再一次性交给 HTTP 客户端。
         let mut headers: Vec<(&str, String)> = Vec::new();
         if let Some(a) = accept {
             headers.push(("Accept", a.to_string()));
@@ -125,59 +105,22 @@ impl RegistryClient {
             }
         }
 
-        // 按 method 分派。`agent` 已配置 http_status_as_error(false)，
-        // 所以 4xx/5xx 走 Ok 分支，只有真正的传输错误才是 Err。
-        macro_rules! with_headers {
-            ($req:expr) => {{
-                let mut r = $req;
-                for (k, v) in &headers {
-                    r = r.header(*k, v.as_str());
-                }
-                r
-            }};
-        }
-        let sent = match method {
-            "GET" => with_headers!(self.agent.get(url)).call(),
-            "HEAD" => with_headers!(self.agent.head(url)).call(),
-            "POST" => with_headers!(self.agent.post(url)).send(body.unwrap_or(&[])),
-            "PUT" => with_headers!(self.agent.put(url)).send(body.unwrap_or(&[])),
-            other => {
-                return Err(WboxError::new(
-                    ErrKind::Registry,
-                    crate::fail!("不支持的 HTTP method: {other}"),
-                ));
-            }
-        };
-        let mut resp = match sent {
-            Ok(r) => r,
-            Err(e) => {
-                return Err(WboxError::new(
+        // 4xx/5xx 是**正常返回**而不是 Err——registry 就是用 401 回话开启
+        // Bearer 流程的，把它变成错误会让整个匿名认证流程走不通。
+        let headers: Vec<(String, String)> = headers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        let resp = self
+            .http
+            .request(method, url, &headers, body)
+            .map_err(|e| {
+                WboxError::new(
                     ErrKind::Registry,
                     crate::fail!(e).context(format!("网络请求失败: {}", url)),
-                ));
-            }
-        };
-        let status = resp.status().as_u16();
-        let headers = resp
-            .headers()
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.as_str().to_ascii_lowercase(),
-                    v.to_str().unwrap_or("").to_string(),
                 )
-            })
-            .collect();
-        let body = resp
-            .body_mut()
-            .with_config()
-            // ureq 3 的 read_to_vec 默认上限只有 10MB，镜像层轻易超过；
-            // 这里放到 MAX_RESPONSE_BYTES。原先 ureq 2 的实现是完全无上限的，
-            // 显式给一个上限比无上限更安全。
-            .limit(MAX_RESPONSE_BYTES)
-            .read_to_vec()
-            .context("读取响应体失败")
-            .ctx(ErrKind::Registry)?;
+            })?;
+        let (status, headers, body) = (resp.status, resp.headers, resp.body);
         Ok(HttpResponse {
             status,
             headers,

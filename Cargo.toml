@@ -9,20 +9,17 @@ license = "MIT OR Apache-2.0"
 # crates/wbox-linux 是 vendor/blink（C）的纯 Rust 重写，两者同一 workspace，
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
-members = [".", "crates/wbox-codec", "crates/wbox-linux"]
+members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux"]
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
 # 这一条取代了原先的 serde_json / sha2 / base64 / flate2 / tar 五个第三方 crate。
 wbox-codec = { path = "crates/wbox-codec" }
 
-# ---- OCI 镜像拉取的 HTTP/TLS（src/oci/registry.rs）----
-# TODO(下一步)：换成自实现的 crates/wbox-tls。
-ureq = { version = "3", default-features = false, features = [
-    "rustls-no-provider",
-    "rustls-webpki-roots",
-] }
-rustls-rustcrypto = "0.0.2-alpha"
+# ---- OCI 镜像拉取的 HTTP（src/oci/registry.rs）----
+# 自实现的阻塞式 HTTP/1.1 客户端，取代 ureq。TLS 传输仍在它内部用 rustls，
+# 那是仓库里最后一处第三方实现，取舍见 docs/rust-rewrite.md §5。
+wbox-http = { path = "crates/wbox-http" }
 
 # 纯 Rust Linux guest 引擎。同一份实现同时产出 wbox-linux.exe（EmuBackend 用）
 # 与进程内入口（src/runtime），避免两份实现慢慢漂移。
