@@ -269,7 +269,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 运行前把只读镜像缓存复制成容器私有 rootfs，只向该 profile 的确定性 AppContainer SID 授修改权（F4.8 / `acl.rs`）；与 Q3 的 overlay upper 不是同一机制 |
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
-| 卷挂载 `-v` | 计划重做 | 由纯 Rust guest VFS 和 Rust supervisor 实现；已撤回 Blink/C brokerfs 实验，CLI 继续明确拒绝 |
+| 卷挂载 `-v` | 计划重做 | 要由纯 Rust guest VFS + Rust supervisor 实现（`src/broker.rs` 目前只到 HELLO/PING，OPEN 未开放），CLI 继续明确拒绝。历史上的 Blink/C brokerfs 实验已撤回，不作为路线 |
 | **解释执行的启动开销** | 已知 | 真实镜像启动约 20–46 秒（纯解释、无 JIT）。这是 §2.4 「天花板二」的具体数字，不是待修缺陷 |
 | 端口映射 `-p` | 不做（语义不适用）| **guest 的 socket 就是宿主 socket**：两代引擎都没有自建网络栈，当前的 `crates/wbox-linux` 连 socket 族都还返回 `-ENOSYS`（见 §4.9 W5）。guest 绑的端口即宿主端口，没有可映射的东西 |
 | 网络隔离模型 | 部分 | 与 Q3 **不同**：Q3 靠 netns，Q2 靠 AppContainer 不授 `INTERNET_CLIENT`——是能力开关而非独立网络栈 |
@@ -317,7 +317,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | `events` | 不做 | 需要常驻事件流与订阅端，与 §2.2「免安装、无服务」直接冲突；wbox 没有 daemon 可发事件 |
 | `update`（改运行中容器的限额）| 不做 | 限额只在设了 `--memory`/`--cpu-pct`/`--max-procs` 时才有 cgroup 可改（见 `linux_limits.rs`），否则无处可写。做出来会时灵时不灵——与 F9.21 当初拒绝用 cgroup freezer 是同一条理由 |
 | `--detach` | 有 | |
-| 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro` |
+| 卷 / 绑定挂载 `-v` | 有 | F9.1，含 `:ro`；只读**递归到子挂载**（`mount_setattr(AT_RECURSIVE)`，门禁 V.2b/V.2c）|
 | **命名卷** `volume create/ls/rm/inspect` | 有 | F9.35：`-v NAME:/path` 数据活得比容器久；卷就是 `~/.wbox/volumes/<名字>`，rootless 可用（门禁 VOL.1–VOL.6）|
 | `--entrypoint` / `--env-file` | 有 | F9.36：覆盖镜像 Entrypoint（空串=清空）；env-file 让密钥不必进命令行（门禁 EP.1–EP.5）|
 | 容器内工作目录 | 有 | F9.37：**修掉镜像 `WorkingDir` 与 `-w` 双双被静默丢掉的缺陷**；不存在时逐级创建，且建在容器可写层（门禁 WD.1–WD.5）|
@@ -722,7 +722,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 | F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
 | F8.8 detached 管道 EOF | `src/cli/run.rs` | G4 Windows | WP.22：重定向输出及时 EOF且 workload 继续运行；提交 `55761da`、CI 30272887266 |
-| F9.1 bind volume | `linux_ns.rs`、模拟器 VFS | G3 Linux / G2 模拟器 | Linux V.1-V.4；模拟器 `t_mount_ro` 覆盖 `MS_RDONLY` 全局写门禁，Windows HANDLE 数据面仍 active |
+| F9.1 bind volume | `linux_ns.rs`、guest VFS | G3 Linux | Linux V.1–V.4 + V.2b/V.2c（`:ro` 递归到子挂载）。**模拟器侧无证据**：`t_mount_ro` 在当前纯 Rust 引擎上是**已知失败**（`mount(2)` 未实现，`tests/known-failures.txt` E 组），此前"模拟器 `t_mount_ro` 覆盖 `MS_RDONLY`"是 Blink 时代的说法。Windows OCI 的 `-v` 仍未开放（`[TODO-WINDOW]`）|
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -985,7 +985,13 @@ no_std Rust，但那不影响 §2.2.1 的发布验收。
 - glibc pthread/通用 clone 尚未支持。
 - ptrace 未支持。
 
-**F4.3 的覆盖缺口（2026-07-27 发现并修复）**。`wbox run <镜像>` 走的是
+> **以下"F4.3 的覆盖缺口"一段是 Blink 时代的记录**（`PortableMmap`、
+> `W32Mmap64`、`blink.dat.XXXXXX` 都是那份已删除的 C 实现里的东西）。
+> 保留它不是为了描述当前实现，而是为了留住那条**至今仍然成立的教训**：
+> 产品首页宣传的路径可以长期零覆盖，直到有人给它加一条门禁才暴露。
+> 当前引擎的匿名映射由 `crates/wbox-linux` 自己的 `mem.rs` 处理，与下文无关。
+
+**F4.3 的覆盖缺口（2026-07-27 发现并修复；Blink 时代）**。`wbox run <镜像>` 走的是
 guest 前缀环境变量（首选名现在是 `WBOX_PREFIX`，`BLINK_PREFIX` 保留为兼容名，
 两者引擎都认，见 `crates/wbox-linux/src/syscall/fs.rs`；下文沿用当时的
 `BLINK_PREFIX` 写法），而 `scripts/test-matrix.sh` 的 A–F 组**全部不设**
@@ -1302,7 +1308,7 @@ OCI/模拟器 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原�
 
 ```text
 F9
-├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] Linux 已完成，Windows OCI 已取证
+├── F9.1 卷 / 绑定挂载 `-v host:guest[:ro]`   —— [partial] 仅 Linux 宿主；Windows 两格均明确拒绝
 ├── F9.2 端口映射 `-p`                        —— [done]（Linux 侧，仅 TCP）
 ├── F9.3 镜像构建（Dockerfile 子集）          —— [done]（Linux + Windows）
 ├── F9.4 Windows 文件系统写重定向             —— 单象限，且受 §2.4 天花板限制
@@ -1345,11 +1351,24 @@ F9
 
 #### F9.1 卷 / 绑定挂载
 
-**F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4）。已定的语义：
+**F9.1 卷 / 绑定挂载** `[partial]`（Linux 宿主已完成，门禁 V.1–V.4 + V.2b/V.2c）。
+已定的语义：
 
 - 只读/读写：`:ro` / `:rw`（默认读写）。**`:ro` 必须 remount 第二次才生效**
   ——首次 bind 会忽略 `MS_RDONLY`，这是 `mount(2)` 的既定行为；漏了这步
   `:ro` 会静默变成可写，那比不支持只读更糟。V.2 专盯这条。
+- **而且只读必须递归**（V.2b/V.2c）。bind 用的是 `MS_BIND|MS_REC`（把源下面的
+  子挂载一并带过来），而 remount 那步的 `MS_RDONLY` **只作用于顶层**——实测
+  （内核 6.18）容器内 `/ro` 是 `ro`、`/ro/sub` 却是 `rw`，往子挂载写入 rc=0
+  且文件真的落到宿主上。这是"给了一个没兑现的承诺"，比不支持只读更糟。
+  现用 `mount_setattr(AT_RECURSIVE)` 一次把整棵挂载树设成只读；选它而不是
+  遍历子挂载逐个 remount，是因为这段代码跑在 **fork 后的子进程**里、受
+  async-signal-safety 约束（不能分配内存、不能读 `/proc`），而 `mount_setattr`
+  是单条裸 syscall。老内核（`ENOSYS`）**只在等价时才回退**到非递归 remount
+  ——仅当源下面确实没有子挂载，有子挂载却退回去就是静默地只兑现一半。
+  **只认 `ENOSYS`、不认 `EINVAL`**：后者是我们自己参数写错，退回去就成了
+  静默降级。V.2c 是反向判据（不加 `:ro` 时子挂载照常可写），防止一个
+  "永远拒绝写"的实现也变绿。
 - 宿主路径**必须已存在**，不自动创建：拼错的路径会变成一个空目录，用户直到
   发现数据"不见了"才知道挂错了（V.4）。容器内的挂载点则会自动建——它在
   rootfs 里，不是宿主。
@@ -1368,8 +1387,10 @@ F9
 2. 路径解析逐组件拒绝 reparse/junction/symlink 越界，不得递归修改用户目录 ACL。
 3. `:ro` 在 Rust VFS 的所有修改入口统一返回 `EROFS`；`:rw` 的修改实时回到宿主。
 4. 首版只承诺目录 bind；文件 bind 在实现前明确拒绝。
-5. 不得通过修改 Blink、编译 C broker client 或引入其他 native filesystem library
-   实现。此前 brokerfs/C 实验已撤回。
+5. 不得引入任何 native filesystem library 或 C broker client 来实现它——
+   §2.2.1 两档口径都挡着。（原文写的是"不得通过修改 Blink……"：`vendor/blink`
+   已删除，这条约束的**对象**没了，但**规矩**照旧适用于现在的
+   `crates/wbox-linux`。历史上确实有过一次 brokerfs/C 实验，已撤回。）
 
 验收必须证明 `:rw` 修改实时回到宿主，`:ro` 的每条写通道均失败且宿主元数据
 不变；多卷、嵌套目标、`..`、绝对/相对 symlink、junction、dirfd 逃逸、detach、
@@ -2977,7 +2998,8 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 | Rust 主机逻辑 | G0 complete | Windows workspace 单测与 Win32 实机模块持续进入 CI；实时数量以 runner 输出为准 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | complete | Linux P.6-P.22 与 Windows WP.6-WP.17 在 CI 30250676453 通过；Windows OCI/模拟器 exec 明确不支持 |
+| 后台生命周期管理 | complete | Linux P.6-P.25 与 Windows WP.6-WP.22（含 create/start、kill/top、管道 EOF）已进门禁；Windows OCI/模拟器 exec 明确不支持 |
+| Rust-only 依赖约束 | done | `Cargo.lock` 16 条 = 5 个第一方 crate + `libc`/`windows-sys` 及其 target 垫片；三条棘轮（`src/runtime/mod.rs`）盯住 C 源码、被换掉的 crate 与整棵依赖图 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -3014,7 +3036,12 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
 2026-07-28
 ├── Rust-only 成为产品与发布硬约束
 ├── 撤回 Windows volume 的 Blink/C brokerfs 实验
-└── 启动纯 Rust Linux ELF/OCI runtime 替换
+├── 纯 Rust Linux ELF/OCI runtime 替换**完成**：vendor/blink 删除，
+│   引擎换成 crates/wbox-linux（第一档达成）
+├── 第二档收紧：serde_json/sha2/base64/flate2/tar/anyhow/ureq/rustls
+│   全部换成第一方，含自实现 TLS 1.3；构建图 119 -> 16 个 crate
+└── 安全收口：归档解包符号链接越界（L7）、guest VFS 宿主符号链接逃逸（L12）、
+    卷挂载点跟随符号链接、`-v :ro` 未递归到子挂载
 ```
 
 下一里程碑不使用虚构日期，按验收条件推进：
