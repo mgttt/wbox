@@ -35,9 +35,13 @@ const ALL_APP_PACKAGES_SID: &str = "S-1-15-2-1";
 /// GENERIC_READ | GENERIC_EXECUTE（windows-sys 0.59 未在启用的 feature 集内导出常量，
 /// 按 Win32 头文件值定义：只读 + 遍历/执行，rootfs 只需读）。
 const ACCESS_READ_EXECUTE: u32 = 0x8000_0000 | 0x2000_0000;
-/// GENERIC_ALL。私有运行副本只向该容器 SID 授权，guest 需要完整创建、改写、
-/// rename 与删除语义；共享镜像缓存仍只有读取 ACE。
-const ACCESS_MODIFY: u32 = 0x1000_0000;
+/// FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
+/// DELETE | FILE_DELETE_CHILD。
+///
+/// 私有 rootfs/tmp 需要创建、改写、rename 与删除，但不需要 GENERIC_ALL 中的
+/// WRITE_DAC/WRITE_OWNER。把权限边界写成文件语义，guest 即使被攻破也不能改 ACL
+/// 给自己扩权。
+const ACCESS_MODIFY: u32 = 0x0012_0089 | 0x0012_0116 | 0x0012_00A0 | 0x0001_0000 | 0x0000_0040;
 
 /// 递归地为 `root` 及其全部子孙文件/目录添加 ALL APPLICATION PACKAGES 读取 ACE。
 pub fn grant_read_recursive(root: &Path) -> Result<()> {
@@ -52,11 +56,11 @@ pub fn grant_read_recursive(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 仅向指定 AppContainer profile 的确定性 SID 授予私有 rootfs 修改权。
+/// 仅向指定 AppContainer profile 的确定性 SID 授予私有 rootfs/tmp 修改权。
 pub fn grant_modify_recursive_for_profile(root: &Path, profile_name: &str) -> Result<()> {
     if !root.is_dir() {
         return Err(WboxError::profile(format!(
-            "私有 rootfs 目录 '{}' 不存在，无法授权",
+            "私有目录 '{}' 不存在，无法授权",
             root.display()
         )));
     }
@@ -205,5 +209,23 @@ impl Drop for LocalGuard {
             // SetEntriesInAclW 的 LocalAlloc 分配，仅释放一次。
             unsafe { LocalFree(self.0) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modify_access_cannot_rewrite_owner_or_acl() {
+        const WRITE_DAC: u32 = 0x0004_0000;
+        const WRITE_OWNER: u32 = 0x0008_0000;
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_WRITE_DATA: u32 = 0x0000_0002;
+
+        assert_ne!(ACCESS_MODIFY & FILE_WRITE_DATA, 0);
+        assert_ne!(ACCESS_MODIFY & DELETE, 0);
+        assert_eq!(ACCESS_MODIFY & WRITE_DAC, 0);
+        assert_eq!(ACCESS_MODIFY & WRITE_OWNER, 0);
     }
 }

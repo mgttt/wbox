@@ -553,7 +553,7 @@ F9.1–F9.39 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有�
 |---|---|---|---|
 | Q1.1 | 写重定向的**用户态可行性取证** | 取证（未做） | §4.9 W3：AppContainer 下 UAC VirtualStore 是否仍生效、per-package 存储对非 UWP 进程是否自动可写。步骤与判据已写好，**只能在真 Windows 上跑**。它的结论决定 Q1.2 存不存在 |
 | Q1.2 | 基于取证结论的写重定向近似 | 取决于 Q1.1 | 若 W3 判定用户态只能「拒绝」，本条转为**不做**并写明；若发现可用的重定向点，再按结论定范围 |
-| Q1.3 | 临时目录私有化（`TMPDIR`/`TEMP`/`TMP` 指向容器私有目录）| **已实现**（`--private-tmp`，门禁 PT.1–PT.5）| 机制平台中立（建目录 + 注入变量），故在 Linux 侧就实现并取证了；Windows 侧只剩「那三个变量在 AppContainer 下是否确实被遵守」这一问。边界：只覆盖遵守该约定的程序 |
+| Q1.3 | 临时目录私有化（`TMPDIR`/`TEMP`/`TMP` 指向容器私有目录）| **已实现**（`--private-tmp`，门禁 PT.1–PT.5、WP.25）| Linux 三项均指向状态目录；Windows 的 `TMPDIR` 指向状态目录，AppContainer 将 `TEMP`/`TMP` 改到 package 专属 `AC\Temp`。两处均已实机验证可写，且显式 `-e TMPDIR=...` 优先。边界：只覆盖遵守该约定的程序 |
 | Q1.4 | 授权粒度：只读授予 | **可做**（待 Windows 侧确认）| 目前给 rootfs 授 ACE 是读写一档；ACL 本身支持只读授予，可对应 `-v` 的 `:ro` 语义。判据：授只读后容器内写入被拒 |
 | Q1.5 | capability 粒度 | **可做**（待 Windows 侧确认）| 现只有 `INTERNET_CLIENT` 一个开关；Windows 还有 `INTERNET_CLIENT_SERVER`、`PRIVATE_NETWORK_CLIENT_SERVER` 等 capability SID，可按需授予。判据：只授客户端能力时监听端口失败 |
 | — | 注册表虚拟化 | **不做** | 与写重定向同一介入点问题（§2.4.2 Q1） |
@@ -756,6 +756,8 @@ S4 在 Linux 上运行 Windows CLI
   程序与离线 pull 分别保留 spawn/registry 原始错误类别和非零退出码，且不留状态记录。
 - `WP.24`：`create old -> rename old new -> start new` 必须以新名称建立
   supervisor、Job 与状态记录；保存配置中的旧 `--name` 不得复活。
+- `WP.25`：`--private-tmp` 下状态目录 `TMPDIR` 与 AppContainer package
+  `TEMP`/`TMP` 均可实际写入和读回；显式 `-e TMPDIR=...` 必须优先。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -2411,7 +2413,7 @@ TODO-WINDOW
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集                [done]
 ├── W3 F9.4 Windows 文件系统写重定向取证                  [active] 分析完成，实验待跑
 ├── W4 build 在 Windows 宿主的可行性                      [done]
-├── W6 Q1 临时目录私有化（TEMP/TMP）                      [active] 实机语义待收口
+├── W6 Q1 临时目录私有化（TEMP/TMP）                      [done] WP.25
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
 ├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
@@ -2598,15 +2600,17 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 `CACHED`；运行产物必须同时输出 COPY/RUN 标记，并断言基础镜像未被修改、staging
 无残留。本机与 CI 30265370299 均已通过。
 
-##### W6/W7/W8 Q1 的三条可做项 `[Windows agent]` `[待验证]`
+##### W6/W7/W8 Q1 的三条可做项 `[Windows agent]`
 
-三条都来自 §2.4.4 的 Q1 路线图。**它们由 Linux 侧 agent 提出，可行性未经实测**
-——判断依据是对 Windows 机制的了解，不是跑出来的结论。接手的 Windows agent
+三条都来自 §2.4.4 的 Q1 路线图，最初由 Linux 侧 agent 提出。W6 现已完成
+Windows 实测；W7/W8 仍只是基于 Windows 机制的可行性判断。接手的 Windows agent
 **先验证再实现**；验证不成立就把条目改成「不做」并写明原因，那比留一个永远做不成
 的待办诚实（这条纪律与 W3 一致）。
 
-**W6 临时目录私有化** `[active：Windows 实机语义待收口]`。
-`--private-tmp` 尝试把 `TMPDIR`/`TEMP`/`TMP` 指向 `<状态目录>/tmp`。
+**W6 临时目录私有化** `[done：WP.25]`。
+`--private-tmp` 在 Linux 把 `TMPDIR`/`TEMP`/`TMP` 指向 `<状态目录>/tmp`；
+Windows 下 `TMPDIR` 保持该值，AppContainer 将 `TEMP`/`TMP` 改到 package 专属
+`AC\Temp`。
 
 **这一条原本整条挂在「待 Windows 验证」，其实不必**：它的机制是「建一个目录 +
 注入三个环境变量」，**完全是平台中立的**，Q1 与 Q4 走的还是同一个宿主程序模式。
@@ -2624,9 +2628,12 @@ Windows 改写为该 AppContainer package 的 `AC\Temp`。两者都是容器私�
 `TMPDIR`/`TEMP`/`TMP` 约定**的程序。硬编码路径的程序挡不住——那需要写重定向，
 而那正是 §2.4.2 说清的、用户态做不到的那一半。
 
-**留给 Windows agent 的**：补 cmd、PowerShell 和常见 CLI 的实际落盘门禁，明确
-验收语义应是“临时文件进入容器私有位置”，而不是强求三个变量路径相同；同时验证
-`-e TMPDIR=...` 的用户覆盖在 AppContainer 下仍成立。
+Windows 真机门禁 `WP.25` 已用 PowerShell 分别在状态目录 `TMPDIR` 与 package
+`TEMP`/`TMP` 创建并读回文件，证明两处都可写；另一次运行证明
+`-e TMPDIR=...` 的用户覆盖在 AppContainer 下仍成立。状态目录在前台进程退出后
+随运行记录一起清理。为了让 AppContainer 真能写状态目录，登记后创建私有 `tmp`，
+再向该容器的确定性 profile SID 授予文件级 modify 权限；权限不含
+`WRITE_DAC`/`WRITE_OWNER`，没有用 `GENERIC_ALL` 扩大边界。
 
 **W7 只读授权粒度**。现在给 rootfs 授 ACE 是读写一档；ACL 本身支持只读授予。
 - 为什么值得做：这是 Q1 能兑现 `-v ... :ro` 语义的唯一途径（那一格没有挂载层，
@@ -3022,7 +3029,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.24 进入门禁；Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.25 进入门禁；私有临时目录已实机核验，Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |

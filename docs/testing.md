@@ -148,6 +148,10 @@ detached 生命周期门禁还覆盖 READY/ERROR：父进程只有在真实 work
 才能返回容器名；缺失程序与失败 pull 必须返回原始错误和非零退出码。另有
 `create -> rename -> start` 真机路径，防止保存配置中的旧名称复活。
 
+`WP.25` 覆盖 Windows `--private-tmp` 的实际落盘语义：状态目录中的 `TMPDIR`
+与 AppContainer package 专属的 `TEMP`/`TMP` 都必须可写，且显式
+`-e TMPDIR=...` 不能被默认值覆盖。
+
 ### 2.6 Windows 原生程序矩阵
 
 ```powershell

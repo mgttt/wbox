@@ -887,6 +887,8 @@ fn register_for_spawn(
         std::fs::create_dir_all(&dir).map_err(|e| {
             WboxError::args(format!("创建私有临时目录 '{}' 失败：{}", dir.display(), e))
         })?;
+        #[cfg(windows)]
+        crate::acl::grant_modify_recursive_for_profile(&dir, &spec.name)?;
     }
     Ok(reg)
 }

@@ -753,6 +753,43 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     }
     Write-Host "PASS WP.23B detached parent returns the original pull error"
 
+    # WP.25 Windows rewrites TEMP/TMP to the AppContainer package AC\Temp,
+    # while TMPDIR remains the lifecycle-bound wbox state directory. Both
+    # private locations must be writable; environment injection alone is not enough.
+    $privateTmpCommand = @'
+if ($env:TMPDIR -notmatch '\\.wbox\\run\\product-private-tmp\\tmp$') { exit 41 }
+if ($env:TEMP -ne $env:TMP) { exit 42 }
+if ($env:TEMP -notmatch '\\Packages\\product-private-tmp\\AC\\Temp$') { exit 43 }
+$stateProbe = [IO.Path]::Combine($env:TMPDIR, "state-probe.txt")
+$packageProbe = [IO.Path]::Combine($env:TEMP, "package-probe.txt")
+[IO.File]::WriteAllText($stateProbe, "STATE_TMP_OK")
+[IO.File]::WriteAllText($packageProbe, "PACKAGE_TMP_OK")
+[Console]::WriteLine([IO.File]::ReadAllText($stateProbe))
+[Console]::WriteLine([IO.File]::ReadAllText($packageProbe))
+'@
+    $privateTmpOutput = & $portableWbox run --name product-private-tmp --private-tmp `
+        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
+        -NonInteractive -Command $privateTmpCommand 2>&1 | Out-String
+    Assert-Exit 0 "WP.25 writable private temp" $privateTmpOutput
+    if ($privateTmpOutput -notmatch "STATE_TMP_OK" -or
+        $privateTmpOutput -notmatch "PACKAGE_TMP_OK") {
+        throw "WP.25 private temp did not round-trip content: $privateTmpOutput"
+    }
+    $privateTmpState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($privateTmpState -match "(?m)^product-private-tmp\s+") {
+        throw "WP.25 foreground private temp left a state record: $privateTmpState"
+    }
+    $privateTmpOverride = & $portableWbox run --name product-private-tmp-override `
+        --private-tmp -e TMPDIR=WBOX_EXPLICIT_TMP --workdir $env:SystemRoot\System32 -- `
+        powershell.exe -NoLogo -NoProfile -NonInteractive -Command `
+        'if ($env:TMPDIR -ne "WBOX_EXPLICIT_TMP") { exit 44 }; [Console]::WriteLine("PRIVATE_TMP_OVERRIDE_OK")' `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.25 explicit TMPDIR override" $privateTmpOverride
+    if ($privateTmpOverride -notmatch "PRIVATE_TMP_OVERRIDE_OK") {
+        throw "WP.25 explicit TMPDIR override was lost: $privateTmpOverride"
+    }
+    Write-Host "PASS WP.25 private temp locations are writable and explicit TMPDIR wins"
+
     # WP.21/WP.24 create must not execute anything. Rename then start consumes
     # the saved configuration under the new name, and exited remains restartable.
     $createGuestPidFile = Join-Path $stopWork "create-guest.pid"
