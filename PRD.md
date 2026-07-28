@@ -2207,9 +2207,16 @@ TODO-WINDOW
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
 ├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
 ├── W9 create → rename → start 生命周期损坏               [active] Windows 已稳定复现
-├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [planned] 现只证明参数下发成功
+├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [active] Job 总内存语义已核验，超限 workload 待补
+├── W11 detached 启动 READY 握手                           [planned] workload 启动失败时父进程不得 rc0
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+`W11` 复现形状：`wbox run -d --name bad-start -- C:\definitely-missing-wbox.exe`
+当前父进程只确认 supervisor 已创建，可能先输出容器名并返回 0，随后后台才在 pull、
+rootfs/AppContainer/Job 或 workload 启动阶段失败。完成判据是父子控制通道在 workload
+成功恢复后发送 READY；READY 前任一步失败都向调用方返回原始错误和非零退出码，并由
+Windows 产品门禁覆盖本地缺失程序与失败 pull 两条离线路径。
 
 ### 4.9.2 [TODO-LINUX]
 
@@ -2714,11 +2721,11 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.17 本地与 CI 30250676453 通过；资源超限仍缺行为门禁 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.22 进入门禁；Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
-| Windows Linux guest | blocked on Rust runtime | Blink artifact 曾实机运行 Alpine 3.20 与 Ubuntu 24.04，但违反 §2.2.1，只作为迁移基线 |
-| Windows shell 矩阵 | legacy baseline | 46 pass、0 fail、1 skip；目标是由纯 Rust runtime 逐项接管 |
-| Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
+| Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
+| Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
+| Rust 主机逻辑 | G0 complete | Windows workspace 单测与 Win32 实机模块持续进入 CI；实时数量以 runner 输出为准 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
 | 后台生命周期管理 | complete | Linux P.6-P.22 与 Windows WP.6-WP.17 在 CI 30250676453 通过；Windows OCI/模拟器 exec 明确不支持 |
@@ -2726,8 +2733,8 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
 
-Windows Linux guest 现有 Blink 门禁保留为迁移期间的行为基线，但不能作为
-Rust-only 发布门禁。纯 Rust runtime 接管 WP.3 前，Windows OCI 能力不得标记完成。
+Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Rust
+`wbox-linux.exe`；Blink 时代取证仅保留为历史参考，不属于当前能力证据。
 
 ## 7. 里程碑与时间线
 
@@ -2784,9 +2791,9 @@ release gate
 ├── test-windows               Rust/Windows 真机
 ├── check-windows-msvc         双目标 clippy/check
 ├── smoke-windows              AppContainer + Job 启动链
-├── rust-runtime               纯 Rust ELF loader/CPU/syscall 组件门禁
+├── build-wbox-linux           纯 Rust ELF loader/CPU/syscall 组件与发布物门禁
 ├── guest-tests                预构建 ELF fixtures 的 Rust runtime 行为门禁
-├── test-windows-product       wbox.exe 内置 Rust runtime 的 Windows/OCI 产品路径
+├── test-windows-product       release wbox.exe + wbox-linux.exe 的 Windows/OCI 产品路径
 ├── test-linux-backend         namespace/network/resource/lifecycle
 └── test-wine-backend          Linux 隔离层内运行 PE
 ```

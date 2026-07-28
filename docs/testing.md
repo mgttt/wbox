@@ -94,13 +94,13 @@ cgroup v2 的存在不等于当前进程获得委派。诊断时同时记录：
 
 ```powershell
 scripts/test-windows-product.ps1 `
-  -Wbox target/debug/wbox.exe `
+  -Wbox target/release/wbox.exe `
   -WboxLinux target/release/wbox-linux.exe `
   -Busybox busybox
 ```
 
 它覆盖 Windows 原生 workload、环境过滤、正常退出状态清理，以及从
-`wbox run <image>` 到 AppContainer、Blink 和 Linux ELF 的完整路径。任何前置
+`wbox run <image>` 到 AppContainer、纯 Rust `wbox-linux` 和 Linux ELF 的完整路径。任何前置
 缺失或执行失败都直接 FAIL，不允许 SKIP。
 
 ### 2.6 Windows 原生程序矩阵

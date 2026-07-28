@@ -11,7 +11,7 @@ CLI (`src/cli`)
         |
 目标分类与环境构造 (`src/backend`)
 ├── Windows NativeBackend
-├── Windows BlinkBackend
+├── Windows EmuBackend
 ├── Linux LinuxNativeBackend
 └── Linux Wine 执行器
         |
@@ -46,7 +46,7 @@ attribute-list 路径避免普通用户通常没有的
 Job Object 提供：
 
 - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
-- 每进程内存上限。
+- Job 进程树总内存上限。
 - CPU hard cap。
 - active process limit。
 
@@ -54,8 +54,8 @@ Job Object 提供：
 
 ### 2.2 Linux ELF/OCI
 
-`BlinkBackend` 定位同目录的 `wbox-linux.exe` 或 `WBOX_LINUX` 指定文件，
-将 OCI rootfs 作为 `BLINK_PREFIX`，再经相同 AppContainer/Job 启动链执行。
+`EmuBackend` 定位同目录的 `wbox-linux.exe` 或 `WBOX_LINUX` 指定文件，
+将 OCI rootfs 作为 guest 前缀，再经相同 AppContainer/Job 启动链执行。
 镜像缓存只向 AppContainer 提供读取执行权限；Windows 运行前在容器状态目录
 创建完整的私有 rootfs 副本，并只向该 profile 的确定性 SID 授予修改权。
 前台退出随状态登记清理，后台实例保留到 `rm`。全量复制是语义正确的首版，

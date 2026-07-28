@@ -2,7 +2,7 @@
 //!
 //! 约定（见 SPEC §2）：
 //! - `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 必开：wbox 退出/崩溃时内核自动杀掉整棵进程树；
-//! - 可选：进程内存上限、CPU 硬性百分比上限（CPU rate control，Win8+）、最大进程数；
+//! - 可选：Job 进程树总内存上限、CPU 硬性百分比上限（CPU rate control，Win8+）、最大进程数；
 //! - 不授予 breakaway 权限，子进程无法逃离 Job。
 
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
@@ -13,8 +13,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
     JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::SystemServices::{
     JOB_OBJECT_ASSIGN_PROCESS, JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE,
@@ -150,8 +150,10 @@ impl Job {
         // MB→字节换算（含溢出检查）在 backend::Limits::memory_limit_bytes，
         // 那里跨平台可测；此处只负责下发。
         if let Some(bytes) = self.limits.memory_limit_bytes()? {
-            ext.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-            ext.ProcessMemoryLimit = bytes;
+            // `--memory` 是容器进程树的总预算，不能使用 PROCESS_MEMORY：
+            // 后者会让 Job 内每个进程各自获得一份完整额度。
+            ext.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            ext.JobMemoryLimit = bytes;
         }
         // # Safety: 结构体已完整初始化，句柄有效，尺寸与信息类匹配。
         let ok = unsafe {
@@ -355,7 +357,7 @@ mod real_windows_tests {
         assert!(!job.raw().is_null());
     }
 
-    /// 内存上限边界：0 = 不限（不挂 JOB_OBJECT_LIMIT_PROCESS_MEMORY flag）。
+    /// 内存上限边界：0 = 不限（不挂 JOB_OBJECT_LIMIT_JOB_MEMORY flag）。
     /// JobLimits 默认实现是全 0，本测试断言 0 不触发任何限额下发。
     #[test]
     fn job_zero_limits_means_unlimited() {
@@ -366,6 +368,33 @@ mod real_windows_tests {
             max_procs: 0,
         })
         .unwrap();
+    }
+
+    #[test]
+    fn memory_limit_applies_to_the_whole_job() {
+        let job = Job::create(JobLimits {
+            memory_mb: 128,
+            cpu_pct: 0,
+            max_procs: 0,
+        })
+        .unwrap();
+        let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.raw(),
+                JobObjectExtendedLimitInformation,
+                &mut ext as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(ok, 0, "QueryInformationJobObject failed");
+        assert_ne!(
+            ext.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_JOB_MEMORY,
+            0,
+            "容器总内存限制必须使用 JOB_OBJECT_LIMIT_JOB_MEMORY"
+        );
+        assert_eq!(ext.JobMemoryLimit, 128 * 1024 * 1024);
     }
 
     /// memory_mb 上限的算术溢出保护：apply_limits 内 checked_mul(1024*1024)。
