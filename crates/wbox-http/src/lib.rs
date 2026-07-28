@@ -24,8 +24,7 @@
 //!    wbox 撑爆。
 //! 3. **头部值里的 CR/LF 一律拒绝**，否则攻击者控制的字符串能拆出额外请求。
 //!
-//! TLS 仍是第三方（`rustls` + `rustls-rustcrypto`），是仓库里最后一处；
-//! 接缝与取舍见 [`transport`] 的模块注释。
+//! TLS 走同仓的 `wbox-tls`（自实现的 TLS 1.3 客户端），见 [`transport`]。
 
 pub mod pem;
 pub mod transport;

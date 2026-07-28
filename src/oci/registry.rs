@@ -6,7 +6,8 @@
 //!    向 realm 匿名请求 token（GET，query 带 service/scope），缓存后重试；
 //! 3. blob 拉取同理（`/v2/<repo>/blobs/<digest>`）。
 //!
-//! HTTP 走自实现的 `wbox-http`（阻塞式，无 tokio）。跨主机重定向丢弃
+//! HTTP 与 TLS 都走自实现的 `wbox-http` / `wbox-tls`（阻塞式，无 tokio）。
+//! 跨主机重定向丢弃
 //! `Authorization`、响应体上限、头部注入拒绝这几条都在那边，本文件只负责
 //! registry 协议本身（Bearer 流程、凭证发放规则、digest 语义）。
 

@@ -10,12 +10,12 @@
 | 项 | 之前 | 现在 |
 |---|---|---|
 | Linux ELF 模拟器（`wbox-linux.exe`） | `vendor/blink`，约 122k 行 C（含 win32 移植层与 third_party） | `crates/wbox-linux`，纯 Rust，零第三方依赖 |
-| OCI registry 的 TLS | `native-tls`：Linux 链接系统 **OpenSSL**（第三方 C 库），Windows 走 schannel | `rustls` + `rustls-rustcrypto`，**纯 Rust** |
 | CI 构建 wbox-linux | windows runner 上装 MSYS2 + MinGW-w64 gcc 编 C11+GNU 扩展 | `cargo build -p wbox-linux`，**CI 不再需要任何 C 工具链** |
 | 后端模块名 | `backend::blink` / `BlinkBackend` | `backend::emu` / `EmuBackend` |
 | JSON / SHA-256 / Base64 / gzip / tar | `serde_json`、`sha2`、`base64`、`flate2`、`tar` 五个第三方 crate | `crates/wbox-codec`，**第一方、零依赖** |
 | 错误上下文链 | `anyhow` | `src/fault.rs`，约 120 行 |
-| HTTP 客户端 | `ureq` | `crates/wbox-http`，第一方（TLS 传输除外） |
+| HTTP 客户端 | `ureq` | `crates/wbox-http`，第一方 |
+| TLS | `native-tls`(OpenSSL) → `rustls` + `rustls-rustcrypto` | `crates/wbox-tls`，第一方 TLS 1.3 |
 
 整个仓库现在没有任何 `.c` / `.cc` / `.cpp` 参与产品构建。仍在仓库里的
 非 Rust 文件只有两类，都不链接进产品：
@@ -203,27 +203,69 @@ tar），所以要完整、要对畸形输入报错、要有资源上界；**编
 重定向到 CDN → 动态 Huffman 解压真实层 → sha256 校验 → tar 解包 → 随后
 `wbox run` 起容器执行 busybox。这条路径同时验证了上面六个模块。
 
-## 5.1 TLS：仓库里最后一处第三方实现（需要人拍板）
+## 5.1 TLS：已换成第一方实现
 
-HTTP 协议层已经是第一方（`crates/wbox-http`），但 **TLS 仍是 `rustls` +
-`rustls-rustcrypto`**。接缝是 `wbox-http/src/transport.rs` 的 `connect_tls`
-一个函数。
+`crates/wbox-tls` 是自实现的 TLS 1.3 客户端。`rustls` +
+`rustls-rustcrypto` + `webpki-roots` 已从构建图移除。
 
-为什么停在这里：自己写 TLS 意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签与
-X.509 链校验。那是**未经审计、非常量时间**的密码学，与"少一个第三方 crate"
-要放在一起权衡——这不是工作量问题，是取舍问题，需要人拍板。
+### 范围：只做一条路
 
-已知的成熟度问题照旧：`rustls-rustcrypto` 当前是 `0.0.2-alpha`，README 明说
-未经安全审计。三个选项：
+只支持 **TLS 1.3**、**X25519**、**AES-128-GCM / AES-256-GCM**。
+**不做** TLS 1.2 回退、会话恢复（PSK/0-RTT）、客户端证书、吊销检查。
 
-| 选项 | 得到 | 代价 |
+这是**减少攻击面**，不是省事：TLS 的历史漏洞里很大一部分出在版本回退与旧
+套件上（FREAK、Logjam、POODLE 都是）。registry 全都支持 1.3，没有回退的
+必要；**不实现就不可能被降级到它**。对端不支持 1.3 时明确报错。
+
+### 组成
+
+| 模块 | 内容 | 正确性判据 |
 |---|---|---|
-| A 自己写 TLS 1.3 客户端 | 100% 第一方，仓库里再无第三方实现 | 自写密码学，同样未经审计，且非常量时间 |
-| B 维持现状（rustls + rustls-rustcrypto） | 有人审视过的协议实现 | 密码学 provider 是 alpha；仍有第三方 crate |
-| C 回到 `native-tls` | 成熟度最高 | Linux 上链接系统 OpenSSL，违反"无 C" |
+| `sha512` | SHA-384/512 + HMAC | FIPS 180-4、RFC 4231 向量 |
+| `aes` | AES-128/256 + GHASH + GCM | FIPS 197、NIST SP 800-38D 向量 |
+| `x25519` | RFC 7748 密钥协商 | RFC 7748 向量，含 **1000 轮迭代** |
+| `bigint` + `rsa` | 大整数、PKCS#1 v1.5 与 PSS 验签 | 用 RFC 8017 测试密钥现签的真实签名 |
+| `ec` | ECDSA P-256 / P-384 验签 | 现签的真实签名 + 曲线自检（n·G = ∞）|
+| `der` + `x509` + `roots` | 证书解析与链校验、121 张 Mozilla 根 | **121 张真实根全部解析成功，90+ 张自签名验证通过** |
+| `kdf` | HKDF + TLS 1.3 密钥调度 | RFC 5869 向量 |
+| `record` + `handshake` + `stream` | 记录层、握手、字节管道 | 往返、篡改检测、降级拒绝 |
 
-受影响面**仅限 `wbox pull/push` 的 registry HTTPS**，不涉及容器隔离本身。
-无论选哪个，改动都只落在 `transport.rs` 一个文件加 `Cargo.toml`。
+端到端取证：`wbox pull alpine:3.20` 从 Docker Hub 拉通，manifest digest
+与换之前**逐字节一致**；随后 `wbox run` 起容器执行 busybox。
+
+### 安全声明（必须如实说）
+
+**未经第三方安全审计，且不是常量时间实现**（AES 用查表 S-box，大整数运算
+不做时序均衡）。换掉的 `rustls-rustcrypto` 当时是 `0.0.2-alpha`、README 同样
+写明未经审计——所以这不是"从审计过的换成没审计的"，但**也不构成安全性提升
+的理由**。选它的理由是 §2.2.1 第二档的口径，不是安全。
+
+可以接受的三条依据（详见 PRD §2.2.2）：
+
+1. 影响面**仅限 registry HTTPS**，不涉及容器隔离本身；
+2. 威胁模型是"从公开 registry 拉镜像"，利用侧信道要与 wbox 争抢同一台机器
+   的缓存，而那时攻击者已经能直接读内存；
+3. 镜像内容有**独立于 TLS 的完整性保护**——manifest 与每层都按 sha256
+   digest 校验，TLS 被攻破也换不掉内容而不被发现。
+
+**不要把 `wbox-tls` 里的密码学实现用到别的地方去。** 它是按 wbox 这一个
+威胁模型裁剪的。
+
+### 实现时踩到、值得留下的几处
+
+- **仿射坐标做 ECDSA 会慢到不可用。** 每次点加/倍点都要一次模逆（走费马
+  小定理就是一次完整模幂），一次 256 位标量乘约 380 次点运算 = 380 次模幂，
+  **实测一次验签超过一分钟**。Jacobian 投影坐标把模逆推迟到最后只做一次：
+  降到 644 ms。
+- **还是慢，而瓶颈是内存分配不是算术。** `BigUint::rem` 的逐位长除法每一位
+  都 `shl`/`add`/`sub` 出一个新的 `BigUint`，512 位被除数就是上千次 `Vec`
+  分配。改成原地无分配（算法没变）：76 ms。一条三证书链约 230 ms。
+- **老根用 SHA-1 自签，还有根用 P-521。** 第一反应是"那就支持 SHA-1"——错的：
+  根的自签名在真实链校验里根本不验，信任来自它在信任库里。正确的分界是
+  `SigAlg::Unsupported` / `PublicKey::Unsupported`：**解析不失败、验签必失败**。
+- **只测"自产自销的往返"会漏掉一半代码。** `deflate` 的编码器只产生固定
+  Huffman，而真实镜像层全是动态块——往返测试一行都走不到动态块解码。
+  同理，签名验证只有负向用例的话，"永远返回 false"的实现也能全绿。
 
 ## 6. 运行期开关
 

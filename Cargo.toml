@@ -5,20 +5,23 @@ edition = "2021"
 description = "Portable Windows 进程容器（AppContainer + Job Object，无需 VT-x / 管理员权限）"
 license = "MIT OR Apache-2.0"
 
-# 全 Rust 实现（PRD §2.2 依赖红线）：根包是 CLI 与宿主隔离后端，
-# crates/wbox-linux 是 vendor/blink（C）的纯 Rust 重写，两者同一 workspace，
+# 全 Rust 实现（PRD §2.2.1 的两档口径）：
+#   - 第一档「没有 C/C++」：crates/wbox-linux 取代了 vendor/blink；
+#   - 第二档「承载产品语义的实现必须第一方」：codec / http / tls 三个 crate
+#     取代了 serde_json、sha2、base64、flate2、tar、anyhow、ureq、rustls。
+# 整棵构建图只剩这五个 wbox 包，外加 libc / windows-sys（平台 ABI 声明）。
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
-members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux"]
+members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-tls"]
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
 # 这一条取代了原先的 serde_json / sha2 / base64 / flate2 / tar 五个第三方 crate。
 wbox-codec = { path = "crates/wbox-codec" }
 
-# ---- OCI 镜像拉取的 HTTP（src/oci/registry.rs）----
-# 自实现的阻塞式 HTTP/1.1 客户端，取代 ureq。TLS 传输仍在它内部用 rustls，
-# 那是仓库里最后一处第三方实现，取舍见 docs/rust-rewrite.md §5。
+# ---- OCI 镜像拉取的 HTTP/TLS（src/oci/registry.rs）----
+# 自实现的阻塞式 HTTP/1.1 客户端；TLS 1.3 在它依赖的 crates/wbox-tls 里，
+# 同样是自实现。安全声明见 PRD §2.2.2 与 docs/rust-rewrite.md §5.1。
 wbox-http = { path = "crates/wbox-http" }
 
 # 纯 Rust Linux guest 引擎。同一份实现同时产出 wbox-linux.exe（EmuBackend 用）

@@ -2,19 +2,11 @@
 name = "wbox-http"
 version = "1.0.0-rc2"
 edition = "2021"
-description = "wbox 自实现的阻塞式 HTTP/1.1 客户端（TLS 传输可插拔）"
+description = "wbox 自实现的阻塞式 HTTP/1.1 客户端（TLS 走同仓 wbox-tls）"
 license = "MIT OR Apache-2.0"
 
-# 协议层（URL、请求/响应、分块编码、重定向、代理）零依赖，全部自实现，
-# 取代原先的 ureq。
-#
-# 只剩**密码学**这一层还是第三方：TLS 的握手与原语。这不是遗漏，是仓库里
-# 唯一一处"要不要自己写密码学"的待决取舍，见 docs/rust-rewrite.md §5。
-# `transport::tls` 是那条唯一的接缝——换成第一方实现时只动那一个文件。
+# 零第三方依赖。协议层（URL、请求/响应、分块编码、重定向、代理）与 TLS
+# 全部第一方实现——TLS 在 crates/wbox-tls。
 [dependencies]
-# 自实现的 base64（PEM 解码用）。
 wbox-codec = { path = "../wbox-codec" }
-
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"] }
-rustls-rustcrypto = "0.0.2-alpha"
-webpki-roots = "0.26"
+wbox-tls = { path = "../wbox-tls" }

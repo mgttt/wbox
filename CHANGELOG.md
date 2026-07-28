@@ -6,6 +6,71 @@
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 里程碑以功能线回溯标注（项目以 trunk 滚动开发，tag 自 v1.0-rc 起）。
 
+## [未发布] —— 100% 第一方 Rust：自实现 TLS 1.3，构建图清零
+
+**里程碑：`Cargo.lock` 从 119 条降到 16 条。整棵构建图只剩五个 wbox 自己的
+crate，外加 `libc` / `windows-sys`（平台 ABI 声明）。**
+
+### 新增 `crates/wbox-tls`：自实现的 TLS 1.3 客户端
+
+取代 `rustls` + `rustls-rustcrypto` + `webpki-roots`，是 §2.2.1 第二档的最后
+一块。组成与各自的正确性判据：
+
+| 模块 | 内容 | 判据 |
+|---|---|---|
+| `sha512` | SHA-384/512 + HMAC | FIPS 180-4、RFC 4231 向量 |
+| `aes` | AES-128/256 + GHASH + GCM | FIPS 197、NIST SP 800-38D 向量 |
+| `x25519` | RFC 7748 密钥协商 | RFC 7748 向量，含 1000 轮迭代 |
+| `bigint` + `rsa` | 大整数、PKCS#1 v1.5 与 PSS 验签 | 用 RFC 8017 测试密钥现签的真实签名 |
+| `ec` | ECDSA P-256 / P-384 验签 | 现签的真实签名 + 曲线自检（n·G = ∞）|
+| `der` + `x509` + `roots` | 证书解析、链校验、121 张 Mozilla 根 | **121 张真实根全部解析成功，90+ 张自签名验证通过** |
+| `kdf` | HKDF + TLS 1.3 密钥调度 | RFC 5869 向量 |
+| `record` + `handshake` + `stream` | 记录层、握手、字节管道 | 往返、篡改检测、降级拒绝 |
+
+**范围刻意窄**：只做 TLS 1.3 / X25519 / AES-GCM。**不做 TLS 1.2 回退**
+（不实现就不可能被降级——FREAK、Logjam、POODLE 都是回退路径上的洞）、
+不做会话恢复、不做客户端证书、不做吊销检查（CRL/OCSP 都要额外网络请求，
+主流客户端还普遍软失败，等于没查）。对端不支持 1.3 时明确报错。
+
+### 安全声明
+
+`wbox-tls` **未经第三方安全审计，且不是常量时间实现**。换掉的
+`rustls-rustcrypto` 当时是 `0.0.2-alpha`、README 同样写明未审计，所以这不是
+"从审计过的换成没审计的"，但**也不构成安全性提升的理由**。
+
+可以接受的三条依据（PRD §2.2.2）：影响面仅限 registry HTTPS，**不涉及容器
+隔离本身**；威胁模型下利用侧信道需与 wbox 争抢同一台机器的缓存；镜像内容有
+**独立于 TLS 的 sha256 digest 校验**，TLS 被攻破也换不掉内容而不被发现。
+
+### 依赖棘轮加到三条
+
+`dependency_graph_is_first_party_plus_platform_abi_only` 直接盯 `Cargo.lock`
+——前两条棘轮（有没有 C、某几个 crate 有没有回流）都看不见"直接依赖清白但
+拖进来一串传递依赖"。
+
+### 已验证
+
+- `cargo test --workspace` → **756 passed / 0 failed**
+  （wbox 423 + wbox-tls 97 + wbox-codec 40 + wbox-http 27 + 引擎 167）
+- `cargo clippy --workspace --all-targets -- -D warnings` → 干净
+- **端到端，整条链路零第三方**：`wbox pull alpine:3.20` 从 Docker Hub 拉通
+  ——自实现 TLS 1.3 握手 → Bearer token → 跨主机重定向到 CDN → 动态 Huffman
+  解压 → sha256 校验 → tar 解包；随后 `wbox run` 起容器执行 busybox。
+  **manifest digest 与换掉 rustls 之前逐字节一致。**
+
+### 性能
+
+一次 P-256 验签 76 ms，一条三证书链约 230 ms（release）。到这个数用了两处
+优化，中间那一步是剖开看才发现的：仿射坐标 → Jacobian（把每次点运算的模逆
+推迟到最后一次）60 s → 644 ms；`BigUint::rem` 逐位长除法改成原地无分配
+（分配本身才是大头）644 ms → 76 ms。
+
+### 文档
+
+- PRD §2.2.1 重写为两档口径并标注第二档**已全部达成**；新增 §2.2.2
+  「自实现密码学的安全声明」；§4.9 的 L10 结案；R9 标 `[done]`。
+- `docs/rust-rewrite.md` §5.1 重写为 TLS 的组成、判据、安全声明与实现教训。
+
 ## [未发布] —— 全 Rust 化第二步：承载产品语义的第三方 crate 换成第一方实现
 
 **里程碑：镜像管理链路上的第三方实现只剩 TLS 一处，且已切好接缝。**
