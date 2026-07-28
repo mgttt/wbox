@@ -23,9 +23,9 @@
    冲突由当前 agent 基于双方意图解决。
 5. 功能状态发生变化时更新本文；发布历史写入 `CHANGELOG.md`，不要在多份文档
    复制同一组动态数字。
-6. **先看 §4.9 `[TODO-PLAN]`**：那里按宿主分派了待办条目。挑与**你这台机器
-   能真实验证**的宿主相符的条目做；验证不了的不要硬写，改成那里的一个新条目
-   交给对应宿主的 agent。
+6. **先看 §4.9 的 `[TODO-WINDOW]` / `[TODO-LINUX]`**：进入与**你这台机器
+   能真实验证**的宿主相符的队列；验证不了的不要硬写，把背景、判据和完成标准
+   写进另一台宿主的树，交给对应 agent。
 
 事实发生冲突时，优先级为：当前代码和可重复测试 > CI 配置 > 本文 >
 技术参考 > `CHANGELOG.md` 历史段落。
@@ -36,8 +36,9 @@
 - `[active]`：主路径已实现，但仍有明确缺口或正在补充验证。
 - `[planned]`：认可的后续范围，尚未进入交付。
 - `[out]`：非目标，除非产品范围被明确修改。
-- `[TODO-PLAN]`：跨宿主交接点，见 §4.9。条目上的 `[Windows agent]` /
-  `[Linux agent]` 标明该由哪台机器上的 agent 接手。
+- `[TODO-WINDOW]`：必须在 Windows 真机完成或最终验收的交接队列，见 §4.9。
+- `[TODO-LINUX]`：必须在 Linux/Wine/overlay 环境完成或最终验收的交接队列，
+  见 §4.9。
 
 ## 2. 产品定义
 
@@ -1259,8 +1260,8 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 - 仍不做 overlay：overlayfs 在 rootless 下未必可用，`FROM` 走整份 rootfs 复制。
 
 **F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
-Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-PLAN]` 的
-Windows 侧工作。
+Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-WINDOW]`
+工作。
 
 **F9.22 `save` / `load`** `[done]`（门禁 SL.1–SL.6）。把镜像打包成 tar 搬到别处。
 
@@ -2090,10 +2091,11 @@ supervisor，**人为停掉的容器不会被自己重新拉起**——不需要
 时报错——两者对"退出"的处置直接矛盾，静默让一方胜出会让用户无从知道实际
 生效的是哪个。
 
-## 4.9 [TODO-PLAN] 跨宿主协作交接点
+## 4.9 跨宿主协作交接点
 
-本节是**给另一台宿主上的 agent 看的工作面**。约定很简单：谁的宿主谁验证，
-拿不到的机器不硬猜。
+本节是 Windows 与 Linux agent 共享的工作面。队列按**最终必须在哪台宿主验收**
+划分，不按谁提出、谁写代码或条目历史编号划分。谁的宿主谁验证，拿不到的机器
+不硬猜。
 
 无法在本机验证的东西**不写进产品代码**，改写成这里的一个条目：说清背景、
 判据、以及"怎样算做完"。这不是甩锅，是本轮反复吃亏后的结论——两次把 CI
@@ -2101,23 +2103,70 @@ supervisor，**人为停掉的容器不会被自己重新拉起**——不需要
 根本不是我以为的东西（msys 把 guest 路径 `/busybox` 改写成宿主路径，
 造出一个纯自伤的假失败）。
 
+协作约定：
+
+1. 每个 agent 开工前只从自己的宿主树领取任务；完成后在原条目更新状态和证据。
+2. 任一 agent 都可以向另一棵树投递任务，但必须写明复现/背景、验收判据和完成标准。
+3. 条目编号一旦被引用就保持稳定；`W5` 这类历史编号不代表当前归属，以所在树为准。
+4. 能写代码但不能完成目标宿主验收时，状态最多是 `[active]`，并把剩余验收留在
+   对应宿主树；不得仅凭另一宿主的单元测试标 `[done]`。
+5. 两台机器都直接使用 `main`，领取和提交前先同步远端；冲突按双方任务意图合并，
+   不覆盖另一 agent 的并行成果。
+
+### 4.9.1 [TODO-WINDOW]
+
 ```text
-TODO-PLAN
-├── W1 Windows 侧 stop 的持续门禁              [Windows agent] 已完成
-├── W2 F8.4 exec 的 Windows 原生可对齐子集     [Windows agent] 已完成
-├── L1 F8.4 exec 的 Linux 侧实现              [Linux agent] 已完成
-├── W3 F9.4 Windows 文件系统写重定向取证     [Windows agent] 分析已完成+实验已设计，只剩照跑
-├── W5 Q2 端口映射 -p 的可行性取证           [Linux agent] 已完成：语义不适用
-├── W4 build 在 Windows 宿主的可行性          [Windows agent] 已完成
-├── L2 Wine 象限的 wineprefix 隔离            [Linux agent] 已完成
-├── L3 `wbox push` 镜像推送                   [Linux agent] 已完成（F9.13）
-├── L4 compose 子集                           [任一 agent] 已完成（F9.14）
-├── L5 镜像分层存储                           [Linux agent] 已完成（F9.16–F9.18）
-├── L6 pod 抽象是否值得做                     [任一 agent] 已评估：不做（见下）
-├── W6 Q1 临时目录私有化（TEMP/TMP）          [Linux agent] 机制已实现（`--private-tmp`）；只剩 Windows 侧取证
-├── W7 Q1 只读授权粒度（ACL 只读 ACE）        [Windows agent] 待验证可行性后实现
-└── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）[Windows agent] 待验证可行性后实现
+TODO-WINDOW
+├── W1 Windows 侧 stop 的持续门禁                         [done]
+├── W2 F8.4 exec 的 Windows 原生可对齐子集                [done]
+├── W3 F9.4 Windows 文件系统写重定向取证                  [active] 分析完成，实验待跑
+├── W4 build 在 Windows 宿主的可行性                      [done]
+├── W6 Q1 临时目录私有化（TEMP/TMP）                      [active] 实机语义待收口
+├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
+├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
+└── W9 create → rename → start 生命周期损坏               [active] Windows 已稳定复现
 ```
+
+### 4.9.2 [TODO-LINUX]
+
+```text
+TODO-LINUX
+├── L1 F8.4 exec 的 Linux 侧实现                          [done]
+├── L2 Wine 象限的 wineprefix 隔离                        [done]
+├── L3 `wbox push` 镜像推送                               [done] F9.13
+├── L4 compose 子集                                       [done] F9.14
+├── L5 镜像分层存储                                       [done] F9.16-F9.18
+├── L6 pod 抽象是否值得做                                 [done] 结论是不做
+├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
+├── L7 `load` / `import` 解包的符号链接边界               [active] 待修复与门禁
+├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁
+└── L9 Linux native / Wine 共用后端验收当前失败            [active] 待取得失败断言
+```
+
+### W9 `create -> rename -> start` 生命周期损坏 `[TODO-WINDOW]` `[active]`
+
+Windows 真机已稳定复现：创建未启动容器，改名后执行 `start`，CLI 表面返回成功，
+supervisor 却仍按保存参数中的旧名接管 detached 预留，最终留下 `Running=true`、
+`Pid=0` 的记录；`restart`、`rm` 无法恢复，`wait` 持续阻塞。
+
+完成标准：改名同步所有后续启动所依赖的名称，或启动时用当前记录名覆盖历史参数；
+增加 `create -> rename -> start -> wait/rm` 的 Windows 产品门禁，并证明失败启动
+不会遗留永久 reservation。
+
+### L7/L8 文件路径边界 `[TODO-LINUX]` `[active]`
+
+- L7：`load` 与 `import` 目前先做词法路径检查，再对拼出的目标调用
+  `tar::Entry::unpack`。需要用“归档先创建指向外部的符号链接、后续条目写入其子路径”
+  的用例证明解包始终留在 staging/rootfs 内；失败时不得留下半成品镜像。
+- L8：`cp` 的容器路径只消解 `..`，尚未约束 upper/rootfs 中已有的中间符号链接。
+  copy-in 和 copy-out 都要增加真实 overlay 门禁，证明不能借链接写出或读出容器视图。
+
+### L9 Linux/Wine 后端门禁红灯 `[TODO-LINUX]` `[active]`
+
+2026-07-28 的 `main`（`89087bc`）上，Windows 编译/产品测试、Linux 单测和 guest
+测试通过，但 `test-linux-backend` 与 `test-wine-backend` 同时退出 1；二者共用
+`scripts/test-linux-backend.sh`。完成标准是先取得首个失败断言，修复产品或门禁后
+让两项恢复绿色；在没有日志前不要猜测是 `--private-tmp` 或其他最近功能导致。
 
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
 
@@ -2164,13 +2213,15 @@ blink 加一层用户态网络栈，那是另一个数量级的工作。
 **先验证再实现**；验证不成立就把条目改成「不做」并写明原因，那比留一个永远做不成
 的待办诚实（这条纪律与 W3 一致）。
 
-**W6 临时目录私有化** `[机制已实现，只剩 Windows 侧取证]`。
-`--private-tmp` 把容器内的 `TMPDIR`/`TEMP`/`TMP` 指向 `<状态目录>/tmp`。
+**W6 临时目录私有化** `[active：Windows 实机语义待收口]`。
+`--private-tmp` 尝试把 `TMPDIR`/`TEMP`/`TMP` 指向 `<状态目录>/tmp`。
 
 **这一条原本整条挂在「待 Windows 验证」，其实不必**：它的机制是「建一个目录 +
 注入三个环境变量」，**完全是平台中立的**，Q1 与 Q4 走的还是同一个宿主程序模式。
-所以在 Linux 侧就实现并取证了（门禁 PT.1–PT.5），Windows 侧只剩一件事：
-确认那三个变量在 AppContainer 下**确实被常见程序遵守**。
+所以在 Linux 侧就实现并取证了（门禁 PT.1–PT.5）。2026-07-28 Windows 实机取证
+确认：AppContainer 内 `TMPDIR` 保留为 `<状态目录>/tmp`，但 `TEMP`/`TMP` 会被
+Windows 改写为该 AppContainer package 的 `AC\Temp`。两者都是容器私有位置，
+但“三个变量都指向同一路径”的描述不成立。
 
 已在 Linux 侧钉住的：缺口真实存在（PT.1 先证明不加选项时写 `/tmp` 确实落在宿主）、
 私有目录可写且不泄漏到宿主（PT.2）、三个变量都设（PT.3）、
@@ -2181,8 +2232,9 @@ blink 加一层用户态网络栈，那是另一个数量级的工作。
 `TMPDIR`/`TEMP`/`TMP` 约定**的程序。硬编码路径的程序挡不住——那需要写重定向，
 而那正是 §2.4.2 说清的、用户态做不到的那一半。
 
-**留给 Windows agent 的**：在真 Windows 上确认 AppContainer 进程读得到这三个变量、
-且典型工具链（cmd、PowerShell、常见 CLI）确实按它们落盘；不成立的部分照实写回。
+**留给 Windows agent 的**：补 cmd、PowerShell 和常见 CLI 的实际落盘门禁，明确
+验收语义应是“临时文件进入容器私有位置”，而不是强求三个变量路径相同；同时验证
+`-e TMPDIR=...` 的用户覆盖在 AppContainer 下仍成立。
 
 **W7 只读授权粒度**。现在给 rootfs 授 ACE 是读写一档；ACL 本身支持只读授予。
 - 为什么值得做：这是 Q1 能兑现 `-v ... :ro` 语义的唯一途径（那一格没有挂载层，
