@@ -38,6 +38,27 @@ cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnin
 
 双目标 clippy 都是门槛；Linux host 不会编译 `cfg(windows)` 模块。
 
+日常构建使用仓库 wrapper，而不是长期直接调用 `cargo build`：
+
+```powershell
+# Windows
+scripts/build.ps1
+scripts/build.ps1 -Release
+scripts/build.ps1 -Release -Package wbox-linux
+```
+
+```bash
+# Linux
+scripts/build.sh
+scripts/build.sh --release -p wbox-linux
+```
+
+wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`，删除所有 target
+三元组下可再生成的 `incremental/`，以及根目录的 `tmp/`、`review-*` 测试临时状态。
+`deps/`、`build/`、`.fingerprint/` 和最终二进制会保留，避免每次退化成全量重编。
+Windows 可传 `-KeepIncremental`，Linux 可设置 `WBOX_KEEP_INCREMENTAL=1` 临时保留
+增量缓存；不得把该选项写入 CI 或长期开发命令。
+
 测试不得直接并发修改进程环境。使用 `crate::testenv::EnvGuard`；需要临时 HOME
 时使用 `cli::TempHome`，额外变量经其同一守卫设置，避免重入锁。
 

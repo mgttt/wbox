@@ -2209,6 +2209,7 @@ TODO-WINDOW
 ├── W9 create → rename → start 生命周期损坏               [active] Windows 已稳定复现
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [active] Job 总内存语义已核验，超限 workload 待补
 ├── W11 detached 启动 READY 握手                           [planned] workload 启动失败时父进程不得 rc0
+├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2232,7 +2233,8 @@ TODO-LINUX
 ├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁
 ├── L9 Linux native / Wine 共用后端验收当前失败            [active] 待取得失败断言
-└── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
+├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
+└── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ```
 
 ### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
