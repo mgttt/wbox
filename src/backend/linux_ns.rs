@@ -58,7 +58,12 @@ struct NsPlan {
     /// 卷挂载：(宿主源, 容器内目标的**宿主可见路径**, 只读)。
     /// 目标在 fork 前就解析成宿主视角的绝对路径——镜像模式是 `rootfs/<guest>`，
     /// 宿主模式就是 `<guest>`；闭包内不再拼字符串（不能分配）。
-    vol_binds: Vec<(CString, CString, bool)>,
+    /// (源, 目标, 只读, 源下面是否有子挂载)
+    ///
+    /// 第四项是**父进程预算好的**：子进程在 fork 之后不能分配也不能读文件
+    /// （见文件顶部的 async-signal-safety 约束），没法自己去解析
+    /// `/proc/self/mountinfo`。
+    vol_binds: Vec<(CString, CString, bool, bool)>,
     /// `/proc/self/setgroups` / `uid_map` / `gid_map`
     p_setgroups: CString,
     p_uid_map: CString,
@@ -438,6 +443,8 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
             cstr(&v.host.to_string_lossy())?,
             cstr(&target.to_string_lossy())?,
             v.read_only,
+            // 只有只读卷才需要这个信息；可写卷不必花这次扫描。
+            v.read_only && source_has_submounts(&v.host),
         ));
     }
 
@@ -746,6 +753,69 @@ fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
     };
     let _ = std::fs::remove_dir_all(&base);
     ok
+}
+
+/// `mount_setattr(2)` 的系统调用号。所有架构上都是 442（Linux 5.12 引入）。
+/// `libc` 0.2 尚未导出，这里自定义。
+const SYS_MOUNT_SETATTR: libc::c_long = 442;
+/// `AT_RECURSIVE`：对整棵挂载树生效。
+const AT_RECURSIVE: libc::c_int = 0x8000;
+/// `MOUNT_ATTR_RDONLY`。
+const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
+
+/// `struct mount_attr`（Linux uapi/linux/mount.h）。
+///
+/// 字段顺序与大小必须与内核一致——内核按 `size` 参数校验，写错了会 EINVAL，
+/// 而 EINVAL 在上面正好是"退回老路"的分支，于是表现为**静默降级**。
+/// 所以这里不用 `#[repr(Rust)]`。
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+/// `src` 目录**下面**是否还挂着别的文件系统。
+///
+/// 只在父进程调用（要读 `/proc/self/mountinfo`，子进程做不了这件事）。
+///
+/// 为什么需要它：`-v src:dst:ro` 的 bind 用 `MS_REC`，会把 `src` 下的子挂载
+/// 一并带过去。而把它们也变成只读需要 `mount_setattr(AT_RECURSIVE)`
+/// （内核 5.12+）。老内核上只能做非递归 remount——那时**顶层只读、子挂载
+/// 仍可写**，`:ro` 的承诺没兑现。
+///
+/// 但绝大多数 `-v` 的源就是个普通目录，底下一个子挂载都没有；那种情况下
+/// 非递归 remount 与递归**完全等价**，不该因为内核老就拒绝用户。所以这里
+/// 先问一句"到底有没有子挂载"，让子进程能区分"退化但等价"与"退化且不安全"。
+fn source_has_submounts(src: &std::path::Path) -> bool {
+    // 比较用规范化路径：mountinfo 里是解析过符号链接的绝对路径。
+    let Ok(canon) = std::fs::canonicalize(src) else {
+        // 读不出来就保守当作"有"——宁可在老内核上明确报错，
+        // 也不要在不确定的情况下宣称只读生效了。
+        return true;
+    };
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return true;
+    };
+    let prefix = {
+        let mut p = canon.to_string_lossy().into_owned();
+        if !p.ends_with('/') {
+            p.push('/');
+        }
+        p
+    };
+    for line in info.lines() {
+        // mountinfo 第 5 个字段是挂载点（空格转义成 \040 等，这里只需前缀比较）
+        let Some(mp) = line.split_whitespace().nth(4) else {
+            continue;
+        };
+        // 严格的**真子路径**：挂载点自身不算（它就是要被 bind 的那个）。
+        if mp.starts_with(&prefix) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 备好 overlay 可写层计划。
@@ -1131,7 +1201,7 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
     //     宿主源路径就没了。目标已在 fork 前解析成宿主视角路径，这里只做 mount。
     //     两种模式都执行——宿主模式虽不换根，但已在独立 mount namespace 里，
     //     bind 只对容器可见。
-    for (src, dst, read_only) in &p.vol_binds {
+    for (src, dst, read_only, has_submounts) in &p.vol_binds {
         if libc::mount(
             src.as_ptr(),
             dst.as_ptr(),
@@ -1143,18 +1213,54 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
             return Err(err());
         }
         if *read_only {
-            // 只读要**第二次** remount 才生效：首次 bind 会忽略 MS_RDONLY，
-            // 这是 mount(2) 的既定行为。少了这步 :ro 会静默变成可写——
-            // 那比不支持只读更糟。
-            if libc::mount(
-                std::ptr::null(),
+            // # `:ro` 必须**递归**生效
+            //
+            // 上面的 bind 用了 `MS_REC`，会把源下面的子挂载一并带过来。
+            // 而 `MS_REMOUNT | MS_RDONLY` **只作用于顶层**——顶层变只读、
+            // 子挂载全是可写的。用户写了 `:ro` 却能往里写，这比不支持只读
+            // 更糟：它给了一个没兑现的承诺。
+            //
+            // `mount_setattr(AT_RECURSIVE)` 一次把整棵挂载树设成只读，
+            // 且是单条裸 syscall，符合这里的 async-signal-safety 约束
+            // （解析 /proc/self/mountinfo 那种做法在 fork 后做不了）。
+            // 内核 5.12+；本项目的 rootless overlay 本来就要 5.11+，
+            // 所以这不是个突兀的新门槛。
+            let attr = MountAttr {
+                attr_set: MOUNT_ATTR_RDONLY,
+                attr_clr: 0,
+                propagation: 0,
+                userns_fd: 0,
+            };
+            let rc = libc::syscall(
+                SYS_MOUNT_SETATTR,
+                libc::AT_FDCWD,
                 dst.as_ptr(),
-                std::ptr::null(),
-                libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
-                std::ptr::null(),
-            ) != 0
-            {
-                return Err(err());
+                AT_RECURSIVE | libc::AT_SYMLINK_NOFOLLOW,
+                &attr as *const MountAttr,
+                core::mem::size_of::<MountAttr>(),
+            );
+            if rc != 0 {
+                let e = *libc::__errno_location();
+                // 老内核没有这个 syscall。此时只能退回非递归 remount——
+                // 但**仅当源下面确实没有子挂载**时那两者才等价。
+                // 有子挂载却退回去，就是静默地只兑现一半的 :ro。
+                // **只认 ENOSYS**（内核没这个 syscall）。EINVAL 不能进这条
+                // 分支——参数或结构体大小写错也返回 EINVAL，那是我们自己的
+                // bug，退回去就成了静默降级，正是这次要修的东西。
+                if e == libc::ENOSYS && !*has_submounts {
+                    if libc::mount(
+                        std::ptr::null(),
+                        dst.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                        std::ptr::null(),
+                    ) != 0
+                    {
+                        return Err(err());
+                    }
+                } else {
+                    return Err(err());
+                }
             }
         }
     }

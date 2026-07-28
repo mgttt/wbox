@@ -829,6 +829,39 @@ else
   report FAIL "V.2 :ro 只读" "rc=$rc（期望非 0）；宿主是否被写入=$([ -f "$VOLSRC/should-fail.txt" ] && echo 是 || echo 否)"
 fi
 
+# V.2b **:ro 必须递归生效**。上一条只证明了顶层只读。
+#
+# bind 用 MS_REC，会把源下面的子挂载一并带过来；而 MS_REMOUNT|MS_RDONLY
+# 只作用于顶层。少了 mount_setattr(AT_RECURSIVE) 的话，顶层只读、子挂载
+# 全是可写的——用户写了 :ro 却能往里写，是个没兑现的承诺。
+#
+# 造一个真的带子挂载的源：VOLSRC/sub 上再 bind 一层。
+VOLSUB="$WORK/volsub"
+mkdir -p "$VOLSRC/sub" "$VOLSUB"
+echo seed > "$VOLSUB/inner.txt"
+if mount --bind "$VOLSUB" "$VOLSRC/sub" 2>/dev/null; then
+  run -v "$VOLSRC:/ro:ro" lbetest -- /bin/sh -c 'echo X > /ro/sub/should-fail.txt'
+  if [ "$rc" -ne 0 ] && [ ! -f "$VOLSUB/should-fail.txt" ]; then
+    report PASS "V.2b -v :ro 递归只读（子挂载也写不进去）"
+  else
+    report FAIL "V.2b :ro 递归只读" \
+      "rc=$rc（期望非 0）；子挂载是否被写入=$([ -f "$VOLSUB/should-fail.txt" ] && echo 是 || echo 否)"
+  fi
+  # 反向：同一个带子挂载的源，不加 :ro 时应当可写——只测"挡得住"会让
+  # 一个"永远拒绝写"的实现也变绿。
+  run -v "$VOLSRC:/rw" lbetest -- /bin/sh -c 'echo Y > /rw/sub/ok.txt'
+  if [ "$rc" -eq 0 ] && [ -f "$VOLSUB/ok.txt" ]; then
+    report PASS "V.2c 不加 :ro 时子挂载照常可写（递归只读没有误伤）"
+  else
+    report FAIL "V.2c 子挂载可写" "rc=$rc 宿主有 ok.txt=$([ -f "$VOLSUB/ok.txt" ] && echo 是 || echo 否)"
+  fi
+  umount "$VOLSRC/sub" 2>/dev/null || true
+else
+  # 无权限做 bind mount（需要 CAP_SYS_ADMIN 或在 userns 内）时跳过。
+  absent "V.2b/V.2c :ro 递归只读" "本环境无法建立测试用的子挂载（需要 mount --bind 权限）"
+fi
+rmdir "$VOLSRC/sub" 2>/dev/null || true
+
 # V.3 安全断言：挂到容器根会让隔离作废，必须拒绝
 vout=$(HOME=$WORK/home "$WBOX_ABS" run -v "$VOLSRC:/" lbetest -- /bin/true 2>&1); vrc=$?
 if [ "$vrc" -ne 0 ] && printf '%s' "$vout" | grep -q "隔离失效"; then
