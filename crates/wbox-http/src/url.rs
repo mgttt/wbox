@@ -89,9 +89,7 @@ fn split_host_port(authority: &str, https: bool) -> Result<(String, u16), String
             .split_once(']')
             .ok_or_else(|| format!("IPv6 地址未闭合：{authority}"))?;
         let port = match tail.strip_prefix(':') {
-            Some(p) => p
-                .parse()
-                .map_err(|_| format!("端口非法：{authority}"))?,
+            Some(p) => p.parse().map_err(|_| format!("端口非法：{authority}"))?,
             None => default,
         };
         return Ok((host.to_ascii_lowercase(), port));
@@ -123,7 +121,8 @@ mod tests {
 
     #[test]
     fn parses_common_forms() {
-        let u = Url::parse("https://registry-1.docker.io/v2/library/ubuntu/manifests/latest").unwrap();
+        let u =
+            Url::parse("https://registry-1.docker.io/v2/library/ubuntu/manifests/latest").unwrap();
         assert!(u.https);
         assert_eq!(u.host, "registry-1.docker.io");
         assert_eq!(u.port, 443);

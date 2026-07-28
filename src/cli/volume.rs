@@ -125,10 +125,7 @@ fn inspect(args: &[String]) -> Result<u32> {
             "UsedBy": volume::users(n),
         }));
     }
-    println!(
-        "{}",
-        wbox_codec::json::Value::Array(out).to_string_pretty()
-    );
+    println!("{}", wbox_codec::json::Value::Array(out).to_string_pretty());
     Ok(0)
 }
 
@@ -148,12 +145,24 @@ mod tests {
     #[test]
     fn create_list_inspect_remove_round_trip() {
         let _home = TempHome::new("volcli");
-        assert_eq!(cmd_volume(&["create".to_string(), "v1".to_string()]).unwrap(), 0);
+        assert_eq!(
+            cmd_volume(&["create".to_string(), "v1".to_string()]).unwrap(),
+            0
+        );
         assert_eq!(volume::list().unwrap(), vec!["v1"]);
         assert_eq!(cmd_volume(&["ls".to_string()]).unwrap(), 0);
-        assert_eq!(cmd_volume(&["ls".to_string(), "-q".to_string()]).unwrap(), 0);
-        assert_eq!(cmd_volume(&["inspect".to_string(), "v1".to_string()]).unwrap(), 0);
-        assert_eq!(cmd_volume(&["rm".to_string(), "v1".to_string()]).unwrap(), 0);
+        assert_eq!(
+            cmd_volume(&["ls".to_string(), "-q".to_string()]).unwrap(),
+            0
+        );
+        assert_eq!(
+            cmd_volume(&["inspect".to_string(), "v1".to_string()]).unwrap(),
+            0
+        );
+        assert_eq!(
+            cmd_volume(&["rm".to_string(), "v1".to_string()]).unwrap(),
+            0
+        );
         assert!(volume::list().unwrap().is_empty());
         // 删不存在的要报错，而不是静默成功——静默会让脚本以为清理过了
         assert!(cmd_volume(&["rm".to_string(), "v1".to_string()]).is_err());

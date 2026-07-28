@@ -151,7 +151,10 @@ impl<'a> Cursor<'a> {
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.left() < n {
-            return Err(format!("TLS：消息截断（要 {n} 字节，只剩 {}）", self.left()));
+            return Err(format!(
+                "TLS：消息截断（要 {n} 字节，只剩 {}）",
+                self.left()
+            ));
         }
         let s = &self.d[self.p..self.p + n];
         self.p += n;
@@ -316,7 +319,8 @@ impl HandshakeReader {
         if self.buf.len() < 4 {
             return Ok(None);
         }
-        let len = ((self.buf[1] as usize) << 16) | ((self.buf[2] as usize) << 8) | self.buf[3] as usize;
+        let len =
+            ((self.buf[1] as usize) << 16) | ((self.buf[2] as usize) << 8) | self.buf[3] as usize;
         // 单条握手消息上限：证书链可以很大，但不该无上限。
         if len > 1 << 20 {
             return Err(format!("TLS：握手消息过长（{len}）"));
@@ -471,8 +475,11 @@ pub fn client_handshake(
     let cfin = hmac(h, &ckey, &th_done);
     let fin_msg = handshake_message(HS_FINISHED, &cfin);
     // 兼容中间设备：先发一条明文 CCS（RFC 8446 附录 D.4）。
-    io.write_all(&record::plaintext_record(ContentType::ChangeCipherSpec, &[1]))
-        .map_err(|e| format!("TLS：发送 CCS 失败：{e}"))?;
+    io.write_all(&record::plaintext_record(
+        ContentType::ChangeCipherSpec,
+        &[1],
+    ))
+    .map_err(|e| format!("TLS：发送 CCS 失败：{e}"))?;
     let wire = client_keys.seal(ContentType::Handshake, &fin_msg);
     io.write_all(&wire)
         .map_err(|e| format!("TLS：发送 Finished 失败：{e}"))?;

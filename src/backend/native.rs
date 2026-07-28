@@ -42,20 +42,14 @@ impl NativeBackend {
             caps.push(token::CapabilitySid::internet_client()?);
         }
 
-        let mut job =
-            job::Job::wait_for_container(name, std::time::Duration::from_secs(2))?;
+        let mut job = job::Job::wait_for_container(name, std::time::Duration::from_secs(2))?;
         // profile 已由运行中的 supervisor 创建。exec 只派生同一 SID，不创建
         // 或删除注册项，失败路径也不会留下 profile。
         let profile = token::AppContainerProfile::open_existing(name)?;
         let cmdline = sandbox::build_cmdline(cmd)?;
         let workdir = win32_workdir(workdir);
-        let env = super::build_sanitized_env(
-            &[],
-            &[],
-            false,
-            false,
-            super::env::GuestFlavor::Windows,
-        );
+        let env =
+            super::build_sanitized_env(&[], &[], false, false, super::env::GuestFlavor::Windows);
 
         sandbox::run_container_with_start_hook(
             &profile,
@@ -85,7 +79,13 @@ impl Backend for NativeBackend {
         // H2/H6：默认不继承完整宿主环境——构造显式白名单环境；
         // spec.env 中的保留键（BLINK_*/WBOX_*）过滤后并入（统一策略见
         // backend::build_sanitized_env）。
-        let env = super::build_sanitized_env(&spec.env, &[], spec.env_pass_all, spec.verbose, super::env::GuestFlavor::Windows);
+        let env = super::build_sanitized_env(
+            &spec.env,
+            &[],
+            spec.env_pass_all,
+            spec.verbose,
+            super::env::GuestFlavor::Windows,
+        );
         Ok(Prepared {
             cmd: spec.cmd.clone(),
             workdir: spec.workdir.clone(),
@@ -220,7 +220,9 @@ mod tests {
         let dir = std::env::temp_dir();
         assert!(NativeBackend.prepare(&spec(dir.clone(), &[])).is_err());
         let missing = dir.join("wbox-definitely-missing-workdir");
-        let e = NativeBackend.prepare(&spec(missing, &["cmd.exe"])).unwrap_err();
+        let e = NativeBackend
+            .prepare(&spec(missing, &["cmd.exe"]))
+            .unwrap_err();
         assert!(format!("{}", e).contains("工作目录"), "{}", e);
     }
 
@@ -233,7 +235,10 @@ mod tests {
         // 保留键被过滤，普通键保留；SystemRoot 兜底存在
         assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
         assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
-        assert!(p.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+        assert!(p
+            .env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
     }
 
     #[cfg(windows)]

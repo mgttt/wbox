@@ -72,9 +72,8 @@ pub struct RunOptions {
 ///
 /// 值里可以有 `=`（`URL=k=v` 合法），所以只切第一个 `=`。
 fn parse_env_file(path: &str) -> Result<Vec<(String, String)>> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        WboxError::args(format!("--env-file '{}' 读取失败：{}", path, e))
-    })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| WboxError::args(format!("--env-file '{}' 读取失败：{}", path, e)))?;
     let mut out = Vec::new();
     for (n, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -246,9 +245,10 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             "--health-interval" | "--health-retries" | "--health-start-period" => {
                 let flag = a.clone();
                 let v = super::args::take_value(args, &mut i, &flag)?;
-                let h = opts.health.as_mut().ok_or_else(|| {
-                    WboxError::args(format!("{} 需要与 --health-cmd 同用", flag))
-                })?;
+                let h = opts
+                    .health
+                    .as_mut()
+                    .ok_or_else(|| WboxError::args(format!("{} 需要与 --health-cmd 同用", flag)))?;
                 match flag.as_str() {
                     "--health-interval" => h.interval = crate::health::parse_secs(&flag, &v)?,
                     "--health-start-period" => {
@@ -624,7 +624,10 @@ pub(crate) fn spawn_reserved_quiet(
     // （补这个之前只有 create 的容器能再启动）。写失败不该拦住容器启动——
     // 容器照跑，代价只是这一个名字以后不能重启，所以出声而不中止。
     if let Err(e) = crate::runstate::save_run_args(dir, args) {
-        eprintln!("wbox: 警告：未能记录重启配置，该容器退出后将无法 start/restart（{}）", e);
+        eprintln!(
+            "wbox: 警告：未能记录重启配置，该容器退出后将无法 start/restart（{}）",
+            e
+        );
     }
     let out = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDOUT)?;
     let err = crate::runstate::open_log_append(dir, crate::runstate::LOG_STDERR)?;
@@ -674,16 +677,12 @@ fn detach_from_terminal(_cmd: &mut std::process::Command) {
 }
 
 #[cfg(not(windows))]
-fn spawn_supervisor(
-    cmd: &mut std::process::Command,
-) -> std::io::Result<std::process::Child> {
+fn spawn_supervisor(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     cmd.spawn()
 }
 
 #[cfg(windows)]
-fn spawn_supervisor(
-    cmd: &mut std::process::Command,
-) -> std::io::Result<std::process::Child> {
+fn spawn_supervisor(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
     let _guard = StandardHandleInheritanceGuard::new()?;
     cmd.spawn()
 }
@@ -703,8 +702,8 @@ impl StandardHandleInheritanceGuard {
     fn new() -> std::io::Result<Self> {
         use std::sync::{Mutex, OnceLock};
         use windows_sys::Win32::Foundation::{
-            GetHandleInformation, SetHandleInformation, ERROR_INVALID_HANDLE,
-            HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+            GetHandleInformation, SetHandleInformation, ERROR_INVALID_HANDLE, HANDLE_FLAG_INHERIT,
+            INVALID_HANDLE_VALUE,
         };
         use windows_sys::Win32::System::Console::{
             GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -1027,7 +1026,10 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     if opts.verbose {
         if let Some(c) = &img_cfg {
             if let Some(wd) = &c.working_dir {
-                println!("wbox: 镜像 WorkingDir = {}（guest 路径，由 wbox-linux 映射）", wd);
+                println!(
+                    "wbox: 镜像 WorkingDir = {}（guest 路径，由 wbox-linux 映射）",
+                    wd
+                );
             }
         }
     }
@@ -1054,11 +1056,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             let reg = {
                 let reg = register_for_spawn(&spec, &iref.qualified_ref(), opts.auto_remove)?;
                 let private_rootfs = reg.dir().join("rootfs");
-                backend::create_private_rootfs(
-                    &spec.workdir,
-                    &private_rootfs,
-                    &spec.name,
-                )?;
+                backend::create_private_rootfs(&spec.workdir, &private_rootfs, &spec.name)?;
                 spec.workdir = private_rootfs;
                 reg
             };
@@ -1081,11 +1079,16 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         backend::ImageBackendKind::LinuxNative => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Image);
             let prepared = backend.prepare(&spec)?;
-            spawn_with_state(&backend, &spec, &prepared, &iref.qualified_ref(), opts.auto_remove)
+            spawn_with_state(
+                &backend,
+                &spec,
+                &prepared,
+                &iref.qualified_ref(),
+                opts.auto_remove,
+            )
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1107,7 +1110,10 @@ mod tests {
     /// 镜像模式下它没有意义（换根后 /tmp 本就是私有的），要明确拒绝。
     #[test]
     fn private_tmp_is_rejected_in_image_mode() {
-        let a: Vec<String> = ["--private-tmp", "someimage"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["--private-tmp", "someimage"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = super::parse_run_args(&a).unwrap();
         let m = format!("{}", super::validate_options(&o).unwrap_err());
         assert!(m.contains("宿主程序模式"), "{}", m);
@@ -1124,7 +1130,17 @@ mod tests {
 
     #[test]
     fn parse_native_dashdash_command() {
-        let o = parse(&["--memory", "256", "--cpu-pct", "50", "--", "cmd.exe", "/c", "echo"]).unwrap();
+        let o = parse(&[
+            "--memory",
+            "256",
+            "--cpu-pct",
+            "50",
+            "--",
+            "cmd.exe",
+            "/c",
+            "echo",
+        ])
+        .unwrap();
         assert_eq!(o.limits.memory_mb, 256);
         assert_eq!(o.limits.cpu_pct, 50);
         assert_eq!(o.positional, None);
@@ -1154,11 +1170,20 @@ mod tests {
     #[test]
     fn parse_preserves_all_guest_flags_after_image() {
         let o = parse(&[
-            "ubuntu:24.04", "sh", "-c", "printf '%s' \"$1\"", "--name", "-e", "-w",
+            "ubuntu:24.04",
+            "sh",
+            "-c",
+            "printf '%s' \"$1\"",
+            "--name",
+            "-e",
+            "-w",
         ])
         .unwrap();
         assert_eq!(o.positional.as_deref(), Some("ubuntu:24.04"));
-        assert_eq!(o.cmd, vec!["sh", "-c", "printf '%s' \"$1\"", "--name", "-e", "-w"]);
+        assert_eq!(
+            o.cmd,
+            vec!["sh", "-c", "printf '%s' \"$1\"", "--name", "-e", "-w"]
+        );
         assert!(o.name.is_none());
         assert!(o.env.is_empty());
         assert!(o.workdir.is_none());
@@ -1169,7 +1194,15 @@ mod tests {
 
     #[test]
     fn parse_pull_flag_and_misc() {
-        let o = parse(&["--pull", "-V", "--name", "t1", "--keep-profile", "alpine:3.20"]).unwrap();
+        let o = parse(&[
+            "--pull",
+            "-V",
+            "--name",
+            "t1",
+            "--keep-profile",
+            "alpine:3.20",
+        ])
+        .unwrap();
         assert!(o.pull && o.verbose && o.keep_profile);
         assert_eq!(o.name.as_deref(), Some("t1"));
         assert_eq!(o.positional.as_deref(), Some("alpine:3.20"));
@@ -1219,7 +1252,15 @@ mod tests {
 
     #[test]
     fn parse_env_pass_all_and_network_flags() {
-        let o = parse(&["--env-pass-all", "--allow-network", "--workdir", r"C:\app", "--", "x"]).unwrap();
+        let o = parse(&[
+            "--env-pass-all",
+            "--allow-network",
+            "--workdir",
+            r"C:\app",
+            "--",
+            "x",
+        ])
+        .unwrap();
         assert!(o.env_pass_all);
         assert!(o.allow_network);
         assert_eq!(o.workdir.as_deref(), Some(r"C:\app"));
@@ -1293,7 +1334,12 @@ mod tests {
         assert!(parse(&["--max-procs", "abc", "--", "x"]).is_err());
         assert!(parse(&["--cpu-pct", "100", "--", "x"]).is_ok());
         // 选项缺值一律报错
-        for args in [&["--name"][..], &["--cpu-pct"][..], &["--max-procs"][..], &["--workdir"][..]] {
+        for args in [
+            &["--name"][..],
+            &["--cpu-pct"][..],
+            &["--max-procs"][..],
+            &["--workdir"][..],
+        ] {
             assert!(parse(args).is_err(), "{:?}", args);
         }
     }
@@ -1344,6 +1390,10 @@ mod tests {
         let opts = parse(&["--", "cmd.exe"]).unwrap();
         assert!(opts.name.is_none());
         let default = format!("wbox-{}", std::process::id());
-        assert!(crate::backend::validate_container_name(&default).is_ok(), "{}", default);
+        assert!(
+            crate::backend::validate_container_name(&default).is_ok(),
+            "{}",
+            default
+        );
     }
 }

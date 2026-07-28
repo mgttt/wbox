@@ -62,7 +62,10 @@ pub fn cmd_prune(args: &[String]) -> Result<u32> {
         return Ok(0);
     }
     if !o.force {
-        println!("将删除以下 {} 条已退出的容器记录（含它们的日志）：", names.len());
+        println!(
+            "将删除以下 {} 条已退出的容器记录（含它们的日志）：",
+            names.len()
+        );
         for n in &names {
             println!("  {}", n);
         }
@@ -117,7 +120,11 @@ mod tests {
         let _home = TempHome::new("prunecreated");
         let dir = runstate::dir_for("pending").unwrap();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("meta.json"), r#"{"name":"pending","pid":0,"created_unix":1,"cmd":["x"],"target":"t"}"#).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            r#"{"name":"pending","pid":0,"created_unix":1,"cmd":["x"],"target":"t"}"#,
+        )
+        .unwrap();
         std::fs::write(dir.join(".created"), b"").unwrap();
         assert_eq!(runstate::liveness(&dir), Liveness::Created);
         assert!(

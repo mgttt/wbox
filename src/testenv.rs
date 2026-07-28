@@ -35,15 +35,23 @@ impl EnvGuard {
         // 忽略中毒：被保护的是"进程环境"这一外部状态，不会因上一个用例 panic
         // 而处于逻辑损坏状态（且那个用例的 EnvGuard 已在展开中完成还原）。
         // 若在此 unwrap，一个用例失败会连坐后续所有改环境的用例。
-        let lock = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Self { _lock: Some(lock), saved: BTreeMap::new() }
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            _lock: Some(lock),
+            saved: BTreeMap::new(),
+        }
     }
 
     /// 嵌套守卫：**调用方所在线程已持有**外层守卫时使用（不再加锁，否则自死锁）。
     /// 用于在外层作用域内再开一段"改动后即刻还原"的小作用域。
     #[allow(dead_code)] // 目前仅本模块自测使用；保留为通用原语
     pub fn nested() -> Self {
-        Self { _lock: None, saved: BTreeMap::new() }
+        Self {
+            _lock: None,
+            saved: BTreeMap::new(),
+        }
     }
 
     /// 设置环境变量（首次触碰该键时记录原值）。
@@ -93,11 +101,8 @@ pub(crate) struct TempHome {
 #[cfg(test)]
 impl TempHome {
     pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "wbox-test-home-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("wbox-test-home-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = crate::testenv::EnvGuard::new();
@@ -112,7 +117,12 @@ impl TempHome {
     }
 
     /// 在缓存布局中安放一个假镜像（rootfs + 元数据），返回缓存目录。
-    pub fn plant_fake_image(&self, registry: &str, name_flat: &str, tag: &str) -> std::path::PathBuf {
+    pub fn plant_fake_image(
+        &self,
+        registry: &str,
+        name_flat: &str,
+        tag: &str,
+    ) -> std::path::PathBuf {
         let dir = self
             .dir
             .join(".wbox/images")

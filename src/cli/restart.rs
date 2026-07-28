@@ -33,13 +33,9 @@ fn parse<'a>(args: &'a [String]) -> Result<Options<'a>> {
         match args[i].as_str() {
             "-t" | "--timeout" => {
                 i += 1;
-                timeout = Some(
-                    args.get(i)
-                        .map(|s| s.as_str())
-                        .ok_or_else(|| {
-                            crate::error::WboxError::args("restart: --timeout 缺少取值（秒）")
-                        })?,
-                );
+                timeout = Some(args.get(i).map(|s| s.as_str()).ok_or_else(|| {
+                    crate::error::WboxError::args("restart: --timeout 缺少取值（秒）")
+                })?);
             }
             other if other.starts_with('-') => {
                 return Err(crate::error::WboxError::args(format!(
@@ -74,7 +70,10 @@ fn restart_one(name: &str, timeout: Option<&str>) -> Result<()> {
     if runstate::liveness(&dir) == Liveness::Running {
         let secs = match timeout {
             Some(t) => t.parse::<u64>().map_err(|_| {
-                crate::error::WboxError::args(format!("restart: --timeout 取值 '{}' 不是合法秒数", t))
+                crate::error::WboxError::args(format!(
+                    "restart: --timeout 取值 '{}' 不是合法秒数",
+                    t
+                ))
             })?,
             None => super::stop::DEFAULT_TIMEOUT_SECS,
         };
@@ -95,7 +94,10 @@ mod tests {
 
     #[test]
     fn parse_takes_names_and_timeout() {
-        let a: Vec<String> = ["-t", "3", "one", "two"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["-t", "3", "one", "two"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = parse(&a).unwrap();
         assert_eq!(o.names, vec!["one", "two"]);
         assert_eq!(o.timeout, Some("3"));

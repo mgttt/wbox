@@ -129,7 +129,11 @@ fn apply(name: &str, dir: &std::path::Path, action: Action) -> Result<u32> {
         return Err(WboxError::args(format!(
             "容器 '{}' 没有可{}的进程（可能刚退出）",
             name,
-            if action == Action::Pause { "暂停" } else { "恢复" }
+            if action == Action::Pause {
+                "暂停"
+            } else {
+                "恢复"
+            }
         )));
     }
     println!("{}", name);

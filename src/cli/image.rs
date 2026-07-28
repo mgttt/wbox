@@ -1,7 +1,7 @@
 //! `wbox image` 子命令：pull / list / show / inspect / rm。
 
-use crate::error::{Result, WboxError};
 use crate::backend;
+use crate::error::{Result, WboxError};
 use crate::oci;
 
 /// `wbox image` 子命令：pull / list / show / inspect / rm。
@@ -61,8 +61,9 @@ fn remove_cached_image(iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
             dir.display()
         )));
     }
-    std::fs::remove_dir_all(&dir)
-        .map_err(|e| WboxError::registry(format!("删除缓存目录 '{}' 失败：{}", dir.display(), e)))?;
+    std::fs::remove_dir_all(&dir).map_err(|e| {
+        WboxError::registry(format!("删除缓存目录 '{}' 失败：{}", dir.display(), e))
+    })?;
     Ok(dir)
 }
 
@@ -85,12 +86,17 @@ pub(super) fn cmd_image_rm(args: &[String]) -> Result<u32> {
     }
     // 收多个引用，好让 `wbox rmi $(wbox images -q)` 成立；一个删不掉不中断其余的
     // ——与容器侧 `rm`/`prune` 共用同一条批处理路径。
-    super::args::each_named(&positional, "删除镜像", super::args::Echo::Nothing, |r| {
-        let iref = oci::ImageRef::parse(r, None)?;
-        let dir = remove_cached_image(&iref)?;
-        println!("wbox: 已删除 {}（{}）", iref.repo_tag(), dir.display());
-        Ok(())
-    })
+    super::args::each_named(
+        &positional,
+        "删除镜像",
+        super::args::Echo::Nothing,
+        |r| {
+            let iref = oci::ImageRef::parse(r, None)?;
+            let dir = remove_cached_image(&iref)?;
+            println!("wbox: 已删除 {}（{}）", iref.repo_tag(), dir.display());
+            Ok(())
+        },
+    )
 }
 
 /// `wbox image show <REF>`：打印已 pull 镜像的 config.json 摘要。
@@ -275,7 +281,6 @@ pub(super) fn cmd_image_load(args: &[String]) -> Result<u32> {
     oci::archive::load(std::path::Path::new(&input), tag.as_deref())?;
     Ok(0)
 }
-
 
 #[cfg(test)]
 mod tests {

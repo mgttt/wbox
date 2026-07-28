@@ -137,7 +137,11 @@ pub(super) fn container_pids(root: u32) -> Vec<u32> {
 pub(super) fn proc_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close = stat.rfind(')')?;
-    stat.get(close + 2..)?.split_whitespace().next()?.chars().next()
+    stat.get(close + 2..)?
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
 }
 
 #[cfg(target_os = "linux")]

@@ -351,7 +351,11 @@ mod tests {
         assert_eq!(b.to_bytes_be(5).unwrap(), vec![0, 0, 1, 2, 3]);
         // 放不下必须报错而不是截断——截断会把不匹配的签名变成"看着对"的。
         assert!(b.to_bytes_be(2).is_none());
-        assert!(BigUint::zero().to_bytes_be(4).unwrap().iter().all(|&x| x == 0));
+        assert!(BigUint::zero()
+            .to_bytes_be(4)
+            .unwrap()
+            .iter()
+            .all(|&x| x == 0));
     }
 
     #[test]

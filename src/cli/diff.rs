@@ -47,9 +47,7 @@ fn parse<'a>(args: &'a [String]) -> Result<Options<'a>> {
             }
         }
     }
-    let name = name.ok_or_else(|| {
-        WboxError::args("diff: 缺少容器名（用法：wbox diff <NAME>）")
-    })?;
+    let name = name.ok_or_else(|| WboxError::args("diff: 缺少容器名（用法：wbox diff <NAME>）"))?;
     Ok(Options { name })
 }
 

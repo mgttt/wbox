@@ -338,7 +338,9 @@ fn bb_run(root: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Out {
 
 #[test]
 fn busybox_basic_applets() {
-    let Some(root) = busybox_rootfs("bbapplets") else { return };
+    let Some(root) = busybox_rootfs("bbapplets") else {
+        return;
+    };
 
     let o = bb_run(&root, &["echo", "hello", "busybox"], &[]);
     assert_ok(&o, 0, "busybox echo");
@@ -357,7 +359,9 @@ fn busybox_basic_applets() {
 
 #[test]
 fn busybox_reads_files_and_directories() {
-    let Some(root) = busybox_rootfs("bbfs") else { return };
+    let Some(root) = busybox_rootfs("bbfs") else {
+        return;
+    };
     std::fs::write(root.join("a.txt"), "alpha\n").unwrap();
     std::fs::write(root.join("b.txt"), "beta\n").unwrap();
     std::fs::create_dir(root.join("sub")).unwrap();
@@ -386,7 +390,9 @@ fn busybox_reads_files_and_directories() {
 
 #[test]
 fn busybox_sha256_matches_known_value() {
-    let Some(root) = busybox_rootfs("bbsha") else { return };
+    let Some(root) = busybox_rootfs("bbsha") else {
+        return;
+    };
     std::fs::write(root.join("x"), "abc").unwrap();
     let o = bb_run(&root, &["sha256sum", "/x"], &[]);
     assert_ok(&o, 0, "busybox sha256sum");
@@ -444,15 +450,25 @@ fn wbox_prefix_confines_the_guest_to_the_rootfs() {
 
 #[test]
 fn internal_control_env_is_not_leaked_to_the_guest() {
-    let Some(root) = busybox_rootfs("bbenv") else { return };
+    let Some(root) = busybox_rootfs("bbenv") else {
+        return;
+    };
     // WBOX_*/BLINK_* 是内部控制键，按 PRD §F7.2 不得透传给 guest
     let o = bb_run(
         &root,
         &["env"],
-        &[("WBOX_SECRET_KNOB", "1"), ("BLINK_SECRET_KNOB", "1"), ("VISIBLE", "yes")],
+        &[
+            ("WBOX_SECRET_KNOB", "1"),
+            ("BLINK_SECRET_KNOB", "1"),
+            ("VISIBLE", "yes"),
+        ],
     );
     assert_ok(&o, 0, "busybox env");
-    assert!(o.stdout.contains("VISIBLE=yes"), "普通变量该透传：{}", o.stdout);
+    assert!(
+        o.stdout.contains("VISIBLE=yes"),
+        "普通变量该透传：{}",
+        o.stdout
+    );
     assert!(
         !o.stdout.contains("WBOX_SECRET_KNOB") && !o.stdout.contains("BLINK_SECRET_KNOB"),
         "内部控制键泄漏给了 guest：{}",
@@ -462,7 +478,9 @@ fn internal_control_env_is_not_leaked_to_the_guest() {
 
 #[test]
 fn instruction_budget_env_stops_a_runaway_guest() {
-    let Some(root) = busybox_rootfs("bbbudget") else { return };
+    let Some(root) = busybox_rootfs("bbbudget") else {
+        return;
+    };
     // 给一个极小的指令预算：guest 一定跑不完，必须被终止而不是挂住
     let o = bb_run(&root, &["echo", "hi"], &[("WBOX_MAX_INSNS", "1000")]);
     assert_ne!(o.code, 0, "预算耗尽应非零退出");
@@ -475,14 +493,13 @@ fn instruction_budget_env_stops_a_runaway_guest() {
 
 #[test]
 fn shebang_script_runs_through_its_interpreter() {
-    let Some(root) = busybox_rootfs("shebang") else { return };
+    let Some(root) = busybox_rootfs("shebang") else {
+        return;
+    };
     // 用 busybox 的 echo applet 当解释器：#!/busybox echo
     // 解释器路径必须是 **guest** 路径，否则容器里找不到它。
     std::fs::write(root.join("s"), "#!/busybox echo\n").unwrap();
-    let o = emulate(
-        &["/s", "tail"],
-        &[("WBOX_PREFIX", root.to_str().unwrap())],
-    );
+    let o = emulate(&["/s", "tail"], &[("WBOX_PREFIX", root.to_str().unwrap())]);
     assert_ok(&o, 0, "#! 脚本");
     // echo 会把 [echo] <脚本路径> tail 都打出来
     assert!(o.stdout.contains("tail"), "{}", o.stdout);
@@ -498,7 +515,9 @@ fn bb_sh(root: &Path, script: &str) -> Out {
 
 #[test]
 fn shell_and_and_sequences_fork_and_exec() {
-    let Some(root) = busybox_rootfs("procseq") else { return };
+    let Some(root) = busybox_rootfs("procseq") else {
+        return;
+    };
 
     // `a && b` 的右边要 shell fork+exec 出一个新进程。这条正是 Windows
     // 产品用例 WP.3W 跑的形状（写进私有 rootfs 再读回来）。
@@ -519,7 +538,9 @@ fn shell_and_and_sequences_fork_and_exec() {
 
 #[test]
 fn command_substitution_reads_child_output_through_a_pipe() {
-    let Some(root) = busybox_rootfs("procsubst") else { return };
+    let Some(root) = busybox_rootfs("procsubst") else {
+        return;
+    };
     // `$(...)`：父进程建管道、fork、子进程 exec 后写、父进程读到 **EOF**。
     // 读端必须在写端全部关闭后返回 0；返回 EAGAIN 会让 shell 无限自旋。
     let o = bb_sh(&root, "v=$(/busybox echo inner); echo got=$v");
@@ -529,7 +550,9 @@ fn command_substitution_reads_child_output_through_a_pipe() {
 
 #[test]
 fn pipeline_passes_data_between_two_processes() {
-    let Some(root) = busybox_rootfs("procpipe") else { return };
+    let Some(root) = busybox_rootfs("procpipe") else {
+        return;
+    };
     let o = bb_sh(&root, "/busybox echo abcd | /busybox wc -c");
     assert_ok(&o, 0, "管道");
     assert_eq!(o.stdout.trim(), "5"); // abcd + 换行
@@ -537,7 +560,9 @@ fn pipeline_passes_data_between_two_processes() {
 
 #[test]
 fn loops_fork_repeatedly_without_leaking_the_budget() {
-    let Some(root) = busybox_rootfs("procloop") else { return };
+    let Some(root) = busybox_rootfs("procloop") else {
+        return;
+    };
     // 同一层里连续 fork 很多次：不该撞上 fork 嵌套深度上限
     // （那个上限管的是 fork 里再 fork，不是顺序 fork）。
     let o = bb_sh(&root, "for i in 1 2 3 4 5; do /busybox echo n$i; done");
@@ -547,7 +572,9 @@ fn loops_fork_repeatedly_without_leaking_the_budget() {
 
 #[test]
 fn dev_null_and_zero_are_synthesised() {
-    let Some(root) = busybox_rootfs("devnodes") else { return };
+    let Some(root) = busybox_rootfs("devnodes") else {
+        return;
+    };
 
     // rootfs 里**没有** /dev 目录，这几个节点全靠我们合成。
     // `2>/dev/null` 是 shell 脚本里最常见的一句，缺了它脚本第一行就挂。
@@ -561,7 +588,10 @@ fn dev_null_and_zero_are_synthesised() {
     assert_eq!(o.stdout.trim(), "0");
 
     // /dev/zero 读出来是 0 字节；用 dd 取固定长度，避免无限读
-    let o = bb_sh(&root, "/busybox dd if=/dev/zero bs=1 count=8 2>/dev/null | /busybox wc -c");
+    let o = bb_sh(
+        &root,
+        "/busybox dd if=/dev/zero bs=1 count=8 2>/dev/null | /busybox wc -c",
+    );
     assert_ok(&o, 0, "读 /dev/zero");
     assert_eq!(o.stdout.trim(), "8");
 
@@ -573,7 +603,9 @@ fn dev_null_and_zero_are_synthesised() {
 
 #[test]
 fn proc_self_exe_points_at_the_running_image() {
-    let Some(root) = busybox_rootfs("selfexe") else { return };
+    let Some(root) = busybox_rootfs("selfexe") else {
+        return;
+    };
     // readlink /proc/self/exe 必须给**真的** guest 路径：回一条
     // "/proc/self/exe" 自身会让 guest 的 re-exec 无声失败。
     let o = bb_run(&root, &["readlink", "/proc/self/exe"], &[]);
@@ -583,7 +615,9 @@ fn proc_self_exe_points_at_the_running_image() {
 
 #[test]
 fn dash_s_enables_the_syscall_trace_with_the_sys_tag() {
-    let Some(root) = busybox_rootfs("stracecli") else { return };
+    let Some(root) = busybox_rootfs("stracecli") else {
+        return;
+    };
     // `-s`（打印 syscall）与 `-e`（诊断走 stderr）是被取代的 blink 的命令行
     // 拼写。产品用例 WP.4S 就用 `-s -e` 检查发布二进制**还能**吐 syscall 记录，
     // 并按 `(sys)` 这个子系统标签筛行——两者都得保住。
@@ -607,7 +641,9 @@ fn dash_s_enables_the_syscall_trace_with_the_sys_tag() {
 
 #[test]
 fn guest_own_options_are_not_eaten_by_the_runtime() {
-    let Some(root) = busybox_rootfs("argpass") else { return };
+    let Some(root) = busybox_rootfs("argpass") else {
+        return;
+    };
     // 程序名之后的参数一律原样交给 guest：`-s` 出现在程序名之后是 **guest** 的
     // 选项，不能被我们当成"开 trace"。busybox echo 会把它打出来。
     let o = bb_run(&root, &["echo", "-s", "--version"], &[]);

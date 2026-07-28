@@ -130,7 +130,10 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         } else if all.is_empty() {
             println!("没有已登记的容器。");
         } else {
-            println!("没有运行中的容器（有 {} 条非运行记录，用 -a 查看）。", all.len());
+            println!(
+                "没有运行中的容器（有 {} 条非运行记录，用 -a 查看）。",
+                all.len()
+            );
         }
         return Ok(0);
     }
@@ -139,7 +142,10 @@ pub fn cmd_ps(args: &[String]) -> Result<u32> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    println!("{:<20} {:<20} {:<8} {:<10} 命令", "名称", "状态", "PID", "已运行");
+    println!(
+        "{:<20} {:<20} {:<8} {:<10} 命令",
+        "名称", "状态", "PID", "已运行"
+    );
     for (e, l) in rows {
         // 状态标签走共享口径（`status::label`）：三处显示状态的地方各写一份
         // match 的话，加了新状态必然漏掉其中一处（F9.32 就漏了 compose ps）。
@@ -200,10 +206,16 @@ mod tests {
         assert!(parse(&["-a".to_string()]).unwrap().all);
         assert!(parse(&["--all".to_string()]).unwrap().all);
         assert!(parse(&["-q".to_string()]).unwrap().quiet);
-        let a: Vec<String> = ["--filter", "status=running", "-a"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["--filter", "status=running", "-a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = parse(&a).unwrap();
         assert!(o.all);
-        assert_eq!(o.filters, vec![("status".to_string(), "running".to_string())]);
+        assert_eq!(
+            o.filters,
+            vec![("status".to_string(), "running".to_string())]
+        );
         // 认不得的键要当场报错：静默忽略会让手滑变成"列出了全部"而用户以为筛过了
         assert!(parse(&["--filter".to_string(), "stauts=running".to_string()]).is_err());
         assert!(parse(&["--filter".to_string(), "noequals".to_string()]).is_err());

@@ -80,7 +80,10 @@ impl WboxError {
         if !configured || cfg!(target_os = "linux") {
             return Ok(());
         }
-        Err(Self::args(format!("{} 目前只在 Linux 宿主可用：{}", flag, why)))
+        Err(Self::args(format!(
+            "{} 目前只在 Linux 宿主可用：{}",
+            flag, why
+        )))
     }
 
     /// 便捷构造：AppContainer profile 错误。

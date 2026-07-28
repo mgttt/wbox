@@ -65,8 +65,8 @@ fn parse(args: &[String]) -> Result<ExecOptions<'_>> {
             }
         }
     }
-    let name = name
-        .ok_or_else(|| WboxError::args("exec: 缺少容器名（用法：wbox exec <NAME> -- <CMD>）"))?;
+    let name =
+        name.ok_or_else(|| WboxError::args("exec: 缺少容器名（用法：wbox exec <NAME> -- <CMD>）"))?;
     if cmd.is_empty() {
         return Err(WboxError::args(
             "exec: 缺少要执行的命令（wbox exec <NAME> -- <CMD> [ARGS...]）",
@@ -233,7 +233,11 @@ fn exec_in_namespaces_with(pid: u32, cmd: &[&str], quiet: bool) -> Result<u32> {
                     }
                 }
                 // WIFEXITED / WEXITSTATUS 的等价位运算（libc crate 未导出宏）
-                let code = if st & 0x7f == 0 { (st >> 8) & 0xff } else { 128 + (st & 0x7f) };
+                let code = if st & 0x7f == 0 {
+                    (st >> 8) & 0xff
+                } else {
+                    128 + (st & 0x7f)
+                };
                 libc::_exit(code);
             }
             Ok(())

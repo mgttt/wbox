@@ -262,10 +262,22 @@ mod tests {
     fn block_boundary_lengths() {
         // 55/56/57 是 padding 是否要多一块的分界，逐个盯住。
         let expect = [
-            (55usize, "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318"),
-            (56, "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a"),
-            (57, "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6"),
-            (64, "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb"),
+            (
+                55usize,
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                56,
+                "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            ),
+            (
+                57,
+                "f13b2d724659eb3bf47f2dd6af1accc87b81f09f59f2b75e5c0bed6589dfe8c6",
+            ),
+            (
+                64,
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
         ];
         for (n, want) in expect {
             assert_eq!(sha256_hex(&vec![b'a'; n]), want, "n={n}");

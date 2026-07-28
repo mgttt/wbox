@@ -7,7 +7,7 @@
 //! `"tls13 "` 前缀，且长度字段是单字节。写错了握手会在 Finished 那一步
 //! 失败，而那时你看到的只是"对端说 decrypt_error"，完全指不到这里。
 
-use crate::hash::{hmac, HashAlg, Digest};
+use crate::hash::{hmac, Digest, HashAlg};
 
 /// HKDF-Extract：`PRK = HMAC(salt, ikm)`。
 pub fn extract(alg: HashAlg, salt: &[u8], ikm: &[u8]) -> Digest {
@@ -44,7 +44,13 @@ pub fn expand(alg: HashAlg, prk: &[u8], info: &[u8], len: usize) -> Vec<u8> {
 ///     opaque context<0..255>;
 /// } HkdfLabel;
 /// ```
-pub fn expand_label(alg: HashAlg, secret: &[u8], label: &str, context: &[u8], len: usize) -> Vec<u8> {
+pub fn expand_label(
+    alg: HashAlg,
+    secret: &[u8],
+    label: &str,
+    context: &[u8],
+    len: usize,
+) -> Vec<u8> {
     let mut info = Vec::with_capacity(4 + 6 + label.len() + context.len());
     info.extend_from_slice(&(len as u16).to_be_bytes());
     // "tls13 " 前缀是规范的一部分，漏掉它握手会在 Finished 那步失败，
@@ -140,6 +146,9 @@ mod tests {
         // TLS_AES_256_GCM_SHA384 走 SHA-384 的调度。
         let prk = extract(HashAlg::Sha384, &[], &[0u8; 48]);
         assert_eq!(prk.len(), 48);
-        assert_eq!(derive_secret(HashAlg::Sha384, &prk, "derived", &[]).len(), 48);
+        assert_eq!(
+            derive_secret(HashAlg::Sha384, &prk, "derived", &[]).len(),
+            48
+        );
     }
 }

@@ -141,9 +141,8 @@ pub fn cmd_logs(args: &[String]) -> Result<u32> {
         )));
     }
 
-    let read_err = |e: std::io::Error| {
-        WboxError::args(format!("读取 '{}' 失败：{}", path.display(), e))
-    };
+    let read_err =
+        |e: std::io::Error| WboxError::args(format!("读取 '{}' 失败：{}", path.display(), e));
     let (buf, mut offset) = read_from(&path, 0).map_err(read_err)?;
     let shown = match opts.tail {
         Some(n) => last_lines(&buf, n),
@@ -190,15 +189,28 @@ mod tests {
         assert!(!o.stderr);
         assert!(!o.follow);
         assert_eq!(o.tail, None);
-        assert!(parse(&["c1".to_string(), "--stderr".to_string()]).unwrap().stderr);
+        assert!(
+            parse(&["c1".to_string(), "--stderr".to_string()])
+                .unwrap()
+                .stderr
+        );
         assert!(parse(&["-f".to_string(), "c1".to_string()]).unwrap().follow);
-        let a: Vec<String> = ["--tail", "5", "c1"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["--tail", "5", "c1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(parse(&a).unwrap().tail, Some(5));
         // docker 的 `--tail all` 等价于不限行数
-        let a: Vec<String> = ["--tail", "all", "c1"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["--tail", "all", "c1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(parse(&a).unwrap().tail, None);
         assert!(parse(&[]).is_err(), "缺名字应报错");
-        assert!(parse(&["a".to_string(), "b".to_string()]).is_err(), "两个名字应报错");
+        assert!(
+            parse(&["a".to_string(), "b".to_string()]).is_err(),
+            "两个名字应报错"
+        );
         assert!(parse(&["--bogus".to_string()]).is_err());
         assert!(parse(&["--tail".to_string()]).is_err(), "缺取值应报错");
         assert!(parse(&["--tail".to_string(), "x".to_string()]).is_err());

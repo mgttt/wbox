@@ -66,7 +66,11 @@ pub fn setup(mem: &mut Mem, loaded: &Loaded, argv: &[Vec<u8>], envp: &[Vec<u8>])
     };
 
     // AT_EXECFN 指向 argv[0] 的一份独立副本（Linux 就是这么做的）。
-    let execfn = push_bytes(mem, &mut p, argv.first().map(|v| v.as_slice()).unwrap_or(b""));
+    let execfn = push_bytes(
+        mem,
+        &mut p,
+        argv.first().map(|v| v.as_slice()).unwrap_or(b""),
+    );
 
     let env_ptrs: Vec<u64> = envp.iter().map(|e| push_bytes(mem, &mut p, e)).collect();
     let arg_ptrs: Vec<u64> = argv.iter().map(|a| push_bytes(mem, &mut p, a)).collect();
@@ -239,7 +243,10 @@ mod tests {
         let r = *seen.get(&AT_RANDOM).unwrap();
         assert!(m.read(r, &mut [0u8; 16]).is_ok());
         // AT_PLATFORM 指向 "x86_64"
-        assert_eq!(m.read_cstr(*seen.get(&AT_PLATFORM).unwrap(), 16).unwrap(), b"x86_64");
+        assert_eq!(
+            m.read_cstr(*seen.get(&AT_PLATFORM).unwrap(), 16).unwrap(),
+            b"x86_64"
+        );
     }
 
     #[test]

@@ -187,7 +187,11 @@ impl Curve {
         let yyyy8 = self.mul_mod(&BigUint::from_u32(8), &self.mul_mod(&yy, &yy));
         let y3 = self.sub_mod(&self.mul_mod(&m, &self.sub_mod(&s, &x3)), &yyyy8);
         let z3 = self.mul_mod(&self.add_mod(&pt.y, &pt.y), &pt.z);
-        Jacobian { x: x3, y: y3, z: z3 }
+        Jacobian {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
     }
 
     /// Jacobian 点 + 仿射点（混合加法，比两个 Jacobian 相加更省）。
@@ -224,7 +228,11 @@ impl Curve {
             &self.mul_mod(&a.y, &hhh),
         );
         let z3 = self.mul_mod(&a.z, &h);
-        Jacobian { x: x3, y: y3, z: z3 }
+        Jacobian {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
     }
 
     /// Jacobian → 仿射。这是整个标量乘里**唯一**的一次模逆。

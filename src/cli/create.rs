@@ -43,12 +43,7 @@ mod tests {
     #[test]
     fn rejects_detach_and_duplicate_name() {
         let _home = TempHome::new("create-reject");
-        assert!(cmd_create(&[
-            "-d".to_string(),
-            "--".to_string(),
-            "x".to_string()
-        ])
-        .is_err());
+        assert!(cmd_create(&["-d".to_string(), "--".to_string(), "x".to_string()]).is_err());
         let args = vec![
             "--name".to_string(),
             "same".to_string(),

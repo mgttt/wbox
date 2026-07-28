@@ -51,7 +51,10 @@ impl ImageConfig {
 
     /// 从完整 config.json 的 JSON Value 提取 config 段。
     pub fn from_json(v: &wbox_codec::json::Value) -> Self {
-        let cfg = v.get("config").cloned().unwrap_or(wbox_codec::json::Value::Null);
+        let cfg = v
+            .get("config")
+            .cloned()
+            .unwrap_or(wbox_codec::json::Value::Null);
 
         let str_list = |key: &str| -> Vec<String> {
             cfg.get(key)
@@ -185,7 +188,10 @@ mod tests {
     fn merge_explicit_overrides_cmd() {
         let c = cfg(&[], &["bash"]);
         // 显式 cmd 覆盖镜像 Cmd
-        assert_eq!(c.merged_command(&explicit(&["sh", "-l"]), None), vec!["sh", "-l"]);
+        assert_eq!(
+            c.merged_command(&explicit(&["sh", "-l"]), None),
+            vec!["sh", "-l"]
+        );
     }
 
     #[test]
@@ -263,15 +269,20 @@ mod tests {
     #[test]
     fn merge_all_combinations() {
         // (entrypoint, cmd, explicit) -> 期望输出；None 表示未提供显式 cmd
-        type Case = (&'static [&'static str], &'static [&'static str], Option<&'static [&'static str]>, &'static [&'static str]);
+        type Case = (
+            &'static [&'static str],
+            &'static [&'static str],
+            Option<&'static [&'static str]>,
+            &'static [&'static str],
+        );
         let cases: &[Case] = &[
             (&[], &[], None, &[]),
             (&[], &["c"], None, &["c"]),
             (&["e"], &[], None, &["e"]),
             (&["e"], &["c"], None, &["e", "c"]),
             (&[], &[], Some(&["x"]), &["x"]),
-            (&[], &["c"], Some(&["x"]), &["x"]),       // 显式覆盖 Cmd
-            (&["e"], &[], Some(&["x"]), &["e", "x"]),  // Entrypoint 始终前置
+            (&[], &["c"], Some(&["x"]), &["x"]), // 显式覆盖 Cmd
+            (&["e"], &[], Some(&["x"]), &["e", "x"]), // Entrypoint 始终前置
             (&["e"], &["c"], Some(&["x"]), &["e", "x"]),
         ];
         for (ep, cmd, x, want) in cases {
@@ -280,8 +291,14 @@ mod tests {
                 Some(x) => c.merged_command(&explicit(x), None),
                 None => c.merged_command(&[], None),
             };
-            assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                "ep={:?} cmd={:?} explicit={:?}", ep, cmd, x);
+            assert_eq!(
+                got,
+                want.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                "ep={:?} cmd={:?} explicit={:?}",
+                ep,
+                cmd,
+                x
+            );
         }
     }
 
@@ -289,7 +306,8 @@ mod tests {
 
     #[test]
     fn parse_skips_malformed_env_entries() {
-        let v = wbox_codec::json!({"config": {"Env": ["OK=1", "NO_EQUALS", "", "=emptykey", "A=B=C"]}});
+        let v =
+            wbox_codec::json!({"config": {"Env": ["OK=1", "NO_EQUALS", "", "=emptykey", "A=B=C"]}});
         let c = ImageConfig::from_json(&v);
         // 拆不出 '=' 的项跳过；值内 '=' 保留
         assert_eq!(
@@ -324,7 +342,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.json"), b"{not json").unwrap();
-        assert!(ImageConfig::load(&dir).is_err(), "解析失败必须报错而非静默 None");
+        assert!(
+            ImageConfig::load(&dir).is_err(),
+            "解析失败必须报错而非静默 None"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -346,7 +367,10 @@ mod tests {
         let c = ImageConfig::from_json(&v);
         assert_eq!(
             c.env,
-            vec![("".to_string(), "".to_string()), ("K".to_string(), "".to_string())]
+            vec![
+                ("".to_string(), "".to_string()),
+                ("K".to_string(), "".to_string())
+            ]
         );
     }
 }

@@ -133,7 +133,11 @@ pub fn shr(a: u64, cnt: u64, size: u8, f: &mut Flags) -> u64 {
     let bits = size as u32 * 8;
     let v = trunc(a, size);
     let r = if n >= bits { 0 } else { v >> n };
-    f.cf = if n <= bits { (v >> (n - 1)) & 1 != 0 } else { false };
+    f.cf = if n <= bits {
+        (v >> (n - 1)) & 1 != 0
+    } else {
+        false
+    };
     // SHR 的 OF = 原操作数的符号位
     f.of = v & sign_bit(size) != 0;
     f.af = false;

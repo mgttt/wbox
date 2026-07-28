@@ -21,7 +21,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     /// `FROM <镜像> [AS <阶段名>]`。`as_name` 供多阶段构建的 `COPY --from` 引用。
-    From { image: String, as_name: Option<String> },
+    From {
+        image: String,
+        as_name: Option<String>,
+    },
     Run(String),
     /// `COPY [--from=<阶段>] <src> <dst>`：
     /// `from_stage` 为 `None` 时 src 相对构建上下文；为 `Some(名字)` 时
@@ -34,19 +37,31 @@ pub enum Instruction {
     },
     /// `ADD <src> <dst>`：与 `COPY` 的差别只有一条——**src 是本地 tar 时自动解开**。
     /// 远程 URL **不做**（见解析处的说明）。
-    Add { src: String, dst: String },
-    Env { key: String, value: String },
+    Add {
+        src: String,
+        dst: String,
+    },
+    Env {
+        key: String,
+        value: String,
+    },
     Workdir(String),
     Cmd(Vec<String>),
     Entrypoint(Vec<String>),
     /// `LABEL k=v`：写进镜像 config 的 `Labels`。
-    Label { key: String, value: String },
+    Label {
+        key: String,
+        value: String,
+    },
     /// `EXPOSE 80` / `EXPOSE 80/tcp`：**纯声明**，不会真的发布端口。
     Expose(String),
     /// `USER 1000[:1000]`：镜像声明的默认身份。
     User(String),
     /// `ARG k[=默认值]`：构建期变量。
-    Arg { key: String, default: Option<String> },
+    Arg {
+        key: String,
+        default: Option<String>,
+    },
 }
 
 /// 解析 Dockerfile 文本。
@@ -75,7 +90,9 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
 
     let mut out = Vec::new();
     for line in &logical {
-        let (verb, rest) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
+        let (verb, rest) = line
+            .split_once(char::is_whitespace)
+            .unwrap_or((line.as_str(), ""));
         let rest = rest.trim();
         let upper = verb.to_ascii_uppercase();
         let need = |what: &str| -> Result<()> {
@@ -104,7 +121,9 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
                     }
                 };
                 if it.next().is_some() {
-                    return Err(WboxError::args("FROM 的参数过多（用法 FROM <镜像> [AS <阶段名>]）"));
+                    return Err(WboxError::args(
+                        "FROM 的参数过多（用法 FROM <镜像> [AS <阶段名>]）",
+                    ));
                 }
                 out.push(Instruction::From { image, as_name });
             }
@@ -348,9 +367,9 @@ fn parse_exec_form(rest: &str) -> Vec<String> {
 /// 一个把宿主任意文件读进镜像的通道。
 pub fn resolve_context_path(context: &Path, src: &str) -> Result<PathBuf> {
     let joined = context.join(src);
-    let canon = joined.canonicalize().map_err(|e| {
-        WboxError::args(format!("COPY 源 '{}' 不可用：{}", src, e))
-    })?;
+    let canon = joined
+        .canonicalize()
+        .map_err(|e| WboxError::args(format!("COPY 源 '{}' 不可用：{}", src, e)))?;
     let root = context.canonicalize().map_err(|e| {
         WboxError::args(format!("构建上下文 '{}' 不可用：{}", context.display(), e))
     })?;
@@ -429,11 +448,17 @@ mod tests {
         assert_eq!(got[4], Instruction::User("1000:1000".into()));
         assert_eq!(
             got[5],
-            Instruction::Arg { key: "BUILD_ID".into(), default: Some("42".into()) }
+            Instruction::Arg {
+                key: "BUILD_ID".into(),
+                default: Some("42".into())
+            }
         );
         assert_eq!(
             got[6],
-            Instruction::Arg { key: "NO_DEFAULT".into(), default: None }
+            Instruction::Arg {
+                key: "NO_DEFAULT".into(),
+                default: None
+            }
         );
 
         // 缺参数一律报错，不静默跳过
@@ -490,11 +515,17 @@ CMD ["--help"]
         let got = parse_dockerfile(df).unwrap();
         assert_eq!(
             got[0],
-            Instruction::From { image: "alpine:3.20".into(), as_name: None }
+            Instruction::From {
+                image: "alpine:3.20".into(),
+                as_name: None
+            }
         );
         assert_eq!(
             got[1],
-            Instruction::Env { key: "FOO".into(), value: "bar".into() }
+            Instruction::Env {
+                key: "FOO".into(),
+                value: "bar".into()
+            }
         );
         assert_eq!(got[2], Instruction::Workdir("/app".into()));
         // 续行要被拼成一条
@@ -512,7 +543,11 @@ CMD ["--help"]
         let got = parse_dockerfile("FROM x\nCMD echo a && echo b").unwrap();
         assert_eq!(
             got[1],
-            Instruction::Cmd(vec!["/bin/sh".into(), "-c".into(), "echo a && echo b".into()])
+            Instruction::Cmd(vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo a && echo b".into()
+            ])
         );
     }
 
@@ -530,9 +565,18 @@ CMD ["--help"]
         assert!(parse_dockerfile("RUN echo hi").is_err(), "首条须 FROM");
         assert!(parse_dockerfile("").is_err(), "空文件");
         assert!(parse_dockerfile("FROM").is_err(), "FROM 缺参数");
-        assert!(parse_dockerfile("FROM x\nCOPY only-one").is_err(), "COPY 缺参数");
-        assert!(parse_dockerfile("FROM x\nENV noequals").is_err(), "ENV 需 K=V");
-        assert!(parse_dockerfile("FROM x\nRUN cmd \\").is_err(), "续行未收尾");
+        assert!(
+            parse_dockerfile("FROM x\nCOPY only-one").is_err(),
+            "COPY 缺参数"
+        );
+        assert!(
+            parse_dockerfile("FROM x\nENV noequals").is_err(),
+            "ENV 需 K=V"
+        );
+        assert!(
+            parse_dockerfile("FROM x\nRUN cmd \\").is_err(),
+            "续行未收尾"
+        );
     }
 
     /// COPY 源不得逃出构建上下文——否则构建成了读取宿主任意文件的通道。
@@ -565,7 +609,10 @@ CMD ["--help"]
             resolve_rootfs_path(root, "/app/../x").unwrap(),
             PathBuf::from("/tmp/rootfs/x")
         );
-        assert!(resolve_rootfs_path(root, "/../escape").is_err(), "越界的 .. 要拒绝");
+        assert!(
+            resolve_rootfs_path(root, "/../escape").is_err(),
+            "越界的 .. 要拒绝"
+        );
         assert!(resolve_rootfs_path(root, "relative").is_err(), "须绝对路径");
     }
 }
@@ -737,8 +784,8 @@ pub(crate) fn link_tree(src: &Path, dst: &Path) -> Result<()> {
 /// 前缀**不是**一套，两处判别不能互相套用。
 #[cfg(not(windows))]
 fn is_whiteout(meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::MetadataExt;
     meta.file_type().is_char_device() && meta.rdev() == 0
 }
 
@@ -836,7 +883,10 @@ fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
         // `COPY --from=<阶段>` 的源在**那个阶段的产物里**，不在构建上下文里——
         // 拿去 `resolve_context_path` 会直接报"源不可用"。它的内容由前面那些
         // 指令决定，而那些指令已经进了累加的键链，所以这里跳过是安全的。
-        Instruction::Copy { from_stage: Some(_), .. } => None,
+        Instruction::Copy {
+            from_stage: Some(_),
+            ..
+        } => None,
         Instruction::Copy { src, .. } | Instruction::Add { src, .. } => Some(src),
         _ => None,
     };
@@ -875,9 +925,8 @@ fn hash_path_into(p: &Path, h: &mut wbox_codec::Sha256) -> Result<()> {
 fn copy_file_contents(src: &Path, dst: &Path) -> Result<()> {
     let mut input = std::fs::File::open(src)
         .map_err(|e| WboxError::args(format!("打开 COPY 源 '{}' 失败：{}", src.display(), e)))?;
-    let mut output = std::fs::File::create(dst).map_err(|e| {
-        WboxError::args(format!("创建 COPY 目标 '{}' 失败：{}", dst.display(), e))
-    })?;
+    let mut output = std::fs::File::create(dst)
+        .map_err(|e| WboxError::args(format!("创建 COPY 目标 '{}' 失败：{}", dst.display(), e)))?;
     std::io::copy(&mut input, &mut output)
         .map_err(|e| WboxError::args(format!("COPY '{}' 失败：{}", src.display(), e)))?;
     Ok(())
@@ -886,7 +935,11 @@ fn copy_file_contents(src: &Path, dst: &Path) -> Result<()> {
 fn copy_build_tree(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
-            WboxError::args(format!("创建复制目标父目录 '{}' 失败：{}", parent.display(), e))
+            WboxError::args(format!(
+                "创建复制目标父目录 '{}' 失败：{}",
+                parent.display(),
+                e
+            ))
         })?;
     }
     #[cfg(windows)]
@@ -972,7 +1025,10 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         // 会把 A 阶段的 rootfs 恢复到 B 阶段头上——那是**错的**缓存，
         // 而错的缓存比没有缓存糟得多（构建"成功"，内容是别的阶段的）。
         // 宁可不缓存；等阶段内独立键做出来再打开。
-        println!("wbox: 多阶段构建（{} 个阶段），本次禁用构建缓存", stage_count);
+        println!(
+            "wbox: 多阶段构建（{} 个阶段），本次禁用构建缓存",
+            stage_count
+        );
     } else {
         for idx in (0..instructions.len()).rev() {
             if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
@@ -1007,17 +1063,19 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             continue;
         }
         match ins {
-            Instruction::From { image: base, as_name } => {
+            Instruction::From {
+                image: base,
+                as_name,
+            } => {
                 // 切到本阶段自己的产物目录。最后一个阶段写最终目录，
                 // 前面的各写一个临时目录（`COPY --from` 从那里取）。
                 let this_stage = stage_of[idx];
                 if this_stage + 1 < stage_count {
-                    let dir = final_build_dir
-                        .with_file_name(format!(
-                            ".wbox-stage-{}-{}",
-                            std::process::id(),
-                            this_stage
-                        ));
+                    let dir = final_build_dir.with_file_name(format!(
+                        ".wbox-stage-{}-{}",
+                        std::process::id(),
+                        this_stage
+                    ));
                     build_dir = dir.clone();
                     stage_dirs.push(dir);
                 } else {
@@ -1070,11 +1128,19 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     cfg.workdir = base_cfg.working_dir.clone();
                 }
             }
-            Instruction::Copy { src, dst, from_stage } => {
+            Instruction::Copy {
+                src,
+                dst,
+                from_stage,
+            } => {
                 match from_stage {
                     Some(st) => println!(
                         "[{}/{}] COPY --from={} {} {}",
-                        step, instructions.len(), st, src, dst
+                        step,
+                        instructions.len(),
+                        st,
+                        src,
+                        dst
                     ),
                     None => println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst),
                 }
@@ -1230,9 +1296,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     // 做不到时（基础镜像是旧缓存 / 本身就是 build 产物 / 算增量失败）退回写
     // 空 manifest——那是诚实的：本地构建没有 registry 层信息，编一个假 digest
     // 只会误导，而 push 会据此走 flatten 路径（F9.13）。
-    let layered = base_image_dir
-        .as_ref()
-        .and_then(|b| write_layered_manifest(b, &out_dir, &rootfs, &cfg).ok().flatten());
+    let layered = base_image_dir.as_ref().and_then(|b| {
+        write_layered_manifest(b, &out_dir, &rootfs, &cfg)
+            .ok()
+            .flatten()
+    });
     if layered.is_none() {
         std::fs::write(out_dir.join("manifest.json"), "{}")
             .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
@@ -1292,8 +1360,11 @@ fn write_layered_manifest(
         .map_err(|e| WboxError::args(format!("复制基础层 {} 失败：{}", d, e)))?;
         layers.push(l.clone());
     }
-    std::fs::write(crate::oci::blob_path(out_dir, &delta.digest), &delta.gzipped)
-        .map_err(|e| WboxError::args(format!("写增量层失败：{}", e)))?;
+    std::fs::write(
+        crate::oci::blob_path(out_dir, &delta.digest),
+        &delta.gzipped,
+    )
+    .map_err(|e| WboxError::args(format!("写增量层失败：{}", e)))?;
     layers.push(wbox_codec::json!({
         "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
         "digest": delta.digest,
@@ -1317,8 +1388,8 @@ fn write_layered_manifest(
         .unwrap_or_default();
     let mut diff_ids = base_diff_ids;
     diff_ids.push(wbox_codec::json!(delta.diff_id));
-    let mut config: wbox_codec::json::Value = wbox_codec::json::from_str(&cfg.to_json())
-        .unwrap_or_else(|_| wbox_codec::json!({}));
+    let mut config: wbox_codec::json::Value =
+        wbox_codec::json::from_str(&cfg.to_json()).unwrap_or_else(|_| wbox_codec::json!({}));
     if let Some(o) = config.as_object_mut() {
         o.insert("architecture".into(), wbox_codec::json!("amd64"));
         o.insert("os".into(), wbox_codec::json!("linux"));

@@ -276,7 +276,6 @@ fn guest_dir_prefixes(dir: &str) -> Result<Vec<CString>> {
     Ok(out)
 }
 
-
 /// 镜像模式的换根参数（[`LinuxMode::Image`] 才有）。
 struct NewRoot {
     /// rootfs 的宿主绝对路径
@@ -296,7 +295,6 @@ struct NewRoot {
     overlay: Option<OverlayPlan>,
 }
 
-
 /// 容器最小设备集。选取依据：shell 重定向到 /dev/null 是最常见的刚需
 /// （实测缺了它 busybox sh 直接报 "can't create /dev/null"），
 /// zero/random/urandom 被大量程序用于初始化，tty 供交互式程序探测。
@@ -306,11 +304,7 @@ const MIN_DEVICES: &[&str] = &["null", "zero", "full", "random", "urandom", "tty
 ///
 /// `mode` 决定是否换根：[`LinuxMode::Image`] 进镜像 rootfs，
 /// [`LinuxMode::Host`] 直接跑宿主程序（只做身份/进程/网络/限额隔离）。
-pub(super) fn spawn_isolated(
-    spec: &RunSpec,
-    prepared: &Prepared,
-    mode: LinuxMode,
-) -> Result<u32> {
+pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMode) -> Result<u32> {
     let new_root = match mode {
         LinuxMode::Host => None,
         LinuxMode::Image => {
@@ -468,7 +462,10 @@ pub(super) fn spawn_isolated(
         verbose_kv("隔离", ns_list);
         verbose_kv(
             "uid 映射",
-            format!("容器 {} ← 宿主 {}（gid {} ← {}）", target_uid, uid, target_gid, gid),
+            format!(
+                "容器 {} ← 宿主 {}（gid {} ← {}）",
+                target_uid, uid, target_gid, gid
+            ),
         );
         verbose_kv("capability", spec.caps.summary());
         verbose_kv("seccomp", spec.seccomp.summary());
@@ -728,16 +725,11 @@ fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
 ///
 /// 所以这里改成返回 `Err`。确实接受共享写入语义的，用 `WBOX_NO_OVERLAY=1`
 /// 显式声明——**逃生口要用户自己按，不能由程序替他按**。
-fn build_overlay(
-    rootfs: &str,
-    layer_dir: &std::path::Path,
-    verbose: bool,
-) -> Result<OverlayPlan> {
+fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Result<OverlayPlan> {
     // overlayfs 的选项串用 ',' 分隔、':' 分隔多个 lower，路径里含这两个字符
     // 就没法表达。宁可回退也不要错挂——挂错 lower 的表现是"容器看到错的根"。
     let layer = layer_dir.to_string_lossy().into_owned();
-    let fallback_hint =
-        "如果确实接受容器写入落进共享镜像缓存，用 WBOX_NO_OVERLAY=1 显式声明后重试";
+    let fallback_hint = "如果确实接受容器写入落进共享镜像缓存，用 WBOX_NO_OVERLAY=1 显式声明后重试";
     if rootfs.contains([',', ':']) || layer.contains([',', ':']) {
         return Err(WboxError::spawn(format!(
             "路径含 ',' 或 ':'，overlayfs 选项无法表达，无法建立容器可写层；{fallback_hint}"
@@ -766,7 +758,10 @@ fn build_overlay(
         rootfs, layer, layer
     ))?;
     if verbose {
-        super::super::verbose_kv("rootfs 写入层", format!("overlay（upper 在 {}/upper）", layer));
+        super::super::verbose_kv(
+            "rootfs 写入层",
+            format!("overlay（upper 在 {}/upper）", layer),
+        );
     }
     Ok(OverlayPlan {
         c_overlay: cstr("overlay")?,
@@ -896,7 +891,10 @@ fn userns_hint_from(
 /// 那几个 sysctl，其它错误（命令不存在等）原样返回，不添乱。
 fn spawn_failure_hint(e: &std::io::Error) -> String {
     use std::io::ErrorKind;
-    if !matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::InvalidInput) {
+    if !matches!(
+        e.kind(),
+        ErrorKind::PermissionDenied | ErrorKind::InvalidInput
+    ) {
         return String::new();
     }
     let read = |p: &str| std::fs::read_to_string(p).ok();
@@ -1248,7 +1246,8 @@ mod tests {
         assert!(apparmor.contains("apparmor_restrict_unprivileged_userns"));
         assert!(apparmor.contains("sysctl"), "提示必须给出可照做的命令");
 
-        let clone = userns_hint_from(None, Some("0\n"), None).expect("应认出 unprivileged_userns_clone=0");
+        let clone =
+            userns_hint_from(None, Some("0\n"), None).expect("应认出 unprivileged_userns_clone=0");
         assert!(clone.contains("unprivileged_userns_clone"));
 
         let maxns = userns_hint_from(None, None, Some("0\n")).expect("应认出配额为 0");
@@ -1256,7 +1255,11 @@ mod tests {
 
         // 优先级：AppArmor 最常见，同时命中时先报它
         let both = userns_hint_from(Some("1"), Some("0"), Some("0")).unwrap();
-        assert!(both.contains("AppArmor"), "同时命中时应优先报 AppArmor：{}", both);
+        assert!(
+            both.contains("AppArmor"),
+            "同时命中时应优先报 AppArmor：{}",
+            both
+        );
     }
 
     /// 宿主没有任何限制时不能瞎提示——否则会把"命令不存在"这类无关错误
@@ -1264,7 +1267,10 @@ mod tests {
     #[test]
     fn userns_hint_silent_when_unrestricted() {
         assert!(userns_hint_from(Some("0"), Some("1"), Some("31231")).is_none());
-        assert!(userns_hint_from(None, None, None).is_none(), "文件都不存在时不该提示");
+        assert!(
+            userns_hint_from(None, None, None).is_none(),
+            "文件都不存在时不该提示"
+        );
     }
 
     /// 只有权限类错误才去查 sysctl；其它错误原样返回，不添乱。

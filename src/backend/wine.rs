@@ -128,7 +128,11 @@ pub fn version(wine: &Path) -> Option<String> {
         .env("WINEDEBUG", "-all")
         .output()
         .ok()?;
-    let text = if out.stdout.is_empty() { out.stderr } else { out.stdout };
+    let text = if out.stdout.is_empty() {
+        out.stderr
+    } else {
+        out.stdout
+    };
     let s = String::from_utf8_lossy(&text);
     let first = s.lines().next()?.trim();
     (!first.is_empty()).then(|| first.to_string())
@@ -164,9 +168,8 @@ pub fn prepare_prefix(container: &str) -> Result<PathBuf> {
         Some(v) => PathBuf::from(v),
         None => container_prefix(container)?,
     };
-    std::fs::create_dir_all(&p).map_err(|e| {
-        WboxError::spawn(format!("创建 WINEPREFIX '{}' 失败：{}", p.display(), e))
-    })?;
+    std::fs::create_dir_all(&p)
+        .map_err(|e| WboxError::spawn(format!("创建 WINEPREFIX '{}' 失败：{}", p.display(), e)))?;
     Ok(p)
 }
 
@@ -292,7 +295,11 @@ mod tests {
             Err(err) => {
                 let m = format!("{}", err);
                 assert!(m.contains("wine"), "{}", m);
-                assert!(m.contains("WBOX_WINE") || m.contains("apt install"), "要给出解法：{}", m);
+                assert!(
+                    m.contains("WBOX_WINE") || m.contains("apt install"),
+                    "要给出解法：{}",
+                    m
+                );
             }
         }
     }
@@ -329,7 +336,10 @@ mod tests {
             1,
             "不应重复塞入"
         );
-        assert_eq!(env.iter().find(|(k, _)| k == "WINEPREFIX").unwrap().1, "/mine");
+        assert_eq!(
+            env.iter().find(|(k, _)| k == "WINEPREFIX").unwrap().1,
+            "/mine"
+        );
         assert!(env.iter().any(|(k, v)| k == "HOME" && v == "/tmp/wp"));
         assert!(env.iter().any(|(k, v)| k == "WINEDEBUG" && v == "-all"));
 

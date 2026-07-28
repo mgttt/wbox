@@ -214,9 +214,7 @@ fn imul_and_idiv() {
     assert_eq!(m.cpu.regs[RAX], 42);
 
     // mov $100,%eax ; cltd ; mov $7,%ecx ; idivl %ecx
-    let mut m = mach(&[
-        0xb8, 0x64, 0, 0, 0, 0x99, 0xb9, 0x07, 0, 0, 0, 0xf7, 0xf9,
-    ]);
+    let mut m = mach(&[0xb8, 0x64, 0, 0, 0, 0x99, 0xb9, 0x07, 0, 0, 0, 0xf7, 0xf9]);
     steps(&mut m, 4);
     assert_eq!(m.cpu.regs[RAX], 14, "商");
     assert_eq!(m.cpu.regs[RDX], 2, "余数");
@@ -225,9 +223,7 @@ fn imul_and_idiv() {
 #[test]
 fn divide_by_zero_raises_divide_error() {
     // mov $1,%eax ; xor %edx,%edx ; xor %ecx,%ecx ; divl %ecx
-    let mut m = mach(&[
-        0xb8, 0x01, 0, 0, 0, 0x31, 0xd2, 0x31, 0xc9, 0xf7, 0xf1,
-    ]);
+    let mut m = mach(&[0xb8, 0x01, 0, 0, 0, 0x31, 0xd2, 0x31, 0xc9, 0xf7, 0xf1]);
     steps(&mut m, 3);
     match m.step() {
         Err(Exception::DivideError { .. }) => {}
@@ -395,9 +391,7 @@ fn bit_test_and_set() {
 #[test]
 fn bsf_bsr_and_zero_source() {
     // mov $0x100,%eax ; bsf %eax,%ebx ; bsr %eax,%ecx
-    let mut m = mach(&[
-        0xb8, 0x00, 0x01, 0, 0, 0x0f, 0xbc, 0xd8, 0x0f, 0xbd, 0xc8,
-    ]);
+    let mut m = mach(&[0xb8, 0x00, 0x01, 0, 0, 0x0f, 0xbc, 0xd8, 0x0f, 0xbd, 0xc8]);
     steps(&mut m, 3);
     assert_eq!(m.cpu.regs[RBX], 8);
     assert_eq!(m.cpu.regs[RCX], 8);
@@ -690,7 +684,10 @@ fn addsd_subsd_mulsd_divsd() {
     m.mem.write(DATA, &1.5f64.to_le_bytes()).unwrap();
     m.mem.write(DATA + 8, &2.25f64.to_le_bytes()).unwrap();
     steps(&mut m, 4);
-    assert_eq!(f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()), 3.75);
+    assert_eq!(
+        f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()),
+        3.75
+    );
 
     // 同样的编码换成 mulsd(0x59) / subsd(0x5c) / divsd(0x5e)
     for (op, want) in [(0x59u8, 1.5 * 2.25), (0x5c, 1.5 - 2.25), (0x5e, 1.5 / 2.25)] {
@@ -720,7 +717,10 @@ fn scalar_float_op_preserves_high_lane() {
     m.cpu.xmm[0][0..8].copy_from_slice(&2.0f64.to_le_bytes());
     m.cpu.xmm[0][8..16].copy_from_slice(&0xdead_beef_cafe_babeu64.to_le_bytes());
     steps(&mut m, 2);
-    assert_eq!(f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()), 3.0);
+    assert_eq!(
+        f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()),
+        3.0
+    );
     assert_eq!(
         u64::from_le_bytes(m.cpu.xmm[0][8..16].try_into().unwrap()),
         0xdead_beef_cafe_babe,
@@ -737,7 +737,10 @@ fn cvtsi2sd_and_cvttsd2si_roundtrip() {
         0xf2, 0x0f, 0x2c, 0xc8, // cvttsd2si %xmm0,%ecx
     ]);
     steps(&mut m, 3);
-    assert_eq!(f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()), -7.0);
+    assert_eq!(
+        f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()),
+        -7.0
+    );
     assert_eq!(m.cpu.regs[RCX] as u32 as i32, -7);
 }
 
@@ -797,7 +800,10 @@ fn ucomisd_sets_flags_and_flags_nan_as_unordered() {
     m.mem.write(DATA, &f64::NAN.to_le_bytes()).unwrap();
     m.mem.write(DATA + 8, &1.0f64.to_le_bytes()).unwrap();
     steps(&mut m, 3);
-    assert!(m.cpu.flags.pf && m.cpu.flags.zf && m.cpu.flags.cf, "NaN 必须报无序");
+    assert!(
+        m.cpu.flags.pf && m.cpu.flags.zf && m.cpu.flags.cf,
+        "NaN 必须报无序"
+    );
 }
 
 #[test]
@@ -808,7 +814,10 @@ fn sqrtsd_computes_square_root() {
     let mut m = mach(&code);
     m.mem.write(DATA, &2.25f64.to_le_bytes()).unwrap();
     steps(&mut m, 2);
-    assert_eq!(f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()), 1.5);
+    assert_eq!(
+        f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()),
+        1.5
+    );
 }
 
 #[test]
@@ -837,7 +846,10 @@ fn cvtss2sd_widens_float_to_double() {
     let mut m = mach(&code);
     m.mem.write(DATA, &0.5f32.to_le_bytes()).unwrap();
     steps(&mut m, 2);
-    assert_eq!(f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()), 0.5);
+    assert_eq!(
+        f64::from_le_bytes(m.cpu.xmm[0][0..8].try_into().unwrap()),
+        0.5
+    );
 }
 
 #[test]

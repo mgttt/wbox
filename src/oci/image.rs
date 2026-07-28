@@ -271,9 +271,7 @@ pub fn pull_image(
         // blob，push 才能原样回推、digest 不变。写在解包**之前**：解包失败时
         // 整个 staging 会被丢弃，不存在半份 blob 留在正式缓存里的可能。
         std::fs::create_dir_all(staging.path.join(super::BLOBS_DIR))
-            .and_then(|_| {
-                std::fs::write(super::blob_path(&staging.path, digest), &blob)
-            })
+            .and_then(|_| std::fs::write(super::blob_path(&staging.path, digest), &blob))
             .context(format!("保存原始层 {} 失败", digest))
             .ctx(ErrKind::Registry)?;
         unpack_layer_with_state(&blob, &rootfs, media_type, &mut symlinks)
@@ -565,9 +563,8 @@ fn materialize_symlink_as_copy(
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }
-        std::fs::copy(&src, &dst).map_err(|e| {
-            crate::fail!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e)
-        })?;
+        std::fs::copy(&src, &dst)
+            .map_err(|e| crate::fail!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e))?;
     }
     Ok(())
 }
@@ -918,10 +915,8 @@ mod tests {
 
     fn gzip(data: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        let mut e = wbox_codec::deflate::GzEncoder::new(
-            Vec::new(),
-            wbox_codec::deflate::Level::Fast,
-        );
+        let mut e =
+            wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Fast);
         e.write_all(data).unwrap();
         e.finish().unwrap()
     }
@@ -1330,7 +1325,8 @@ mod tests {
             dir_header.set_mode(0o755);
             dir_header.set_size(0);
             dir_header.set_cksum();
-            b.append_data(&mut dir_header, "usr/local/bin/", &[][..]).unwrap();
+            b.append_data(&mut dir_header, "usr/local/bin/", &[][..])
+                .unwrap();
 
             let mut link_header = wbox_codec::tar::Header::new_gnu();
             link_header.set_entry_type(wbox_codec::tar::EntryType::Symlink);
@@ -1344,8 +1340,14 @@ mod tests {
         unpack_layer_with_state(&second, &rootfs, "", &mut symlinks).unwrap();
         finalize_symlinks(&rootfs, &symlinks).unwrap();
 
-        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python3")).unwrap(), b"python");
-        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python")).unwrap(), b"python");
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/local/bin/python3")).unwrap(),
+            b"python"
+        );
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/local/bin/python")).unwrap(),
+            b"python"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

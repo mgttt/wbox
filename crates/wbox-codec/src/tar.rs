@@ -639,9 +639,7 @@ impl Entry {
                 // 链到一个完全无关的文件上去（或者失败，看运气）。
                 let target = self.link.clone().ok_or_else(|| err("硬链接条目没有目标"))?;
                 let Some(root) = self.unpack_root.as_ref() else {
-                    return Err(err(
-                        "硬链接条目要求用 unpack_in 解包（目标需按归档根解析）",
-                    ));
+                    return Err(err("硬链接条目要求用 unpack_in 解包（目标需按归档根解析）"));
                 };
                 let resolved = safe_join(root, &target)?;
                 fs::hard_link(&resolved, dest)
@@ -708,10 +706,7 @@ pub fn safe_join(root: &Path, rel: &Path) -> io::Result<PathBuf> {
                     )));
                 }
                 if !md.is_dir() {
-                    return Err(err(format!(
-                        "解包路径上的 '{}' 不是目录",
-                        cur.display()
-                    )));
+                    return Err(err(format!("解包路径上的 '{}' 不是目录", cur.display())));
                 }
             }
             Err(_) => fs::create_dir_all(&cur)?,

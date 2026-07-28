@@ -227,7 +227,11 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                 get_f64(&src, 0)
             };
             // 0x2c 截断；0x2d 舍入到最近偶数（默认舍入模式，我们不建模 MXCSR）
-            let r = if op == 0x2c { f.trunc() } else { round_half_even(f) };
+            let r = if op == 0x2c {
+                f.trunc()
+            } else {
+                round_half_even(f)
+            };
             // 超范围/NaN 时 x86 返回"整数不定值"= 目标宽度的最小负数
             let out = if r.is_nan() {
                 min_int(size)
@@ -325,7 +329,11 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                 let trunc_mode = d.rep == 0xf3;
                 for i in 0..4 {
                     let f = get_f32(&src, i) as f64;
-                    let r = if trunc_mode { f.trunc() } else { round_half_even(f) };
+                    let r = if trunc_mode {
+                        f.trunc()
+                    } else {
+                        round_half_even(f)
+                    };
                     let iv = if r.is_nan() || !(-2147483648.0..2147483648.0).contains(&r) {
                         i32::MIN
                     } else {
@@ -380,14 +388,14 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
             let pred = |a: f64, b: f64| -> bool {
                 let un = a.is_nan() || b.is_nan();
                 match imm {
-                    0 => a == b,           // eq（有序）
-                    1 => !un && a < b,     // lt
-                    2 => !un && a <= b,    // le
-                    3 => un,               // unord
-                    4 => un || a != b,     // neq
-                    5 => un || a >= b,     // nlt
-                    6 => un || a > b,      // nle
-                    _ => !un,              // ord
+                    0 => a == b,        // eq（有序）
+                    1 => !un && a < b,  // lt
+                    2 => !un && a <= b, // le
+                    3 => un,            // unord
+                    4 => un || a != b,  // neq
+                    5 => un || a >= b,  // nlt
+                    6 => un || a > b,   // nle
+                    _ => !un,           // ord
                 }
             };
             let mut o = dst;
@@ -403,15 +411,21 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                 FForm::Ps => {
                     for i in 0..4 {
                         let t = pred(get_f32(&dst, i) as f64, get_f32(&src, i) as f64);
-                        o[i * 4..i * 4 + 4]
-                            .copy_from_slice(&if t { [0xffu8; 4] } else { [0u8; 4] });
+                        o[i * 4..i * 4 + 4].copy_from_slice(&if t {
+                            [0xffu8; 4]
+                        } else {
+                            [0u8; 4]
+                        });
                     }
                 }
                 FForm::Pd => {
                     for i in 0..2 {
                         let t = pred(get_f64(&dst, i), get_f64(&src, i));
-                        o[i * 8..i * 8 + 8]
-                            .copy_from_slice(&if t { [0xffu8; 8] } else { [0u8; 8] });
+                        o[i * 8..i * 8 + 8].copy_from_slice(&if t {
+                            [0xffu8; 8]
+                        } else {
+                            [0u8; 8]
+                        });
                     }
                 }
             }
@@ -423,9 +437,9 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
         0x10 | 0x11 => {
             let (reg, rm) = m.modrm(d)?;
             let n = match d.rep {
-                0xf3 => 4,  // movss：32 位
-                0xf2 => 8,  // movsd：64 位
-                _ => 16,    // movups/movupd
+                0xf3 => 4, // movss：32 位
+                0xf2 => 8, // movsd：64 位
+                _ => 16,   // movups/movupd
             };
             if op == 0x10 {
                 let v = read_narrow(m, d, rm, n)?;
@@ -582,7 +596,11 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                 0x75 => 2,
                 _ => 4,
             };
-            let mask = if w == 8 { u64::MAX } else { (1u64 << (w * 8)) - 1 };
+            let mask = if w == 8 {
+                u64::MAX
+            } else {
+                (1u64 << (w * 8)) - 1
+            };
             m.cpu.xmm[reg] = lanes(a, b, w, |x, y| if x == y { mask } else { 0 });
             m.next(d)
         }
@@ -635,11 +653,11 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
             let b = read_xmm_rm(m, d, rm)?;
             let a = m.cpu.xmm[reg];
             m.cpu.xmm[reg] = match op {
-                0xd8 => zip(a, b, |x, y| x.saturating_sub(y)),        // psubusb
+                0xd8 => zip(a, b, |x, y| x.saturating_sub(y)), // psubusb
                 0xd9 => lanes(a, b, 2, |x, y| (x as u16).saturating_sub(y as u16) as u64), // psubusw
-                0xda => zip(a, b, |x, y| x.min(y)),                   // pminub
-                0xde => zip(a, b, |x, y| x.max(y)),                   // pmaxub
-                0xe8 => zip(a, b, |x, y| (x as i8).saturating_add(y as i8) as u8), // paddsb
+                0xda => zip(a, b, |x, y| x.min(y)),                                        // pminub
+                0xde => zip(a, b, |x, y| x.max(y)),                                        // pmaxub
+                0xe8 => zip(a, b, |x, y| (x as i8).saturating_add(y as i8) as u8),         // paddsb
                 0xe9 => lanes(a, b, 2, |x, y| {
                     ((x as u16 as i16).saturating_add(y as u16 as i16)) as u16 as u64
                 }), // paddsw
@@ -665,9 +683,17 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                 0xfe => (4, true),
                 _ => (8, true),
             };
-            let mask = if w == 8 { u64::MAX } else { (1u64 << (w * 8)) - 1 };
+            let mask = if w == 8 {
+                u64::MAX
+            } else {
+                (1u64 << (w * 8)) - 1
+            };
             m.cpu.xmm[reg] = lanes(a, b, w, |x, y| {
-                (if add { x.wrapping_add(y) } else { x.wrapping_sub(y) }) & mask
+                (if add {
+                    x.wrapping_add(y)
+                } else {
+                    x.wrapping_sub(y)
+                }) & mask
             });
             m.next(d)
         }
@@ -827,12 +853,29 @@ pub fn exec(m: &mut Machine, d: &mut Dec, op: u8) -> ExecResult<()> {
                     o[..16 - n].copy_from_slice(&x[n..]);
                     o
                 }
-                (_, 2) => lanes(x, x, w, |v, _| {
-                    if imm as usize >= w * 8 { 0 } else { v >> imm }
-                }), // psrl
+                (_, 2) => lanes(
+                    x,
+                    x,
+                    w,
+                    |v, _| {
+                        if imm as usize >= w * 8 {
+                            0
+                        } else {
+                            v >> imm
+                        }
+                    },
+                ), // psrl
                 (_, 6) => lanes(x, x, w, |v, _| {
-                    let mask = if w == 8 { u64::MAX } else { (1u64 << (w * 8)) - 1 };
-                    if imm as usize >= w * 8 { 0 } else { (v << imm) & mask }
+                    let mask = if w == 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (w * 8)) - 1
+                    };
+                    if imm as usize >= w * 8 {
+                        0
+                    } else {
+                        (v << imm) & mask
+                    }
                 }), // psll
                 (_, 4) => lanes(x, x, w, |v, _| {
                     // psra：按 lane 宽度做算术右移

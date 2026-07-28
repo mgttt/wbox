@@ -24,7 +24,12 @@ impl<S: Read + Write> TlsStream<S> {
     ///
     /// `now` 是当前 Unix 秒（用于证书有效期）；`extra_roots` 是在内置根之外
     /// **追加**的信任根（`SSL_CERT_FILE` 走这条路），不替换内置根。
-    pub fn connect(mut inner: S, hostname: &str, now: i64, extra_roots: &[Vec<u8>]) -> io::Result<Self> {
+    pub fn connect(
+        mut inner: S,
+        hostname: &str,
+        now: i64,
+        extra_roots: &[Vec<u8>],
+    ) -> io::Result<Self> {
         let Handshake { secrets } =
             handshake::client_handshake(&mut inner, hostname, now, extra_roots)
                 .map_err(io::Error::other)?;

@@ -166,10 +166,7 @@ mod tests {
         assert_eq!(l.lookup("/f").unwrap(), upper.join("f"));
         assert!(l.lookup("/nope").is_err());
 
-        let only_upper = ContainerLayers {
-            upper,
-            lower: None,
-        };
+        let only_upper = ContainerLayers { upper, lower: None };
         assert!(only_upper.lookup("/nope").is_err());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -199,7 +196,10 @@ mod tests {
         assert_eq!(std::fs::read(out.join("keep")).unwrap(), b"base");
         assert_eq!(std::fs::read(out.join("changed")).unwrap(), b"new");
         assert!(out.join("added").exists());
-        assert!(!out.join(".wbox_oldroot").exists(), "内部产物不该留在物化结果里");
+        assert!(
+            !out.join(".wbox_oldroot").exists(),
+            "内部产物不该留在物化结果里"
+        );
         // 合并必须**先 unlink 再落盘**：下层那份不能被就地改写，
         // 否则会写坏与它共享 inode 的别的镜像。
         assert_eq!(

@@ -17,9 +17,9 @@
 //! （如 `library_ubuntu`）；路径段中的 `:`（registry 端口、digest 引用
 //! `sha256:...`）一律替换为 `_`，避免 Windows 非法目录名（M4）。
 
+pub mod archive;
 pub mod config;
 pub mod image;
-pub mod archive;
 pub mod push;
 pub mod registry;
 
@@ -102,9 +102,7 @@ impl ImageRef {
         // 拆 registry 前缀：首段含 '.' 或 ':' 或等于 localhost 时视为 registry 主机。
         let segs: Vec<&str> = name_part.splitn(2, '/').collect();
         let (registry, repo) = match (segs.len(), segs[0]) {
-            (2, first)
-                if first.contains('.') || first.contains(':') || first == "localhost" =>
-            {
+            (2, first) if first.contains('.') || first.contains(':') || first == "localhost" => {
                 (first.to_string(), segs[1].to_string())
             }
             _ => (DEFAULT_REGISTRY.to_string(), name_part.clone()),
@@ -267,7 +265,11 @@ pub fn pull(
         );
     }
 
-    println!("wbox: 完成 —— {} 层已解包到 {}", summary.layers, dest.join("rootfs").display());
+    println!(
+        "wbox: 完成 —— {} 层已解包到 {}",
+        summary.layers,
+        dest.join("rootfs").display()
+    );
     println!("wbox: manifest digest: {}", summary.manifest_digest);
     Ok(())
 }
@@ -379,7 +381,10 @@ pub fn list() -> crate::error::Result<u32> {
     // IMAGE 列给的是**能直接照抄去用**的引用，不是缓存目录名
     println!("{:<28} {:<40} {:<20} LAYERS", "REGISTRY", "IMAGE", "TAG");
     for r in &rows {
-        println!("{:<28} {:<40} {:<20} {}", r.registry, r.reference, r.tag, r.layers);
+        println!(
+            "{:<28} {:<40} {:<20} {}",
+            r.registry, r.reference, r.tag, r.layers
+        );
     }
     if rows.is_empty() {
         println!("（无已缓存镜像）");
@@ -624,7 +629,10 @@ mod tests {
         // 多级仓库名同样要往返得回来
         let r = restore_reference("quay.io", "org_team_app", "1").unwrap();
         assert_eq!(r, "quay.io/org/team/app:1");
-        assert_eq!(ImageRef::parse(&r, None).unwrap().cache_name(), "org_team_app");
+        assert_eq!(
+            ImageRef::parse(&r, None).unwrap().cache_name(),
+            "org_team_app"
+        );
 
         // 往返对不上的（这里用一个空目录名）不许硬给引用
         assert!(restore_reference(DEFAULT_REGISTRY, "", "latest").is_none());

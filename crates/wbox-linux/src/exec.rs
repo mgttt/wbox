@@ -10,7 +10,7 @@
 
 use crate::alu;
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
-use crate::machine::{ExecResult, Exception, Machine};
+use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::PROT_EXEC;
 
 /// 一条指令的译码状态。
@@ -256,22 +256,22 @@ impl Machine {
     pub(crate) fn cond(&self, cc: u8) -> bool {
         let f = &self.cpu.flags;
         match cc {
-            0x0 => f.of,                    // O
-            0x1 => !f.of,                   // NO
-            0x2 => f.cf,                    // B/C/NAE
-            0x3 => !f.cf,                   // AE/NB/NC
-            0x4 => f.zf,                    // E/Z
-            0x5 => !f.zf,                   // NE/NZ
-            0x6 => f.cf || f.zf,            // BE/NA
-            0x7 => !f.cf && !f.zf,          // A/NBE
-            0x8 => f.sf,                    // S
-            0x9 => !f.sf,                   // NS
-            0xa => f.pf,                    // P/PE
-            0xb => !f.pf,                   // NP/PO
-            0xc => f.sf != f.of,            // L/NGE
-            0xd => f.sf == f.of,            // GE/NL
-            0xe => f.zf || (f.sf != f.of),  // LE/NG
-            _ => !f.zf && (f.sf == f.of),   // G/NLE
+            0x0 => f.of,                   // O
+            0x1 => !f.of,                  // NO
+            0x2 => f.cf,                   // B/C/NAE
+            0x3 => !f.cf,                  // AE/NB/NC
+            0x4 => f.zf,                   // E/Z
+            0x5 => !f.zf,                  // NE/NZ
+            0x6 => f.cf || f.zf,           // BE/NA
+            0x7 => !f.cf && !f.zf,         // A/NBE
+            0x8 => f.sf,                   // S
+            0x9 => !f.sf,                  // NS
+            0xa => f.pf,                   // P/PE
+            0xb => !f.pf,                  // NP/PO
+            0xc => f.sf != f.of,           // L/NGE
+            0xd => f.sf == f.of,           // GE/NL
+            0xe => f.zf || (f.sf != f.of), // LE/NG
+            _ => !f.zf && (f.sf == f.of),  // G/NLE
         }
     }
 
@@ -529,7 +529,11 @@ impl Machine {
             0x99 => {
                 let size = d.opsize();
                 let a = self.cpu.get_reg(RAX, size, false);
-                let hi = if (sext(a, size) as i64) < 0 { u64::MAX } else { 0 };
+                let hi = if (sext(a, size) as i64) < 0 {
+                    u64::MAX
+                } else {
+                    0
+                };
                 self.cpu.set_reg(RDX, size, hi, false);
                 self.next(d)
             }
@@ -733,7 +737,8 @@ impl Machine {
                         };
                         if size == 1 {
                             // 8 位形式结果是 ax（不写 dl）
-                            self.cpu.set_reg(RAX, 2, (lo & 0xff) | ((hi & 0xff) << 8), false);
+                            self.cpu
+                                .set_reg(RAX, 2, (lo & 0xff) | ((hi & 0xff) << 8), false);
                         } else {
                             self.cpu.set_reg(RAX, size, lo, false);
                             self.cpu.set_reg(RDX, size, hi, false);
@@ -759,8 +764,12 @@ impl Machine {
                         }
                         .ok_or(Exception::DivideError { rip: d.start })?;
                         if size == 1 {
-                            self.cpu
-                                .set_reg(RAX, 2, (out.quot & 0xff) | ((out.rem & 0xff) << 8), false);
+                            self.cpu.set_reg(
+                                RAX,
+                                2,
+                                (out.quot & 0xff) | ((out.rem & 0xff) << 8),
+                                false,
+                            );
                         } else {
                             self.cpu.set_reg(RAX, size, out.quot, false);
                             self.cpu.set_reg(RDX, size, out.rem, false);
@@ -1128,7 +1137,11 @@ impl Machine {
                 if d.rep == 0xf3 {
                     // TZCNT/LZCNT：源为 0 时返回宽度，CF 置位
                     let n = if op == 0xbc {
-                        if v == 0 { bits } else { v.trailing_zeros() }
+                        if v == 0 {
+                            bits
+                        } else {
+                            v.trailing_zeros()
+                        }
                     } else if v == 0 {
                         bits
                     } else {
@@ -1269,7 +1282,6 @@ pub fn load_code(m: &mut Machine, addr: u64, code: &[u8]) {
     let len = (code.len() as u64 + 0xfff) & !0xfff;
     m.mem.map(addr, len.max(0x1000), PROT_READ | PROT_WRITE);
     m.mem.write_raw(addr, code);
-    m.mem
-        .map(addr, len.max(0x1000), PROT_READ | PROT_EXEC);
+    m.mem.map(addr, len.max(0x1000), PROT_READ | PROT_EXEC);
     m.cpu.rip = addr;
 }

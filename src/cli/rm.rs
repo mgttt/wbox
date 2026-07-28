@@ -100,7 +100,10 @@ mod tests {
         assert!(!dir.exists());
         // 选项可以写在名字后面
         let dir = plant_stale("stale2");
-        assert_eq!(cmd_rm(&["stale2".to_string(), "--force".to_string()]).unwrap(), 0);
+        assert_eq!(
+            cmd_rm(&["stale2".to_string(), "--force".to_string()]).unwrap(),
+            0
+        );
         assert!(!dir.exists());
     }
 

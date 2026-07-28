@@ -144,8 +144,7 @@ mod tests {
 
     #[test]
     fn context_on_result_and_option() {
-        let r: std::result::Result<(), std::io::Error> =
-            Err(std::io::Error::other("底层"));
+        let r: std::result::Result<(), std::io::Error> = Err(std::io::Error::other("底层"));
         let e = Context::context(r, "读取失败").unwrap_err();
         assert_eq!(format!("{:#}", e), "读取失败：底层");
 
@@ -155,7 +154,11 @@ mod tests {
 
         // with_context 只在失败路径上求值。
         let ok: Option<u8> = Some(1);
-        assert_eq!(ok.with_context(|| -> String { panic!("不该被求值") }).unwrap(), 1);
+        assert_eq!(
+            ok.with_context(|| -> String { panic!("不该被求值") })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

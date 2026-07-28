@@ -251,9 +251,9 @@ mod tests {
 
     #[test]
     fn parity_counts_low_byte_only() {
-        assert!(parity(0x00));       // 0 个 1 -> 偶
-        assert!(!parity(0x01));      // 1 个 1 -> 奇
-        assert!(parity(0x03));       // 2 个 1 -> 偶
-        assert!(parity(0xff00));     // 低字节 0 -> 偶
+        assert!(parity(0x00)); // 0 个 1 -> 偶
+        assert!(!parity(0x01)); // 1 个 1 -> 奇
+        assert!(parity(0x03)); // 2 个 1 -> 偶
+        assert!(parity(0xff00)); // 低字节 0 -> 偶
     }
 }

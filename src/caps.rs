@@ -26,47 +26,47 @@ use crate::error::{Result, WboxError};
 /// 已知 capability 名与其位号。取自 `include/uapi/linux/capability.h`，
 /// 顺序即位号，故**只能往后追加，不能插入或重排**。
 pub const CAP_NAMES: &[&str] = &[
-    "CHOWN",                 // 0
-    "DAC_OVERRIDE",          // 1
-    "DAC_READ_SEARCH",       // 2
-    "FOWNER",                // 3
-    "FSETID",                // 4
-    "KILL",                  // 5
-    "SETGID",                // 6
-    "SETUID",                // 7
-    "SETPCAP",               // 8
-    "LINUX_IMMUTABLE",       // 9
-    "NET_BIND_SERVICE",      // 10
-    "NET_BROADCAST",         // 11
-    "NET_ADMIN",             // 12
-    "NET_RAW",               // 13
-    "IPC_LOCK",              // 14
-    "IPC_OWNER",             // 15
-    "SYS_MODULE",            // 16
-    "SYS_RAWIO",             // 17
-    "SYS_CHROOT",            // 18
-    "SYS_PTRACE",            // 19
-    "SYS_PACCT",             // 20
-    "SYS_ADMIN",             // 21
-    "SYS_BOOT",              // 22
-    "SYS_NICE",              // 23
-    "SYS_RESOURCE",          // 24
-    "SYS_TIME",              // 25
-    "SYS_TTY_CONFIG",        // 26
-    "MKNOD",                 // 27
-    "LEASE",                 // 28
-    "AUDIT_WRITE",           // 29
-    "AUDIT_CONTROL",         // 30
-    "SETFCAP",               // 31
-    "MAC_OVERRIDE",          // 32
-    "MAC_ADMIN",             // 33
-    "SYSLOG",                // 34
-    "WAKE_ALARM",            // 35
-    "BLOCK_SUSPEND",         // 36
-    "AUDIT_READ",            // 37
-    "PERFMON",               // 38
-    "BPF",                   // 39
-    "CHECKPOINT_RESTORE",    // 40
+    "CHOWN",              // 0
+    "DAC_OVERRIDE",       // 1
+    "DAC_READ_SEARCH",    // 2
+    "FOWNER",             // 3
+    "FSETID",             // 4
+    "KILL",               // 5
+    "SETGID",             // 6
+    "SETUID",             // 7
+    "SETPCAP",            // 8
+    "LINUX_IMMUTABLE",    // 9
+    "NET_BIND_SERVICE",   // 10
+    "NET_BROADCAST",      // 11
+    "NET_ADMIN",          // 12
+    "NET_RAW",            // 13
+    "IPC_LOCK",           // 14
+    "IPC_OWNER",          // 15
+    "SYS_MODULE",         // 16
+    "SYS_RAWIO",          // 17
+    "SYS_CHROOT",         // 18
+    "SYS_PTRACE",         // 19
+    "SYS_PACCT",          // 20
+    "SYS_ADMIN",          // 21
+    "SYS_BOOT",           // 22
+    "SYS_NICE",           // 23
+    "SYS_RESOURCE",       // 24
+    "SYS_TIME",           // 25
+    "SYS_TTY_CONFIG",     // 26
+    "MKNOD",              // 27
+    "LEASE",              // 28
+    "AUDIT_WRITE",        // 29
+    "AUDIT_CONTROL",      // 30
+    "SETFCAP",            // 31
+    "MAC_OVERRIDE",       // 32
+    "MAC_ADMIN",          // 33
+    "SYSLOG",             // 34
+    "WAKE_ALARM",         // 35
+    "BLOCK_SUSPEND",      // 36
+    "AUDIT_READ",         // 37
+    "PERFMON",            // 38
+    "BPF",                // 39
+    "CHECKPOINT_RESTORE", // 40
 ];
 
 /// 本表覆盖到的最高位号。运行时内核可能认识更多（见 [`CapPolicy::retained`]
@@ -320,7 +320,10 @@ mod tests {
 
     #[test]
     fn rejected_off_linux_only_when_touched() {
-        assert!(reject_if_unsupported(&CapPolicy::default()).is_ok(), "默认策略任何宿主都放行");
+        assert!(
+            reject_if_unsupported(&CapPolicy::default()).is_ok(),
+            "默认策略任何宿主都放行"
+        );
         let p = CapPolicy::resolve(&[CapSelector::All], &[]);
         let r = reject_if_unsupported(&p);
         if cfg!(target_os = "linux") {

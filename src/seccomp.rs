@@ -213,12 +213,21 @@ const AUDIT_ARCH: u32 = 0xc000_00b7; // AUDIT_ARCH_AARCH64
 
 /// `seccomp_data` 里 `nr` 与 `arch` 的字节偏移（`struct seccomp_data` 前两个
 /// 字段，各 4 字节）。
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 const OFF_NR: u32 = 0;
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 const OFF_ARCH: u32 = 4;
 
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn stmt(code: u32, k: u32) -> libc::sock_filter {
     libc::sock_filter {
         code: code as u16,
@@ -228,7 +237,10 @@ fn stmt(code: u32, k: u32) -> libc::sock_filter {
     }
 }
 
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter {
         code: code as u16,
@@ -266,13 +278,24 @@ fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 /// 这一类错误最坏的地方是它不报错：策略照常装上，`wbox` 照常启动，
 /// 只是安全边界没了。所以这里换成恒定 0/1 偏移的形状——**结构上不可能溢出**，
 /// 而不是"加一条上限检查然后祈祷没人超"。代价是每条拒绝项多一条指令。
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub fn build_filter(policy: &SeccompPolicy) -> Vec<libc::sock_filter> {
     let n = policy.denied.len();
     let mut prog = Vec::with_capacity(2 * n + 5);
     prog.push(stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, OFF_ARCH));
-    prog.push(jump(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, AUDIT_ARCH, 1, 0));
-    prog.push(stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_KILL_PROCESS));
+    prog.push(jump(
+        libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+        AUDIT_ARCH,
+        1,
+        0,
+    ));
+    prog.push(stmt(
+        libc::BPF_RET | libc::BPF_K,
+        libc::SECCOMP_RET_KILL_PROCESS,
+    ));
     prog.push(stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, OFF_NR));
     let deny = stmt(
         libc::BPF_RET | libc::BPF_K,
@@ -301,7 +324,10 @@ pub fn build_filter(policy: &SeccompPolicy) -> Vec<libc::sock_filter> {
 /// 装载前必须置 `PR_SET_NO_NEW_PRIVS`：没有它，内核要求调用者持有
 /// `CAP_SYS_ADMIN` 才允许装过滤器，而我们恰恰可能刚被 `--cap-drop` 削掉。
 /// 它本身也是必要的——否则 setuid 程序可以在 execve 时提权绕过意图。
-#[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub unsafe fn apply(prog: &[libc::sock_filter]) -> std::io::Result<()> {
     if prog.is_empty() {
         return Ok(());
@@ -328,7 +354,10 @@ pub unsafe fn apply(prog: &[libc::sock_filter]) -> std::io::Result<()> {
 
 /// 未适配的架构：不能装一个号可能对不上的过滤器，宁可明确拒绝。
 /// 静默不装是最坏的结果——用户以为拦住了。
-#[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
 pub fn reject_unsupported_arch(policy: &SeccompPolicy) -> Result<()> {
     if policy.is_default() {
         return Ok(());
@@ -396,8 +425,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn resolves_names_and_dedups() {
-        let p = SeccompPolicy::resolve(&["ptrace,mount".to_string(), "ptrace".to_string()])
-            .unwrap();
+        let p =
+            SeccompPolicy::resolve(&["ptrace,mount".to_string(), "ptrace".to_string()]).unwrap();
         assert_eq!(p.denied().len(), 2, "重复项应去重：{:?}", p.denied());
         assert!(p.denied().contains(&(libc::SYS_ptrace as i64)));
         assert!(p.denied().contains(&(libc::SYS_mount as i64)));
@@ -408,7 +437,10 @@ mod tests {
     /// seccomp 装上就撤不掉，靠"跑一遍看看"调试代价太高：指令序列必须能离线
     /// 断言。这条钉死跳转偏移——算错的话拒绝项会落到 ALLOW 上，
     /// 表现为"配置了却没拦住"，是最危险的失败形态。
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn filter_program_shape_and_jump_offsets() {
         let p = SeccompPolicy::resolve(&["ptrace,mount,chroot".to_string()]).unwrap();
@@ -443,7 +475,10 @@ mod tests {
     ///
     /// 这条用 300 条拒绝项走一遍，断言每条命中路径都真的到达 ERRNO、
     /// 且没有任何一条能走到 ALLOW。
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn large_policy_does_not_fail_open() {
         let mut pol = SeccompPolicy::default();
@@ -462,7 +497,10 @@ mod tests {
             let at = 4 + 2 * i;
             // 命中：落到 at+1，必须是 ERRNO，绝不能是 ALLOW。
             let hit = at + 1 + prog[at].jt as usize;
-            assert_ne!(hit, allow_idx, "第 {i} 条拒绝项命中后走到了 ALLOW —— fail-open");
+            assert_ne!(
+                hit, allow_idx,
+                "第 {i} 条拒绝项命中后走到了 ALLOW —— fail-open"
+            );
             assert_eq!(
                 prog[hit].k,
                 libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32),
@@ -479,7 +517,10 @@ mod tests {
     }
 
     /// 空策略也要能构造出合法程序（虽然落地层不会装它）。
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
     #[test]
     fn empty_policy_still_builds_a_valid_allow_all_program() {
         let prog = build_filter(&SeccompPolicy::default());

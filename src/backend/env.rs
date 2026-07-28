@@ -65,9 +65,7 @@ const HOST_WHITELIST: &[&str] = &[
 
 /// 过滤镜像 config.Env：丢弃保留键与非法键（空键/含 '='）。
 /// 返回 (保留的项, 被丢弃的键名)（丢弃清单供 verbose 告警）。
-pub fn sanitize_image_env(
-    image_env: &[(String, String)],
-) -> (Vec<(String, String)>, Vec<String>) {
+pub fn sanitize_image_env(image_env: &[(String, String)]) -> (Vec<(String, String)>, Vec<String>) {
     let mut kept = Vec::new();
     let mut dropped = Vec::new();
     for (k, v) in image_env {
@@ -116,7 +114,9 @@ pub fn build_child_env(
         // SystemRoot 兜底：很多 Win32 进程缺了它无法初始化。
         // 仅 Windows 风味——Linux 容器注入 C:\Windows 是噪音兼误导。
         if flavor == GuestFlavor::Windows
-            && !out.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot"))
+            && !out
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot"))
         {
             out.push(("SystemRoot".to_string(), r"C:\Windows".to_string()));
         }
@@ -214,7 +214,9 @@ mod tests {
         let env = build_child_env(&[], &[], false, GuestFlavor::Windows);
         assert!(!env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
         assert!(!env.iter().any(|(k, _)| k == "MY_SECRET_HOST_VAR"));
-        assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+        assert!(env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
     }
 
     #[test]
@@ -223,7 +225,9 @@ mod tests {
         let forced = vec![("BLINK_PREFIX".to_string(), "/rootfs".to_string())];
         let env = build_child_env(&img, &forced, false, GuestFlavor::Windows);
         assert_eq!(
-            env.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.as_str()),
+            env.iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_str()),
             Some("/img/bin")
         );
         assert_eq!(
@@ -269,7 +273,9 @@ mod tests {
         g.set("COMSPEC", r"C:\Windows\system32\cmd.exe");
         g.set("PATH", "/usr/bin");
         let env = build_child_env(&[], &[], false, GuestFlavor::Linux);
-        assert!(!env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+        assert!(!env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
         assert!(!env.iter().any(|(k, _)| k.eq_ignore_ascii_case("COMSPEC")));
         assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"));
     }
@@ -377,9 +383,7 @@ mod tests {
         let forced = vec![("path".to_string(), "/forced/lower".to_string())];
         let env = build_child_env(&image, &forced, false, GuestFlavor::Linux);
         assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"));
-        assert!(env
-            .iter()
-            .any(|(k, v)| k == "path" && v == "/forced/lower"));
+        assert!(env.iter().any(|(k, v)| k == "path" && v == "/forced/lower"));
     }
 
     #[test]
@@ -398,12 +402,12 @@ mod tests {
     #[test]
     fn sanitize_image_env_edge_keys() {
         let env = vec![
-            ("".to_string(), "v".to_string()),       // 空键
-            ("A=B".to_string(), "v".to_string()),    // 键含 '='
-            ("OK".to_string(), "a=b".to_string()),   // 值含 '=' 合法
-            ("WBOX_X".to_string(), "v".to_string()), // 保留键
-            ("blink_y".to_string(), "v".to_string()),// 保留键小写
-            ("AWBOX_X".to_string(), "v".to_string()),// 非前缀，保留
+            ("".to_string(), "v".to_string()),        // 空键
+            ("A=B".to_string(), "v".to_string()),     // 键含 '='
+            ("OK".to_string(), "a=b".to_string()),    // 值含 '=' 合法
+            ("WBOX_X".to_string(), "v".to_string()),  // 保留键
+            ("blink_y".to_string(), "v".to_string()), // 保留键小写
+            ("AWBOX_X".to_string(), "v".to_string()), // 非前缀，保留
         ];
         let (kept, dropped) = sanitize_image_env(&env);
         assert_eq!(

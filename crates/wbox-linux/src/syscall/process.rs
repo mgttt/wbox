@@ -33,8 +33,8 @@
 //! ——正是 Linux 在达到进程数上限时给的 errno，guest 侧的 libc 认得。
 
 use super::{guest_path, E2BIG, EAGAIN, ECHILD, EFAULT, EINVAL, ENOSYS, ESRCH, PATH_MAX};
-use crate::cpu::{Cpu, RAX, RCX, R11};
-use crate::machine::{ExecResult, Exception, Machine};
+use crate::cpu::{Cpu, R11, RAX, RCX};
+use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::Mem;
 use crate::proc;
 
@@ -62,10 +62,10 @@ fn wstatus(r: &ExecResult<i32>) -> i32 {
         Ok(code) => (code & 0xff) << 8,
         Err(e) => {
             let signo = match e {
-                Exception::Fault(_) => 11,             // SIGSEGV
-                Exception::Undefined { .. } => 4,      // SIGILL
-                Exception::DivideError { .. } => 8,    // SIGFPE
-                Exception::Breakpoint { .. } => 5,     // SIGTRAP
+                Exception::Fault(_) => 11,          // SIGSEGV
+                Exception::Undefined { .. } => 4,   // SIGILL
+                Exception::DivideError { .. } => 8, // SIGFPE
+                Exception::Breakpoint { .. } => 5,  // SIGTRAP
                 Exception::Killed { signo } => *signo,
                 // Exit 走 Ok 分支，不会到这里；兜底按 SIGKILL 记。
                 Exception::Exit(_) => 9,
@@ -241,11 +241,20 @@ pub fn sys_kill(m: &mut Machine, pid: i32, signo: i32) -> ExecResult<i64> {
     }
     if signo == 0 {
         // 只探测存在性。
-        return Ok(if pid == m.os.pid || pid <= 0 { 0 } else { -ESRCH });
+        return Ok(if pid == m.os.pid || pid <= 0 {
+            0
+        } else {
+            -ESRCH
+        });
     }
     if pid == m.os.pid || pid == 0 || pid == -1 {
         // 默认动作是终止的信号才自杀；SIGCHLD/SIGURG/SIGWINCH 等默认忽略。
-        const IGNORED: [i32; 4] = [17 /*CHLD*/, 23 /*URG*/, 28 /*WINCH*/, 18 /*CONT*/];
+        const IGNORED: [i32; 4] = [
+            17, /*CHLD*/
+            23, /*URG*/
+            28, /*WINCH*/
+            18, /*CONT*/
+        ];
         if !IGNORED.contains(&signo) {
             return Err(Exception::Killed { signo });
         }

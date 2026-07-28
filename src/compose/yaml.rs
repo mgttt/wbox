@@ -331,13 +331,25 @@ mod tests {
 
     #[test]
     fn flow_sequence_and_scalar_both_become_list() {
-        let n = p("a:\n  command: [\"/bin/sh\", \"-c\", \"echo hi, there\"]\nb:\n  command: /bin/true\n");
+        let n = p(
+            "a:\n  command: [\"/bin/sh\", \"-c\", \"echo hi, there\"]\nb:\n  command: /bin/true\n",
+        );
         assert_eq!(
-            n.get("a").unwrap().get("command").unwrap().as_list().unwrap(),
+            n.get("a")
+                .unwrap()
+                .get("command")
+                .unwrap()
+                .as_list()
+                .unwrap(),
             vec!["/bin/sh", "-c", "echo hi, there"]
         );
         assert_eq!(
-            n.get("b").unwrap().get("command").unwrap().as_list().unwrap(),
+            n.get("b")
+                .unwrap()
+                .get("command")
+                .unwrap()
+                .as_list()
+                .unwrap(),
             vec!["/bin/true"]
         );
     }
@@ -346,7 +358,13 @@ mod tests {
     fn comments_and_blank_lines_are_ignored() {
         let n = p("# top\n\nservices:\n  # inner\n  a:\n    image: x  # trailing\n");
         assert_eq!(
-            n.get("services").unwrap().get("a").unwrap().get("image").unwrap().as_str(),
+            n.get("services")
+                .unwrap()
+                .get("a")
+                .unwrap()
+                .get("image")
+                .unwrap()
+                .as_str(),
             Some("x")
         );
     }

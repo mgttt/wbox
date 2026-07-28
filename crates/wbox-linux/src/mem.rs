@@ -191,9 +191,10 @@ impl Mem {
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> MemResult<()> {
         let mut done = 0usize;
         while done < buf.len() {
-            let a = addr
-                .checked_add(done as u64)
-                .ok_or(Fault { addr, prot: PROT_READ })?;
+            let a = addr.checked_add(done as u64).ok_or(Fault {
+                addr,
+                prot: PROT_READ,
+            })?;
             let off = (a & PAGE_MASK) as usize;
             let n = (PAGE_SIZE as usize - off).min(buf.len() - done);
             let p = self.page(a, PROT_READ)?;
@@ -207,9 +208,10 @@ impl Mem {
     pub fn write(&mut self, addr: u64, buf: &[u8]) -> MemResult<()> {
         let mut done = 0usize;
         while done < buf.len() {
-            let a = addr
-                .checked_add(done as u64)
-                .ok_or(Fault { addr, prot: PROT_WRITE })?;
+            let a = addr.checked_add(done as u64).ok_or(Fault {
+                addr,
+                prot: PROT_WRITE,
+            })?;
             let off = (a & PAGE_MASK) as usize;
             let n = (PAGE_SIZE as usize - off).min(buf.len() - done);
             let p = self.page_mut(a, PROT_WRITE)?;
@@ -244,7 +246,12 @@ impl Mem {
     pub fn fetch(&self, addr: u64, n: usize) -> MemResult<&[u8]> {
         let p = match self.pages.get(&Self::pn(addr)) {
             Some(p) if p.prot & PROT_EXEC != 0 => p,
-            _ => return Err(Fault { addr, prot: PROT_EXEC }),
+            _ => {
+                return Err(Fault {
+                    addr,
+                    prot: PROT_EXEC,
+                })
+            }
         };
         let off = (addr & PAGE_MASK) as usize;
         let end = (off + n).min(PAGE_SIZE as usize);
@@ -255,7 +262,12 @@ impl Mem {
     pub fn fetch_u8(&self, addr: u64) -> MemResult<u8> {
         let p = match self.pages.get(&Self::pn(addr)) {
             Some(p) if p.prot & PROT_EXEC != 0 => p,
-            _ => return Err(Fault { addr, prot: PROT_EXEC }),
+            _ => {
+                return Err(Fault {
+                    addr,
+                    prot: PROT_EXEC,
+                })
+            }
         };
         Ok(p.data[(addr & PAGE_MASK) as usize])
     }
@@ -332,7 +344,10 @@ impl Mem {
                 return Ok(out);
             }
             out.push(b);
-            a = a.checked_add(1).ok_or(Fault { addr: a, prot: PROT_READ })?;
+            a = a.checked_add(1).ok_or(Fault {
+                addr: a,
+                prot: PROT_READ,
+            })?;
         }
         // 超上限按截断处理而不是报错：guest 传了超长路径时，
         // 后续 open 会自然拿到 ENAMETOOLONG，比这里报 fault 更贴近 Linux。
@@ -372,7 +387,10 @@ mod tests {
         let m = Mem::new();
         assert_eq!(
             m.read_u8(0x2000).unwrap_err(),
-            Fault { addr: 0x2000, prot: PROT_READ }
+            Fault {
+                addr: 0x2000,
+                prot: PROT_READ
+            }
         );
     }
 

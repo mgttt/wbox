@@ -99,7 +99,9 @@ fn connect_tunnel(tcp: &mut TcpStream, host: &str, port: u16) -> io::Result<()> 
     } else {
         format!("{host}:{port}")
     };
-    let req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n");
+    let req = format!(
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: keep-alive\r\n\r\n"
+    );
     tcp.write_all(req.as_bytes())?;
     tcp.flush()?;
     // 只读到头部结束，之后的字节属于隧道，必须原样留给 TLS 层。
