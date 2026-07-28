@@ -68,12 +68,16 @@ detached 记录在 `~/.wbox/run/<name>/` 保存 `meta.json`、owner `lock`、
 stdout/stderr 日志与最终 `exit-code`。supervisor 先写退出码、再释放 owner 锁；
 `wait` 和 `inspect` 因而读取同一事实源。异常崩溃没有退出码时保持 unknown。
 
-Windows OCI bind volume 的规划入口是 Blink VFS `hostfs`，不是
-`BLINK_OVERLAYS`。宿主根目录将由父进程预开并通过 handle list 精确继承，
-hostfs 以该 HANDLE 为锚；不能通过递归修改用户 ACL 或扩大 `WBOX_ROOT` 实现。
-`:ro` 只有在 VFS 每个路径型、fd 型与 mmap 修改入口都执行 `MS_RDONLY` 后才算成立。
+Windows OCI bind volume 的规划入口是 `crates/wbox-linux` 的 guest VFS
+（`syscall/fs.rs`）。此前写的是 "Blink VFS `hostfs`" —— 那份 C 实现已随
+`vendor/blink` 删除，规划口径不变但落点换了。宿主根目录将由父进程预开并通过
+handle list 精确继承，guest VFS 以该 HANDLE 为锚；不能通过递归修改用户 ACL
+或扩大 `WBOX_ROOT` 实现。`:ro` 只有在 VFS 每个路径型、fd 型与 mmap 修改入口
+都执行只读拒绝后才算成立。
 
-`wbox-linux` 是 blink 的 Win32 移植。它维护两层 fd：
+`wbox-linux` 是**第一方纯 Rust 引擎**（不是 blink 的移植；`vendor/blink` 已
+整体删除，两者只在"快照式 fork"这一设计取舍上同源，见 `rust-rewrite.md` §2）。
+它维护两层 fd：
 
 - 每个 guest `System` 的 Linux fd 编号。
 - 进程共享的宿主 VFS/Winsock/Win32 backing。

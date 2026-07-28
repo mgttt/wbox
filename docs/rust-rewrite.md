@@ -75,7 +75,7 @@ wbox-linux: fatal: unsupported instruction at 0x5555555567e5: d9 e8 48 89 e5 ...
 
 ## 3. 已验证到哪一档
 
-门禁：`cargo test -p wbox-linux`（167 项：84 单测 + 61 指令语义 + 22 端到端）。
+门禁：`cargo test -p wbox-linux`（173 项：90 单测 + 61 指令语义 + 22 端到端）。
 指令语义测试用手工汇编的字节序列，**不依赖任何工具链**，Windows CI 上跑的是
 同一批断言。
 
@@ -157,12 +157,15 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 `tests/run-guest-tests.sh` 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）
 ——这套用例本就是这么设计的，见 `tests/KNOWN-FAILURES.md` 的说明。
 
-当前 **5 通过 / 16 失败**（旧引擎除 `t_net_sockopt@wine` 外全通）。
-`t_stress` 已随 `O_TMPFILE` 的实现转绿并从基线移出；`t_exec` 从 7 个失败降到 2 个、
-`t_fork_mem` 从 19 个降到 12 个、`t_proc` 从 300s 超时变成快速失败。
+21 个用例，当前在 Linux 宿主上 **7 通过 / 14 失败**（旧引擎除
+`t_net_sockopt@wine` 外全通）。此前是 5 通过 / 16 失败，收紧来自宿主 symlink
+防护落地：`t_sec_path` 与 `t_sec_linkabs` 转绿并移出基线（H 组整组清空）。
+更早：`t_stress` 已随 `O_TMPFILE` 的实现转绿并从基线移出；`t_exec` 从 7 个失败
+降到 2 个、`t_fork_mem` 从 19 个降到 12 个、`t_proc` 从 300s 超时变成快速失败。
 这是一次真实的 ABI 覆盖回退，逐条根因与分组见
 `tests/known-failures.txt`；门禁靠基线判定，新回归照样变红。
-安全相关的 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通且不在基线内**。
+安全相关的四条（`t_sec_path`、`t_sec_linkabs`、`t_sec_path_abshost`、
+`t_sec_path_relesc`）**全通且都不在基线内**。
 
 ## 5. 第二轮：从"没有 C"收紧到"第一方实现"
 

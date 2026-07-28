@@ -66,7 +66,7 @@ PRD
 0. **新会话先读 `HANDOFF.md`**：那里有"现在到哪了 / 下一步做什么 / 哪些坑别再踩"
    的交接导航，读完再回来看本文的细节。
 1. 阅读本文，确认产品边界、功能状态和当前工作。要判断「某个能力该不该做、
-   该落在哪一格」，§2.4 三节是成套的：§2.4 说**有什么**、§2.4.1 说 wbox
+   该落在哪一格」，§2.4 的**五节是成套的**：§2.4 说**有什么**、§2.4.1 说 wbox
    **怎么做的**（两条隔离链路 × 两种程序格式）、§2.4.2 说**对标物怎么做的、
    差在哪、为什么**、§2.4.3 说**接下来往哪走**、§2.4.4 是**四格等深度的能力
    路线图**（Q1 的条目多数标着「待 Windows 侧确认」，接手前先验证再实现）。
@@ -264,14 +264,14 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest 套件 5 通过 / 16 失败，见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
+| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 7 通过 / 14 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
 | 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
 | 双层隔离 | 有 | AppContainer 套模拟器 |
-| 可写 rootfs 层 | 有 | 私有可写层（远端已实现） |
+| 可写 rootfs 层 | 有 | 运行前把只读镜像缓存复制成容器私有 rootfs，只向该 profile 的确定性 AppContainer SID 授修改权（F4.8 / `acl.rs`）；与 Q3 的 overlay upper 不是同一机制 |
 | **接近原生的性能** | **不做** | 用户态解释/JIT，天花板二 |
 | 卷挂载 `-v` | 计划重做 | 由纯 Rust guest VFS 和 Rust supervisor 实现；已撤回 Blink/C brokerfs 实验，CLI 继续明确拒绝 |
 | **解释执行的启动开销** | 已知 | 真实镜像启动约 20–46 秒（纯解释、无 JIT）。这是 §2.4 「天花板二」的具体数字，不是待修缺陷 |
-| 端口映射 `-p` | 不做（语义不适用）| **guest 的 socket 就是宿主 socket**（blink 无自建网络栈，见 §4.9 W5），guest 绑的端口即宿主端口，没有可映射的东西 |
+| 端口映射 `-p` | 不做（语义不适用）| **guest 的 socket 就是宿主 socket**：两代引擎都没有自建网络栈，当前的 `crates/wbox-linux` 连 socket 族都还返回 `-ENOSYS`（见 §4.9 W5）。guest 绑的端口即宿主端口，没有可映射的东西 |
 | 网络隔离模型 | 部分 | 与 Q3 **不同**：Q3 靠 netns，Q2 靠 AppContainer 不授 `INTERNET_CLIENT`——是能力开关而非独立网络栈 |
 | 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | `--cap-*` / seccomp / healthcheck | 不做 | 同 Q1：均为 Linux 原语，明确报错 |
@@ -387,7 +387,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | | 原生格式 | 异构格式 |
 |---|---|---|
-| Windows 宿主 | PE 直接由内核加载（Q1） | Linux ELF 经用户态 x86-64 执行器（Q2，F4；纯 Rust 化进行中，见 §2.2.1） |
+| Windows 宿主 | PE 直接由内核加载（Q1） | Linux ELF 经用户态 x86-64 执行器（Q2，F4；执行器**已是纯 Rust**（`crates/wbox-linux`），见 §2.2.1；剩余的是 guest ABI 覆盖缺口，不是语言迁移） |
 | Linux 宿主 | ELF 直接由内核加载（Q3 的宿主程序模式） | PE 经系统 Wine（Q4，F6） |
 
 **四格由此得出**：
@@ -708,7 +708,7 @@ S4 在 Linux 上运行 Windows CLI
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
 | F4.R0 移除 C/C++ runtime | 全仓、CI、发布脚本 | `[done]` | `vendor/blink` 已删除；TLS 去 OpenSSL；CI 不再装 C 工具链 |
-| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `crates/wbox-linux` | G1 | `cargo test -p wbox-linux`（167 项）；实测跑通静态/动态 glibc、busybox、Alpine 镜像、shell 的 fork/exec 与管道。x87/socket/MAP_SHARED 仍是缺口，见 `docs/rust-rewrite.md` §4 |
+| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `crates/wbox-linux` | G1 | `cargo test -p wbox-linux`（173 项：90 单测 + 61 指令语义 + 22 端到端）；实测跑通静态/动态 glibc、busybox、Alpine 镜像、shell 的 fork/exec 与管道。VFS 的宿主符号链接逃逸已封死（用户态 `RESOLVE_IN_ROOT`）；x87/socket/MAP_SHARED 仍是缺口，见 `docs/rust-rewrite.md` §4 |
 | F4.R8 合并成单一 `wbox.exe` | `src/runtime` + `EmuBackend` | `[planned]` | 见 §4.9 R8：需先决定进程内执行如何保留"AppContainer 套模拟器"的双层隔离 |
 | F4 Windows 完整 Linux guest 路径 | Rust runtime + F2/F3 | G3 | `WP.3`：portable artifact 在 AppContainer 内执行 BusyBox（当前仍是两个 exe） |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
@@ -891,16 +891,24 @@ F3
 - 网络不可达可在网络型测试中记 SKIP，但本地构造的严格错误路径必须通过。
 - 缓存目录按 registry/repository/reference 隔离，重复 pull 不混入旧 rootfs。
 
-### F4 Windows 上执行 Linux ELF `[active: Rust runtime replacement]`
+### F4 Windows 上执行 Linux ELF `[active]`
+
+> 状态标记从 `[active: Rust runtime replacement]` 改为 `[active]`：**替换本身
+> 已经完成**（引擎是 `crates/wbox-linux`，`vendor/blink` 已删除，F4.R0/R1/R2/R7
+> 均 `[done]`）。这条仍是 `[active]`，缺的是 **guest ABI 覆盖**（R3–R6），
+> 不是语言迁移。
 
 ```text
 F4
 ├── F4.R0 `[done]` 删除 Blink/C 产品依赖与构建链（含 native-tls -> 纯 Rust TLS）
 ├── F4.R1 `[done]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈（含 auxv）
 ├── F4.R2 `[done]` 纯 Rust x86-64 解释执行器（整数全集 + SSE/SSE2）；JIT 未做
-├── F4.R3 `[active]` Linux syscall 与 fd 已可用（约 80 个）；进程族（快照式
-│                   fork/execve/wait4）已做，信号投递未做
-├── F4.R4 `[active]` guest VFS 与 rootfs 前缀约束已做；/dev/{null,zero,full,
+├── F4.R3 `[active]` Linux syscall 与 fd 已可用（`syscall/mod.rs` 的分发表
+│                   现有 76 条）；进程族（快照式 fork/execve/wait4）已做，
+│                   信号投递未做
+├── F4.R4 `[active]` guest VFS 与 rootfs 前缀约束已做，且**已从词法检查升级为
+│                   用户态 `RESOLVE_IN_ROOT`**（逐段解析、符号链接目标重新从
+│                   根展开，见下方"宿主符号链接逃逸"）；/dev/{null,zero,full,
 │                   random,tty} 与 /proc/self/exe 已合成，procfs 其余未做
 ├── F4.R5 `[active]` 动态 glibc、shell 的 fork/exec 与管道已跑通；
 │                   线程、epoll、socket、MAP_SHARED 跨进程共享未做
@@ -910,28 +918,47 @@ F4
 
 首个纯 Rust 纵切落在 `src/runtime`（`MOV r64,imm` + `syscall`，跑手工构造的
 `exit(42)`）。此后引擎移到独立 crate `crates/wbox-linux` 并补齐到可用：
-整数指令全集、SSE/SSE2（含浮点）、约 50 个 syscall、带 `../` 逃逸防护的 VFS。
+整数指令全集、SSE/SSE2（含浮点）、`syscall/mod.rs` 分发表现有的 76 条
+syscall、带逃逸防护的 VFS。
 实测跑通静态与动态 glibc 程序、仓库内静态 busybox 多个 applet、真实动态
 coreutils，以及 `wbox image pull alpine:3.20` 后其中的动态 musl PIE busybox。
-门禁 142 项；`src/runtime` 现在是同一引擎的**进程内入口**，不再是第二份实现。
+门禁 `cargo test -p wbox-linux` 现为 173 项（90 单测 + 61 指令语义 + 22 端到端）；
+`src/runtime` 现在是同一引擎的**进程内入口**，不再是第二份实现。
 指令解码是自己写的（`crates/wbox-linux/src/exec.rs`），不依赖外部 decoder crate，
 因此 `iced-x86` 依赖已移除。
+
+**宿主符号链接逃逸（曾是 Critical，已修）**。VFS 早先只做**词法**规范化：
+挡得住 `../../etc/passwd`，却完全挡不住符号链接——rootfs 里一个 `/evil -> /`
+的链接，guest 打开 `/evil/etc/shadow` 时词法上一路合法，内核在宿主上跟着链接走，
+直接读到宿主的 `/etc/shadow`（修复前 `t_sec_path` 报的就是
+"SANDBOX ESCAPE: open(...) succeeded"）。现改为逐段解析、符号链接目标重新从
+rootfs 根展开，`..` 与绝对目标都作用在"已解析栈"上，栈空即到根——**结构上不可能**
+指到 prefix 之外，语义等同内核的 `openat2(RESOLVE_IN_ROOT)`。不直接用
+`openat2` 是因为它只在 Linux 5.6+，而本 crate 也要在 Windows 宿主上跑；
+一套可移植实现两边共用。代价与残余风险（每段一次 `symlink_metadata`、
+check-then-use 的 TOCTOU 窗口）见 `docs/rust-rewrite.md` §4 第 9 条。
+基线随之收紧：`t_sec_path` 与 `t_sec_linkabs` 移出 `tests/known-failures.txt`，
+四条安全用例全部在基线之外。
 
 F4.R0 已收口：`vendor/blink=452` 个 native 源全部删除；`native-tls ->
 openssl-sys` 这条 Linux 侧 C 依赖先换成 rustls，**现已换成自实现的
 `crates/wbox-tls`**（§2.2.1 第二档，安全声明见 §2.2.2）。仓库里只剩
-`tests/guest=22` 个
+`tests/guest` 下的 21 个
 `.c`，它们是**被模拟执行的 guest 夹具**、不进任何发布物；按下面的计划仍应改写成
 no_std Rust，但那不影响 §2.2.1 的发布验收。
 
-**vendor/blink Rust 替换图**：
+> **以下"vendor/blink Rust 替换图"是历史记录**（迁移期的规划），保留是因为它
+> 说明了"哪些东西决定不迁移、为什么"。图中提到的 `flate2` 等第三方 crate
+> **后来也被换成第一方实现**（§2.2.1 第二档），当前依赖以 §2.2.1 的替换清单为准。
+
+**vendor/blink Rust 替换图**（历史）：
 
 ```text
 不迁移，Rust 接管后直接删除
 ├── blinkenlights TUI、反向调试、BIOS/i8086/显卡模拟
 ├── 非 x86-64 宿主的 JIT 模板与交叉工具链
 ├── third_party 测试镜像、摘要和下载脚本
-└── libz C；产品 OCI gzip 已使用 flate2 的纯 Rust backend
+└── libz C；产品 OCI gzip 当时改用 flate2，现已换成第一方 wbox-codec::deflate
 
 按产品纵切迁移
 ├── R1 自研 decoder + Rust CPU/register/flags/instruction semantics
@@ -943,9 +970,10 @@ no_std Rust，但那不影响 §2.2.1 的发布验收。
 └── R7 可选纯 Rust JIT；解释器产品门禁通过前不引入
 ```
 
-`tests/guest/*.c` 先改为 no_std Rust x86-64 Linux fixtures，作为每个纵切的验收；
-迁移期 Blink 只允许作为差分 oracle，不进入最终构建或发布。每层达到对应 fixture
-与 Alpine/Ubuntu 门禁后，删除其旧测试、CI 和 vendor 依赖，不维持双实现。
+`tests/guest/*.c` 先改为 no_std Rust x86-64 Linux fixtures，作为每个纵切的验收
+——这一条**仍未做**，21 个夹具还是 C（它们是被模拟执行的 guest 输入，不进发布物，
+故不违反 §2.2.1）。"迁移期 Blink 作为差分 oracle"这一条已随 `vendor/blink`
+删除而失效，不再适用。
 
 以下 Blink 结果仅作为纯 Rust 迁移的行为基线，不再证明目标架构完成。历史上直接
 运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
@@ -958,8 +986,10 @@ no_std Rust，但那不影响 §2.2.1 的发布验收。
 - ptrace 未支持。
 
 **F4.3 的覆盖缺口（2026-07-27 发现并修复）**。`wbox run <镜像>` 走的是
-`BLINK_PREFIX=<rootfs>`，而 `scripts/test-matrix.sh` 的 A–F 组**全部不设**
-`BLINK_PREFIX`（guest 的 `/` 直通宿主 `/`）。也就是说产品首页宣传的
+guest 前缀环境变量（首选名现在是 `WBOX_PREFIX`，`BLINK_PREFIX` 保留为兼容名，
+两者引擎都认，见 `crates/wbox-linux/src/syscall/fs.rs`；下文沿用当时的
+`BLINK_PREFIX` 写法），而 `scripts/test-matrix.sh` 的 A–F 组**全部不设**
+该前缀（guest 的 `/` 直通宿主 `/`）。也就是说产品首页宣传的
 "Windows 上跑 Linux OCI 镜像"这条路径，长期**没有任何自动化覆盖**；
 `test-windows-product.ps1` 的 WP.3 第一次执行时暴露出崩溃：
 
@@ -2271,10 +2301,15 @@ docker 一等概念。
 **认不得的过滤键当场报错**（AF.7）：静默忽略会让 `--filter stauts=running` 这种手滑
 变成「列出了全部」，而用户以为自己筛过了。
 
-**多阶段构建（`COPY --from`）认得写法但明确拒绝**（AF.3）。当成普通 `COPY` 更糟——
+**多阶段构建（`COPY --from`）当时认得写法但明确拒绝**（AF.3）。当成普通 `COPY` 更糟——
 找不到同名文件时报一个与真实原因无关的错，找得到则**悄悄打包了错的东西**。
 它要求把每个 `FROM` 分成独立阶段各建一棵 rootfs，是 `run_build` 的结构性改造；
-不在同一轮里既动那个函数又赶别的功能，列进 §2.4.3 的下一步。
+不在同一轮里既动那个函数又赶别的功能，列进了 §2.4.3 的下一步。
+
+> **这一段已被 F9.39 取代**：多阶段构建随后实现了（门禁 MS.1–MS.5），
+> `COPY --from=<阶段名>` 现在**正常工作**而不是拒绝。保留这段是因为 AF.3
+> 这个门禁 ID 仍在脚本里，且"为什么当时选择拒绝而不是当普通 COPY"的论证
+> 对下一次遇到同类取舍仍然有效。当前行为以 F9.39 为准。
 
 #### F9.39 多阶段构建
 
@@ -2590,10 +2625,11 @@ TODO-LINUX
 ├── L6 pod 抽象是否值得做                                 [done] 结论是不做
 ├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
 ├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
-├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁
-├── L9 Linux native / Wine 共用后端验收当前失败            [active] 待取得失败断言
+├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁；见下方 L8
+├── L9 Linux native / Wine 共用后端验收当前失败            [done] 见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
-└── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
+├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
+└── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ```
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
@@ -2775,6 +2811,50 @@ Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不�
 失败的实现也变绿）、`lying_size_header_does_not_allocate`、
 `absurd_size_header_is_rejected_outright`。
 
+##### L8 `cp` 穿过 upper/rootfs 中间符号链接 `[Linux agent]` `[active]`
+
+**仍未修，已核对代码确认。** `wbox cp`、`build` 的 `COPY`/`ADD` 目标、以及
+F9.39 的 `COPY --from` 共用 `build::resolve_rootfs_path`，而那个函数是
+**纯词法**的：逐段消解 `..`、拒绝逃出 rootfs，但**完全不看符号链接**。
+这与 L7 修掉的是同一形态的洞（"路径词法合法但经由链接指到别处"），只是
+入口不同——L7 修的是归档解包，本条是 `cp`/`COPY` 的目标路径解析。
+
+**已有的两处正确做法可直接复用**，不必新设计：`wbox_codec::tar::safe_join`
+（逐段确认中间路径不是符号链接，缺失的段按目录创建；L7 与卷挂载点都用它），
+以及 `crates/wbox-linux` VFS 的用户态 `RESOLVE_IN_ROOT`（逐段解析、链接目标
+重新从根展开）。
+
+**判据**（缺一不可）：容器 rootfs 里放一个 `/evil -> /tmp`（或指向宿主的
+绝对链接），`wbox cp <文件> <容器>:/evil/pwned` 必须失败且宿主 `/tmp` 下
+**没有**出现该文件；反向用例要证明正常的嵌套路径仍然拷得进去——只测"挡得住"
+的话，一个恒失败的实现也能变绿（这条判据形状与 L7 的
+`unpack_in_still_allows_normal_nested_paths` 一致）。
+
+##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[done]`
+
+**已取得失败断言。** 原条目是"验收当前失败，待取得失败断言"——真正的问题
+不是用例红，而是 `test-wine-backend` 这个 **release 前置门禁在全 SKIP 时也返回 0**：
+W 段的依赖检查刻意绕过 `WBOX_LBE_REQUIRE` 直接 `report SKIP`，于是 apt 装包
+悄悄失败、或 wine 包名随发行版改了，这个 job 就**什么都没测却变绿**，还能放行发布。
+
+这是同一个坑的第二个实例：脚本顶部早就记过一次 Ubuntu 24.04 起 AppArmor
+默认关掉 unprivileged userns、脚本老实 SKIP 全部用例并返回 0 的情形。规律已
+写进脚本顶部——**凡是"缺依赖就 SKIP"的段落，都要问一句：有没有哪个 job 的
+全部存在意义就是跑这一段？** 有的话，那个 job 必须有开关把 SKIP 变成 FAIL。
+
+两道判据都已落地（`scripts/test-linux-backend.sh` + `.github/workflows/ci.yml`）：
+
+1. `WBOX_WINE_REQUIRE=1`（**只有** `test-wine-backend` 设）：wine/mingw 缺失
+   记 FAIL 而不是 SKIP。不复用 `WBOX_LBE_REQUIRE` 是因为 wine 对
+   `test-linux-backend` 确实可选，那里 SKIP 是对的。
+2. **空跑兜底**：即便依赖装上了，W 段没让 PASS 计数涨过也判红。第 1 条只挡
+   "依赖缺失"这一种成因，而空跑的成因不止一种（中间步骤失败、`if` 分支写歪），
+   这条直接盯结果。
+
+取证：不设开关时 `SKIP W.1-W.4`、PASS=232 FAIL=0、exit 0（本地行为不变）；
+设 `WBOX_WINE_REQUIRE=1` 时两条 FAIL 都报出来、exit 1。两个开关的对照表见
+`docs/testing.md`。
+
 ##### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
 
 结论是**做了**：`crates/wbox-tls` 是自实现的 TLS 1.3 客户端，`rustls` +
@@ -2788,6 +2868,36 @@ Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不�
 
 取证：`wbox pull alpine:3.20` 走完整自实现栈从 Docker Hub 拉通，
 manifest digest 与换之前**逐字节一致**；随后 `wbox run` 起容器执行 busybox。
+
+##### L12 guest VFS 的宿主符号链接逃逸 `[Linux agent]` `[done]`
+
+**已修，曾是 Critical。** 由 Windows 侧 agent 的代码审查指出，也是
+`tests/known-failures.txt` 里唯一带安全含义的一组（H 组）——代码里原本自己
+注释着"已知缺口"。
+
+**洞**：`crates/wbox-linux` 的 VFS 只做词法规范化，挡得住 `../../etc/passwd`，
+却完全挡不住符号链接。rootfs 里一个 `/evil -> /` 的链接，guest 打开
+`/evil/etc/shadow` 时词法上一路合法，内核在宿主上跟着链接走，直接读到宿主的
+`/etc/shadow`。guest 套件实测确认：修复前 `t_sec_path` 报的就是
+"SANDBOX ESCAPE: open(...) succeeded"。
+
+**修法与残余风险**见 F4.R4 下的"宿主符号链接逃逸"段与
+`docs/rust-rewrite.md` §4 第 9 条。要点：逐段解析、链接目标重新从 rootfs 根
+展开，结构上不可能指到 prefix 之外；不用内核 `openat2(RESOLVE_IN_ROOT)` 是
+因为它只在 Linux 5.6+，而本 crate 也要在 Windows 宿主上跑。
+
+**同一类问题的第二处**（审查另列 High，一并修掉）：卷挂载点的
+`create_dir_all` 会跟着镜像里的符号链接走，把目录建到镜像别处乃至宿主上，
+随后的 bind mount 也就挂到了那个位置。改成复用 `wbox_codec::tar::safe_join`，
+末段另判不得为符号链接（`src/backend/linux_ns.rs`）。
+
+**基线随之收紧**：guest 套件 5 PASS → 7 PASS，`t_sec_path` 与 `t_sec_linkabs`
+移出 `tests/known-failures.txt`，H 组整组清空，四条安全用例全部在基线之外。
+判据非空已验证——临时退回旧实现，新增用例当场读到宿主文件内容而变红。
+
+**与 L7 的分工**：L7 修的是**归档解包**（`load`/`import`/`ADD`）的同形态洞，
+本条修的是 **guest 运行期**的路径解析。剩下未修的同形态入口是 L8
+（`cp`/`COPY` 的目标路径）。
 
 ##### W5 Q2 的端口映射 `-p` 取证 `[Linux agent]` `[done：结论是语义不适用]`
 
@@ -2821,9 +2931,15 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 ### N1 可移植性
 
 - Rust stable；Windows 主目标 `x86_64-pc-windows-msvc`。
-- Windows 发布物为单一 Rust `wbox.exe`；Linux guest runtime 内置于同一二进制。
+- Windows 发布物当前是**两个**纯 Rust exe：`wbox.exe`（CLI/supervisor）与
+  `wbox-linux.exe`（Linux guest 引擎）。同一份 `crates/wbox-linux` 同时产出
+  bin 形态（`EmuBackend` 用）与 lib 形态（`src/runtime` 的进程内入口），
+  不是两份实现。**合并成单文件是 §4.9 R8 的待决项**，卡点是"合并后
+  AppContainer 套模拟器的双层隔离怎么算"，不是 Rust-only 约束——两个 exe
+  都是纯 Rust，不违反 §2.2.1。
 - 不引入后台服务、驱动、tokio 或 clap。
-- release 保持单文件可复制；完整 Windows 包仅含 `wbox.exe` 及校验文件。
+- release 保持免安装、可直接复制；完整 Windows 包为 `wbox.exe` +
+  `wbox-linux.exe` + `SHA256SUMS.txt`，不含任何运行时 DLL（`WP.4` 盯这条）。
 
 ### N2 失败语义
 
@@ -2906,10 +3022,10 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
 2. `[done]` F4.R0–F4.R4：C/C++ 依赖已清零，纯 Rust ELF64 loader、初始栈、
-   x86-64 整数指令全集 + SSE/SSE2、约 50 个 syscall 与 VFS 前缀约束均已落地
-   并有门禁（167 项）。进程族（快照式 fork/execve/wait4）已补齐，Windows
-   产品用例 WP.3W 随之转绿。下一步是 §4.9 R8（单一 exe）与
-   x87/socket/MAP_SHARED 三个缺口。
+   x86-64 整数指令全集 + SSE/SSE2、76 条 syscall 与 VFS 前缀约束均已落地
+   并有门禁（173 项）。进程族（快照式 fork/execve/wait4）已补齐，Windows
+   产品用例 WP.3W 随之转绿；VFS 的宿主符号链接逃逸已封死（§4.9 L12）。
+   下一步是 §4.9 R8（单一 exe）与 x87/socket/MAP_SHARED 三个缺口。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
