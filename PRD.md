@@ -2245,6 +2245,34 @@ FAIL  RT.5 start 已退出容器 —— PID=
 之前的 `6162dc6` / `44cbd0a` 上 RT.* 就已经红了，`2d05db7` 及更早是绿的。
 与 F9.26 `restart`、F9.32 `pause`、F9.33 `inspect` 这三次改动同期。
 
+**失败集合已经漂移，重记一次（2026-07-28）**。`main`（`40e4db6`，run 30325802052）
+与其上的 PR 分支（`29de54b`，run 30329413767）**两边逐条一致**，
+`test-linux-backend` 与 `test-wine-backend` 各 `FAIL=7`：
+
+```text
+FAIL  MS.3  阶段目录残留 —— .wbox-stage-<pid>-0 未清理
+FAIL  INS.1 Mounts —— 容器内挂载数=… 已退出，无法 exec
+FAIL  INS.4 NetworkMode 三态 —— netns 相同=否
+FAIL  RT.1  restart 生效 —— 前=<pid> 后=（应都非空且不同）
+FAIL  RT.2  沿用原配置 —— 容器内 hostname=… 已退出，无法 exec
+FAIL  RT.4  重启已退出容器 —— PID=
+FAIL  RT.5  start 已退出容器 —— PID=
+```
+
+与上一份相比：**`PZ.1` 变成通过**，**新增 `MS.3` 与 `INS.4`**。
+"基线内用例变通过也要变红"这条纪律在这里就是这个意思——`PZ.1` 转绿说明根因
+动过，不该继续挂在这条里；`MS.3`/`INS.4` 则是本条要一并解释的新现象。
+
+**只在 CI 复现，本地容器不复现。** 同一个脚本在开发容器里跑 `232 PASS / 0 FAIL /
+2 SKIP`。所以这**不是"已修"，是环境依赖**：GitHub runner 与本地容器在
+namespace / cgroup / 挂载传播上的差异才是要查的方向。判据里最该先问的一句是
+**"容器为什么起来就退出"**——`INS.4` 的"netns 相同=否"与 `RT.*` 的 `PID=` 空
+很可能是同一个根因的两种表现（对端容器根本没活到能被加入 netns）。
+
+取证下一步：在能复现的机器上，把 `RT.4` 那条单独跑一遍并留下
+supervisor 的 stderr（脚本目前把它丢到 `/dev/null`），先确认是启动失败还是
+启动后立刻退出。**不要在不能复现的机器上改产品代码去猜。**
+
 ### R8 是否把模拟器合并进单一 `wbox.exe` `[Windows agent]` `[待决]`
 
 **背景**：§2.2.1 的 Rust-only 约束已兑现（`vendor/blink` 删除，引擎是

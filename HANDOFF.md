@@ -344,12 +344,13 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
   git clean -fdq tests/guest               # 跑完必清，用例会在 tests/guest 里落文件
   ```
 
-- `scripts/test-linux-backend.sh` → 本机 **232 PASS / 0 FAIL / 2 SKIP**（exit 0）。
-  L9 记录的那六条（`PZ.1` / `INS.1` / `RT.1` / `RT.2` / `RT.4` / `RT.5`）**未复现**。
-  **不要据此把 L9 判为已修**：本轮的改动全在 JSON/摘要/压缩/tar/HTTP 这几层，
-  与 `pause`/`inspect`/`restart` 的容器启动路径无关，更像是环境差异
-  （两处 SKIP 是 cgroup v2 与 mingw 夹具不可用）。谁在能复现的机器上跑到红，
-  再按 L9 的取证步骤走。
+- `scripts/test-linux-backend.sh` → **本机绿、CI 红，两边都要看**：
+  - 开发容器里 **232 PASS / 0 FAIL / 2 SKIP**（exit 0）；
+  - GitHub runner 上 **FAIL=7**：`MS.3` / `INS.1` / `INS.4` / `RT.1` / `RT.2` /
+    `RT.4` / `RT.5`。**`main` 与 PR 分支逐条一致**（run 30325802052 vs
+    30329413767），所以与本轮改动无关。
+  - L9 的失败集合已按这次的实测重记（`PZ.1` 转绿、新增 `MS.3`/`INS.4`），
+    并写明它是**环境依赖**而非已修。**在不能复现的机器上不要改产品代码去猜。**
 - 端到端取证（本轮新增，验的是六个自实现模块串起来能用）：
   `wbox pull alpine:3.20` 成功——匿名 Bearer token → 跨主机重定向到 CDN →
   动态 Huffman 解压真实层 → sha256 校验 → tar 解包；随后 `wbox run` 起容器
