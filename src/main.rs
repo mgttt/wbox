@@ -15,6 +15,8 @@ mod backend;
 // CLI 层：子命令分发、参数解析与 USAGE（纯逻辑跨平台可测）。
 mod cli;
 mod error;
+// 带上下文链的通用错误类型（取代 anyhow，见 fault.rs 模块注释）。
+mod fault;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod oci;
 mod build;

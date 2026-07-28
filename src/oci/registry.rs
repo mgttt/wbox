@@ -10,7 +10,7 @@
 //! 整条 TLS 链路是纯 Rust，没有需要编译或链接的 C 代码。
 
 use crate::error::{ErrKind, KindExt, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 
 /// 单个 HTTP 响应体的上限。镜像层可以很大，但也不该无上限地吃内存。
 const MAX_RESPONSE_BYTES: u64 = 8 << 30; // 8 GiB
@@ -144,7 +144,7 @@ impl RegistryClient {
             other => {
                 return Err(WboxError::new(
                     ErrKind::Registry,
-                    anyhow::anyhow!("不支持的 HTTP method: {other}"),
+                    crate::fail!("不支持的 HTTP method: {other}"),
                 ));
             }
         };
@@ -153,7 +153,7 @@ impl RegistryClient {
             Err(e) => {
                 return Err(WboxError::new(
                     ErrKind::Registry,
-                    anyhow::anyhow!(e).context(format!("网络请求失败: {}", url)),
+                    crate::fail!(e).context(format!("网络请求失败: {}", url)),
                 ));
             }
         };
@@ -239,7 +239,7 @@ impl RegistryClient {
                 resp.status, realm
             )));
         }
-        let v: serde_json::Value = serde_json::from_slice(&resp.body)
+        let v: wbox_codec::json::Value = wbox_codec::json::from_slice(&resp.body)
             .context("token 响应不是合法 JSON")
             .ctx(ErrKind::Registry)?;
         // Docker 返回 token 字段；部分实现用 access_token（OAuth2 风格）
@@ -527,10 +527,9 @@ fn realm_host_allowed(realm: &str, registry: &str) -> bool {
 
 /// 从环境变量构造可选的 Basic 认证头（用于私有 registry 的 token 端点）。
 fn basic_auth_from_env() -> Option<String> {
-    use base64::Engine;
     let u = std::env::var("WBOX_REGISTRY_USER").ok()?;
     let p = std::env::var("WBOX_REGISTRY_PASS").ok()?;
-    let cred = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, p));
+    let cred = wbox_codec::base64::encode(format!("{}:{}", u, p).as_bytes());
     Some(format!("Basic {}", cred))
 }
 

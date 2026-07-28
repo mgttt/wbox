@@ -102,7 +102,7 @@ pub struct ExecContext {
 impl Entry {
     fn to_json(&self) -> String {
         let exec_context = self.exec_context.as_ref().map(|context| {
-            serde_json::json!({
+            wbox_codec::json!({
                 "allow_network": context.allow_network,
                 "workdir": context.workdir,
                 "volumes": context.volumes,
@@ -110,7 +110,7 @@ impl Entry {
                 "network_container": context.network_container,
             })
         });
-        let v = serde_json::json!({
+        let v = wbox_codec::json!({
             "name": self.name,
             "pid": self.pid,
             "created_unix": self.created_unix,
@@ -125,7 +125,7 @@ impl Entry {
     /// 解析 `meta.json`。字段缺失/类型不对一律返回 `None`——状态目录可能被
     /// 用户手改或被上一版 wbox 写过，读不懂就当这条不存在，不要让 `ps` 崩掉。
     fn from_json(text: &str) -> Option<Self> {
-        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        let v: wbox_codec::json::Value = wbox_codec::json::from_str(text).ok()?;
         let exec_context = v.get("exec_context").and_then(|context| {
             if context.is_null() {
                 return None;
@@ -428,9 +428,14 @@ pub fn create_pending(
             stopping: false,
             exec_context,
         };
-        let mut meta = serde_json::from_str::<serde_json::Value>(&entry.to_json())
+        let mut meta = wbox_codec::json::from_str(&entry.to_json())
             .map_err(|e| WboxError::args(format!("生成 created 元数据失败：{}", e)))?;
-        meta["lifecycle"] = serde_json::Value::String("created".to_string());
+        meta.as_object_mut()
+            .ok_or_else(|| WboxError::args("created 元数据不是 JSON 对象"))?
+            .insert(
+                "lifecycle".to_string(),
+                wbox_codec::json::Value::String("created".to_string()),
+            );
         std::fs::write(dir.join("meta.json"), meta.to_string())
             .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
         std::fs::write(dir.join(CREATED_MARKER), b"")
@@ -447,7 +452,7 @@ pub fn create_pending(
 /// 权限收到 0600：argv 里可能有 `-e TOKEN=...` 这类东西，它不该比原命令行
 /// 更容易被同机别的用户读到。
 fn write_run_config(path: &Path, args: &[String]) -> Result<()> {
-    let config = serde_json::json!({ "schema": 1, "run_args": args });
+    let config = wbox_codec::json!({ "schema": 1, "run_args": args });
     std::fs::write(path, config.to_string()).map_err(|e| {
         WboxError::args(format!("写 {} 失败：{}", path.display(), e))
     })?;
@@ -485,7 +490,7 @@ fn read_create_args(dir: &Path) -> Result<Vec<String>> {
             }
         },
     };
-    let value: serde_json::Value = serde_json::from_str(&text)
+    let value: wbox_codec::json::Value = wbox_codec::json::from_str(&text)
         .map_err(|e| WboxError::args(format!("{} 不可读：{}", from, e)))?;
     value
         .get("run_args")
@@ -1355,7 +1360,7 @@ mod tests {
     /// 用 `?` 取这两个字段的话，上一版 wbox 写的容器会从 `ps` 里整个消失。
     #[test]
     fn exec_context_without_the_newer_fields_still_parses() {
-        let text = serde_json::json!({
+        let text = wbox_codec::json!({
             "name": "old", "pid": 7, "created_unix": 1, "cmd": ["x"], "target": "t",
             "exec_context": { "allow_network": true, "workdir": "/w" },
         })

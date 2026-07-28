@@ -24,7 +24,7 @@ pub mod push;
 pub mod registry;
 
 use crate::error::{ErrKind, KindExt, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 use std::path::PathBuf;
 
 /// Docker Hub 默认 registry 主机。
@@ -321,7 +321,7 @@ pub fn list_refs() -> crate::error::Result<Vec<CachedImage>> {
                 // 读 layers.json 拿层数；失败则显示 "-"
                 let layers = std::fs::read_to_string(tag_entry.path().join("layers.json"))
                     .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|s| wbox_codec::json::from_str(&s).ok())
                     .and_then(|v| v.as_array().map(|a| a.len().to_string()))
                     .unwrap_or_else(|| "-".to_string());
                 let reference = restore_reference(&registry, &dir_name, &tag)

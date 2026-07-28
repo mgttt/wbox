@@ -7,8 +7,7 @@
 use super::registry::RegistryClient;
 use super::ImageRef;
 use crate::error::{ErrKind, KindExt, WboxError};
-use anyhow::Context;
-use sha2::Digest;
+use crate::fault::Context;
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -31,13 +30,13 @@ pub struct PullSummary {
 
 static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn sibling_path(dest: &Path, role: &str, unique: bool) -> anyhow::Result<PathBuf> {
+fn sibling_path(dest: &Path, role: &str, unique: bool) -> crate::fault::Result<PathBuf> {
     let parent = dest
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少父目录：{}", dest.display()))?;
+        .ok_or_else(|| crate::fail!("镜像缓存路径缺少父目录：{}", dest.display()))?;
     let name = dest
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少目录名：{}", dest.display()))?
+        .ok_or_else(|| crate::fail!("镜像缓存路径缺少目录名：{}", dest.display()))?
         .to_string_lossy();
     if unique {
         let serial = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -59,10 +58,10 @@ struct StagingDir {
 }
 
 impl StagingDir {
-    fn create(dest: &Path) -> anyhow::Result<Self> {
+    fn create(dest: &Path) -> crate::fault::Result<Self> {
         let parent = dest
             .parent()
-            .ok_or_else(|| anyhow::anyhow!("镜像缓存路径缺少父目录：{}", dest.display()))?;
+            .ok_or_else(|| crate::fail!("镜像缓存路径缺少父目录：{}", dest.display()))?;
         std::fs::create_dir_all(parent)?;
         let path = sibling_path(dest, "staging", true)?;
         std::fs::create_dir(&path)?;
@@ -87,7 +86,7 @@ struct PullCommitLock {
 }
 
 impl PullCommitLock {
-    fn acquire(dest: &Path, timeout: Duration) -> anyhow::Result<Self> {
+    fn acquire(dest: &Path, timeout: Duration) -> crate::fault::Result<Self> {
         let path = sibling_path(dest, "pull.lock", false)?;
         let deadline = Instant::now() + timeout;
         loop {
@@ -95,7 +94,7 @@ impl PullCommitLock {
                 Ok(()) => return Ok(Self { path }),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     if Instant::now() >= deadline {
-                        anyhow::bail!(
+                        crate::bail!(
                             "等待镜像缓存提交锁超时：{}（可能有另一 pull 正在提交）",
                             path.display()
                         );
@@ -118,7 +117,7 @@ fn replace_cache_dir_with(
     staging: &Path,
     dest: &Path,
     mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-) -> anyhow::Result<()> {
+) -> crate::fault::Result<()> {
     if !dest.exists() {
         rename(staging, dest).with_context(|| {
             format!(
@@ -141,14 +140,14 @@ fn replace_cache_dir_with(
 
     if let Err(install_error) = rename(staging, dest) {
         if let Err(rollback_error) = rename(&backup, dest) {
-            anyhow::bail!(
+            crate::bail!(
                 "提交新镜像缓存失败：{}；回滚旧缓存也失败：{}。旧缓存保留在 {}",
                 install_error,
                 rollback_error,
                 backup.display()
             );
         }
-        return Err(anyhow::anyhow!(
+        return Err(crate::fail!(
             "提交新镜像缓存失败，旧缓存已恢复：{}",
             install_error
         ));
@@ -164,7 +163,7 @@ fn replace_cache_dir_with(
     Ok(())
 }
 
-fn replace_cache_dir(staging: &Path, dest: &Path) -> anyhow::Result<()> {
+fn replace_cache_dir(staging: &Path, dest: &Path) -> crate::fault::Result<()> {
     replace_cache_dir_with(staging, dest, |from, to| std::fs::rename(from, to))
 }
 
@@ -191,7 +190,7 @@ pub fn pull_image(
     }
     let (manifest_bytes, manifest_digest) = if is_index(&ctype) {
         // manifest list：按 os/arch 选择子 manifest（Windows 宿主默认拉 linux/amd64）
-        let index: serde_json::Value = serde_json::from_slice(&body)
+        let index: wbox_codec::json::Value = wbox_codec::json::from_slice(&body)
             .context("解析 manifest index 失败")
             .ctx(ErrKind::Registry)?;
         let digest = select_manifest(&index, os, arch)?;
@@ -215,7 +214,7 @@ pub fn pull_image(
         (body, d)
     };
 
-    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+    let manifest: wbox_codec::json::Value = wbox_codec::json::from_slice(&manifest_bytes)
         .context("解析 image manifest 失败")
         .ctx(ErrKind::Registry)?;
 
@@ -295,7 +294,7 @@ pub fn pull_image(
         .and_then(|_| {
             std::fs::write(
                 staging.path.join("layers.json"),
-                serde_json::to_string_pretty(&layer_digests).unwrap(),
+                wbox_codec::json::Value::from(&layer_digests).to_string_pretty(),
             )
         })
         .context("写入镜像元数据失败")
@@ -318,7 +317,7 @@ pub fn pull_image(
 
 /// 从 manifest index 中挑选匹配 os/arch 的子 manifest digest。
 fn select_manifest(
-    index: &serde_json::Value,
+    index: &wbox_codec::json::Value,
     os: &str,
     arch: &str,
 ) -> crate::error::Result<String> {
@@ -369,12 +368,12 @@ fn select_manifest(
 }
 
 /// sha256 digest 校验：`digest` 形如 `sha256:<hex>`。
-pub fn verify_digest(digest: &str, data: &[u8]) -> anyhow::Result<()> {
+pub fn verify_digest(digest: &str, data: &[u8]) -> crate::fault::Result<()> {
     let expected = digest
         .strip_prefix("sha256:")
-        .ok_or_else(|| anyhow::anyhow!("不支持的 digest 算法（仅支持 sha256）：{}", digest))?;
+        .ok_or_else(|| crate::fail!("不支持的 digest 算法（仅支持 sha256）：{}", digest))?;
     let actual = hex_sha256(data);
-    anyhow::ensure!(
+    crate::ensure!(
         actual == expected,
         "digest 不匹配：期望 sha256:{}，实际 sha256:{}",
         expected,
@@ -384,9 +383,7 @@ pub fn verify_digest(digest: &str, data: &[u8]) -> anyhow::Result<()> {
 }
 
 fn hex_sha256(data: &[u8]) -> String {
-    let mut h = sha2::Sha256::new();
-    h.update(data);
-    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    wbox_codec::sha256_hex(data)
 }
 
 fn sha256_hex_prefixed(data: &[u8]) -> String {
@@ -405,10 +402,10 @@ fn is_zstd(data: &[u8]) -> bool {
 
 /// 按 layer mediaType（辅以小端 magic 嗅探）把 blob 解成 tar 字节。
 /// 显式拒绝不支持的压缩格式（zstd 等），而不是误当 tar 解出垃圾。
-fn decompress_layer(blob: &[u8], media_type: &str) -> anyhow::Result<Vec<u8>> {
+fn decompress_layer(blob: &[u8], media_type: &str) -> crate::fault::Result<Vec<u8>> {
     let mt = media_type.to_ascii_lowercase();
     if mt.contains("zstd") || (mt.is_empty() && is_zstd(blob)) {
-        anyhow::bail!(
+        crate::bail!(
             "不支持的压缩格式：zstd（mediaType={}），仅支持 gzip 与未压缩 tar",
             media_type
         );
@@ -416,14 +413,14 @@ fn decompress_layer(blob: &[u8], media_type: &str) -> anyhow::Result<Vec<u8>> {
     let want_gzip = mt.contains("gzip") || (mt.is_empty() && is_gzip(blob));
     if want_gzip {
         let mut out = Vec::new();
-        flate2::read::GzDecoder::new(blob).read_to_end(&mut out)?;
+        wbox_codec::deflate::GzDecoder::new(blob).read_to_end(&mut out)?;
         Ok(out)
     } else if mt.is_empty() || mt.ends_with("+tar") || mt.contains("tar") || mt.contains("layer") {
         // 未压缩 tar：application/vnd.oci.image.layer.v1.tar、
         // application/vnd.docker.image.rootfs.diff.tar 等。
         Ok(blob.to_vec())
     } else {
-        anyhow::bail!("不支持的 layer 压缩/格式：mediaType={}", media_type)
+        crate::bail!("不支持的 layer 压缩/格式：mediaType={}", media_type)
     }
 }
 
@@ -488,7 +485,7 @@ fn resolve_with_symlinks(
     root: &Path,
     rel: &Path,
     symlinks: &SymlinkState,
-) -> anyhow::Result<PathBuf> {
+) -> crate::fault::Result<PathBuf> {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::path::Component;
@@ -506,10 +503,10 @@ fn resolve_with_symlinks(
         cur.push(&comp);
         if let Some(target) = symlinks.links.get(&cur) {
             hops += 1;
-            anyhow::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
+            crate::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
             let parent = cur.parent().unwrap_or_else(|| Path::new(""));
             let normalized = normalize_symlink_target(parent, target)
-                .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target))?;
+                .ok_or_else(|| crate::fail!("符号链接目标越出 rootfs：{:?}", target))?;
             cur.clear();
             for component in normalized.components().rev() {
                 if let Component::Normal(name) = component {
@@ -523,11 +520,11 @@ fn resolve_with_symlinks(
         if let Ok(md) = std::fs::symlink_metadata(&abs) {
             if md.file_type().is_symlink() {
                 hops += 1;
-                anyhow::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
+                crate::ensure!(hops <= 32, "符号链接层级过深：{:?}", rel);
                 let target = std::fs::read_link(&abs)?;
                 let parent = cur.parent().unwrap_or_else(|| Path::new(""));
                 let normalized = normalize_symlink_target(parent, &target)
-                    .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target))?;
+                    .ok_or_else(|| crate::fail!("符号链接目标越出 rootfs：{:?}", target))?;
                 cur.clear();
                 for component in normalized.components().rev() {
                     if let Component::Normal(name) = component {
@@ -549,10 +546,10 @@ fn materialize_symlink_as_copy(
     link_rel: &Path,
     target_raw: &Path,
     symlinks: &SymlinkState,
-) -> anyhow::Result<()> {
+) -> crate::fault::Result<()> {
     let parent_rel = link_rel.parent().unwrap_or_else(|| Path::new(""));
     let norm = normalize_symlink_target(parent_rel, target_raw)
-        .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target_raw))?;
+        .ok_or_else(|| crate::fail!("符号链接目标越出 rootfs：{:?}", target_raw))?;
     let src = resolve_with_symlinks(root, &norm, symlinks)?;
     let dst = root.join(link_rel);
     remove_path(&dst)?;
@@ -563,13 +560,13 @@ fn materialize_symlink_as_copy(
             std::fs::create_dir_all(p)?;
         }
         std::fs::copy(&src, &dst).map_err(|e| {
-            anyhow::anyhow!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e)
+            crate::fail!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e)
         })?;
     }
     Ok(())
 }
 
-fn remove_path(path: &Path) -> anyhow::Result<()> {
+fn remove_path(path: &Path) -> crate::fault::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(md) if md.is_dir() && !md.file_type().is_symlink() => std::fs::remove_dir_all(path)?,
         Ok(_) => std::fs::remove_file(path)?,
@@ -580,7 +577,7 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(any(windows, test))]
-fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> crate::fault::Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
@@ -595,7 +592,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> anyhow::Result<()> {
+fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> crate::fault::Result<()> {
     for link_rel in symlinks.links.keys() {
         let dst = root.join(link_rel);
         remove_path(&dst)?;
@@ -618,7 +615,7 @@ fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> anyhow::Result<()>
         for (link_rel, target_raw) in &symlinks.links {
             let parent = link_rel.parent().unwrap_or_else(|| Path::new(""));
             let target_rel = normalize_symlink_target(parent, target_raw)
-                .ok_or_else(|| anyhow::anyhow!("符号链接目标越出 rootfs：{:?}", target_raw))?;
+                .ok_or_else(|| crate::fail!("符号链接目标越出 rootfs：{:?}", target_raw))?;
             let target = resolve_with_symlinks(root, &target_rel, symlinks)?;
             if target.is_dir() {
                 directories.push((link_rel, target_raw));
@@ -659,7 +656,7 @@ fn finalize_symlinks(root: &Path, symlinks: &SymlinkState) -> anyhow::Result<()>
 /// - H3：symlink 在所有层应用期间保存在逻辑链接表中，最终才落地；Windows
 ///   无 SeCreateSymbolicLinkPrivilege 时把最终目标内容复制到链接位置。
 #[cfg(test)]
-fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> anyhow::Result<()> {
+fn unpack_layer(blob: &[u8], dest: &Path, media_type: &str) -> crate::fault::Result<()> {
     let mut symlinks = SymlinkState::default();
     unpack_layer_with_state(blob, dest, media_type, &mut symlinks)?;
     finalize_symlinks(dest, &symlinks)
@@ -670,13 +667,13 @@ fn unpack_layer_with_state(
     dest: &Path,
     media_type: &str,
     symlinks: &mut SymlinkState,
-) -> anyhow::Result<()> {
+) -> crate::fault::Result<()> {
     let tar_bytes = decompress_layer(blob, media_type)?;
 
     // ---- 第一遍：收集本层 opaque 目录集合，并在解包任何条目之前应用清理（L7），
     // 避免 opq 条目排在同层新文件之后时误删同层先前条目。
     {
-        let mut archive = tar::Archive::new(&tar_bytes[..]);
+        let mut archive = wbox_codec::tar::Archive::new(&tar_bytes[..]);
         let mut opq_dirs: Vec<PathBuf> = Vec::new();
         for entry in archive.entries()? {
             let entry = entry?;
@@ -727,14 +724,14 @@ fn unpack_layer_with_state(
     }
 
     // ---- 第二遍：正式解包 ----
-    let mut archive = tar::Archive::new(&tar_bytes[..]);
+    let mut archive = wbox_codec::tar::Archive::new(&tar_bytes[..]);
     // 硬链接目标可能在其链接条目之后才出现（如 ubuntu 层），
     // 先记录、解包完成后再统一创建：(链接路径, 目标路径)，均为 rootfs 相对路径。
     let mut hardlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
 
     // 单遍流式处理：遇到 whiteout 立即删除目标（规范保证 whiteout 先于目标出现）。
     for entry in archive.entries()? {
-        let mut entry = entry?;
+        let entry = entry?;
         let path = entry.path()?.into_owned();
         let comps: Vec<_> = path.components().collect();
         // 路径穿越防护：拒绝含 .. 或根/前缀成分的条目
@@ -792,7 +789,7 @@ fn unpack_layer_with_state(
         let entry_type = entry.header().entry_type();
 
         // 硬链接：延迟创建（目标可能尚未解包）
-        if entry_type == tar::EntryType::Link {
+        if entry_type == wbox_codec::tar::EntryType::Link {
             if let Ok(Some(target)) = entry.link_name() {
                 let tcomps: Vec<_> = target.components().collect();
                 if !tcomps.iter().any(|c| {
@@ -811,7 +808,7 @@ fn unpack_layer_with_state(
 
         // 符号链接先进入跨层逻辑表。等所有层完成后再统一落地，避免 Windows
         // 的复制降级成为旧快照，也让 dangling 目标有机会在后续层出现。
-        if entry_type == tar::EntryType::Symlink {
+        if entry_type == wbox_codec::tar::EntryType::Symlink {
             let target = match entry.link_name() {
                 Ok(Some(t)) => t.into_owned(),
                 _ => continue,
@@ -831,7 +828,7 @@ fn unpack_layer_with_state(
 
         // 目录头只确保目录存在，不会删除目录原有内容；因此只能替换同路径的
         // 逻辑链接，不能清掉前层留在该目录下的链接。普通文件才覆盖整棵同名路径。
-        if entry_type == tar::EntryType::Directory {
+        if entry_type == wbox_codec::tar::EntryType::Directory {
             symlinks.remove_exact(&path);
         } else {
             symlinks.remove_at_or_below(&path);
@@ -860,7 +857,7 @@ fn unpack_layer_with_state(
         std::fs::remove_file(&link_abs).ok();
         if std::fs::hard_link(&target_abs, &link_abs).is_err() {
             std::fs::copy(&target_abs, &link_abs)
-                .map_err(|e| anyhow::anyhow!("创建硬链接/复制失败 {:?}: {}", link_rel, e))?;
+                .map_err(|e| crate::fail!("创建硬链接/复制失败 {:?}: {}", link_rel, e))?;
         }
     }
     Ok(())
@@ -872,9 +869,9 @@ mod tests {
 
     /// 构造一个内存 tar（未压缩），条目为 (路径, 内容)。
     fn make_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut b = tar::Builder::new(Vec::new());
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
         for (p, data) in entries {
-            let mut h = tar::Header::new_gnu();
+            let mut h = wbox_codec::tar::Header::new_gnu();
             h.set_size(data.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
@@ -888,17 +885,17 @@ mod tests {
         files: &[(&'a str, &'a [u8])],
         symlinks: &[(&'a str, &'a str)],
     ) -> Vec<u8> {
-        let mut b = tar::Builder::new(Vec::new());
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
         for (p, data) in files {
-            let mut h = tar::Header::new_gnu();
+            let mut h = wbox_codec::tar::Header::new_gnu();
             h.set_size(data.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
             b.append_data(&mut h, p, *data).unwrap();
         }
         for (p, target) in symlinks {
-            let mut h = tar::Header::new_gnu();
-            h.set_entry_type(tar::EntryType::Symlink);
+            let mut h = wbox_codec::tar::Header::new_gnu();
+            h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
             h.set_size(0);
             h.set_mode(0o777);
             h.set_cksum();
@@ -914,9 +911,11 @@ mod tests {
     }
 
     fn gzip(data: &[u8]) -> Vec<u8> {
-        use flate2::write::GzEncoder;
         use std::io::Write;
-        let mut e = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut e = wbox_codec::deflate::GzEncoder::new(
+            Vec::new(),
+            wbox_codec::deflate::Level::Fast,
+        );
         e.write_all(data).unwrap();
         e.finish().unwrap()
     }
@@ -1080,12 +1079,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wbox-test-trav-{}", std::process::id()));
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        // tar crate 的 Builder 会拒绝 `..`，手动构造 header 字节以模拟恶意归档
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
+        // 归档里的路径带 `..`。写入侧**故意不过滤**（见 wbox_codec::tar 模块
+        // 注释：路径安全是解包方的职责），所以这里能直接造出恶意归档——
+        // 要验的正是解包这一侧拦不拦得住。
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
         h.set_size(1);
         h.set_mode(0o644);
-        h.as_mut_bytes()[..11].copy_from_slice(b"../evil.txt");
+        h.set_path("../evil.txt");
         h.set_cksum();
         b.append(&h, &b"e"[..]).unwrap(); // append 不覆写 header 中的路径字段
         let l = b.into_inner().unwrap();
@@ -1138,9 +1139,9 @@ mod tests {
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         // 合法层：目录 real/ 与指向它的同级 symlink alias -> real，再经 alias 写入
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Symlink);
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
+        h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
         h.set_size(0);
         h.set_mode(0o777);
         h.set_cksum();
@@ -1149,7 +1150,7 @@ mod tests {
             ("real/keep.txt", b"k".as_slice()),
             ("alias/new.txt", b"n".as_slice()),
         ] {
-            let mut h = tar::Header::new_gnu();
+            let mut h = wbox_codec::tar::Header::new_gnu();
             h.set_size(data.len() as u64);
             h.set_mode(0o644);
             h.set_cksum();
@@ -1317,16 +1318,16 @@ mod tests {
 
         let mut second = Vec::new();
         {
-            let mut b = tar::Builder::new(&mut second);
-            let mut dir_header = tar::Header::new_gnu();
-            dir_header.set_entry_type(tar::EntryType::Directory);
+            let mut b = wbox_codec::tar::Builder::new(&mut second);
+            let mut dir_header = wbox_codec::tar::Header::new_gnu();
+            dir_header.set_entry_type(wbox_codec::tar::EntryType::Directory);
             dir_header.set_mode(0o755);
             dir_header.set_size(0);
             dir_header.set_cksum();
             b.append_data(&mut dir_header, "usr/local/bin/", &[][..]).unwrap();
 
-            let mut link_header = tar::Header::new_gnu();
-            link_header.set_entry_type(tar::EntryType::Symlink);
+            let mut link_header = wbox_codec::tar::Header::new_gnu();
+            link_header.set_entry_type(wbox_codec::tar::EntryType::Symlink);
             link_header.set_mode(0o777);
             link_header.set_size(0);
             link_header.set_cksum();
@@ -1348,14 +1349,14 @@ mod tests {
         let dir = tmpdir("symorder");
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Symlink);
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
+        h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
         h.set_size(0);
         h.set_mode(0o777);
         h.set_cksum();
         b.append_link(&mut h, "link", "/target.txt").unwrap();
-        let mut h = tar::Header::new_gnu();
+        let mut h = wbox_codec::tar::Header::new_gnu();
         h.set_size(1);
         h.set_mode(0o755);
         h.set_cksum();
@@ -1381,22 +1382,22 @@ mod tests {
 
         // Alpine 3.20 的层以绝对 symlink 安装 applet；ash 在 busybox
         // 本体之前，cat/sh 在其后。Windows 上都必须解析到容器根。
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Symlink);
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
+        h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
         h.set_size(0);
         h.set_mode(0o777);
         h.set_cksum();
         b.append_link(&mut h, "bin/ash", "/bin/busybox").unwrap();
-        let mut h = tar::Header::new_gnu();
+        let mut h = wbox_codec::tar::Header::new_gnu();
         h.set_size(7);
         h.set_mode(0o755);
         h.set_cksum();
         b.append_data(&mut h, "bin/busybox", &b"busybox"[..])
             .unwrap();
         for applet in ["bin/cat", "bin/sh"] {
-            let mut h = tar::Header::new_gnu();
-            h.set_entry_type(tar::EntryType::Symlink);
+            let mut h = wbox_codec::tar::Header::new_gnu();
+            h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
             h.set_size(0);
             h.set_mode(0o777);
             h.set_cksum();
@@ -1429,7 +1430,7 @@ mod tests {
         std::fs::create_dir_all(&rootfs).unwrap();
 
         // bookworm-slim 的目录链接与动态加载器链接都可能先于最终目标出现。
-        let mut b = tar::Builder::new(Vec::new());
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
         for (link, target) in [
             ("lib64", "/usr/lib64"),
             (
@@ -1437,15 +1438,15 @@ mod tests {
                 "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
             ),
         ] {
-            let mut h = tar::Header::new_gnu();
-            h.set_entry_type(tar::EntryType::Symlink);
+            let mut h = wbox_codec::tar::Header::new_gnu();
+            h.set_entry_type(wbox_codec::tar::EntryType::Symlink);
             h.set_size(0);
             h.set_mode(0o777);
             h.set_cksum();
             b.append_link(&mut h, link, target).unwrap();
         }
         let loader = b"elf-loader";
-        let mut h = tar::Header::new_gnu();
+        let mut h = wbox_codec::tar::Header::new_gnu();
         h.set_size(loader.len() as u64);
         h.set_mode(0o755);
         h.set_cksum();
@@ -1556,17 +1557,17 @@ mod tests {
 
     // ---- select_manifest ----
 
-    fn index_with(platforms: &[(&str, &str, &str)]) -> serde_json::Value {
-        let manifests: Vec<serde_json::Value> = platforms
+    fn index_with(platforms: &[(&str, &str, &str)]) -> wbox_codec::json::Value {
+        let manifests: Vec<wbox_codec::json::Value> = platforms
             .iter()
             .map(|(os, arch, digest)| {
-                serde_json::json!({
+                wbox_codec::json!({
                     "digest": digest,
                     "platform": {"os": os, "architecture": arch}
                 })
             })
             .collect();
-        serde_json::json!({"manifests": manifests})
+        wbox_codec::json!({"manifests": manifests})
     }
 
     #[test]
@@ -1623,14 +1624,14 @@ mod tests {
 
     #[test]
     fn select_manifest_missing_manifests_array() {
-        let e = select_manifest(&serde_json::json!({"schemaVersion": 2}), "linux", "amd64")
+        let e = select_manifest(&wbox_codec::json!({"schemaVersion": 2}), "linux", "amd64")
             .unwrap_err();
         assert!(e.to_string().contains("manifests"), "{}", e);
     }
 
     #[test]
     fn select_manifest_match_without_digest_is_error() {
-        let idx = serde_json::json!({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}}]});
+        let idx = wbox_codec::json!({"manifests": [{"platform": {"os": "linux", "architecture": "amd64"}}]});
         let e = select_manifest(&idx, "linux", "amd64").unwrap_err();
         assert!(e.to_string().contains("digest"), "{}", e);
     }
@@ -1702,14 +1703,14 @@ mod tests {
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         // 硬链接排在目标之前，验证延迟创建与不支持 hardlink 时的复制 fallback。
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Link);
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
+        h.set_entry_type(wbox_codec::tar::EntryType::Link);
         h.set_size(0);
         h.set_mode(0o644);
         h.set_cksum();
         b.append_link(&mut h, "bin/alias", "bin/real").unwrap();
-        let mut h = tar::Header::new_gnu();
+        let mut h = wbox_codec::tar::Header::new_gnu();
         h.set_size(5);
         h.set_mode(0o644);
         h.set_cksum();
@@ -1725,9 +1726,9 @@ mod tests {
         let dir = tmpdir("hardlink-trav");
         let rootfs = dir.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        let mut b = tar::Builder::new(Vec::new());
-        let mut h = tar::Header::new_gnu();
-        h.set_entry_type(tar::EntryType::Link);
+        let mut b = wbox_codec::tar::Builder::new(Vec::new());
+        let mut h = wbox_codec::tar::Header::new_gnu();
+        h.set_entry_type(wbox_codec::tar::EntryType::Link);
         h.set_size(0);
         h.set_cksum();
         b.append_link(&mut h, "evil", "../../etc/passwd").unwrap();

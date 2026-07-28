@@ -19,7 +19,7 @@
 //! 与其事后判断"这个路径安全吗"，不如一开始就只认识我们自己产的结构。
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 use std::path::{Component, Path, PathBuf};
 
 /// 归档里记录镜像身份的文件。load 靠它知道该放回哪个缓存位置。
@@ -48,14 +48,14 @@ pub fn save(image_ref: &str, out: &Path, registry_override: Option<&str>) -> Res
     let file = std::fs::File::create(out)
         .with_context(|| format!("创建 '{}' 失败", out.display()))
         .ctx(ErrKind::Registry)?;
-    let mut b = tar::Builder::new(file);
+    let mut b = wbox_codec::tar::Builder::new(file);
     b.follow_symlinks(false);
     // 身份先写进去：load 端不必靠文件名或调用方记忆去猜这是哪个镜像
-    let marker = serde_json::json!({ "ref": iref.qualified_ref() }).to_string();
-    let mut hdr = tar::Header::new_gnu();
+    let marker = wbox_codec::json!({ "ref": iref.qualified_ref() }).to_string();
+    let mut hdr = wbox_codec::tar::Header::new_gnu();
     hdr.set_size(marker.len() as u64);
     hdr.set_mode(0o644);
-    hdr.set_entry_type(tar::EntryType::Regular);
+    hdr.set_entry_type(wbox_codec::tar::EntryType::Regular);
     hdr.set_cksum();
     b.append_data(&mut hdr, MARKER, marker.as_bytes())
         .context("写归档标记失败")
@@ -82,13 +82,13 @@ pub fn load(archive: &Path, tag_override: Option<&str>) -> Result<()> {
     std::fs::create_dir_all(&staging)
         .context("创建解包暂存目录失败")
         .ctx(ErrKind::Registry)?;
-    let mut ar = tar::Archive::new(std::io::Cursor::new(&bytes));
+    let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(&bytes));
     for entry in ar
         .entries()
         .context("读取归档失败")
         .ctx(ErrKind::Registry)?
     {
-        let mut e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
+        let e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
         let path = e
             .path()
             .context("归档条目路径非法")
@@ -127,7 +127,7 @@ pub fn load(archive: &Path, tag_override: Option<&str>) -> Result<()> {
 }
 
 fn read_marker(bytes: &[u8]) -> Result<String> {
-    let mut ar = tar::Archive::new(std::io::Cursor::new(bytes));
+    let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(bytes));
     for entry in ar.entries().context("读取归档失败").ctx(ErrKind::Registry)? {
         let mut e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
         let is_marker = e
@@ -140,7 +140,7 @@ fn read_marker(bytes: &[u8]) -> Result<String> {
             e.read_to_string(&mut s)
                 .context("读取归档标记失败")
                 .ctx(ErrKind::Registry)?;
-            let v: serde_json::Value = serde_json::from_str(&s)
+            let v: wbox_codec::json::Value = wbox_codec::json::from_str(&s)
                 .context("归档标记不是合法 JSON")
                 .ctx(ErrKind::Registry)?;
             if let Some(r) = v.get("ref").and_then(|r| r.as_str()) {
@@ -203,7 +203,7 @@ mod tests {
     fn marker_missing_is_reported_with_the_escape_hatch() {
         let mut buf = Vec::new();
         {
-            let mut b = tar::Builder::new(&mut buf);
+            let mut b = wbox_codec::tar::Builder::new(&mut buf);
             b.finish().unwrap();
         }
         let m = format!("{}", read_marker(&buf).unwrap_err());

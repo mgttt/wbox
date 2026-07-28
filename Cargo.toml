@@ -9,28 +9,20 @@ license = "MIT OR Apache-2.0"
 # crates/wbox-linux 是 vendor/blink（C）的纯 Rust 重写，两者同一 workspace，
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
-members = [".", "crates/wbox-linux"]
+members = [".", "crates/wbox-codec", "crates/wbox-linux"]
 
 [dependencies]
-anyhow = "1"
+# 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
+# 这一条取代了原先的 serde_json / sha2 / base64 / flate2 / tar 五个第三方 crate。
+wbox-codec = { path = "crates/wbox-codec" }
 
-# ---- OCI 镜像拉取（src/oci/）----
-# 全部选用纯 Rust / 无 tokio 的小依赖，保证 windows-msvc 可编译。
-#
-# TLS 是**纯 Rust**：rustls 做协议，rustls-rustcrypto 做密码学原语。
-# 之所以不用 rustls 的默认 provider——aws-lc-rs 和 ring 都带 C 与汇编源码，
-# 违反"不引第三方 C/C++"这条约束（也正是当初选 native-tls 的原因：
-# 那条路避开了 ring 的汇编，但代价是 Linux 上链接系统 OpenSSL，仍是 C 库）。
+# ---- OCI 镜像拉取的 HTTP/TLS（src/oci/registry.rs）----
+# TODO(下一步)：换成自实现的 crates/wbox-tls。
 ureq = { version = "3", default-features = false, features = [
-    "rustls-no-provider",   # 要 rustls，但不要它自带的 C/汇编 provider
-    "rustls-webpki-roots",  # 内置根证书（纯 Rust 数据，不读系统证书库）
+    "rustls-no-provider",
+    "rustls-webpki-roots",
 ] }
-rustls-rustcrypto = "0.0.2-alpha" # 纯 Rust 密码学 provider（成熟度见 docs/rust-rewrite.md）
-tar = "0.4"          # tar 层解包
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] } # gzip 解压（miniz_oxide 纯 Rust）
-sha2 = "0.10"        # blob digest 校验（sha256）
-serde_json = "1"     # manifest / config JSON 解析（用 Value，不引入 serde derive）
-base64 = "0.22"      # 认证 token 请求等编码辅助
+rustls-rustcrypto = "0.0.2-alpha"
 
 # 纯 Rust Linux guest 引擎。同一份实现同时产出 wbox-linux.exe（EmuBackend 用）
 # 与进程内入口（src/runtime），避免两份实现慢慢漂移。
