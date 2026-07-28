@@ -271,6 +271,69 @@ pub struct Vfs {
     pub cwd: PathBuf,
 }
 
+/// 受限路径解析的失败原因。
+///
+/// 两者**必须分开**：guest 程序按 POSIX 语义分辨 `EACCES` 与 `ELOOP`，
+/// 合并成一档会让 `open` 在链接成环时返回"权限不足"，与真实内核不符。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveErr {
+    /// 试图越过 rootfs 根（`/..`、`../../..` 之类）。
+    Escaped,
+    /// 符号链接成环，展开深度超过 [`MAX_SYMLINK_DEPTH`]。
+    Loop,
+}
+
+impl ResolveErr {
+    /// 对应的 Linux 负 errno，直接可作为 syscall 返回值。
+    pub fn errno(self) -> i64 {
+        match self {
+            // 13 = EACCES，40 = ELOOP。这里写字面量而不是引用 syscall::mod
+            // 的常量，是为了不让 fs 反向依赖上层模块。
+            ResolveErr::Escaped => -13,
+            ResolveErr::Loop => -40,
+        }
+    }
+}
+
+/// 符号链接展开的深度上限，等同内核的 `MAXSYMLINKS`（40）。
+/// 超过就认为成环——真实 rootfs 里正常链接远到不了这个数。
+const MAX_SYMLINK_DEPTH: u32 = 40;
+
+/// 这条路径在 **guest 眼里**是不是绝对路径。
+///
+/// 不能只用 `Path::is_absolute()`：那是**宿主**语义，Windows 上
+/// `"/etc/passwd"` 会被判成相对路径（它要 `C:\` 那样的盘符）。而 guest 是
+/// Linux，`/` 开头就是绝对。判错的后果是绝对符号链接不按 rootfs 根解析，
+/// 那正是要防的越狱路径。
+fn guest_is_absolute(p: &Path) -> bool {
+    p.to_string_lossy().starts_with('/') || p.is_absolute()
+}
+
+/// 把路径拆成待解析的段，压进队列。
+///
+/// 根/盘符前缀丢弃（起点由调用方决定），`.` 跳过，`..` 原样保留成一个段
+/// ——它要在**解析栈**上生效，不能在这里就地消掉（就地消掉正是旧实现挡不住
+/// 符号链接的原因）。
+fn push_segments(p: &Path, out: &mut std::collections::VecDeque<std::ffi::OsString>) {
+    for c in p.components() {
+        match c {
+            Component::RootDir | Component::Prefix(_) => {}
+            Component::CurDir => {}
+            Component::ParentDir => out.push_back(std::ffi::OsString::from("..")),
+            Component::Normal(s) => out.push_back(s.to_os_string()),
+        }
+    }
+}
+
+/// 把已解析的组件栈拼回 prefix 之下。
+fn join_under(pre: &Path, stack: &[std::ffi::OsString]) -> PathBuf {
+    let mut out = pre.to_path_buf();
+    for s in stack {
+        out.push(s);
+    }
+    out
+}
+
 impl Vfs {
     pub fn from_env() -> Self {
         let prefix = std::env::var_os(PREFIX_ENV)
@@ -347,8 +410,6 @@ impl Vfs {
     /// `Component::Prefix` 并被 `normalize` 丢掉，结果变成 `\x`，于是
     /// "找不到路径"。这个 bug 在 Windows CI 上实测踩到过，见下方回归测试。
     ///
-    /// **已知缺口**：宿主侧的 symlink 不做防护——rootfs 里若存在指向外部的
-    /// 符号链接，guest 能顺着它出去。与 blink 的限制相同，见 crate 文档。
     /// 把一条（可能是相对的）guest 路径变成 **guest 视角**的绝对路径字符串。
     ///
     /// 用于 `/proc/self/exe` 之类"要把路径回报给 guest"的场合：容器模式下
@@ -361,33 +422,151 @@ impl Vfs {
         }
     }
 
+    /// guest 路径 -> 宿主路径，**末段符号链接也跟随**。
+    ///
+    /// 这是默认入口，`open`/`stat`/`execve` 这类"会跟随"的 syscall 用它。
+    /// 不跟随末段的那一小撮（`lstat`/`readlink`/`unlink`/`symlink`/`rename`
+    /// /`link`）用 [`Vfs::host_path_nofollow`]。
+    ///
+    /// **默认选跟随，是在选失败方向**：漏标一个"其实不该跟随"的调用点，
+    /// 表现是功能不对（`lstat` 看到的是目标而不是链接本身），测试会抓到；
+    /// 反过来把默认设成不跟随，漏标一个"其实会跟随"的调用点，表现是
+    /// **静默的越狱**——没有任何东西会提醒你。
     pub fn host_path(&self, guest: &str) -> PathBuf {
-        match &self.prefix {
-            None => {
-                let p = Path::new(guest);
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    self.cwd.join(p)
+        self.translate(guest, true).0
+    }
+
+    /// 同 [`Vfs::host_path`]，但**不跟随末段**符号链接。
+    ///
+    /// 中间各段照样受限解析——`/link/to/outside/x` 里的 `link` 仍会被夹在
+    /// rootfs 内。只有最后一段保持原样，交给调用方的 `symlink_metadata` /
+    /// `read_link` / `remove_file` 去处理（它们本来就不跟随）。
+    pub fn host_path_nofollow(&self, guest: &str) -> PathBuf {
+        self.translate(guest, false).0
+    }
+
+    /// 路径翻译的唯一实现。返回 `(宿主路径, 是否有越根尝试)`。
+    ///
+    /// # 容器模式：用户态的 `RESOLVE_IN_ROOT`
+    ///
+    /// 早先这里只做**词法**规范化（把 `..` 就地消掉再拼到 prefix 下）。
+    /// 那挡得住 `../../etc/passwd`，但**完全挡不住符号链接**：rootfs 里
+    /// 一个 `/evil -> /` 的链接，guest 打开 `/evil/etc/shadow` 时词法上
+    /// 一路合法，内核在**宿主**上跟着链接走，直接读到宿主的
+    /// `/etc/shadow`。镜像是外部输入，造这么一个链接零成本。
+    ///
+    /// 现在改成逐段解析：每走一段就看它是不是符号链接，是就把链接目标
+    /// 展开后**重新从 rootfs 根开始**解析。关键在于 `..` 与绝对目标都作用在
+    /// 这个"已解析栈"上，而栈**空了就到根**——所以**结构上不可能**指到
+    /// prefix 之外，不是靠事后检查兜。这与内核 `openat2(RESOLVE_IN_ROOT)`
+    /// 的语义一致。
+    ///
+    /// # 为什么不直接用 `openat2(RESOLVE_IN_ROOT)`
+    ///
+    /// 它只在 Linux 5.6+ 有，而这个 crate **也要在 Windows 宿主上跑**
+    /// （PRD §2.4 的 Q2 象限就是 Windows 上跑 Linux 镜像）。用它就得写两套
+    /// 路径解析，而"两套实现"在本仓是踩过的坑。这里一套可移植实现两边共用。
+    ///
+    /// 代价诚实记下来：**每段一次 `symlink_metadata`**，比原来的纯字符串
+    /// 运算慢；以及 check-then-use 的 TOCTOU 窗口——`openat2` 是原子的，
+    /// 这里不是。当前进程模型下窗口很小（快照式 fork，父子不并发跑），
+    /// 但它确实存在，见 crate 文档。
+    fn translate(&self, guest: &str, follow_final: bool) -> (PathBuf, Option<ResolveErr>) {
+        let Some(pre) = self.prefix.as_ref() else {
+            // 直通模式：guest / 就是宿主 /，没有"根"可越，路径原样交给宿主
+            // 解析。这里绝不能走组件分解——Windows 上盘符会被丢掉。
+            let p = Path::new(guest);
+            let host = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                self.cwd.join(p)
+            };
+            return (host, None);
+        };
+
+        let mut escaped = None;
+        // 已解析的 guest 组件。栈空 == 位于 rootfs 根。
+        let mut stack: Vec<std::ffi::OsString> = Vec::new();
+        let mut pending: std::collections::VecDeque<std::ffi::OsString> =
+            std::collections::VecDeque::new();
+
+        let start = if guest_is_absolute(Path::new(guest)) {
+            PathBuf::from(guest)
+        } else {
+            self.cwd.join(guest)
+        };
+        push_segments(&start, &mut pending);
+
+        let mut links = 0u32;
+        while let Some(seg) = pending.pop_front() {
+            if seg == ".." {
+                if stack.pop().is_none() {
+                    // 已经在根上还要往上：记为越根尝试，位置夹在根
+                    // （与内核对 `/..` 的处理一致）。
+                    escaped = Some(ResolveErr::Escaped);
                 }
+                continue;
             }
-            Some(pre) => {
-                let norm = self.normalize(guest);
-                let rel = norm.strip_prefix("/").unwrap_or(&norm);
-                pre.join(rel)
+            stack.push(seg);
+
+            // 末段是否展开由 follow_final 决定；中间段一律展开。
+            if pending.is_empty() && !follow_final {
+                break;
+            }
+            let here = join_under(pre, &stack);
+            let Ok(md) = std::fs::symlink_metadata(&here) else {
+                // 不存在（创建新文件是常态）或没权限看：不再往下解析。
+                // 剩余组件原样拼上——它们同样不可能逃出去，因为 `..`
+                // 仍然作用在这个栈上。
+                continue;
+            };
+            if !md.file_type().is_symlink() {
+                continue;
+            }
+            links += 1;
+            if links > MAX_SYMLINK_DEPTH {
+                // 链接成环。**必须报 ELOOP 而不是 EACCES**：guest 侧的
+                // 程序按 POSIX 语义分辨这两者，`t_path` 的 symlink/loop-ELOOP
+                // 就直接断言了这一点。早先图省事把它并进"越根"一档，
+                // 表现是 `open` 返回 13 而不是 40，测试当场抓到。
+                return (join_under(pre, &stack), Some(ResolveErr::Loop));
+            }
+            let Ok(target) = std::fs::read_link(&here) else {
+                continue;
+            };
+            stack.pop();
+            if guest_is_absolute(&target) {
+                // **guest 里的绝对链接以 rootfs 为根**，不是宿主根。
+                // 清栈就等于"回到 rootfs 根重新解析"。
+                stack.clear();
+            }
+            let mut expanded = std::collections::VecDeque::new();
+            push_segments(&target, &mut expanded);
+            while let Some(x) = expanded.pop_back() {
+                pending.push_front(x);
             }
         }
+
+        (join_under(pre, &stack), escaped)
     }
 
     /// 带越根检查的 guest -> 宿主翻译。
     ///
     /// 容器模式下越根尝试返回 `None`，调用方据此回 `EACCES`；
     /// 直通模式没有"根"可越，一律放行。
-    pub fn host_path_confined(&self, guest: &str) -> Option<PathBuf> {
-        if self.prefix.is_some() && self.normalize_checked(guest).1 {
-            return None;
+    pub fn host_path_confined(&self, guest: &str) -> Result<PathBuf, ResolveErr> {
+        match self.translate(guest, true) {
+            (host, None) => Ok(host),
+            (_, Some(e)) => Err(e),
         }
-        Some(self.host_path(guest))
+    }
+
+    /// 同 [`Vfs::host_path_confined`]，但不跟随末段符号链接。
+    pub fn host_path_confined_nofollow(&self, guest: &str) -> Result<PathBuf, ResolveErr> {
+        match self.translate(guest, false) {
+            (host, None) => Ok(host),
+            (_, Some(e)) => Err(e),
+        }
     }
 
     /// `chdir` 的目标：容器模式记 guest 视角路径，直通模式记宿主路径。
@@ -435,6 +614,148 @@ mod tests {
         v.cwd = PathBuf::from("/usr/lib");
         assert_eq!(v.normalize("libc.so"), PathBuf::from("/usr/lib/libc.so"));
         assert_eq!(v.normalize("../bin/sh"), PathBuf::from("/usr/bin/sh"));
+    }
+
+    /// 造一个真实的 rootfs，里面放各种指向宿主的符号链接，逐条断言
+    /// **解析结果仍在 rootfs 内**。
+    ///
+    /// 这是 PRD §4.9 那条"已知缺口"的回归用例。旧实现只做词法规范化，
+    /// 下面每一条都能逃出去。
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_escape_the_rootfs() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wbox-vfs-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("rootfs");
+        std::fs::create_dir_all(root.join("etc")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("outside/secret.txt"), b"HOST SECRET").unwrap();
+        std::fs::write(root.join("etc/passwd"), b"guest passwd").unwrap();
+
+        // 四种典型的逃逸链接
+        symlink("/", root.join("slash")).unwrap(); // 指向 guest 根
+        symlink(&base, root.join("up")).unwrap(); // 绝对指向宿主
+        symlink("../../outside", root.join("rel")).unwrap(); // 相对往上爬
+        std::fs::create_dir_all(root.join("d")).unwrap();
+        symlink("../../../../..", root.join("d/climb")).unwrap(); // 深度往上爬
+
+        let v = vfs(Some(root.to_str().unwrap()));
+
+        for probe in [
+            "/up/outside/secret.txt",
+            "/rel/secret.txt",
+            "/d/climb/outside/secret.txt",
+            "/slash/../../outside/secret.txt",
+            "/up/../outside/secret.txt",
+        ] {
+            let host = v.host_path(probe);
+            assert!(
+                host.starts_with(&root),
+                "{probe} 解析到了 rootfs 之外：{}",
+                host.display()
+            );
+            // 更硬的判据：真去读，绝不能读到宿主那份内容。
+            if let Ok(data) = std::fs::read(&host) {
+                assert_ne!(
+                    data, b"HOST SECRET",
+                    "{probe} 读到了宿主文件内容（越狱成功）"
+                );
+            }
+        }
+
+        // 反向：正常路径与 rootfs 内部链接仍要能用——只测"挡得住"会让一个
+        // 恒返回根目录的实现也变绿。
+        symlink("/etc/passwd", root.join("alias")).unwrap();
+        assert_eq!(
+            std::fs::read(v.host_path("/alias")).unwrap(),
+            b"guest passwd"
+        );
+        assert_eq!(
+            std::fs::read(v.host_path("/etc/passwd")).unwrap(),
+            b"guest passwd"
+        );
+        // `/slash` 指向 guest 根，`/slash/etc/passwd` 应当正常解析到 rootfs 内
+        assert_eq!(
+            std::fs::read(v.host_path("/slash/etc/passwd")).unwrap(),
+            b"guest passwd"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 末段链接：`host_path` 跟随，`host_path_nofollow` 不跟随。
+    ///
+    /// 两者都必须夹在 rootfs 内——区别只在"看到的是链接还是目标"。
+    #[cfg(unix)]
+    #[test]
+    fn final_component_follow_semantics() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wbox-vfs-fin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(base.join("outside/secret.txt"), b"HOST SECRET").unwrap();
+        std::fs::write(root.join("real.txt"), b"guest data").unwrap();
+        symlink("real.txt", root.join("link")).unwrap();
+        // 末段直接指向宿主
+        symlink(base.join("outside/secret.txt"), root.join("evil")).unwrap();
+
+        let v = vfs(Some(root.to_str().unwrap()));
+
+        // 跟随：解到 real.txt 本身
+        assert_eq!(v.host_path("/link"), root.join("real.txt"));
+        // 不跟随：停在链接上（lstat/readlink 要的就是这个）
+        assert_eq!(v.host_path_nofollow("/link"), root.join("link"));
+
+        // **末段指向宿主的链接，跟随时也不能逃出去**
+        let host = v.host_path("/evil");
+        assert!(
+            host.starts_with(&root),
+            "末段链接逃出 rootfs：{}",
+            host.display()
+        );
+        if let Ok(data) = std::fs::read(&host) {
+            assert_ne!(data, b"HOST SECRET", "末段链接读到了宿主文件");
+        }
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 链接成环时不能死循环，也不能返回一个"解到一半"的路径。
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_are_rejected_not_hung() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wbox-vfs-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        symlink("b", root.join("a")).unwrap();
+        symlink("a", root.join("b")).unwrap();
+
+        let v = vfs(Some(root.to_str().unwrap()));
+        // 不挂住（有这条断言就说明没死循环），且被判为越根 -> 调用方回 EACCES
+        // 必须是 ELOOP 而不是 EACCES——guest 程序按 POSIX 语义分辨这两者
+        // （`tests/guest/t_path.c` 的 symlink/loop-ELOOP 就断言了这一点）。
+        assert_eq!(
+            v.host_path_confined("/a").unwrap_err(),
+            ResolveErr::Loop,
+            "成环应报 ELOOP"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// 不存在的路径照常返回（创建新文件是常态），且仍夹在 rootfs 内。
+    #[test]
+    fn missing_paths_still_resolve_inside_root() {
+        let v = vfs(Some("/srv/rootfs"));
+        assert_eq!(
+            v.host_path("/no/such/file"),
+            PathBuf::from("/srv/rootfs/no/such/file")
+        );
+        assert!(v.host_path("/../../etc/shadow").starts_with("/srv/rootfs"));
     }
 
     #[test]
@@ -521,14 +842,14 @@ mod tests {
         let v = vfs(Some("/srv/rootfs"));
         for probe in ["/..", "/../../..", "/tmp/../../..", "../../../.."] {
             assert!(
-                v.host_path_confined(probe).is_none(),
+                v.host_path_confined(probe) == Err(ResolveErr::Escaped),
                 "{probe} 应被拒绝，而不是夹到根"
             );
             assert!(v.normalize_checked(probe).1, "{probe} 应被判定为越根");
         }
         // 合法的 `..`（不弹出根）必须照常放行
         for ok in ["/usr/lib/../bin/sh", "/a/b/../c", "/."] {
-            assert!(v.host_path_confined(ok).is_some(), "{ok} 被误拒");
+            assert!(v.host_path_confined(ok).is_ok(), "{ok} 被误拒");
             assert!(!v.normalize_checked(ok).1, "{ok} 被误判越根");
         }
         // 即使被拒绝，夹住的结果本身也仍在 prefix 内（双保险）
@@ -540,7 +861,7 @@ mod tests {
     #[test]
     fn passthrough_does_not_apply_above_root_rejection() {
         let v = vfs(None);
-        assert!(v.host_path_confined("/..").is_some());
+        assert!(v.host_path_confined("/..").is_ok());
     }
 
     /// 容器模式**不受**直通改动影响：盘符风格的输入仍被当作 guest 路径收进

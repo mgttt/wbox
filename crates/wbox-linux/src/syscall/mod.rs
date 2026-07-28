@@ -374,34 +374,64 @@ fn guest_path(m: &Machine, ptr: u64) -> Result<String, i64> {
 }
 
 /// 把 `dirfd` + 路径解析成宿主路径。只支持 `AT_FDCWD` 与已打开的目录 fd。
-fn resolve_at(m: &Machine, dirfd: i32, path: &str) -> Result<std::path::PathBuf, i64> {
+///
+/// `follow`：末段是符号链接时要不要展开。**没有默认值是有意的**——
+/// 每个调用点都必须显式回答"这个 syscall 跟随末段吗"。加个薄包装省掉这个
+/// 参数，就等于给了"忘记想"的机会，而想错的那一半是静默的越狱。
+fn resolve_at(
+    m: &Machine,
+    dirfd: i32,
+    path: &str,
+    follow: bool,
+) -> Result<std::path::PathBuf, i64> {
     if path.starts_with('/') || dirfd == AT_FDCWD {
-        // 越根尝试直接拒绝（不是"夹到根"），见 Vfs::normalize_checked
-        return m.os.vfs.host_path_confined(path).ok_or(-EACCES);
+        // 越根尝试直接拒绝（不是"夹到根"）；受限解析见 Vfs::translate
+        // 失败原因原样转成 errno：越根 -> EACCES，链接成环 -> ELOOP。
+        // 合并成一档会让 guest 在成环时看到"权限不足"，与真实内核不符。
+        return if follow {
+            m.os.vfs.host_path_confined(path)
+        } else {
+            m.os.vfs.host_path_confined_nofollow(path)
+        }
+        .map_err(|e| e.errno());
     }
     match m.os.fds.get(dirfd).map(|f| &f.kind) {
         Some(FdKind::Dir { path: dir, .. }) => {
-            // 相对 dirfd 的路径同样不许用 `..` 弹到 prefix 之上。
-            // dir 是宿主路径，先算出拼接结果再确认它仍在 prefix 内。
-            // 相对 dirfd 的路径同样不许用 `..` 弹到 dirfd 之上。
-            // 保守做法：只看路径本身的组件深度，不去比较解析后的真实路径
-            // （那要 canonicalize，带 TOCTOU）。正常程序不会弹出 dirfd。
-            if m.os.vfs.prefix.is_some() {
-                let mut depth = 0i32;
-                for c in std::path::Path::new(path).components() {
-                    match c {
-                        std::path::Component::ParentDir => {
-                            depth -= 1;
-                            if depth < 0 {
-                                return Err(-EACCES);
-                            }
-                        }
-                        std::path::Component::Normal(_) => depth += 1,
-                        _ => {}
-                    }
-                }
+            // **走与绝对路径同一套受限解析**，不再自带一份判据。
+            //
+            // 早先这里用一个朴素的深度计数器：`..` 减一、普通段加一，减到
+            // 负就拒。它有两个毛病，都是"第二份实现"必然带来的：
+            //
+            // 1. **太严**。从 rootfs 里某个子目录的 dirfd 出发，`openat(dfd,
+            //    "..")` 只是回到父目录，完全在 rootfs 内，却被判成越界。
+            //    `tests/guest/t_sec_path.c` 的 openat-dirfd-anchor 就断言了
+            //    这该成功。
+            // 2. **管不到符号链接**。它只看路径字面量，dirfd 底下一个指向
+            //    外部的链接照样能顺出去。
+            //
+            // 现在把 dirfd 的宿主路径还原成 guest 视角路径，与相对路径拼好
+            // 之后交给 `Vfs` 那套解析。一份实现，两条路共用。
+            let Some(pre) = m.os.vfs.prefix.as_ref() else {
+                // 直通模式没有"根"可越，拼上就是。
+                return Ok(dir.join(path));
+            };
+            let guest_dir = match dir.strip_prefix(pre) {
+                Ok(rel) => format!("/{}", rel.to_string_lossy()),
+                // dirfd 落在 prefix 之外：这本身就不该发生（所有 fd 都由
+                // 受限解析产生）。保守拒绝而不是当成根。
+                Err(_) => return Err(-EACCES),
+            };
+            let joined = if guest_dir.ends_with('/') {
+                format!("{guest_dir}{path}")
+            } else {
+                format!("{guest_dir}/{path}")
+            };
+            if follow {
+                m.os.vfs.host_path_confined(&joined)
+            } else {
+                m.os.vfs.host_path_confined_nofollow(&joined)
             }
-            Ok(dir.join(path))
+            .map_err(|e| e.errno())
         }
         Some(_) => Err(-ENOTDIR),
         None => Err(-EBADF),
@@ -931,7 +961,8 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         Ok(p) => p,
         Err(e) => return e,
     };
-    let host = match resolve_at(m, dirfd, &path) {
+    // open 默认跟随末段符号链接（未实现 O_NOFOLLOW，见 crate 文档）。
+    let host = match resolve_at(m, dirfd, &path, true) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1207,7 +1238,8 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
             0
         };
     }
-    let host = match resolve_at(m, dirfd, &path) {
+    // stat 跟随、lstat 不跟随——本函数的 follow 参数就是这个区别。
+    let host = match resolve_at(m, dirfd, &path, follow) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1245,8 +1277,8 @@ fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
         return 0;
     }
     let host = match m.os.vfs.host_path_confined(&path) {
-        Some(p) => p,
-        None => return -EACCES,
+        Ok(p) => p,
+        Err(e) => return e.errno(),
     };
     // 只做存在性判断。真实的 X_OK/W_OK 要看宿主权限位，Windows 上没有
     // 对应语义；容器内一律 root，存在即可访问是可接受的近似。
@@ -1262,7 +1294,8 @@ fn sys_unlinkat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let host = match resolve_at(m, dirfd, &path) {
+    // unlink/rmdir 删的是**链接本身**，绝不能跟随末段。
+    let host = match resolve_at(m, dirfd, &path, false) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1298,7 +1331,8 @@ fn sys_readlinkat(m: &mut Machine, dirfd: i32, path_ptr: u64, buf: u64, size: u6
             n as i64
         };
     }
-    let host = match resolve_at(m, dirfd, &path) {
+    // readlink 读的就是链接本身，跟随了就什么都读不到。
+    let host = match resolve_at(m, dirfd, &path, false) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1724,7 +1758,9 @@ fn sys_mkdir(m: &mut Machine, dirfd: i32, path_ptr: u64) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let host = match resolve_at(m, dirfd, &path) {
+    // mkdir 的末段还不存在；若已存在（哪怕是符号链接）应报 EEXIST，
+    // 跟随会跑去目标位置建目录——那是错的。
+    let host = match resolve_at(m, dirfd, &path, false) {
         Ok(p) => p,
         Err(e) => return e,
     };
@@ -1741,7 +1777,11 @@ fn sys_rename(m: &mut Machine, odirfd: i32, old_ptr: u64, ndirfd: i32, new_ptr: 
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    let (oh, nh) = match (resolve_at(m, odirfd, &old), resolve_at(m, ndirfd, &new)) {
+    // rename 搬的是**链接本身**，两端都不跟随末段。
+    let (oh, nh) = match (
+        resolve_at(m, odirfd, &old, false),
+        resolve_at(m, ndirfd, &new, false),
+    ) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
@@ -1756,7 +1796,12 @@ fn sys_link(m: &mut Machine, old_ptr: u64, new_ptr: u64) -> i64 {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    let (oh, nh) = (m.os.vfs.host_path(&old), m.os.vfs.host_path(&new));
+    // link(2) 不跟随末段：老路径是链接就硬链到链接本身，新路径更不能跟随
+    // （跟随会跑去目标位置建链接）。
+    let (oh, nh) = (
+        m.os.vfs.host_path_nofollow(&old),
+        m.os.vfs.host_path_nofollow(&new),
+    );
     match std::fs::hard_link(&oh, &nh) {
         Ok(()) => 0,
         Err(e) => host_err(&e),
@@ -1770,7 +1815,9 @@ fn sys_symlink(m: &mut Machine, target_ptr: u64, link_ptr: u64) -> i64 {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    let link_host = m.os.vfs.host_path(&link);
+    // 要创建的链接名，绝不跟随末段——跟随会把已存在的同名链接解开，
+    // 于是在它的目标位置建链接。
+    let link_host = m.os.vfs.host_path_nofollow(&link);
     #[cfg(unix)]
     {
         match std::os::unix::fs::symlink(&target, &link_host) {
@@ -1782,6 +1829,8 @@ fn sys_symlink(m: &mut Machine, target_ptr: u64, link_ptr: u64) -> i64 {
     {
         // Windows 建 symlink 默认要开发者模式或管理员权限。失败时如实报
         // EPERM，不要伪造成功——guest 随后读这个链接会得到更难查的错误。
+        // 这里探测的是**目标**是不是目录（Windows 建链接要分 dir/file），
+        // 跟随末段才能问到真实类型。
         let r = if m.os.vfs.host_path(&target).is_dir() {
             std::os::windows::fs::symlink_dir(&target, &link_host)
         } else {
@@ -2029,7 +2078,8 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 None => return -EBADF,
             }
         } else {
-            let host = match resolve_at(m, dirfd, &path) {
+            // statx 由 AT_SYMLINK_NOFOLLOW 决定跟不跟随。
+            let host = match resolve_at(m, dirfd, &path, flags & AT_SYMLINK_NOFOLLOW == 0) {
                 Ok(p) => p,
                 Err(e) => return e,
             };

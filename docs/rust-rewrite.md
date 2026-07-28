@@ -140,7 +140,13 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 8. **file description 级共享状态**。`dup` 出来的 fd 应与原 fd 共享
    `O_APPEND`/`O_NONBLOCK` 等状态标志与文件偏移；当前 `dup` 走宿主
    `try_clone`（偏移共享），但状态标志各自一份。另含 pty。
-9. 宿主 symlink 不防护——rootfs 里若有指向外部的符号链接，guest 能顺着出去。
+9. ~~宿主 symlink 不防护~~ —— **已修**。VFS 换成用户态的
+   `RESOLVE_IN_ROOT`：逐段解析，符号链接目标重新从 rootfs 根展开，`..` 与
+   绝对目标都作用在"已解析栈"上，栈空即到根，**结构上不可能**指到 rootfs
+   之外。不用内核 `openat2(RESOLVE_IN_ROOT)` 是因为它只在 Linux 5.6+，而
+   本 crate 也要在 Windows 宿主上跑；一套可移植实现两边共用。
+   代价：每段一次 `symlink_metadata`；以及 check-then-use 的 TOCTOU 窗口
+   （`openat2` 原子，这里不是）——当前快照式 fork 下父子不并发，窗口很小。
    与 blink 的限制相同（不是新增风险）。
    **越根路径已收紧**：`/..`、`../../..`、绝对宿主路径一律拒绝（`EACCES`），
    不再"夹到根"后成功。内核语义是夹住，夹住也逃不出 rootfs，但本仓的安全

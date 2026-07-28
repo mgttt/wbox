@@ -67,9 +67,17 @@ fn load_depth(
 
     // 程序本身也要走 VFS 与越界检查：容器里的 execve 不能拿绝对宿主路径
     // 把 rootfs 之外的东西跑起来。
-    let host = vfs.host_path_confined(prog).ok_or_else(|| LoadFail {
-        errno: -crate::syscall::EACCES,
-        msg: format!("'{prog}' 越出了 rootfs"),
+    let host = vfs.host_path_confined(prog).map_err(|e| LoadFail {
+        // errno 如实转发：越根 EACCES，链接成环 ELOOP。
+        errno: e.errno(),
+        msg: match e {
+            crate::syscall::fs::ResolveErr::Loop => {
+                format!("'{prog}' 的符号链接成环")
+            }
+            crate::syscall::fs::ResolveErr::Escaped => {
+                format!("'{prog}' 越出了 rootfs")
+            }
+        },
     })?;
     let image = std::fs::read(&host).map_err(|e| LoadFail {
         errno: crate::syscall::host_err(&e),
@@ -91,9 +99,14 @@ fn load_depth(
     let loaded = elf::load(mem, &image, |interp| {
         // PT_INTERP 走同一套前缀，否则动态链接器会命中宿主的 /lib64/ld-linux
         // 而不是 rootfs 里的那个。
-        let hp = vfs
-            .host_path_confined(interp)
-            .ok_or_else(|| format!("动态链接器 '{interp}' 越出了 rootfs"))?;
+        let hp = vfs.host_path_confined(interp).map_err(|e| match e {
+            crate::syscall::fs::ResolveErr::Loop => {
+                format!("动态链接器 '{interp}' 的符号链接成环")
+            }
+            crate::syscall::fs::ResolveErr::Escaped => {
+                format!("动态链接器 '{interp}' 越出了 rootfs")
+            }
+        })?;
         std::fs::read(&hp).map_err(|e| {
             format!(
                 "读取动态链接器 '{}'（guest '{interp}'）失败：{e}",

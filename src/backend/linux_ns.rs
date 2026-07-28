@@ -390,13 +390,50 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
     let mut vol_binds = Vec::new();
     for v in &spec.volumes {
         let target = match new_root.as_ref() {
-            // guest 以 '/' 开头，join 会当成绝对路径覆盖掉 rootfs，故去掉前导 '/'
-            Some(_) => prepared.workdir.join(v.guest.trim_start_matches('/')),
+            // **不能直接 join**：镜像是外部输入，里面可以放一个
+            // `/data -> /etc`（甚至指向宿主）的符号链接。直接 join 再
+            // `create_dir_all` 会**跟着链接走**，把目录建到镜像的别处、
+            // 乃至宿主上，随后的 bind mount 也就挂到了那个位置。
+            //
+            // 复用 `wbox_codec::tar::safe_join`：它逐段确认中间路径不是
+            // 符号链接，缺失的段按目录创建。这与解归档面对的是同一个问题
+            // （"路径词法合法但经由链接指到别处"），共用一份实现。
+            Some(_) => wbox_codec::tar::safe_join(
+                &prepared.workdir,
+                std::path::Path::new(v.guest.trim_start_matches('/')),
+            )
+            .map_err(|e| WboxError::spawn(format!("解析卷挂载点 '{}' 失败：{e}", v.guest)))?,
             None => std::path::PathBuf::from(&v.guest),
         };
-        // 挂载点必须先存在。镜像里没有这个目录是常态（例如挂 /data），
-        // 这里替用户建**容器内**的挂载点是安全的：它在 rootfs 里，不是宿主。
-        let _ = std::fs::create_dir_all(&target);
+        // 末段本身也不能是符号链接——`safe_join` 只管到父目录。
+        if let Ok(md) = std::fs::symlink_metadata(&target) {
+            if md.file_type().is_symlink() {
+                return Err(WboxError::spawn(format!(
+                    "卷挂载点 '{}' 在镜像里是符号链接，拒绝挂载（可能指向 rootfs 之外）",
+                    v.guest
+                )));
+            }
+        }
+        // 挂载点必须先存在，且**类型要与源一致**：源是文件就建文件，
+        // 源是目录才建目录。之前一律 create_dir_all，挂文件时内核会因为
+        // "目录挂到文件上"报 ENOTDIR，而错误信息完全看不出根因。
+        if !target.exists() {
+            let src_is_dir = v.host.is_dir();
+            let created = if src_is_dir {
+                std::fs::create_dir_all(&target)
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::File::create(&target).map(|_| ())
+            };
+            if let Err(e) = created {
+                return Err(WboxError::spawn(format!(
+                    "创建卷挂载点 '{}' 失败：{e}",
+                    v.guest
+                )));
+            }
+        }
         vol_binds.push((
             cstr(&v.host.to_string_lossy())?,
             cstr(&target.to_string_lossy())?,
