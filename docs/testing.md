@@ -152,6 +152,9 @@ detached 生命周期门禁还覆盖 READY/ERROR：父进程只有在真实 work
 与 AppContainer package 专属的 `TEMP`/`TMP` 都必须可写，且显式
 `-e TMPDIR=...` 不能被默认值覆盖。
 
+`WP.26` 对照运行同一内存分配 workload：无限额时必须完成，`--memory 64`
+时必须捕获 OOM，防止 Job 参数“设置成功”被误当成真实限额证据。
+
 ### 2.6 Windows 原生程序矩阵
 
 ```powershell

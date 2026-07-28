@@ -702,7 +702,7 @@ S4 在 Linux 上运行 Windows CLI
 | F1.7 Docker/Podman 基础 CLI 兼容 | `src/cli` | G3/G4 部分 | 别名与参数解析单测；生命周期兼容命令进入 P.25/WP.21，其他新增项仍须逐项进入产品门禁 |
 | F2.1/F2.2/F2.5/F2.7 profile/token/启动 | `token.rs`、`sandbox.rs` | G3 | Windows Rust tests + `WN.1-WN.8` + `WP.1` |
 | F2.3 Windows 网络放行 | `token.rs` | G3 | `WNET.1-WNET.4` 对照宿主、默认拒绝和 `--allow-network` |
-| F2.4 Windows 资源限制 | `job.rs` | G2 | 只证明 Job API 接受参数；缺超限 workload 行为断言 |
+| F2.4 Windows 资源限制 | `job.rs` | G4 | WP.26 通过公开 `run --memory` 对照证明同一 workload 只在 Job 总内存限额下触发 OOM |
 | F2.6 Windows 进程树回收 | `job.rs`、`sandbox.rs` | G4 | WP.9、WP.15、WP.17 分别覆盖 stop、并发 exec 与 supervisor 崩溃后的整树回收 |
 | F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
@@ -758,6 +758,8 @@ S4 在 Linux 上运行 Windows CLI
   supervisor、Job 与状态记录；保存配置中的旧 `--name` 不得复活。
 - `WP.25`：`--private-tmp` 下状态目录 `TMPDIR` 与 AppContainer package
   `TEMP`/`TMP` 均可实际写入和读回；显式 `-e TMPDIR=...` 必须优先。
+- `WP.26`：同一 PowerShell 分配 workload 在无限额对照中完成 192 MiB 分配，
+  在 `--memory 64` 下必须捕获 `OutOfMemoryException`，证明 Job 限额改变真实行为。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -2417,7 +2419,7 @@ TODO-WINDOW
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
 ├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
-├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [active] Job 总内存语义已核验，超限 workload 待补
+├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
 ├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
@@ -2438,6 +2440,12 @@ supervisor 发布 ERROR，父进程保留原始错误类别和退出码；父进
 不会误改 workload 自己的同名参数。`WP.24` 在 Windows 真机执行
 `create old -> rename old new -> start new`，并确认新名称获得非零 supervisor/guest
 进程、旧名称不再出现。
+
+`W10` 已由 `WP.26` 关闭。门禁先让 PowerShell 在无限额 Job 中保留 24 个 8 MiB
+块，证明 workload 与宿主容量可完成该操作；随后只增加 `--memory 64` 重跑同一
+循环，必须由 workload 自身捕获 `OutOfMemoryException`。这与 `job.rs` 对
+`JOB_OBJECT_LIMIT_JOB_MEMORY` 的结构查询证据互补：前者证明公开 CLI 的行为，
+后者钉住限额作用于完整 Job 而不是单进程。
 
 ##### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
 
@@ -3029,7 +3037,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.25 进入门禁；私有临时目录已实机核验，Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.26 进入门禁；私有临时目录与 Job 总内存超限行为均已实机核验 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
@@ -3092,8 +3100,8 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
    产品用例 WP.3W 随之转绿；VFS 的宿主符号链接逃逸已封死（§4.9 L12）。
    下一步是 §4.9 R8（单一 exe）与 x87/socket/MAP_SHARED 三个缺口。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
-   超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。
+4. `[done]` Windows stop、原生 exec 与 Job 总内存超限行为已进入产品门禁；
+   后续按 §4.9 的 W3/W7/W8 继续做 Windows 机制取证。
 
 ## 8. 验收与发布
 

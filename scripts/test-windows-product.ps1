@@ -790,6 +790,37 @@ $packageProbe = [IO.Path]::Combine($env:TEMP, "package-probe.txt")
     }
     Write-Host "PASS WP.25 private temp locations are writable and explicit TMPDIR wins"
 
+    # WP.26 proves --memory changes workload behavior through the public CLI.
+    # The unlimited control must retain all 24 blocks; the 64 MiB Job budget
+    # must make the same allocation loop observe OutOfMemoryException.
+    $memoryLimitCommand = @'
+$blocks = [Collections.Generic.List[byte[]]]::new()
+try {
+    for ($i = 0; $i -lt 24; $i++) {
+        $blocks.Add([byte[]]::new(8388608))
+    }
+} catch [OutOfMemoryException] {
+    [Console]::WriteLine("MEMORY_LIMIT_ENFORCED blocks={0}", $blocks.Count)
+    exit 0
+}
+[Console]::WriteLine("MEMORY_LIMIT_BYPASSED blocks={0}", $blocks.Count)
+'@
+    $memoryControl = & $portableWbox run --name product-memory-control `
+        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
+        -NonInteractive -Command $memoryLimitCommand 2>&1 | Out-String
+    Assert-Exit 0 "WP.26 unlimited memory control" $memoryControl
+    if ($memoryControl -notmatch "MEMORY_LIMIT_BYPASSED blocks=24") {
+        throw "WP.26 control could not complete the allocation workload: $memoryControl"
+    }
+    $memoryLimited = & $portableWbox run --name product-memory-limited --memory 64 `
+        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
+        -NonInteractive -Command $memoryLimitCommand 2>&1 | Out-String
+    Assert-Exit 0 "WP.26 limited memory workload" $memoryLimited
+    if ($memoryLimited -notmatch "MEMORY_LIMIT_ENFORCED blocks=") {
+        throw "WP.26 --memory did not constrain the allocation workload: $memoryLimited"
+    }
+    Write-Host "PASS WP.26 --memory enforces a real Windows Job allocation limit"
+
     # WP.21/WP.24 create must not execute anything. Rename then start consumes
     # the saved configuration under the new name, and exited remains restartable.
     $createGuestPidFile = Join-Path $stopWork "create-guest.pid"
