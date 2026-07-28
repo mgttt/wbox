@@ -301,14 +301,9 @@ fn extract_tar_into(src: &Path, dst: &Path) -> Result<usize> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let target = dst.join(&rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| WboxError::args(format!("创建解包目录失败：{}", e)))?;
-        }
         // 单条解不出来不中止：归档里常有本机建不出来的条目（设备节点要 root）。
-        // 与 `import` 同一取舍。
-        if e.unpack(&target).is_ok() {
+        // 与 `import` 同一取舍。走 `unpack_in` 保证不会经由符号链接写出 dst。
+        if e.unpack_in(dst, &rel).is_ok() {
             count += 1;
         }
     }

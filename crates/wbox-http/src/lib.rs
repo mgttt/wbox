@@ -17,9 +17,10 @@
 //!
 //! # 安全上的三条硬规则
 //!
-//! 1. **跨主机重定向必须丢掉 `Authorization`**。registry 的 blob 会被重定向
-//!    到 CDN，把 Bearer token 带过去等于把凭证交给第三方。见
-//!    [`Client::request`]。
+//! 1. **跨 origin 重定向必须丢掉 `Authorization`**。origin 是
+//!    (scheme, host, port) 三元组，不只是 host：registry 的 blob 会被重定向
+//!    到 CDN（跨 host），而 https → http 的降级会把凭证直接送上明文信道。
+//!    见 [`Client::request`]。
 //! 2. **响应体有上限**。层可以很大，但"没有上限"意味着一个恶意对端能把
 //!    wbox 撑爆。
 //! 3. **头部值里的 CR/LF 一律拒绝**，否则攻击者控制的字符串能拆出额外请求。
@@ -92,7 +93,11 @@ impl Client {
         let mut method = method.to_string();
         let mut body = body;
         let mut headers = headers.to_vec();
-        let origin_host = target.host.clone();
+        // **按完整 origin（scheme + host + port）判定**，不只是 host。
+        // 只比 host 的话，同主机从 https 重定向到 http 会把 Bearer token
+        // 明文发出去；重定向到同主机的另一个端口也一样（那可能是完全不同
+        // 的服务）。
+        let origin = (target.https, target.host.clone(), target.port);
 
         for _ in 0..=self.max_redirects {
             let resp = self.send_once(&method, &target, &headers, body)?;
@@ -102,9 +107,10 @@ impl Client {
             };
             let next = target.join(location).map_err(io::Error::other)?;
 
-            // 规则 1：跨主机就丢掉 Authorization。blob 会被重定向到 CDN，
-            // 把 Bearer token 带过去等于把凭证交给第三方。
-            if next.host != origin_host {
+            // 规则 1：**跨 origin 就丢掉 Authorization**。blob 会被重定向到
+            // CDN，把 Bearer token 带过去等于把凭证交给第三方；而 https →
+            // http 的降级更糟——凭证直接上明文信道。
+            if (next.https, next.host.clone(), next.port) != origin {
                 headers.retain(|(k, _)| !k.eq_ignore_ascii_case("authorization"));
             }
             // 303 一律转 GET；301/302 对 POST 也按浏览器的既成事实转 GET。
@@ -371,6 +377,24 @@ mod tests {
         let second = rx.recv().unwrap();
         assert!(second.starts_with("PUT /upload/2 "), "{second}");
         assert!(second.ends_with("payload"), "{second}");
+    }
+
+    #[test]
+    fn drops_auth_on_scheme_downgrade_and_port_change() {
+        // 只比 host 的话这两条都会漏：同主机 https → http 会把 token 明文
+        // 发出去；同主机换端口可能是完全不同的服务。
+        // 这里直接测判定逻辑（起真实 https 服务器需要证书，成本不成比例）。
+        let https = Url::parse("https://reg.example.com/v2/x").unwrap();
+        let same = Url::parse("https://reg.example.com/v2/y").unwrap();
+        let downgrade = Url::parse("http://reg.example.com/v2/x").unwrap();
+        let other_port = Url::parse("https://reg.example.com:8443/v2/x").unwrap();
+        let other_host = Url::parse("https://cdn.example.net/v2/x").unwrap();
+
+        let origin = |u: &Url| (u.https, u.host.clone(), u.port);
+        assert_eq!(origin(&https), origin(&same), "同 origin，凭证应保留");
+        assert_ne!(origin(&https), origin(&downgrade), "https→http 必须丢凭证");
+        assert_ne!(origin(&https), origin(&other_port), "换端口必须丢凭证");
+        assert_ne!(origin(&https), origin(&other_host), "跨主机必须丢凭证");
     }
 
     #[test]
