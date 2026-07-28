@@ -326,7 +326,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`，F9.38 补 `ADD`，F9.39 补**多阶段构建**；剩下不做的只有 `ADD` 的远程取回（理由见 F9.38） |
-| overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.5）；内核 <5.11 出声回退共享写入 |
+| overlay 可写层 | 有 | F9.12：运行期写入进 per-container upper，镜像缓存只读（门禁 OV.1–OV.8）；内核 <5.11 直接报错，不静默回退共享写入 |
 | 镜像分层存储 | 有 | F9.16–F9.18：pull 保留原始层、可原样回推；build 产物 = 基础层+增量层（push 跳过基础层，PSH.8）；`FROM` 硬链接共享数据块（OVB.1–OVB.4）|
 | 镜像 push | 有 | F9.16：pull 来的镜像**原样回推**，manifest digest 不变、分层保留（门禁 PSH.6–PSH.7）；build 产物无原始层，退回平铺单层（F9.13）|
 | compose | 部分 | F9.14：八字段 + `up -d`/`down`/`ps`（门禁 CMP.1–CMP.7）；服务经共享 netns 互通，非 bridge+DNS |
@@ -1319,7 +1319,7 @@ F9
 ├── F9.9 `--seccomp-deny`                     —— [partial] 拒绝名单，非 docker 的允许名单
 ├── F9.10 健康检查 `--health-cmd`             —— [done]（仅 Linux，门禁 HC.1–HC.5）
 ├── F9.11 `--network container:<NAME>`         —— [done]（仅 Linux，门禁 NC.1–NC.4）
-├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.5）
+├── F9.12 overlay 运行期可写层                 —— [done]（仅 Linux，门禁 OV.1–OV.8）
 ├── F9.13 `wbox push`                          —— [partial] 平铺单层，门禁 PSH.1–PSH.5
 ├── F9.14 compose 子集                         —— [partial] 仅 Linux，门禁 CMP.1–CMP.7
 ├── F9.15 IPC/UTS 隔离与共享                   —— [done]（仅 Linux，门禁 IU.1–IU.7）
@@ -1631,7 +1631,7 @@ EPERM）。
 
 #### F9.12 overlay 运行期可写层
 
-**F9.12 overlay 运行期可写层** `[done]`（门禁 OV.1–OV.5）。
+**F9.12 overlay 运行期可写层** `[done]`（门禁 OV.1–OV.8）。
 
 **修的是一个真实缺陷**：此前 Linux 镜像模式直接把共享镜像缓存当根，容器对 `/`
 的写入落在 `~/.wbox/images/.../rootfs` 里，一个容器的垃圾会被之后所有同镜像
@@ -1654,8 +1654,24 @@ EPERM）。
 - **内核 <5.11** 不允许 userns 内挂 overlayfs。父进程先用独立 userns 真挂一次
   探测（探测必须写 uid_map——光有 capability 不够，upper 的属主在未映射 ns 里
   是 overflow uid，过不了 overlayfs 属主校验；首次实现正是这么失败的）。不支持
-  时**出声**回退共享写入，绝不静默——静默降级会让用户以为镜像缓存是只读的。
-  `WBOX_NO_OVERLAY=1` 是显式逃生口。
+  时**直接报错**：早先是打一句 stderr 警告然后照常启动，容器对 `/` 的写入就
+  落进共享镜像缓存了——一句警告不改退出码，脚本里根本看不见，这既是隔离缺口
+  也违反 §2.2「限制无法生效必须明确报错」。要共享写入语义的用
+  `WBOX_NO_OVERLAY=1` 显式声明——**逃生口要用户自己按**。
+- **启动过程本身也不能改动 lower**（门禁 OV.7/OV.8）。overlay 是子进程挂的，
+  而父进程要在 `fork` 前把几个挂载点先建出来：`pivot_root` 的 put_old
+  （`.wbox_oldroot`）、`/dev/*` 的 bind 目标、每个 `-v` 的目标目录。那时
+  overlay 还没挂，早先那些 `create_dir_all` 全落进了共享镜像缓存——**跑一次容器
+  就往镜像里塞一份**，下一个容器起来就看得到，`commit`/导出也捎带上。F9.12 花
+  力气做的隔离，被启动路径自己从旁边绕过去了。现在挂载点一律建在 upper 里，
+  子进程仍按 rootfs 路径挂载（合并视图下是同一个路径）。两处配套：符号链接
+  检查改成按**合并视图**逐段做（upper 有同名项以 upper 为准，否则看 lower），
+  否则上一次运行在 upper 里留下的链接会被漏掉；以及 upper 里的 **whiteout**
+  （`0:0` 字符设备）要在建挂载点前抹掉，不然第二次 `start` 直接 `EEXIST`。
+  whiteout 的来源有二：**本改动之前建的镜像缓存**里已经有 `.wbox_oldroot`，
+  子进程 `pivot_root` 后 `rmdir` 它就在 upper 留下标记（实测就是这么撞上的）；
+  以及容器自己删掉了某个镜像自带、又正好是下次挂载点的目录。这条只有"同一个
+  容器跑第二次"才走得到，一次性用例发现不了（OV.8 专盯它）。
 - **build 的 `RUN` 步骤豁免**（`direct_rootfs_writes`）：它的写入就是构建产物，
   引到 upper 等于把 RUN 效果全丢掉。F9.12 保护的是**运行期**的共享缓存。
 - 路径含 `,` 或 `:` 时 overlayfs 选项串无法表达，出声回退。

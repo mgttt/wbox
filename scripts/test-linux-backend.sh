@@ -1298,6 +1298,52 @@ else
 fi
 rm -f "$CACHE/rootfs/legacy-way" "$CACHE/rootfs/ov-probe"
 
+# OV.7 **启动过程本身**也不得改动共享镜像缓存。
+#
+# OV.1 只证明了 guest 的写入被 overlay 挡住，但父进程在 fork 前还要把几个
+# 挂载点先建出来：pivot_root 的 put_old（`.wbox_oldroot`）、`/dev/*` 的 bind
+# 目标、以及每个 `-v` 的目标目录。那时 overlay 还没挂（它是子进程挂的），
+# 所以早先那些 `create_dir_all` 全落进了共享镜像缓存——跑一次容器就在镜像里
+# 留下一份，下一个容器起来就看得到，`wbox commit` / 导出也会捎带上。
+# 现在挂载点一律建在 overlay 的 upper 里，子进程仍按 rootfs 路径挂载，
+# 合并视图下是同一个路径。
+# 用 detached：前台容器正常退出后状态目录（连同 layer/upper）会被清掉，
+# 就没法事后翻 upper 看挂载点建在哪了。
+rm -rf "$CACHE/rootfs/.wbox_oldroot" "$CACHE/rootfs/ovmnt"
+OVVOL=$WORK/ovvol; mkdir -p "$OVVOL"
+HOME=$WORK/home "$WBOX_ABS" run -d --name ovc -v "$OVVOL:/ovmnt" lbetest -- /bin/sh -c 'ls -d /ovmnt' >/dev/null 2>&1
+sleep 2
+ovleak=""
+[ -e "$CACHE/rootfs/.wbox_oldroot" ] && ovleak="$ovleak .wbox_oldroot"
+[ -e "$CACHE/rootfs/ovmnt" ] && ovleak="$ovleak ovmnt"
+# `.wbox_oldroot` 不在断言里：它只存在于 upper，子进程 pivot_root 之后
+# `rmdir` 掉它就是**直接删除**（lower 没有同名项，不需要 whiteout），所以
+# 容器退出后 upper 里本来就不该有它。断言看得见的两个：卷目标与 /dev。
+OVUP=$WORK/home/.wbox/run/ovc/layer/upper
+if [ -z "$ovleak" ] && [ -d "$OVUP/ovmnt" ] && [ -d "$OVUP/dev" ]; then
+  report PASS "OV.7 启动准备的挂载点落在 upper，不污染镜像缓存"
+else
+  report FAIL "OV.7 挂载点落点" "泄漏进缓存:${ovleak:-无} upper/ovmnt=$([ -d "$OVUP/ovmnt" ] && echo 有 || echo 无) upper/dev=$([ -d "$OVUP/dev" ] && echo 有 || echo 无) upper 内容:$(ls -a "$OVUP" 2>&1 | tr '\n' ' ' | head -c 120)"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm ovc >/dev/null 2>&1
+
+# OV.8 同一个容器重启不能因为 upper 里的 whiteout 起不来。pivot_root 之后
+# 子进程会 `rmdir /.wbox_oldroot`，那次删除在 overlay 上留下的是 whiteout
+# （0:0 字符设备）；第二次 start 时 `create_dir_all` 会直接 EEXIST。
+# 这条只有"同名容器跑第二次"才走得到，OV.7 那种一次性用例发现不了。
+HOME=$WORK/home "$WBOX_ABS" create --name ovr lbetest -- /bin/sh -c 'echo alive' >/dev/null 2>&1
+o1=$(HOME=$WORK/home "$WBOX_ABS" start ovr 2>&1); r1=$?
+sleep 2
+o2=$(HOME=$WORK/home "$WBOX_ABS" start ovr 2>&1); r2=$?
+sleep 2
+if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ] \
+   && HOME=$WORK/home "$WBOX_ABS" logs ovr 2>&1 | grep -q alive; then
+  report PASS "OV.8 同一容器重启不被 upper 里的 whiteout 卡住"
+else
+  report FAIL "OV.8 重启" "第一次 rc=$r1 输出:$(printf '%s' "$o1"|head -c 80)；第二次 rc=$r2 输出:$(printf '%s' "$o2"|head -c 120)"
+fi
+HOME=$WORK/home "$WBOX_ABS" rm ovr >/dev/null 2>&1
+
 # OV.6 容器内**删除镜像自带的目录**必须成功，且不动到共享缓存。
 # 这条盯的是 rootless overlay 的 `userxattr`：不加它时 overlay 要写
 # trusted.overlay.* xattr 标记 opaque 目录，而那需要初始 userns 的

@@ -257,6 +257,9 @@ struct OverlayPlan {
     c_overlay: CString,
     /// `lowerdir=...,upperdir=...,workdir=...`
     opts: CString,
+    /// upper 层的宿主路径。父进程要在 fork 前建的那些**挂载点**（`.wbox_oldroot`、
+    /// `dev/*`、每个 `-v` 的目标）都建在这里，而不是 lower（共享镜像缓存）里。
+    upper: std::path::PathBuf,
 }
 
 /// 把 `/a/b/c` 拆成 `["/a", "/a/b", "/a/b/c"]`，供换根后逐级 `mkdir`。
@@ -394,43 +397,34 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
     // guest 路径（宿主模式不换根，两者本就同一命名空间）。
     let mut vol_binds = Vec::new();
     for v in &spec.volumes {
-        let target = match new_root.as_ref() {
-            // **不能直接 join**：镜像是外部输入，里面可以放一个
-            // `/data -> /etc`（甚至指向宿主）的符号链接。直接 join 再
-            // `create_dir_all` 会**跟着链接走**，把目录建到镜像的别处、
-            // 乃至宿主上，随后的 bind mount 也就挂到了那个位置。
-            //
-            // 复用 `wbox_codec::tar::safe_join`：它逐段确认中间路径不是
-            // 符号链接，缺失的段按目录创建。这与解归档面对的是同一个问题
-            // （"路径词法合法但经由链接指到别处"），共用一份实现。
-            Some(_) => wbox_codec::tar::safe_join(
+        let rel = std::path::PathBuf::from(v.guest.trim_start_matches('/'));
+        // 挂载点在父进程侧的落地位置。镜像模式下**不能直接 join**：镜像是外部
+        // 输入，里面可以放一个 `/data -> /etc`（甚至指向宿主）的符号链接，直接
+        // join 再 `create_dir_all` 会跟着链接走，随后的 bind mount 也就挂到了
+        // 那个位置。`prepare_mount_point` 逐段按合并视图确认不是符号链接，并把
+        // 缺失的段建在 overlay 的 upper 里（不动共享镜像缓存）。
+        let create_at = match new_root.as_ref() {
+            Some(r) => prepare_mount_point(
                 &prepared.workdir,
-                std::path::Path::new(v.guest.trim_start_matches('/')),
+                r.overlay.as_ref().map(|o| o.upper.as_path()),
+                &rel,
             )
             .map_err(|e| WboxError::spawn(format!("解析卷挂载点 '{}' 失败：{e}", v.guest)))?,
+            // 宿主程序模式不换根，guest 路径就是宿主路径。
             None => std::path::PathBuf::from(&v.guest),
         };
-        // 末段本身也不能是符号链接——`safe_join` 只管到父目录。
-        if let Ok(md) = std::fs::symlink_metadata(&target) {
-            if md.file_type().is_symlink() {
-                return Err(WboxError::spawn(format!(
-                    "卷挂载点 '{}' 在镜像里是符号链接，拒绝挂载（可能指向 rootfs 之外）",
-                    v.guest
-                )));
-            }
-        }
         // 挂载点必须先存在，且**类型要与源一致**：源是文件就建文件，
         // 源是目录才建目录。之前一律 create_dir_all，挂文件时内核会因为
         // "目录挂到文件上"报 ENOTDIR，而错误信息完全看不出根因。
-        if !target.exists() {
+        if !create_at.exists() {
             let src_is_dir = v.host.is_dir();
             let created = if src_is_dir {
-                std::fs::create_dir_all(&target)
+                std::fs::create_dir_all(&create_at)
             } else {
-                if let Some(parent) = target.parent() {
+                if let Some(parent) = create_at.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                std::fs::File::create(&target).map(|_| ())
+                std::fs::File::create(&create_at).map(|_| ())
             };
             if let Err(e) = created {
                 return Err(WboxError::spawn(format!(
@@ -439,6 +433,12 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
                 )));
             }
         }
+        // 传给内核的是 **rootfs 视角**的路径：子进程挂 bind 时 overlay 已经挂好，
+        // 合并视图里看到的就是上面刚在 upper 建出来的那个挂载点。
+        let target = match new_root.as_ref() {
+            Some(_) => prepared.workdir.join(&rel),
+            None => create_at.clone(),
+        };
         vol_binds.push((
             cstr(&v.host.to_string_lossy())?,
             cstr(&target.to_string_lossy())?,
@@ -873,36 +873,168 @@ fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Re
     Ok(OverlayPlan {
         c_overlay: cstr("overlay")?,
         opts,
+        upper: layer_dir.join("upper"),
     })
+}
+
+/// 抹掉 upper 里的 overlay **whiteout**（一个 `0:0` 的字符设备），让这一段
+/// 重新变成"可以在 upper 里建出来"的状态。
+///
+/// 为什么需要：删除一个 **lower 里也存在**的条目，在 overlay 上留下的就是
+/// whiteout。到了下次启动，`create_dir_all` 撞上这个字符设备直接 `EEXIST`，
+/// 容器起不来——而这条路径只有"同一个容器跑第二次"才走得到，一次性用例发现
+/// 不了。两种成因都真实存在：
+///
+/// - **本改动之前建的镜像缓存**里已经有 `.wbox_oldroot` / `dev/null`（那时挂载点
+///   就是往 lower 里建的）。子进程 `pivot_root` 后 `rmdir /.wbox_oldroot`，
+///   于是 upper 里多一个 whiteout。实测就是这么撞上的。
+/// - 容器自己 `rm` 掉了某个镜像自带的目录，而那个目录正好是下次的挂载点。
+///
+/// 只认 whiteout（rdev == 0 的字符设备），不碰任何真实文件：whiteout 是
+/// overlay 的内部标记，绝不会是用户数据。
+fn clear_whiteout(p: &std::path::Path) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if let Ok(md) = std::fs::symlink_metadata(p) {
+            if md.file_type().is_char_device() && md.rdev() == 0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = p;
+}
+
+/// 在**容器可写层**里备好一个挂载点，而不是写进共享的镜像缓存。
+///
+/// # 为什么不能直接 `rootfs.join(x)`
+///
+/// overlay 是在 fork 后的子进程里挂的，父进程这时看到的 `rootfs` 还是
+/// **lower**——也就是 `wbox pull` 解出来、被所有容器共享的那份镜像缓存。
+/// 早先父进程直接往那里 `create_dir_all`，于是每跑一次容器就在镜像里留下
+/// `.wbox_oldroot`、`dev/null`（空文件）以及每个 `-v` 的目标目录。这些残留
+/// 是**跨容器可见**的，下一个容器起来就看得到，`wbox commit` / 导出也会捎带
+/// 上——F9.12 花力气做 overlay 就是为了避免这类污染，结果被启动路径自己绕过。
+///
+/// overlay 生效后 `upper/x` 与 `lower/x` 在容器内是同一个路径 `/x`，所以挂载点
+/// 建在 upper 里、子进程仍按 rootfs 路径去 mount，效果完全一样，区别只是这次
+/// 启动不再改动 lower。
+///
+/// # 符号链接检查按合并视图做
+///
+/// 镜像是外部输入，可以放一个 `/data -> /etc`（甚至指向宿主）的链接。逐段
+/// 检查时 upper 里有同名项就以 upper 为准，否则看 lower：只查 lower 会漏掉
+/// 上一次运行在 upper 里留下的链接，只查 upper 则等于没查。
+///
+/// `upper` 为 `None`（`WBOX_NO_OVERLAY=1` 或 build 的 RUN 步骤）时退化成
+/// "在 lower 里就地准备"，即旧行为。
+fn prepare_mount_point(
+    lower: &std::path::Path,
+    upper: Option<&std::path::Path>,
+    rel: &std::path::Path,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let ioerr = |m: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, m);
+    let mut parts = Vec::new();
+    for c in rel.components() {
+        match c {
+            Component::Normal(s) => parts.push(s),
+            Component::CurDir => {}
+            _ => {
+                return Err(ioerr(format!(
+                    "路径 '{}' 含绝对路径或 '..'，拒绝作为挂载点",
+                    rel.display()
+                )))
+            }
+        }
+    }
+    let Some((last, dirs)) = parts.split_last() else {
+        return Err(ioerr("挂载点路径为空".into()));
+    };
+    let mut lo = lower.to_path_buf();
+    let mut up = upper.unwrap_or(lower).to_path_buf();
+    let has_upper = upper.is_some();
+    // 合并视图下这一段的实际类型：upper 有就是 upper 的。
+    let effective = |up: &std::path::Path, lo: &std::path::Path| match std::fs::symlink_metadata(up)
+    {
+        Ok(md) => Some(md),
+        Err(_) => std::fs::symlink_metadata(lo).ok(),
+    };
+    for seg in dirs {
+        lo.push(seg);
+        up.push(seg);
+        if has_upper {
+            clear_whiteout(&up);
+        }
+        if let Some(md) = effective(&up, &lo) {
+            if md.file_type().is_symlink() {
+                return Err(ioerr(format!(
+                    "挂载点路径经过符号链接 '{}'，拒绝（可能指向 rootfs 之外）",
+                    lo.display()
+                )));
+            }
+            if !md.is_dir() {
+                return Err(ioerr(format!("挂载点路径上的 '{}' 不是目录", lo.display())));
+            }
+        }
+        // lower 里已经有也照建：挂载点必须在 upper 侧存在，子进程才挂得上去。
+        std::fs::create_dir_all(&up)?;
+    }
+    lo.push(last);
+    up.push(last);
+    if has_upper {
+        clear_whiteout(&up);
+    }
+    if let Some(md) = effective(&up, &lo) {
+        if md.file_type().is_symlink() {
+            return Err(ioerr(format!(
+                "挂载点 '{}' 是符号链接，拒绝挂载（可能指向 rootfs 之外）",
+                lo.display()
+            )));
+        }
+    }
+    Ok(up)
 }
 
 fn build_new_root(prepared: &Prepared, overlay: Option<OverlayPlan>) -> Result<NewRoot> {
     let rootfs = prepared.workdir.to_string_lossy().into_owned();
+    // 挂载点一律建在 overlay 的 upper 里（没有 overlay 时才落回 rootfs 自身）。
+    // 见 `prepare_mount_point` 的说明：否则每次启动都会改动共享镜像缓存。
+    let lower = prepared.workdir.as_path();
+    let upper = overlay.as_ref().map(|o| o.upper.clone());
+    let upper = upper.as_deref();
+
     // put_old 必须位于新根之内（pivot_root 的硬性要求）。用固定名字，
     // 每次启动前确保存在；pivot_root 后立刻 umount 并删除。
-    let put_old_host = prepared.workdir.join(".wbox_oldroot");
-    std::fs::create_dir_all(&put_old_host).map_err(|e| {
-        WboxError::spawn(format!(
-            "创建 pivot_root 暂存目录 '{}' 失败：{}（rootfs 是否可写？）",
-            put_old_host.display(),
-            e
-        ))
-    })?;
+    prepare_mount_point(lower, upper, std::path::Path::new(".wbox_oldroot"))
+        .and_then(|p| std::fs::create_dir_all(&p).map(|_| p))
+        .map_err(|e| {
+            WboxError::spawn(format!(
+                "创建 pivot_root 暂存目录 '.wbox_oldroot' 失败：{e}（rootfs 是否可写？）"
+            ))
+        })?;
+    // 子进程是在 pivot_root 之前、overlay 已挂好时用它，故传给内核的必须是
+    // **rootfs 视角**的路径；upper 只是父进程这一侧的落地位置。
+    let put_old_for_child = prepared.workdir.join(".wbox_oldroot");
 
     // 最小设备集：bind 挂载需要目标文件已存在，故在 fork 前先备好空文件。
     // rootfs 不可写时跳过该设备而不是整体失败——只读 rootfs 是合法用法。
-    let dev_dir = prepared.workdir.join("dev");
-    let _ = std::fs::create_dir_all(&dev_dir);
     let mut dev_binds = Vec::new();
     for d in MIN_DEVICES {
         let src = format!("/dev/{}", d);
         if !std::path::Path::new(&src).exists() {
             continue;
         }
-        let dst = dev_dir.join(d);
+        let rel = std::path::PathBuf::from("dev").join(d);
+        let Ok(dst) = prepare_mount_point(lower, upper, &rel) else {
+            continue;
+        };
         if !dst.exists() && std::fs::write(&dst, b"").is_err() {
-            continue; // rootfs 只读或无权限：跳过这个设备
+            continue; // 可写层不可写或无权限：跳过这个设备
         }
+        // 同样换回 rootfs 视角：子进程挂的是合并视图里的 /dev/<d>。
+        let dst = prepared.workdir.join(&rel);
         if let (Ok(a), Ok(b)) = (cstr(&src), cstr(&dst.to_string_lossy())) {
             dev_binds.push((a, b));
         }
@@ -910,7 +1042,7 @@ fn build_new_root(prepared: &Prepared, overlay: Option<OverlayPlan>) -> Result<N
 
     Ok(NewRoot {
         rootfs: cstr(&rootfs)?,
-        put_old: cstr(&put_old_host.to_string_lossy())?,
+        put_old: cstr(&put_old_for_child.to_string_lossy())?,
         c_proc: cstr("/proc")?,
         c_put_old_in_new: cstr("/.wbox_oldroot")?,
         c_proc_fstype: cstr("proc")?,
