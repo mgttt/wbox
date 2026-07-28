@@ -66,6 +66,18 @@ struct NsPlan {
     uid_map: Vec<u8>,
     gid_map: Vec<u8>,
     c_root: CString,
+    /// 换根后要 `chdir` 进去的容器内目录（`-w` 或镜像的 `WorkingDir`）。
+    /// `None` = 落在 `/`（换根后的默认）。
+    c_guest_workdir: Option<CString>,
+    /// 上面那个目录的**逐级前缀**，用于换根后按需 `mkdir`（docker 在工作目录
+    /// 不存在时会建出来，这里对齐）。
+    ///
+    /// **必须换根之后再建**：换根前 `/` 还是宿主视角，往 `rootfs/<w>` 里建会写进
+    /// **共享的镜像缓存**——那正是 F9.12 花力气避免的污染。换根后 `/` 已是 overlay
+    /// 合并视图，写入自然落在本容器的 upper 里。
+    ///
+    /// 前缀在 fork 前算好：子进程里不能分配内存。
+    c_guest_workdir_parents: Vec<CString>,
     c_empty: CString,
     /// `unshare(2)` 的标志位，fork 前算好（是否含 `CLONE_NEWNET` 取决于
     /// `--allow-network`）。
@@ -242,6 +254,29 @@ struct OverlayPlan {
     opts: CString,
 }
 
+/// 把 `/a/b/c` 拆成 `["/a", "/a/b", "/a/b/c"]`，供换根后逐级 `mkdir`。
+///
+/// 在 fork 前算好：子进程里不能分配内存（那是 `pre_exec` 的硬约束）。
+fn guest_dir_prefixes(dir: &str) -> Result<Vec<CString>> {
+    let mut out = Vec::new();
+    let mut acc = String::new();
+    for seg in dir.split('/').filter(|s| !s.is_empty() && *s != ".") {
+        // `..` 不该出现在工作目录里；出现了多半是配置错误，直接拒绝而不是消解——
+        // 消解出来的路径与用户写的不是同一个，出问题时对不上。
+        if seg == ".." {
+            return Err(crate::error::WboxError::args(format!(
+                "工作目录 '{}' 含 '..'，请给出规范的绝对路径",
+                dir
+            )));
+        }
+        acc.push('/');
+        acc.push_str(seg);
+        out.push(cstr(&acc)?);
+    }
+    Ok(out)
+}
+
+
 /// 镜像模式的换根参数（[`LinuxMode::Image`] 才有）。
 struct NewRoot {
     /// rootfs 的宿主绝对路径
@@ -383,6 +418,15 @@ pub(super) fn spawn_isolated(
         uid_map: format!("{} {} 1\n", target_uid, uid).into_bytes(),
         gid_map: format!("{} {} 1\n", target_gid, gid).into_bytes(),
         c_root: cstr("/")?,
+        // 只在换根的镜像模式下有意义；宿主程序模式用 Command::current_dir。
+        c_guest_workdir: match (mode, spec.guest_workdir.as_deref()) {
+            (LinuxMode::Image, Some(w)) if !w.is_empty() => Some(cstr(w)?),
+            _ => None,
+        },
+        c_guest_workdir_parents: match (mode, spec.guest_workdir.as_deref()) {
+            (LinuxMode::Image, Some(w)) if !w.is_empty() => guest_dir_prefixes(w)?,
+            _ => Vec::new(),
+        },
         c_empty: cstr("")?,
         unshare_flags,
         new_netns,
@@ -1097,6 +1141,21 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
     }
     if libc::chdir(p.c_root.as_ptr()) != 0 {
         return Err(err());
+    }
+    // 容器内的工作目录（`-w` 或镜像 config 的 WorkingDir）。
+    // **失败要让容器起不来**：静默留在 `/` 会让 `WORKDIR /app` 的镜像看着跑起来了，
+    // 其实所有相对路径都指错了地方——那种错比起不来难查得多。
+    if let Some(w) = &p.c_guest_workdir {
+        // 不存在就逐级建出来（docker 同此行为）。已存在返回 EEXIST，忽略即可；
+        // 真正建不出来时下面的 chdir 会失败，容器起不来——那是对的：
+        // 静默留在 `/` 会让 `WORKDIR /app` 的镜像看着跑起来了，其实所有相对路径
+        // 都指错了地方，那种错比起不来难查得多。
+        for parent in &p.c_guest_workdir_parents {
+            libc::mkdir(parent.as_ptr(), 0o755);
+        }
+        if libc::chdir(w.as_ptr()) != 0 {
+            return Err(err());
+        }
     }
     // 8. 挂 /proc（新 PID namespace 的视图；ps/top 之类依赖它）。
     //    rootfs 里没有 /proc 目录时静默跳过——镜像不含它属正常情况，

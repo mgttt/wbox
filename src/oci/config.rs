@@ -96,9 +96,30 @@ impl ImageConfig {
     /// 按 docker 规则合并出最终命令：
     /// `Entrypoint + (显式 cmd 若给出，否则镜像 Cmd)`。
     /// 显式 cmd 为空切片表示用户未在 `--` 后提供命令。
-    pub fn merged_command(&self, explicit_cmd: &[String]) -> Vec<String> {
-        let mut out = self.entrypoint.clone();
-        if explicit_cmd.is_empty() {
+    /// `entrypoint_override` 是 `--entrypoint` 的取值（`PRD.md` F9.36）。
+    ///
+    /// **`--entrypoint ""` 是清空而不是"没给"**：docker 用它来彻底甩掉镜像的
+    /// entrypoint（典型用法 `--entrypoint "" IMAGE sh`）。所以这里用
+    /// `Option<&str>` 区分"没写这个选项"（`None`）与"写了空串"（`Some("")`），
+    /// 用空串当"没给"会让那个用法失效。
+    ///
+    /// **只有这一个合并函数**：曾经想留一个不带覆盖参数的薄包装，但那样一来
+    /// 「一个是另一个的特例」的两份东西就得一起维护——事实上补 `--entrypoint`
+    /// 时正是漏改了其中一个调用点（`create` 改了、`run` 没改），实测才发现。
+    pub fn merged_command(
+        &self,
+        explicit_cmd: &[String],
+        entrypoint_override: Option<&str>,
+    ) -> Vec<String> {
+        let mut out = match entrypoint_override {
+            Some("") => Vec::new(),
+            Some(ep) => vec![ep.to_string()],
+            None => self.entrypoint.clone(),
+        };
+        // 覆盖了 entrypoint 时**不再回落到镜像 Cmd**：镜像的 Cmd 是给它自己的
+        // entrypoint 当参数的，换了 entrypoint 还塞那串参数多半是错的
+        // （docker 同此语义）。
+        if explicit_cmd.is_empty() && entrypoint_override.is_none() {
             out.extend(self.cmd.iter().cloned());
         } else {
             out.extend(explicit_cmd.iter().cloned());
@@ -164,13 +185,30 @@ mod tests {
     fn merge_explicit_overrides_cmd() {
         let c = cfg(&[], &["bash"]);
         // 显式 cmd 覆盖镜像 Cmd
-        assert_eq!(c.merged_command(&explicit(&["sh", "-l"])), vec!["sh", "-l"]);
+        assert_eq!(c.merged_command(&explicit(&["sh", "-l"]), None), vec!["sh", "-l"]);
     }
 
     #[test]
     fn merge_uses_image_cmd_when_no_explicit() {
         let c = cfg(&[], &["bash"]);
-        assert_eq!(c.merged_command(&[]), vec!["bash"]);
+        assert_eq!(c.merged_command(&[], None), vec!["bash"]);
+    }
+
+    /// `--entrypoint` 覆盖镜像声明；空串是**清空**而不是"没给"——
+    /// `--entrypoint "" IMAGE sh` 是 docker 里甩掉 entrypoint 的标准写法。
+    #[test]
+    fn entrypoint_override_replaces_and_empty_string_clears() {
+        let c = cfg(&["/docker-entrypoint.sh"], &["nginx", "-g", "daemon off;"]);
+        // 覆盖后不再回落镜像 Cmd（那串参数是给原 entrypoint 的）
+        assert_eq!(c.merged_command(&[], Some("/bin/sh")), vec!["/bin/sh"]);
+        assert_eq!(
+            c.merged_command(&explicit(&["-c", "id"]), Some("/bin/sh")),
+            vec!["/bin/sh", "-c", "id"]
+        );
+        // 空串 = 清空 entrypoint，只留显式命令
+        assert_eq!(c.merged_command(&explicit(&["sh"]), Some("")), vec!["sh"]);
+        // None = 没写这个选项，行为与旧的 merged_command 完全一致
+        assert_eq!(c.merged_command(&[], None), c.merged_command(&[], None));
     }
 
     #[test]
@@ -178,12 +216,12 @@ mod tests {
         let c = cfg(&["/entry", "--serve"], &["--default-arg"]);
         // 无显式 cmd：Entrypoint + Cmd
         assert_eq!(
-            c.merged_command(&[]),
+            c.merged_command(&[], None),
             vec!["/entry", "--serve", "--default-arg"]
         );
         // 有显式 cmd：Entrypoint + 显式（Cmd 被覆盖）
         assert_eq!(
-            c.merged_command(&explicit(&["--override"])),
+            c.merged_command(&explicit(&["--override"]), None),
             vec!["/entry", "--serve", "--override"]
         );
     }
@@ -191,7 +229,7 @@ mod tests {
     #[test]
     fn merge_empty_everything_yields_empty() {
         let c = cfg(&[], &[]);
-        assert!(c.merged_command(&[]).is_empty());
+        assert!(c.merged_command(&[], None).is_empty());
     }
 
     #[test]
@@ -239,8 +277,8 @@ mod tests {
         for (ep, cmd, x, want) in cases {
             let c = cfg(ep, cmd);
             let got = match x {
-                Some(x) => c.merged_command(&explicit(x)),
-                None => c.merged_command(&[]),
+                Some(x) => c.merged_command(&explicit(x), None),
+                None => c.merged_command(&[], None),
             };
             assert_eq!(got, want.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 "ep={:?} cmd={:?} explicit={:?}", ep, cmd, x);

@@ -12,14 +12,10 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
     let liveness = runstate::liveness(&dir);
     let running = liveness == Liveness::Running;
     // `Paused` 原本写死 false——那比没有这个字段更糟：docker 用户会拿
-    // `.State.Paused` 去写脚本，而它结构性地永远为假。改成从 /proc 实测。
-    let paused = running && super::pause::is_paused(&dir);
-    let status = match liveness {
-        Liveness::Created => "created",
-        Liveness::Running if paused => "paused",
-        Liveness::Running => "running",
-        Liveness::Exited => "exited",
-    };
+    // `.State.Paused` 去写脚本，而它结构性地永远为假。改成从 /proc 实测，
+    // 且与 `ps`/`compose ps` 共用同一个状态口径（`status::label`）。
+    let status = super::status::label(&dir, liveness);
+    let paused = status == "paused";
     let exit_code = if liveness != Liveness::Exited {
         serde_json::Value::Null
     } else {
@@ -66,20 +62,20 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         })
         .collect();
 
+    // 网络模式是三态（none / host / container:X），而 `allow_network` 只有两态。
+    // 此前只看后者，于是一个确实共享了对端 netns 的容器被报成 "none"。
     let (network_mode, workdir) = entry
         .exec_context
         .as_ref()
         .map(|context| {
-            (
-                if context.allow_network {
-                    "host"
-                } else {
-                    "none"
-                },
-                context.workdir.as_str(),
-            )
+            let mode = match context.network_container.as_deref() {
+                Some(peer) => format!("container:{}", peer),
+                None if context.allow_network => "host".to_string(),
+                None => "none".to_string(),
+            };
+            (mode, context.workdir.as_str())
         })
-        .unwrap_or(("unknown", ""));
+        .unwrap_or(("unknown".to_string(), ""));
 
     Ok(serde_json::json!({
         "Id": entry.name,

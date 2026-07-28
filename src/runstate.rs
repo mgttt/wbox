@@ -90,6 +90,13 @@ pub struct ExecContext {
     pub volumes: Vec<String>,
     /// `-p` 端口映射，形如 `host:guest`（仅 TCP）。同上，供 `inspect` 如实报出。
     pub ports: Vec<String>,
+    /// `--network container:<NAME>` 的对端容器名。
+    ///
+    /// 网络模式其实有三态（none / host / container:X），而 `allow_network`
+    /// 只有两态。缺这一维时 `inspect` 会把一个**确实共享了对端 netns** 的容器
+    /// 报成 `NetworkMode: "none"`——实测两边 `/proc/self/ns/net` 是同一个 inode，
+    /// 报告却说它没网络。
+    pub network_container: Option<String>,
 }
 
 impl Entry {
@@ -100,6 +107,7 @@ impl Entry {
                 "workdir": context.workdir,
                 "volumes": context.volumes,
                 "ports": context.ports,
+                "network_container": context.network_container,
             })
         });
         let v = serde_json::json!({
@@ -141,6 +149,10 @@ impl Entry {
                 workdir: context.get("workdir")?.as_str()?.to_string(),
                 volumes: strings("volumes"),
                 ports: strings("ports"),
+                network_container: context
+                    .get("network_container")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             })
         });
         Some(Entry {
@@ -1041,6 +1053,17 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     Ok(())
 }
 
+/// 容器私有的临时目录（`PRD.md` §4.9 W6）：`<状态目录>/tmp`。
+///
+/// **放在状态目录里**是刻意的：容器记录被清理时它一并消失，不需要另一套生命周期
+/// ——与 `wineprefix` 的位置选择同一条理由（§4.9 L2）。
+///
+/// 只算路径，不建目录：状态目录在登记时可能被清掉重建（见 `register_with_context`
+/// 对残留 Exited 的 `purge_dir`），所以必须**登记之后**再建。
+pub fn private_tmp_dir(dir: &Path) -> PathBuf {
+    dir.join("tmp")
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1318,6 +1341,7 @@ mod tests {
                 workdir: "/work".into(),
                 volumes: vec!["/h:/g:ro".into()],
                 ports: vec!["8080:80".into()],
+                network_container: Some("peer".into()),
             }),
         };
         let encoded = e.to_json();
@@ -1342,6 +1366,7 @@ mod tests {
         assert_eq!(ctx.workdir, "/w");
         assert!(ctx.volumes.is_empty(), "缺失按空处理");
         assert!(ctx.ports.is_empty());
+        assert!(ctx.network_container.is_none());
     }
 
     #[test]

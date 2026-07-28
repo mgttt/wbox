@@ -1876,6 +1876,17 @@ else
   report FAIL "PZ.4 暂停可见性" "ps 状态列=$pzps inspect: $(printf '%s' "$pzins" | tr -d ' ')"
 fi
 
+# **一条如实记录下来的差异**（PRD F9.21）：wbox 用 SIGSTOP 而非 cgroup freezer，
+# 所以 exec 起的**新**进程没收到过 SIGSTOP，进得去；docker 那里会挂住。
+# 把它钉成门禁不是因为它"对"，而是因为它是 PRD 里写明的行为——哪天实现换成
+# freezer，这条会红，提醒去改文档，而不是让文档悄悄变成谎话。
+pout=$(timeout 10 env HOME=$WORK/home "$WBOX_ABS" exec pzc -- /bin/echo EXEC_OK 2>&1); prc=$?
+if [ "$prc" -eq 0 ] && printf '%s' "$pout" | grep -q EXEC_OK; then
+  report PASS "PZ.6 exec 进暂停容器可用（信号方案的已知差异，PRD 已写明）"
+else
+  report FAIL "PZ.6 暂停期 exec" "rc=$prc 输出: $(printf '%s' "$pout" | tr '\n' '|' | head -c 120)"
+fi
+
 pout=$(HOME=$WORK/home "$WBOX_ABS" unpause pzc 2>&1); prc=$?
 sleep 1
 after=$(cat "$PZFILE" 2>/dev/null)
@@ -2050,6 +2061,431 @@ HOME=$WORK/home "$WBOX_ABS" rm stbusy >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm stidle >/dev/null 2>&1
 
 echo
+echo "=== PT --private-tmp 私有临时目录（PRD §4.9 W6）==="
+
+# 宿主程序模式不换根，容器里的 /tmp 就是**宿主真实的 /tmp**——程序往那儿写的
+# 临时文件会留在宿主上。这一格（Q1/Q4 共用的宿主程序模式）此前没有任何办法挡它。
+PTH=$WORK/pthome
+rm -rf "$PTH" && mkdir -p "$PTH"
+PTMARK=/tmp/wbox-pt-probe-$$
+rm -f "$PTMARK"
+
+# 先确认缺口真实存在：不加选项时，写 /tmp 确实落在宿主上
+HOME=$PTH "$WBOX_ABS" run --rm -- /bin/sh -c "echo leaked > $PTMARK" >/dev/null 2>&1
+if [ -e "$PTMARK" ]; then
+  report PASS "PT.1 基线：不加选项时容器写 /tmp 确实落在宿主（缺口真实存在）"
+else
+  report FAIL "PT.1 基线" "宿主上没出现 $PTMARK，这组用例的前提不成立"
+fi
+rm -f "$PTMARK"
+
+# 加了选项后，TMPDIR 指向容器私有目录，写进去的东西不出现在宿主 /tmp
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp --name ptc -- \
+  /bin/sh -c 'echo "$TMPDIR"; echo y > "$TMPDIR/inside"; ls "$TMPDIR"' 2>&1)
+ptdir=$(printf '%s\n' "$ptout" | head -1)
+if printf '%s' "$ptdir" | grep -q '/.wbox/run/ptc/tmp' && printf '%s\n' "$ptout" | grep -qx 'inside'; then
+  report PASS "PT.2 --private-tmp 把 TMPDIR 指向容器私有目录且可写"
+else
+  report FAIL "PT.2 私有 TMPDIR" "输出: $(printf '%s' "$ptout" | tr '\n' '|' | head -c 180)"
+fi
+
+# 三个变量都要设：TMPDIR 是 POSIX 约定，TEMP/TMP 是 Windows 的——
+# 这条选项要在 Q1 与 Q4 两格都成立，而两格走的是同一个宿主程序模式。
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp -- \
+  /bin/sh -c 'echo "[$TMPDIR][$TEMP][$TMP]"' 2>&1 | tail -1)
+if ! printf '%s' "$ptout" | grep -q '\[\]'; then
+  report PASS "PT.3 TMPDIR/TEMP/TMP 三个变量都指向私有目录"
+else
+  report FAIL "PT.3 三变量" "得到 '$ptout'（不该有空项）"
+fi
+
+# 用户显式的 -e 必须赢：静默覆盖用户的显式意图是最难查的那类行为
+ptout=$(HOME=$PTH "$WBOX_ABS" run --rm --private-tmp -e TMPDIR=/my/own -- \
+  /bin/sh -c 'echo "$TMPDIR"' 2>&1 | tail -1)
+if [ "$ptout" = "/my/own" ]; then
+  report PASS "PT.4 用户显式的 -e TMPDIR 覆盖注入值（不静默改写显式意图）"
+else
+  report FAIL "PT.4 显式 -e 优先" "得到 '$ptout'（期望 /my/own）"
+fi
+
+# 镜像模式换根后 /tmp 本就私有，这个选项没有意义 —— 明确拒绝而不是假装做了事
+ptout=$(HOME=$WORK/home "$WBOX_ABS" run --rm --private-tmp lbetest -- /bin/true 2>&1); ptrc=$?
+if [ "$ptrc" -ne 0 ] && printf '%s' "$ptout" | grep -q '宿主程序模式'; then
+  report PASS "PT.5 镜像模式下明确拒绝（换根后 /tmp 本就私有）"
+else
+  report FAIL "PT.5 镜像模式拒绝" "rc=$ptrc 输出: $(printf '%s' "$ptout" | head -c 150)"
+fi
+
+rm -rf "$PTH"
+
+echo
+echo "=== MS 多阶段构建（PRD F9.39）==="
+
+MSH=$WORK/mshome
+rm -rf "$MSH" && mkdir -p "$MSH" "$WORK/msctx"
+MSD=$MSH/.wbox/images/registry-1.docker.io/library_mstest/latest
+mkdir -p "$MSD/rootfs/bin"
+cp "$BUSYBOX" "$MSD/rootfs/bin/busybox"
+for a in sh echo cat test; do ln -sf busybox "$MSD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":""}}' > "$MSD/config.json"
+echo '[]' > "$MSD/layers.json"; echo '{}' > "$MSD/manifest.json"
+
+cat > "$WORK/msctx/Dockerfile" <<'DF'
+FROM mstest AS builder
+ENV STAGE_A_ONLY=yes
+RUN /bin/sh -c 'echo built-in-A > /artifact.txt'
+FROM mstest
+COPY --from=builder /artifact.txt /from-a.txt
+ENV FINAL=1
+DF
+mout=$(HOME=$MSH "$WBOX_ABS" build -t ms:1 -f "$WORK/msctx/Dockerfile" "$WORK/msctx" 2>&1); mrc=$?
+
+# 多阶段的**全部意义**是：把 A 阶段的产物拿过来，但不把 A 阶段本身带进最终镜像。
+mgot=$(HOME=$MSH "$WBOX_ABS" run --rm ms:1 /bin/cat /from-a.txt 2>&1 | tail -1)
+mleak=$(HOME=$MSH "$WBOX_ABS" run --rm ms:1 \
+  /bin/sh -c 'test -e /artifact.txt && echo LEAKED || echo CLEAN' 2>&1 | tail -1)
+if [ "$mrc" -eq 0 ] && [ "$mgot" = "built-in-A" ] && [ "$mleak" = "CLEAN" ]; then
+  report PASS "MS.1 COPY --from 取到前一阶段产物，且该阶段本身未进最终镜像"
+else
+  report FAIL "MS.1 多阶段产物" "rc=$mrc 取到='$mgot' 泄漏检查='$mleak'"
+fi
+
+# 每个阶段的 config 独立：A 阶段的 ENV 不该出现在最终镜像里
+MSCFG=$MSH/.wbox/images/registry-1.docker.io/library_ms/1/config.json
+if grep -q 'FINAL=1' "$MSCFG" 2>/dev/null && ! grep -q 'STAGE_A_ONLY' "$MSCFG" 2>/dev/null; then
+  report PASS "MS.2 各阶段 config 独立（A 阶段的 ENV 未漏进最终镜像）"
+else
+  report FAIL "MS.2 阶段 config 隔离" "config: $(cat "$MSCFG" 2>/dev/null | head -c 200)"
+fi
+
+# 阶段临时目录要清掉，否则镜像缓存旁边会堆一堆半成品 rootfs
+if ! ls -d "$MSH/.wbox/images/registry-1.docker.io/library_ms/".wbox-stage-* >/dev/null 2>&1; then
+  report PASS "MS.3 构建结束后阶段临时目录已清理"
+else
+  report FAIL "MS.3 阶段目录残留" "$(ls -d "$MSH/.wbox/images/registry-1.docker.io/library_ms/".wbox-stage-* 2>/dev/null | tr '\n' ' ')"
+fi
+
+# 引用不存在的阶段要点名说清，而不是报一个与真实原因无关的错
+printf 'FROM mstest\nCOPY --from=nope /a /b\n' > "$WORK/msctx/D2"
+mout=$(HOME=$MSH "$WBOX_ABS" build -t ms:2 -f "$WORK/msctx/D2" "$WORK/msctx" 2>&1); mrc=$?
+if [ "$mrc" -ne 0 ] && printf '%s' "$mout" | grep -q '未定义的阶段'; then
+  report PASS "MS.4 引用未定义阶段时点名报错"
+else
+  report FAIL "MS.4 未定义阶段" "rc=$mrc 输出: $(printf '%s' "$mout" | head -c 150)"
+fi
+
+# 多阶段时禁用前缀缓存（跨阶段复用快照会是**错的**缓存），且要说出来；
+# 单阶段的缓存则必须照常工作——别把这条一起关掉了。
+printf 'FROM mstest\nRUN /bin/sh -c "echo x > /y"\n' > "$WORK/msctx/D3"
+HOME=$MSH "$WBOX_ABS" build -t ms:3 -f "$WORK/msctx/D3" "$WORK/msctx" >/dev/null 2>&1
+mcached=$(HOME=$MSH "$WBOX_ABS" build -t ms:3 -f "$WORK/msctx/D3" "$WORK/msctx" 2>&1 | grep -c CACHED)
+mnote=$(HOME=$MSH "$WBOX_ABS" build -t ms:1 -f "$WORK/msctx/Dockerfile" "$WORK/msctx" 2>&1 | grep -c '禁用构建缓存')
+if [ "$mcached" -ge 1 ] && [ "$mnote" -ge 1 ]; then
+  report PASS "MS.5 多阶段禁用缓存并出声，单阶段缓存照常命中"
+else
+  report FAIL "MS.5 缓存策略" "单阶段 CACHED 次数=$mcached 多阶段提示次数=$mnote"
+fi
+
+HOME=$MSH "$WBOX_ABS" rmi ms:1 >/dev/null 2>&1
+rm -rf "$MSH" "$WORK/msctx"
+
+echo
+echo "=== AF ADD 与 ps --filter（PRD F9.38）==="
+
+AFH=$WORK/afhome
+rm -rf "$AFH" && mkdir -p "$AFH" "$WORK/afctx/pack/sub"
+AFD=$AFH/.wbox/images/registry-1.docker.io/library_aftest/latest
+mkdir -p "$AFD/rootfs/bin"
+cp "$BUSYBOX" "$AFD/rootfs/bin/busybox"
+for a in sh echo cat sleep; do ln -sf busybox "$AFD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":""}}' > "$AFD/config.json"
+echo '[]' > "$AFD/layers.json"; echo '{}' > "$AFD/manifest.json"
+
+echo tarred > "$WORK/afctx/pack/sub/f"
+( cd "$WORK/afctx/pack" && tar -cf ../payload.tar sub )
+echo plainfile > "$WORK/afctx/plain.txt"
+printf 'FROM aftest\nADD payload.tar /unpacked\nADD plain.txt /plain.txt\n' > "$WORK/afctx/Dockerfile"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t addtest:1 -f "$WORK/afctx/Dockerfile" "$WORK/afctx" 2>&1); arc=$?
+# ADD 与 COPY 的唯一区别就是"本地 tar 自动解开"，判据落在解出来的文件内容上
+aunp=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /unpacked/sub/f 2>&1 | tail -1)
+aplain=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /plain.txt 2>&1 | tail -1)
+if [ "$arc" -eq 0 ] && [ "$aunp" = "tarred" ] && [ "$aplain" = "plainfile" ]; then
+  report PASS "AF.1 ADD 自动解开本地 tar，非归档文件原样拷贝"
+else
+  report FAIL "AF.1 ADD" "rc=$arc 解包内容='$aunp' 普通文件='$aplain'"
+fi
+
+# 远程 URL 明确拒绝：构建期出网拿不到缓存与校验，且常被网络策略挡住
+printf 'FROM aftest\nADD https://example.com/x /z\n' > "$WORK/afctx/D2"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t afx:1 -f "$WORK/afctx/D2" "$WORK/afctx" 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '远程 URL'; then
+  report PASS "AF.2 ADD 拒绝远程 URL 并说明改用 RUN + 下载工具"
+else
+  report FAIL "AF.2 ADD 远程 URL" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
+fi
+
+# `COPY --from` 的源在**那个阶段的 rootfs 内**，相对路径没有可解释的基准点，
+# 必须在解析期就拒绝——放行的话会去构建上下文里找，报一个与真实原因无关的错。
+# （多阶段构建本身的语义由 MS 组覆盖。）
+printf 'FROM aftest\nCOPY --from=builder relative/path /b\n' > "$WORK/afctx/D3"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t afx:1 -f "$WORK/afctx/D3" "$WORK/afctx" 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '必须是该阶段内的绝对路径'; then
+  report PASS "AF.3 COPY --from 的相对路径源被拒绝（没有可解释的基准点）"
+else
+  report FAIL "AF.3 COPY --from 相对路径" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
+fi
+
+# ADD 的源内容变了，缓存必须失效——只哈希指令文本的话会把旧内容烤进镜像
+echo CHANGED > "$WORK/afctx/plain.txt"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t addtest:1 -f "$WORK/afctx/Dockerfile" "$WORK/afctx" 2>&1)
+aplain=$(HOME=$AFH "$WBOX_ABS" run --rm addtest:1 /bin/cat /plain.txt 2>&1 | tail -1)
+if [ "$aplain" = "CHANGED" ]; then
+  report PASS "AF.4 ADD 源内容变化使构建缓存失效（不把旧内容烤进镜像）"
+else
+  report FAIL "AF.4 ADD 缓存失效" "重建后内容='$aplain'（期望 CHANGED）"
+fi
+
+# ps --filter：status 与 name，多条件是与关系
+HOME=$AFH "$WBOX_ABS" run -d --name affa aftest -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" run -d --name affb aftest -- /bin/sleep 30 >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" run -d --name afgone aftest -- /bin/echo x >/dev/null 2>&1
+sleep 2
+HOME=$AFH "$WBOX_ABS" pause affa >/dev/null 2>&1
+sleep 1
+arun=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=running -q | tr '\n' ' ')
+apau=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=paused -q | tr '\n' ' ')
+aexit=$(HOME=$AFH "$WBOX_ABS" ps -a --filter status=exited -q | tr '\n' ' ')
+if [ "$arun" = "affb " ] && [ "$apau" = "affa " ] && [ "$aexit" = "afgone " ]; then
+  report PASS "AF.5 ps --filter status= 区分 running/paused/exited"
+else
+  report FAIL "AF.5 filter status" "running='$arun' paused='$apau' exited='$aexit'"
+fi
+
+aand=$(HOME=$AFH "$WBOX_ABS" ps -a --filter name=aff --filter status=paused -q | tr '\n' ' ')
+if [ "$aand" = "affa " ]; then
+  report PASS "AF.6 多个 --filter 是与关系，name 按子串匹配"
+else
+  report FAIL "AF.6 filter 组合" "得到 '$aand'（期望 affa）"
+fi
+
+# 认不得的过滤键要当场报错：静默忽略会让手滑变成"列出了全部"而用户以为筛过了
+aout=$(HOME=$AFH "$WBOX_ABS" ps --filter stauts=running 2>&1); arc=$?
+if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '不支持的过滤键'; then
+  report PASS "AF.7 未知过滤键当场报错（不静默忽略）"
+else
+  report FAIL "AF.7 未知过滤键" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 140)"
+fi
+
+HOME=$AFH "$WBOX_ABS" unpause affa >/dev/null 2>&1
+HOME=$AFH "$WBOX_ABS" rm -f $(HOME=$AFH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
+rm -rf "$AFH" "$WORK/afctx"
+
+echo
+echo "=== WD 容器内工作目录（PRD F9.37）==="
+
+# 此前**镜像声明的 WorkingDir 与 -w 都被静默丢掉**：容器一律起在 /。
+# 判据是容器里 pwd 打出来的东西，不是命令返回码。
+WDD=$WORK/home/.wbox/images/registry-1.docker.io/library_wdtest/latest
+mkdir -p "$WDD/rootfs/bin" "$WDD/rootfs/imgwd" "$WDD/rootfs/other"
+cp "$BUSYBOX" "$WDD/rootfs/bin/busybox"
+for a in sh pwd echo; do ln -sf busybox "$WDD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":[],"Entrypoint":[],"WorkingDir":"/imgwd"}}' > "$WDD/config.json"
+echo '[]' > "$WDD/layers.json"; echo '{}' > "$WDD/manifest.json"
+
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/imgwd" ]; then
+  report PASS "WD.1 镜像声明的 WorkingDir 生效"
+else
+  report FAIL "WD.1 镜像 WorkingDir" "容器内 pwd='$wout'（期望 /imgwd）"
+fi
+
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /other wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/other" ]; then
+  report PASS "WD.2 -w 覆盖镜像声明的 WorkingDir"
+else
+  report FAIL "WD.2 -w 覆盖" "容器内 pwd='$wout'（期望 /other）"
+fi
+
+# 目录不存在时逐级建出来（docker 同此行为）
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /a/b/c wdtest /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/a/b/c" ]; then
+  report PASS "WD.3 工作目录不存在时逐级创建"
+else
+  report FAIL "WD.3 自动创建工作目录" "容器内 pwd='$wout'（期望 /a/b/c）"
+fi
+
+# **建在哪**是关键：必须落在容器自己的 overlay upper，不能写进共享的镜像缓存。
+# 换根前建就会写进 rootfs，那正是 F9.12 花力气避免的污染。
+if [ ! -e "$WDD/rootfs/a" ]; then
+  report PASS "WD.4 自动创建的工作目录落在容器可写层，未污染共享镜像缓存"
+else
+  report FAIL "WD.4 镜像缓存污染" "$WDD/rootfs/a 被创建了（应只在容器 upper 里）"
+fi
+
+# 宿主程序模式不换根，-w 仍是宿主工作目录，行为不能被这次改动带歪
+wout=$(HOME=$WORK/home "$WBOX_ABS" run --rm -w /etc -- /bin/pwd 2>&1 | tail -1)
+if [ "$wout" = "/etc" ]; then
+  report PASS "WD.5 宿主程序模式的 -w 语义未受影响"
+else
+  report FAIL "WD.5 宿主模式 -w" "pwd='$wout'（期望 /etc）"
+fi
+
+rm -rf "$WDD"
+
+echo
+echo "=== EP --entrypoint / --env-file / Dockerfile 新指令（PRD F9.36）==="
+
+# 造一个带 Entrypoint+Cmd 的镜像，才能验"覆盖"确实换掉了东西
+EPD=$WORK/home/.wbox/images/registry-1.docker.io/library_eptest/latest
+mkdir -p "$EPD/rootfs/bin"
+cp "$BUSYBOX" "$EPD/rootfs/bin/busybox"
+for a in sh echo cat env; do ln -sf busybox "$EPD/rootfs/bin/$a"; done
+printf '{"config":{"Env":[],"Cmd":["IMG_CMD"],"Entrypoint":["/bin/echo","IMG_EP"],"WorkingDir":""}}' > "$EPD/config.json"
+echo '[]' > "$EPD/layers.json"; echo '{}' > "$EPD/manifest.json"
+
+# 基线：不给 --entrypoint 时是镜像的 Entrypoint + Cmd
+eout=$(HOME=$WORK/home "$WBOX_ABS" run --rm eptest 2>&1 | tail -1)
+# 覆盖：换掉 entrypoint，且**不再回落镜像 Cmd**（那串参数是给原 entrypoint 的）
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint /bin/echo eptest OVERRIDDEN 2>&1 | tail -1)
+if [ "$eout" = "IMG_EP IMG_CMD" ] && [ "$eov" = "OVERRIDDEN" ]; then
+  report PASS "EP.1 --entrypoint 覆盖镜像 Entrypoint 且不回落镜像 Cmd"
+else
+  report FAIL "EP.1 entrypoint 覆盖" "默认='$eout'（期望 IMG_EP IMG_CMD） 覆盖后='$eov'（期望 OVERRIDDEN）"
+fi
+
+# 空串是**清空**而不是"没给"——docker 里甩掉 entrypoint 的标准写法
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint "" eptest /bin/echo CLEARED 2>&1 | tail -1)
+if [ "$eov" = "CLEARED" ]; then
+  report PASS "EP.2 --entrypoint \"\" 清空镜像 Entrypoint"
+else
+  report FAIL "EP.2 清空 entrypoint" "得到 '$eov'（期望 CLEARED）"
+fi
+
+# 宿主程序模式没有镜像，也就没有可覆盖的东西：要明确拒绝而不是静默忽略
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint /bin/sh -- /bin/true 2>&1); erc=$?
+if [ "$erc" -ne 0 ] && printf '%s' "$eov" | grep -q '只对镜像模式'; then
+  report PASS "EP.3 宿主程序模式下 --entrypoint 明确拒绝（不静默忽略）"
+else
+  report FAIL "EP.3 宿主模式拒绝" "rc=$erc 输出: $(printf '%s' "$eov" | head -c 140)"
+fi
+
+# --env-file：注释与空行跳过；值里可以有 '='；空值合法
+printf '# comment\nFOO=bar\nURL=k=v\n\nEMPTY=\n' > "$WORK/epenv"
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --entrypoint "" --env-file "$WORK/epenv" eptest \
+  /bin/sh -c 'echo "$FOO|$URL|$EMPTY|"' 2>&1 | tail -1)
+if [ "$eov" = "bar|k=v||" ]; then
+  report PASS "EP.4 --env-file 读入变量（跳过注释/空行，值里的 '=' 不被切）"
+else
+  report FAIL "EP.4 env-file" "得到 '$eov'（期望 bar|k=v||）"
+fi
+
+# 格式不对要指出**第几行**，否则几十行的文件无从查起
+eov=$(HOME=$WORK/home "$WBOX_ABS" run --rm --env-file /definitely/not/here eptest 2>&1); erc=$?
+printf 'GOOD=1\nbadline\n' > "$WORK/epbad"
+eov2=$(HOME=$WORK/home "$WBOX_ABS" run --rm --env-file "$WORK/epbad" eptest 2>&1); erc2=$?
+if [ "$erc" -ne 0 ] && [ "$erc2" -ne 0 ] && printf '%s' "$eov2" | grep -q '第 2 行'; then
+  report PASS "EP.5 env-file 不存在/格式错误都报错，并指出第几行"
+else
+  report FAIL "EP.5 env-file 错误信息" "缺文件 rc=$erc 坏行 rc=$erc2 输出: $(printf '%s' "$eov2" | head -c 140)"
+fi
+
+# Dockerfile 新指令：LABEL/EXPOSE/USER 进镜像 config，ARG 不进（它常带凭证）
+EPCTX=$WORK/epctx
+rm -rf "$EPCTX" && mkdir -p "$EPCTX"
+cat > "$EPCTX/Dockerfile" <<'DF'
+FROM eptest
+ARG BUILD_SECRET=shh
+LABEL org.opencontainers.image.title="my app"
+EXPOSE 8080
+USER 1000:1000
+DF
+eov=$(HOME=$WORK/home "$WBOX_ABS" build -t eplabel:v1 -f "$EPCTX/Dockerfile" "$EPCTX" 2>&1); erc=$?
+EPCFG=$WORK/home/.wbox/images/registry-1.docker.io/library_eplabel/v1/config.json
+if [ "$erc" -eq 0 ] \
+   && grep -q 'my app' "$EPCFG" 2>/dev/null \
+   && grep -q '8080/tcp' "$EPCFG" 2>/dev/null \
+   && grep -q '"User"' "$EPCFG" 2>/dev/null; then
+  report PASS "EP.6 LABEL/EXPOSE/USER 落进镜像 config（EXPOSE 补 /tcp）"
+else
+  report FAIL "EP.6 新指令落盘" "rc=$erc config: $(cat "$EPCFG" 2>/dev/null | head -c 200)"
+fi
+
+# ARG 绝不能落进镜像 config——构建参数常带凭证，落进去等于随镜像发出去
+if [ -f "$EPCFG" ] && ! grep -q 'BUILD_SECRET\|shh' "$EPCFG"; then
+  report PASS "EP.7 ARG 不落进镜像 config（构建参数常带凭证）"
+else
+  report FAIL "EP.7 ARG 泄漏" "config 里出现了构建参数: $(grep -o 'BUILD_SECRET[^,]*\|shh' "$EPCFG" 2>/dev/null | head -1)"
+fi
+
+HOME=$WORK/home "$WBOX_ABS" rmi eplabel:v1 >/dev/null 2>&1
+rm -rf "$EPCTX" "$EPD" "$WORK/epenv" "$WORK/epbad"
+
+echo
+echo "=== VOL 命名卷（PRD F9.35）==="
+
+# 命名卷的**全部意义**是数据活得比容器久。所以判据不是"命令返回 0"，
+# 而是：A 容器写进去，A 没了之后 B 容器还能读到同一份。
+VLH=$WORK/home
+vout=$(HOME=$VLH "$WBOX_ABS" run --rm -v volpersist:/data lbetest -- \
+  /bin/sh -c 'echo PERSISTED > /data/f' 2>&1); vrc=$?
+vread=$(HOME=$VLH "$WBOX_ABS" run --rm -v volpersist:/data lbetest -- \
+  /bin/cat /data/f 2>&1 | tail -1)
+if [ "$vrc" -eq 0 ] && [ "$vread" = "PERSISTED" ]; then
+  report PASS "VOL.1 命名卷跨容器保留数据（A 写，A 没了 B 仍读得到）"
+else
+  report FAIL "VOL.1 跨容器持久" "写 rc=$vrc 读到=$vread（期望 PERSISTED）"
+fi
+
+# 隐式建卷要**出声**：docker 也隐式建，但沉默地建会让 `-v mydta:/data` 这种手滑
+# 变成"数据不见了"，说一句用户当场就能发现名字打错了。
+if printf '%s' "$vout" | grep -q '已创建命名卷'; then
+  report PASS "VOL.2 隐式建卷时出声（手滑打错名字当场可见）"
+else
+  report FAIL "VOL.2 隐式建卷提示" "输出: $(printf '%s' "$vout" | tr '\n' '|' | head -c 150)"
+fi
+
+# 含 '/' 的源仍按宿主路径处理，且不存在时照旧拒绝——这条规则一旦漂了，
+# 用户的绑定挂载会被悄悄变成一个新建的空卷。
+vout=$(HOME=$VLH "$WBOX_ABS" run --rm -v /definitely/not/here:/data lbetest -- /bin/true 2>&1); vrc=$?
+if [ "$vrc" -ne 0 ] && printf '%s' "$vout" | grep -q '宿主路径不存在'; then
+  report PASS "VOL.3 含 '/' 的源仍是宿主路径，不存在时照旧拒绝"
+else
+  report FAIL "VOL.3 路径/卷名分界" "rc=$vrc 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+# 被运行中的容器占用时拒绝删除：卷目录被抽掉，容器里的挂载点就悬空了
+HOME=$VLH "$WBOX_ABS" run -d --name volholder -v volpersist:/data lbetest -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+vout=$(HOME=$VLH "$WBOX_ABS" volume rm volpersist 2>&1); vrc=$?
+vstill=$(HOME=$VLH "$WBOX_ABS" volume ls -q | grep -c '^volpersist$')
+if [ "$vrc" -ne 0 ] && [ "$vstill" -eq 1 ] && printf '%s' "$vout" | grep -q volholder; then
+  report PASS "VOL.4 卷被运行中的容器占用时拒绝删除，并点名是谁在用"
+else
+  report FAIL "VOL.4 占用保护" "rc=$vrc 卷还在=$vstill 输出: $(printf '%s' "$vout" | head -c 150)"
+fi
+
+# inspect 要报出真实挂载点与占用者
+vout=$(HOME=$VLH "$WBOX_ABS" volume inspect volpersist 2>&1)
+if printf '%s' "$vout" | grep -q '"UsedBy"' && printf '%s' "$vout" | grep -q volholder \
+   && printf '%s' "$vout" | grep -q 'volumes/volpersist'; then
+  report PASS "VOL.5 volume inspect 报出挂载点与占用者"
+else
+  report FAIL "VOL.5 volume inspect" "$(printf '%s' "$vout" | tr '\n' ' ' | head -c 180)"
+fi
+
+HOME=$VLH "$WBOX_ABS" rm -f volholder >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  HOME=$VLH "$WBOX_ABS" ps 2>/dev/null | awk '$1=="volholder"{f=1} END{exit !f}' || break
+  sleep 0.5
+done
+vout=$(HOME=$VLH "$WBOX_ABS" volume rm volpersist 2>&1); vrc=$?
+if [ "$vrc" -eq 0 ] && [ -z "$(HOME=$VLH "$WBOX_ABS" volume ls -q)" ]; then
+  report PASS "VOL.6 容器停掉后卷可正常删除"
+else
+  report FAIL "VOL.6 删除卷" "rc=$vrc 剩余: $(HOME=$VLH "$WBOX_ABS" volume ls -q | tr '\n' ' ')"
+fi
+
+echo
 echo "=== INS inspect 如实反映挂载与端口（PRD F9.33）==="
 
 # 判据是**inspect 说的和容器实际有的一致**。此前 Mounts 写死 []、端口根本没出现，
@@ -2086,6 +2522,28 @@ if printf '%s' "$insj" | grep -q '"Mounts": \[\]'; then
   report PASS "INS.3 没挂卷的容器 Mounts 如实为空"
 else
   report FAIL "INS.3 空 Mounts" "$(printf '%s' "$insj" | grep -A4 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+fi
+
+# 网络模式是三态（none / host / container:X），而记录里原本只有 allow_network
+# 这个两态开关，于是一个**确实共享了对端 netns** 的容器被报成 "none"。
+# 判据先确认两边 net namespace 真是同一个，再看 inspect 怎么说。
+HOME=$INSH "$WBOX_ABS" run -d --name inspeer --network container:insc -- /bin/sleep 30 >/dev/null 2>&1
+sleep 2
+insa=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
+insb=$(HOME=$INSH "$WBOX_ABS" exec inspeer -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
+insm=$(HOME=$INSH "$WBOX_ABS" inspect inspeer 2>&1 | grep NetworkMode)
+if [ -n "$insa" ] && [ "$insa" = "$insb" ] \
+   && printf '%s' "$insm" | grep -q 'container:insc'; then
+  report PASS "INS.4 inspect 的 NetworkMode 反映 container:<NAME> 三态"
+else
+  report FAIL "INS.4 NetworkMode 三态" "netns 相同=$([ "$insa" = "$insb" ] && echo 是 || echo 否) inspect: $(printf '%s' "$insm" | tr -d ' ')"
+fi
+
+insm=$(HOME=$INSH "$WBOX_ABS" inspect insplain 2>&1 | grep NetworkMode)
+if printf '%s' "$insm" | grep -q '"none"'; then
+  report PASS "INS.5 未开网络的容器仍如实报 none（没被三态改造带歪）"
+else
+  report FAIL "INS.5 none 未受影响" "$(printf '%s' "$insm" | tr -d ' ')"
 fi
 
 HOME=$INSH "$WBOX_ABS" rm -f $(HOME=$INSH "$WBOX_ABS" ps -aq) >/dev/null 2>&1

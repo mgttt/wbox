@@ -173,11 +173,10 @@ fn ps(o: &Options) -> Result<u32> {
         let cname = project.container_name(&svc.name);
         let state = match crate::runstate::dir_for(&cname) {
             Ok(dir) if dir.exists() => {
-                let base = match crate::runstate::liveness(&dir) {
-                    crate::runstate::Liveness::Running => "running",
-                    crate::runstate::Liveness::Exited => "exited",
-                    crate::runstate::Liveness::Created => "created",
-                };
+                // 共享状态口径：此前这里自己写了一份 match，于是 F9.32 给
+                // ps/inspect 补上 paused 之后，compose ps 仍把暂停的服务显示成
+                // running——分头维护的映射必然会漂。
+                let base = super::status::label(&dir, crate::runstate::liveness(&dir));
                 match crate::health::read_status(&dir) {
                     Some(h) => format!("{} ({})", base, h),
                     None => base.to_string(),

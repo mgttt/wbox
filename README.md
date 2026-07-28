@@ -41,10 +41,14 @@ Portable Windows 发布包包含两个文件：
 |---|---|---|
 | Windows × Windows 程序 | Sandboxie-Plus | **无文件系统写重定向、无注册表虚拟化**——原生 PE 程序发真 NT 调用，架构里没有介入点；已兑现的是「拒绝 + 显式授权」|
 | Windows × Linux 镜像 | WSL2 / Docker Desktop | 已有 `build` 子集+分层缓存/`--restart`；无卷挂载/端口映射/`--user`，**性能不可比** |
-| Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（原样回推，保留分层）/`diff`/`commit`/`pause`/`save`·`load`/`export`·`import`/`cp`/`stats`/`restart`/`rename`·`prune`/`logs -f`·`--tail`/`ps -q`·`rm -f`/`images -q`/`compose` 子集/IPC·UTS 隔离与共享；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
+| Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（原样回推，保留分层）/`diff`/`commit`/`pause`/`save`·`load`/`export`·`import`/`cp`/`stats`/`restart`/`rename`·`prune`/`logs -f`·`--tail`/`ps -q`·`rm -f`/`images -q`/**命名卷**/`--entrypoint`·`--env-file`/`ADD`/**多阶段构建**/`ps --filter`/`compose` 子集/IPC·UTS 隔离与共享；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
 | Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖（wineprefix 已按容器隔离） |
 
-每格的**下一步**（哪些缺口打算补、哪些永远不补）见 `PRD.md` §2.4.1。
+每格**怎么跑起来的**（两条隔离链路 × 两种程序格式）见 `PRD.md` §2.4.1；
+与四个参照物（Sandboxie-Plus / WSL2 / Podman·Docker / Wine）的**架构对照**
+——对标物怎么做的、差在哪、为什么——见 §2.4.2；
+每格的**下一步**（哪些缺口打算补、哪些永远不补）见 §2.4.3；
+四格**等深度的能力路线图**（Q1 的条目多数待 Windows 侧验证）见 §2.4.4。
 
 **两条硬天花板**（不说破的话"对标"只是口号）：
 

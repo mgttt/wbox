@@ -111,7 +111,23 @@ pub struct RunSpec {
     /// 退出后保留 AppContainer profile
     pub keep_profile: bool,
     /// 容器工作目录（原生模式）/ rootfs 目录（镜像模式）
+    /// 镜像模式下是**镜像 rootfs 的宿主路径**；宿主程序模式下才是工作目录。
+    /// 容器**内部**的 cwd 见 [`RunSpec::guest_workdir`]——两者是不同的东西，
+    /// 曾经只有这一个字段，于是镜像模式下 `-w` 与镜像的 `WorkingDir` 都无处安放，
+    /// 被静默丢掉了（F9.37 修的就是这个）。
     pub workdir: PathBuf,
+    /// 宿主程序模式下把 `TMPDIR`/`TEMP`/`TMP` 指向容器私有目录（§4.9 W6）。
+    ///
+    /// 镜像模式不需要它：换根之后 `/tmp` 本就在容器自己的可写层里。
+    pub private_tmp: bool,
+    /// 容器**内**的工作目录（绝对路径）。`None` = 不指定，落在 `/`。
+    ///
+    /// 来源按优先级：`-w/--workdir` > 镜像 config 的 `WorkingDir`。
+    ///
+    /// 目前只有 Linux 镜像后端读它（换根后 `chdir`）。Q2 的 Windows 镜像路径
+    /// 等纯 Rust guest VFS 落地后同样该读——那时它已经在 spec 里，不必再改结构。
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub guest_workdir: Option<String>,
     /// 最终命令行（镜像模式下已按 docker 规则合并 Entrypoint/Cmd）
     pub cmd: Vec<String>,
     /// 注入子进程的环境变量（镜像 config Env；原生模式为空）
@@ -674,10 +690,27 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     if guest == "/" {
         return Err(bad("不允许挂载到容器根 '/'——那会让隔离失效"));
     }
+    // 不含路径分隔符 = **命名卷**（F9.35），与 docker 同一条规则。
+    // 这条规则要简单且可预测，它决定了"数据写到哪"；任何"先当路径试试、
+    // 不存在就当名字"的聪明做法，都会把一次手滑变成一个新建的空卷。
+    if crate::volume::looks_like_name(host) {
+        let (dir, fresh) = crate::volume::create(host)?;
+        if fresh {
+            // 隐式建卷要出声。docker 也隐式建，但沉默地建会让 `-v mydta:/data`
+            // 这种手滑变成"数据不见了"——说一句，用户当场就能发现名字打错了。
+            println!("wbox: 已创建命名卷 '{}'（{}）", host, dir.display());
+        }
+        return Ok(VolumeMount {
+            host: dir,
+            guest: guest.to_string(),
+            read_only,
+        });
+    }
     let host_path = PathBuf::from(host);
     if !host_path.exists() {
         return Err(bad("宿主路径不存在（wbox 不会替你创建：拼错的路径会变成一个\
-                        空目录，等你发现数据不见了才知道挂错了）"));
+                        空目录，等你发现数据不见了才知道挂错了）；\
+                        若本意是命名卷，写成不含 '/' 的名字即可（如 -v mydata:/data）"));
     }
     let host_path = host_path.canonicalize().map_err(|e| {
         WboxError::args(format!("-v '{}'：解析宿主路径失败：{}", spec, e))

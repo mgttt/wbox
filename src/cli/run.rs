@@ -54,10 +54,52 @@ pub struct RunOptions {
     pub uts_container: Option<String>,
     /// `--hostname NAME`（仅 Linux；UTS namespace 已默认隔离）
     pub hostname: Option<String>,
+    /// `--private-tmp`：宿主程序模式下给容器一个私有临时目录（§4.9 W6）。
+    pub private_tmp: bool,
+    /// `--entrypoint`：覆盖镜像声明的 Entrypoint（F9.36）。
+    /// `Some("")` 表示显式清空，与 `None`（没写这个选项）不是一回事。
+    pub entrypoint: Option<String>,
     /// 第一个位置参数：镜像引用候选 或 本地命令首词
     pub positional: Option<String>,
     /// `--` 之后（或未写 `--` 时 positional 之后）的命令与参数
     pub cmd: Vec<String>,
+}
+
+/// 读 `--env-file`：一行一个 `KEY=VALUE`，`#` 开头与空行跳过。
+///
+/// **不做变量展开、不去引号**：docker 的 env-file 也不做。做了的话，
+/// 文件里的 `PASS=a"b` 会被悄悄改写，而用户无从知道自己拿到的值和写下的不一样。
+///
+/// 值里可以有 `=`（`URL=k=v` 合法），所以只切第一个 `=`。
+fn parse_env_file(path: &str) -> Result<Vec<(String, String)>> {
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        WboxError::args(format!("--env-file '{}' 读取失败：{}", path, e))
+    })?;
+    let mut out = Vec::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (k, v) = line.split_once('=').ok_or_else(|| {
+            WboxError::args(format!(
+                "--env-file '{}' 第 {} 行不是 KEY=VALUE：'{}'（不支持只写 KEY 从宿主继承）",
+                path,
+                n + 1,
+                line
+            ))
+        })?;
+        let k = k.trim();
+        if k.is_empty() {
+            return Err(WboxError::args(format!(
+                "--env-file '{}' 第 {} 行的键为空",
+                path,
+                n + 1
+            )));
+        }
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
 }
 
 /// 手写参数解析：支持 `--opt value`、`--flag`、至多一个位置参数（镜像引用
@@ -87,6 +129,8 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
         ipc_container: None,
         uts_container: None,
         hostname: None,
+        private_tmp: false,
+        entrypoint: None,
         positional: None,
         cmd: Vec::new(),
     };
@@ -235,6 +279,18 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             }
             "--pull" => opts.pull = true,
             "--env-pass-all" => opts.env_pass_all = true,
+            "--private-tmp" => opts.private_tmp = true,
+            "--entrypoint" => {
+                opts.entrypoint = Some(super::args::take_value(args, &mut i, "--entrypoint")?);
+            }
+            // `--env-file`：一行一个 KEY=VALUE。存在的理由是**别把密钥写进命令行**
+            // ——`-e TOKEN=...` 会进 shell 历史，也会被同机别的用户从 /proc 看到。
+            "--env-file" => {
+                let path = super::args::take_value(args, &mut i, "--env-file")?;
+                for (k, v) in parse_env_file(&path)? {
+                    opts.env.push((k, v));
+                }
+            }
             "-e" | "--env" => {
                 let raw = super::args::take_value(args, &mut i, a)?;
                 let (key, value) = raw.split_once('=').ok_or_else(|| {
@@ -298,7 +354,13 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
 }
 
 /// 由 RunOptions 组装 RunSpec 的公共部分。
-fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, env: Vec<(String, String)>) -> RunSpec {
+fn make_spec(
+    opts: &RunOptions,
+    workdir: std::path::PathBuf,
+    guest_workdir: Option<String>,
+    cmd: Vec<String>,
+    env: Vec<(String, String)>,
+) -> RunSpec {
     RunSpec {
         name: opts
             .name
@@ -308,6 +370,8 @@ fn make_spec(opts: &RunOptions, workdir: std::path::PathBuf, cmd: Vec<String>, e
         allow_network: opts.allow_network,
         keep_profile: opts.keep_profile,
         workdir,
+        guest_workdir,
+        private_tmp: opts.private_tmp,
         cmd,
         env,
         volumes: opts.volumes.clone(),
@@ -397,6 +461,21 @@ fn validate_options(opts: &RunOptions) -> Result<()> {
         opts.user,
     )?;
     crate::health::reject_if_unsupported(opts.health.as_ref())?;
+    // `--entrypoint` 覆盖的是**镜像**声明的 Entrypoint；宿主程序模式没有镜像，
+    // 也就没有可覆盖的东西。明确拒绝而不是静默忽略——静默忽略会让用户以为
+    // 自己换掉了要跑的程序，实际跑的还是原来那个。
+    if opts.private_tmp && opts.positional.is_some() {
+        return Err(WboxError::args(
+            "--private-tmp 只对宿主程序模式有意义：镜像模式已换根，\
+             /tmp 本就在容器自己的可写层里，不会碰到宿主的 /tmp",
+        ));
+    }
+    if opts.entrypoint.is_some() && opts.positional.is_none() {
+        return Err(WboxError::args(
+            "--entrypoint 只对镜像模式有意义（它覆盖的是镜像声明的 Entrypoint）；\
+             宿主程序模式请直接写要跑的程序",
+        ));
+    }
     if let Some(h) = opts.health.as_ref() {
         crate::health::validate(h)?;
     }
@@ -465,7 +544,7 @@ pub(crate) fn prepare_create(args: &[String]) -> Result<CreatedSummary> {
             let config = oci::config::ImageConfig::load(&dir)?;
             let cmd = config
                 .as_ref()
-                .map(|value| value.merged_command(&opts.cmd))
+                .map(|value| value.merged_command(&opts.cmd, opts.entrypoint.as_deref()))
                 .unwrap_or_else(|| opts.cmd.clone());
             if cmd.is_empty() {
                 return Err(WboxError::args(format!(
@@ -727,6 +806,7 @@ fn register_for_spawn(
             .iter()
             .map(|p| format!("{}:{}", p.host, p.guest))
             .collect(),
+        network_container: spec.network_container.clone(),
     };
     let reservation = std::env::var(SUPERVISED_TOKEN_ENV).ok();
     let mut reg = crate::runstate::register_with_context(
@@ -739,6 +819,16 @@ fn register_for_spawn(
     )?;
     if supervised && auto_remove {
         reg.remove_on_drop();
+    }
+    // 私有临时目录必须**登记之后**建：登记会把残留的已退出目录整个清掉再重建
+    // （见 `register_with_context` 对 Exited 的 purge），提前建的会被一并抹掉。
+    // 建不出来要让容器起不来——环境变量已经指向它了，静默失败会让 guest 往一个
+    // 不存在的目录写临时文件，报出来的错与真实原因毫无关系。
+    if spec.private_tmp {
+        let dir = crate::runstate::private_tmp_dir(reg.dir());
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            WboxError::args(format!("创建私有临时目录 '{}' 失败：{}", dir.display(), e))
+        })?;
     }
     Ok(reg)
 }
@@ -835,7 +925,27 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
         None => std::env::current_dir()
             .map_err(|e| WboxError::args(format!("获取当前目录失败：{}", e)))?,
     };
-    let spec = make_spec(opts, workdir, cmd, opts.env.clone());
+    // 宿主程序模式不换根，`workdir` 就是真正的工作目录，没有「容器内 cwd」这一层
+    let mut env = opts.env.clone();
+    if opts.private_tmp {
+        // 三个变量都设：`TMPDIR` 是 POSIX 约定，`TEMP`/`TMP` 是 Windows 的，
+        // 而这条选项要在两格都成立（Q1 与 Q4 走的是同一个宿主程序模式）。
+        // 放在 `opts.env` **之后**会覆盖用户显式给的值，所以放在前面——
+        // 用户写了 `-e TMPDIR=...` 就该以他的为准。
+        let name = opts
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("wbox-{}", std::process::id()));
+        let dir = crate::runstate::private_tmp_dir(&crate::runstate::dir_for(&name)?);
+        let shown = dir.to_string_lossy().into_owned();
+        let mut pre: Vec<(String, String)> = ["TMPDIR", "TEMP", "TMP"]
+            .iter()
+            .map(|k| (k.to_string(), shown.clone()))
+            .collect();
+        pre.extend(env);
+        env = pre;
+    }
+    let spec = make_spec(opts, workdir, None, cmd, env);
     match backend::host_program_backend_kind() {
         backend::HostProgramBackendKind::LinuxNamespace => {
             let backend = backend::LinuxNativeBackend(backend::LinuxMode::Host);
@@ -886,7 +996,10 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
     // WorkingDir 记录（guest 路径映射由 wbox-linux 侧落地，当前仅展示）。
     let img_cfg = oci::config::ImageConfig::load(&dir)?;
     let (merged, mut env) = match &img_cfg {
-        Some(c) => (c.merged_command(&opts.cmd), c.env.clone()),
+        Some(c) => (
+            c.merged_command(&opts.cmd, opts.entrypoint.as_deref()),
+            c.env.clone(),
+        ),
         None => (opts.cmd.clone(), Vec::new()),
     };
     env.extend(opts.env.iter().cloned());
@@ -907,7 +1020,15 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
         }
     }
 
-    let spec = make_spec(opts, dir.join("rootfs"), merged, env);
+    // 容器内 cwd：`-w` 优先，其次镜像 config 的 WorkingDir。
+    // 补这一条之前两者都被静默丢掉——镜像声明了 WorkingDir 也照样起在 `/`，
+    // 用户写了 `-w` 更是毫无反应（F9.37）。
+    let guest_workdir = opts
+        .workdir
+        .clone()
+        .or_else(|| img_cfg.as_ref().and_then(|c| c.working_dir.clone()))
+        .filter(|w| !w.is_empty());
+    let spec = make_spec(opts, dir.join("rootfs"), guest_workdir, merged, env);
     #[cfg(windows)]
     let mut spec = spec;
     // 按宿主分派（docs/architecture.md §3）：Windows 上 guest 是跑不了的
@@ -956,6 +1077,30 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    /// `--private-tmp` 注入的三个变量要能被用户显式的 `-e` 覆盖：
+    /// 注入放在 `opts.env` **之前**，后写的同名键才会赢。
+    /// 反过来的话，用户写了 `-e TMPDIR=...` 却毫无效果——静默覆盖用户的显式意图
+    /// 是最难查的那类行为。
+    #[test]
+    fn private_tmp_does_not_override_an_explicit_env() {
+        let a: Vec<String> = ["--private-tmp", "-e", "TMPDIR=/my/own", "--", "/bin/true"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let o = super::parse_run_args(&a).unwrap();
+        assert!(o.private_tmp);
+        assert_eq!(o.env, vec![("TMPDIR".to_string(), "/my/own".to_string())]);
+    }
+
+    /// 镜像模式下它没有意义（换根后 /tmp 本就是私有的），要明确拒绝。
+    #[test]
+    fn private_tmp_is_rejected_in_image_mode() {
+        let a: Vec<String> = ["--private-tmp", "someimage"].iter().map(|s| s.to_string()).collect();
+        let o = super::parse_run_args(&a).unwrap();
+        let m = format!("{}", super::validate_options(&o).unwrap_err());
+        assert!(m.contains("宿主程序模式"), "{}", m);
+    }
+
     use super::*;
 
     fn parse(args: &[&str]) -> Result<RunOptions> {

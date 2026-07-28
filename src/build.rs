@@ -1,8 +1,15 @@
 //! `wbox build`：Dockerfile 子集构建（`PRD.md` F9.3）。
 //!
 //! 只实现自用场景够用的子集：`FROM` / `RUN` / `COPY` / `ENV` / `WORKDIR` /
-//! `CMD` / `ENTRYPOINT`。**未实现的指令一律明确报错**，不静默跳过——静默跳过
-//! 会产出一个"看着构建成功、其实少做了事"的镜像，比构建失败难查得多。
+//! `CMD` / `ENTRYPOINT` / `LABEL` / `EXPOSE` / `USER` / `ARG` / `ADD`，
+//! 以及**多阶段构建**（`FROM <镜像> AS <名字>` + `COPY --from=<名字>`，F9.39）。
+//! **未实现的指令一律明确报错**，不静默跳过——静默跳过会产出一个"看着构建成功、
+//! 其实少做了事"的镜像，比构建失败难查得多。
+//!
+//! 后四条里有两条是**纯声明**，必须说清它们不做什么：`EXPOSE` 只写进镜像 config，
+//! 不会真的发布端口（发布要 `-p`）；`USER` 同样只是镜像声明的默认身份，
+//! 运行时是否生效取决于 `--user` 与那一格支持不支持（F9.7）。
+//! 把声明当成生效，是这两条指令最常见的误解。
 //!
 //! `RUN` 复用现成的容器执行路径（`wbox run` 的镜像模式），所以构建期的隔离
 //! 与运行期完全一致，不另起一套。
@@ -13,14 +20,33 @@ use std::path::{Path, PathBuf};
 /// Dockerfile 里的一条指令（已解析）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
-    From(String),
+    /// `FROM <镜像> [AS <阶段名>]`。`as_name` 供多阶段构建的 `COPY --from` 引用。
+    From { image: String, as_name: Option<String> },
     Run(String),
-    /// `COPY <src> <dst>`：src 相对构建上下文，dst 是容器内绝对路径
-    Copy { src: String, dst: String },
+    /// `COPY [--from=<阶段>] <src> <dst>`：
+    /// `from_stage` 为 `None` 时 src 相对构建上下文；为 `Some(名字)` 时
+    /// src 是**该阶段产物 rootfs 内**的绝对路径（多阶段构建，F9.38）。
+    /// dst 始终是容器内绝对路径。
+    Copy {
+        src: String,
+        dst: String,
+        from_stage: Option<String>,
+    },
+    /// `ADD <src> <dst>`：与 `COPY` 的差别只有一条——**src 是本地 tar 时自动解开**。
+    /// 远程 URL **不做**（见解析处的说明）。
+    Add { src: String, dst: String },
     Env { key: String, value: String },
     Workdir(String),
     Cmd(Vec<String>),
     Entrypoint(Vec<String>),
+    /// `LABEL k=v`：写进镜像 config 的 `Labels`。
+    Label { key: String, value: String },
+    /// `EXPOSE 80` / `EXPOSE 80/tcp`：**纯声明**，不会真的发布端口。
+    Expose(String),
+    /// `USER 1000[:1000]`：镜像声明的默认身份。
+    User(String),
+    /// `ARG k[=默认值]`：构建期变量。
+    Arg { key: String, default: Option<String> },
 }
 
 /// 解析 Dockerfile 文本。
@@ -62,21 +88,84 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
         match upper.as_str() {
             "FROM" => {
                 need("基础镜像")?;
-                out.push(Instruction::From(rest.to_string()));
+                // `FROM x AS name`：AS 不区分大小写（docker 同此）
+                let mut it = rest.split_whitespace();
+                let image = it.next().unwrap_or_default().to_string();
+                let as_name = match (it.next(), it.next()) {
+                    (Some(kw), Some(name)) if kw.eq_ignore_ascii_case("AS") => {
+                        Some(name.to_string())
+                    }
+                    (None, _) => None,
+                    (Some(other), _) => {
+                        return Err(WboxError::args(format!(
+                            "FROM 只支持 `FROM <镜像> [AS <阶段名>]`，多出的 '{}' 无法解析",
+                            other
+                        )))
+                    }
+                };
+                if it.next().is_some() {
+                    return Err(WboxError::args("FROM 的参数过多（用法 FROM <镜像> [AS <阶段名>]）"));
+                }
+                out.push(Instruction::From { image, as_name });
             }
             "RUN" => {
                 need("命令")?;
                 out.push(Instruction::Run(rest.to_string()));
             }
             "COPY" => {
-                let mut it = rest.split_whitespace();
+                let mut it = rest.split_whitespace().peekable();
+                let mut from_stage = None;
+                if let Some(first) = it.peek() {
+                    if let Some(stage) = first.strip_prefix("--from=") {
+                        if stage.is_empty() {
+                            return Err(WboxError::args("COPY --from= 缺少阶段名"));
+                        }
+                        from_stage = Some(stage.to_string());
+                        it.next();
+                    }
+                }
                 let (Some(src), Some(dst)) = (it.next(), it.next()) else {
                     return Err(WboxError::args("COPY 需要 <src> <dst> 两个参数"));
                 };
                 if it.next().is_some() {
                     return Err(WboxError::args("COPY 暂只支持单个 src（多源未实现）"));
                 }
+                if from_stage.is_some() && !src.starts_with('/') {
+                    // `--from` 的源在**那个阶段的 rootfs 内**，不是构建上下文里，
+                    // 所以必须是绝对路径。相对路径没有可解释的基准点。
+                    return Err(WboxError::args(format!(
+                        "COPY --from 的源 '{}' 必须是该阶段内的绝对路径",
+                        src
+                    )));
+                }
                 out.push(Instruction::Copy {
+                    src: src.to_string(),
+                    dst: dst.to_string(),
+                    from_stage,
+                });
+            }
+            // `ADD` 与 `COPY` 只差一条：src 是本地 tar 时自动解开。
+            //
+            // **远程 URL 不做**，而且是明确拒绝而非静默当成路径：docker 自己的文档
+            // 都建议别用（拿不到缓存、拿不到校验、构建期出网还常被审批挡住），
+            // 而 wbox 的目标用户里正有"出网要审批"的那一类（§3.1）。
+            // 要取远程文件，用 RUN + 你信任的下载工具，那样至少校验和重试都在你手里。
+            "ADD" => {
+                let mut it = rest.split_whitespace();
+                let (Some(src), Some(dst)) = (it.next(), it.next()) else {
+                    return Err(WboxError::args("ADD 需要 <src> <dst> 两个参数"));
+                };
+                if it.next().is_some() {
+                    return Err(WboxError::args("ADD 暂只支持单个 src（多源未实现）"));
+                }
+                if src.starts_with("http://") || src.starts_with("https://") {
+                    return Err(WboxError::args(format!(
+                        "ADD 不支持远程 URL '{}'：构建期出网拿不到缓存与校验，\
+                         且常被网络策略挡住。请用 RUN + 你信任的下载工具（校验与重试都在你手里）",
+                        src
+                    )));
+                }
+                out.push(Instruction::Add {
                     src: src.to_string(),
                     dst: dst.to_string(),
                 });
@@ -102,6 +191,43 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
                 need("命令")?;
                 out.push(Instruction::Cmd(parse_exec_form(rest)));
             }
+            "LABEL" => {
+                need("KEY=VALUE")?;
+                let (k, v) = rest
+                    .split_once('=')
+                    .ok_or_else(|| WboxError::args("LABEL 需要 KEY=VALUE 形式"))?;
+                if k.trim().is_empty() {
+                    return Err(WboxError::args("LABEL 的键不能为空"));
+                }
+                // 值两侧的引号是 Dockerfile 的写法惯例（LABEL a="b c"），剥掉；
+                // 中间的引号原样保留——那是值的一部分。
+                out.push(Instruction::Label {
+                    key: k.trim().to_string(),
+                    value: strip_quotes(v.trim()).to_string(),
+                });
+            }
+            "EXPOSE" => {
+                need("端口")?;
+                out.push(Instruction::Expose(rest.to_string()));
+            }
+            "USER" => {
+                need("身份")?;
+                out.push(Instruction::User(rest.to_string()));
+            }
+            "ARG" => {
+                need("变量名")?;
+                let (k, default) = match rest.split_once('=') {
+                    Some((k, v)) => (k.trim(), Some(strip_quotes(v.trim()).to_string())),
+                    None => (rest, None),
+                };
+                if k.is_empty() {
+                    return Err(WboxError::args("ARG 的变量名不能为空"));
+                }
+                out.push(Instruction::Arg {
+                    key: k.to_string(),
+                    default,
+                });
+            }
             "ENTRYPOINT" => {
                 need("命令")?;
                 out.push(Instruction::Entrypoint(parse_exec_form(rest)));
@@ -109,17 +235,98 @@ pub fn parse_dockerfile(text: &str) -> Result<Vec<Instruction>> {
             other => {
                 return Err(WboxError::args(format!(
                     "Dockerfile 指令 '{}' 未实现（本子集支持 FROM/RUN/COPY/ENV/WORKDIR/\
-                     CMD/ENTRYPOINT）；静默跳过会产出一个看似构建成功、实则少做了事的镜像",
+                     CMD/ENTRYPOINT/LABEL/EXPOSE/USER/ARG/ADD）；\
+                     静默跳过会产出一个看似构建成功、实则少做了事的镜像",
                     other
                 )));
             }
         }
     }
     match out.first() {
-        Some(Instruction::From(_)) => Ok(out),
+        Some(Instruction::From { .. }) => Ok(out),
         Some(_) => Err(WboxError::args("Dockerfile 的第一条指令必须是 FROM")),
         None => Err(WboxError::args("Dockerfile 为空")),
     }
+}
+
+/// 这个文件是不是 tar 归档。
+///
+/// **看内容不看扩展名**：`ADD payload /x` 里那个没有后缀的文件可能就是 tar，
+/// 而 `notes.tar` 也可能只是个名字里带 tar 的文本。tar 在偏移 257 处有
+/// `ustar` 魔数，读 265 字节就能定。
+fn is_tar_archive(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 265];
+    let Ok(n) = f.read(&mut head) else {
+        return false;
+    };
+    n >= 265 && &head[257..262] == b"ustar"
+}
+
+/// 把 tar 解到 `dst`，返回解出的条目数。
+///
+/// 安全约束与 `wbox import` 同一套（F9.25）：逐条挡绝对路径与 `..`，
+/// 一律拼到 `dst` 之下。Dockerfile 是本仓的输入不假，但 `ADD` 的那个 tar
+/// 常常是第三方下载来的——按不可信输入处理才对。
+fn extract_tar_into(src: &Path, dst: &Path) -> Result<usize> {
+    let bytes = std::fs::read(src)
+        .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", src.display(), e)))?;
+    let mut ar = tar::Archive::new(std::io::Cursor::new(&bytes));
+    let mut count = 0usize;
+    let entries = ar
+        .entries()
+        .map_err(|e| WboxError::args(format!("读取归档失败：{}", e)))?;
+    for entry in entries {
+        let mut e = entry.map_err(|e| WboxError::args(format!("读取归档条目失败：{}", e)))?;
+        let path = e
+            .path()
+            .map_err(|e| WboxError::args(format!("归档条目路径非法：{}", e)))?
+            .into_owned();
+        let mut rel = PathBuf::new();
+        for c in path.components() {
+            match c {
+                std::path::Component::Normal(seg) => rel.push(seg),
+                std::path::Component::CurDir => {}
+                _ => {
+                    return Err(WboxError::args(format!(
+                        "ADD 的归档里含绝对路径或 '..'（'{}'），拒绝解包",
+                        path.display()
+                    )))
+                }
+            }
+        }
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let target = dst.join(&rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| WboxError::args(format!("创建解包目录失败：{}", e)))?;
+        }
+        // 单条解不出来不中止：归档里常有本机建不出来的条目（设备节点要 root）。
+        // 与 `import` 同一取舍。
+        if e.unpack(&target).is_ok() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// 剥掉值两侧成对的引号（`LABEL a="b c"` 的写法惯例）。
+///
+/// 只剥**两侧成对**的那一层，中间的引号原样保留——它们是值的一部分。
+/// 不做转义处理：处理了就得把一整套 shell 引用规则搬进来，而 Dockerfile 的
+/// 这几条指令用不到，半套规则比没有更难预料。
+fn strip_quotes(v: &str) -> &str {
+    for q in ['"', '\''] {
+        if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) {
+            return &v[1..v.len() - 1];
+        }
+    }
+    v
 }
 
 /// `CMD ["a","b"]`（exec 形式）或 `CMD a b`（shell 形式）。
@@ -202,6 +409,76 @@ pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// 新增的四条指令：LABEL/EXPOSE/USER 进镜像 config，ARG **不进**
+    /// （构建参数常带凭证，落进镜像等于随镜像发出去）。
+    #[test]
+    fn parses_label_expose_user_arg() {
+        let df = "FROM alpine:3.20\n\
+                  LABEL org.opencontainers.image.title=\"my app\"\n\
+                  EXPOSE 80\n\
+                  EXPOSE 8443/tcp\n\
+                  USER 1000:1000\n\
+                  ARG BUILD_ID=42\n\
+                  ARG NO_DEFAULT\n";
+        let got = parse_dockerfile(df).unwrap();
+        assert_eq!(
+            got[1],
+            Instruction::Label {
+                key: "org.opencontainers.image.title".into(),
+                // 两侧成对的引号剥掉，中间的原样留（这里没有中间的）
+                value: "my app".into()
+            }
+        );
+        assert_eq!(got[2], Instruction::Expose("80".into()));
+        assert_eq!(got[3], Instruction::Expose("8443/tcp".into()));
+        assert_eq!(got[4], Instruction::User("1000:1000".into()));
+        assert_eq!(
+            got[5],
+            Instruction::Arg { key: "BUILD_ID".into(), default: Some("42".into()) }
+        );
+        assert_eq!(
+            got[6],
+            Instruction::Arg { key: "NO_DEFAULT".into(), default: None }
+        );
+
+        // 缺参数一律报错，不静默跳过
+        assert!(parse_dockerfile("FROM a\nLABEL\n").is_err());
+        assert!(parse_dockerfile("FROM a\nLABEL nokey\n").is_err());
+        assert!(parse_dockerfile("FROM a\nEXPOSE\n").is_err());
+        assert!(parse_dockerfile("FROM a\nUSER\n").is_err());
+        assert!(parse_dockerfile("FROM a\nARG\n").is_err());
+    }
+
+    /// 这四条落进 config 的形状要与 docker/OCI 一致，否则 `run` 读不回来。
+    #[test]
+    fn config_json_shape_for_the_new_instructions() {
+        let mut cfg = ConfigAccum::default();
+        cfg.labels.push(("a".into(), "1".into()));
+        cfg.exposed.push("80/tcp".into());
+        cfg.user = Some("1000".into());
+        cfg.args.push(("SECRET".into(), "shh".into()));
+        let v: serde_json::Value = serde_json::from_str(&cfg.to_json()).unwrap();
+        assert_eq!(v["config"]["Labels"]["a"], "1");
+        // ExposedPorts 的值是空对象，与 OCI 一致
+        assert!(v["config"]["ExposedPorts"]["80/tcp"].is_object());
+        assert_eq!(v["config"]["User"], "1000");
+        // ARG 绝不能出现在镜像 config 里
+        assert!(
+            !cfg.to_json().contains("SECRET"),
+            "构建参数不该落进镜像 config：它常带凭证"
+        );
+    }
+
+    /// 只剥两侧成对的那一层，中间的引号是值的一部分。
+    #[test]
+    fn strip_quotes_only_removes_a_matched_outer_pair() {
+        assert_eq!(strip_quotes("\"a b\""), "a b");
+        assert_eq!(strip_quotes("'a b'"), "a b");
+        assert_eq!(strip_quotes("a\"b"), "a\"b");
+        assert_eq!(strip_quotes("\"unbalanced"), "\"unbalanced");
+        assert_eq!(strip_quotes("plain"), "plain");
+    }
+
     #[test]
     fn parses_supported_subset() {
         let df = r#"
@@ -216,7 +493,10 @@ ENTRYPOINT ["/app/app.sh"]
 CMD ["--help"]
 "#;
         let got = parse_dockerfile(df).unwrap();
-        assert_eq!(got[0], Instruction::From("alpine:3.20".into()));
+        assert_eq!(
+            got[0],
+            Instruction::From { image: "alpine:3.20".into(), as_name: None }
+        );
         assert_eq!(
             got[1],
             Instruction::Env { key: "FOO".into(), value: "bar".into() }
@@ -314,6 +594,15 @@ struct ConfigAccum {
     workdir: Option<String>,
     cmd: Option<Vec<String>>,
     entrypoint: Option<Vec<String>>,
+    /// `LABEL` 累积（同键后写覆盖先写，与 `ENV` 一致）。
+    labels: Vec<(String, String)>,
+    /// `EXPOSE` 声明的端口，形如 `80/tcp`。
+    exposed: Vec<String>,
+    /// `USER` 声明的默认身份。
+    user: Option<String>,
+    /// `ARG` 的构建期变量（含默认值）。**不进镜像 config**——
+    /// 构建参数常带凭证，落进镜像等于把它发出去。
+    args: Vec<(String, String)>,
 }
 
 impl ConfigAccum {
@@ -337,6 +626,28 @@ impl ConfigAccum {
         if let Some(e) = &self.entrypoint {
             cfg.insert("Entrypoint".into(), serde_json::json!(e));
         }
+        if !self.labels.is_empty() {
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .labels
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                .collect();
+            cfg.insert("Labels".into(), serde_json::Value::Object(map));
+        }
+        if !self.exposed.is_empty() {
+            // OCI/docker 的形状是 {"80/tcp": {}}，值是个空对象
+            let map: serde_json::Map<String, serde_json::Value> = self
+                .exposed
+                .iter()
+                .map(|p| (p.clone(), serde_json::json!({})))
+                .collect();
+            cfg.insert("ExposedPorts".into(), serde_json::Value::Object(map));
+        }
+        if let Some(u) = &self.user {
+            cfg.insert("User".into(), serde_json::json!(u));
+        }
+        // ARG 刻意不写进 config：构建参数常带凭证（token、密码），
+        // 落进镜像等于随镜像一起发出去。docker 也不把 ARG 写进 config。
         serde_json::json!({ "config": cfg }).to_string()
     }
 }
@@ -523,8 +834,19 @@ fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
     let mut h = Sha256::new();
     h.update(prev.as_bytes());
     h.update(format!("{:?}", ins).as_bytes());
-    if let Instruction::Copy { src, .. } = ins {
-        // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
+    // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
+    //
+    // **`ADD` 必须和 `COPY` 一起列在这里**：只哈希指令文本的话，源文件改了键不变，
+    // 后续步骤会命中旧快照，把**旧内容悄悄烤进镜像**——构建"成功"，内容是错的。
+    let src = match ins {
+        // `COPY --from=<阶段>` 的源在**那个阶段的产物里**，不在构建上下文里——
+        // 拿去 `resolve_context_path` 会直接报"源不可用"。它的内容由前面那些
+        // 指令决定，而那些指令已经进了累加的键链，所以这里跳过是安全的。
+        Instruction::Copy { from_stage: Some(_), .. } => None,
+        Instruction::Copy { src, .. } | Instruction::Add { src, .. } => Some(src),
+        _ => None,
+    };
+    if let Some(src) = src {
         let from = resolve_context_path(context, src)?;
         hash_path_into(&from, &mut h)?;
     }
@@ -615,7 +937,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     let build_dir = staging.0.clone();
     #[cfg(not(windows))]
     let build_dir = out_dir.clone();
-    let rootfs = build_dir.join("rootfs");
+    // 最终阶段的产物目录。多阶段构建时前面几个阶段各建到自己的临时目录，
+    // 只有最后一个阶段写到这里——它才是这次 build 的输出。
+    let final_build_dir = build_dir.clone();
+    let mut build_dir = build_dir;
+    let mut rootfs = build_dir.join("rootfs");
 
     // ---- 分层缓存：先算出每步的键，再找**最长的已缓存前缀** ----
     //
@@ -631,15 +957,42 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     // 只有会改动 rootfs 的步骤才值得做快照；纯配置指令（ENV/CMD/...）不动
     // 文件系统，缓存它们只是徒增磁盘占用。
     let mutating = |i: &Instruction| {
-        matches!(i, Instruction::Run(_) | Instruction::Copy { .. })
+        matches!(
+            i,
+            Instruction::Run(_) | Instruction::Copy { .. } | Instruction::Add { .. }
+        )
     };
+    // 每条指令属于第几个阶段（`FROM` 开一个新阶段）。
+    let mut stage_of: Vec<usize> = Vec::with_capacity(instructions.len());
+    let mut stage_count = 0usize;
+    for ins in &instructions {
+        if matches!(ins, Instruction::From { .. }) {
+            stage_count += 1;
+        }
+        stage_of.push(stage_count.saturating_sub(1));
+    }
+    let multi_stage = stage_count > 1;
+
     let mut resume_from = 0usize;
-    for idx in (0..instructions.len()).rev() {
-        if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
-            resume_from = idx + 1;
-            break;
+    if multi_stage {
+        // **多阶段时先禁用前缀缓存**。缓存键是沿指令序列累加的，跨阶段复用快照
+        // 会把 A 阶段的 rootfs 恢复到 B 阶段头上——那是**错的**缓存，
+        // 而错的缓存比没有缓存糟得多（构建"成功"，内容是别的阶段的）。
+        // 宁可不缓存；等阶段内独立键做出来再打开。
+        println!("wbox: 多阶段构建（{} 个阶段），本次禁用构建缓存", stage_count);
+    } else {
+        for idx in (0..instructions.len()).rev() {
+            if mutating(&instructions[idx]) && cache.join(&keys[idx]).join("rootfs").is_dir() {
+                resume_from = idx + 1;
+                break;
+            }
         }
     }
+    // 阶段名 → 该阶段产物 rootfs，供 `COPY --from` 取用。
+    let mut stage_roots: std::collections::HashMap<String, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    // 非最终阶段的临时目录，构建结束后清掉
+    let mut stage_dirs: Vec<std::path::PathBuf> = Vec::new();
 
     // 记住基础镜像目录：构建结束后要按它算增量层（PRD L5b）。
     let mut base_image_dir: Option<std::path::PathBuf> = None;
@@ -661,7 +1014,29 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
             continue;
         }
         match ins {
-            Instruction::From(base) => {
+            Instruction::From { image: base, as_name } => {
+                // 切到本阶段自己的产物目录。最后一个阶段写最终目录，
+                // 前面的各写一个临时目录（`COPY --from` 从那里取）。
+                let this_stage = stage_of[idx];
+                if this_stage + 1 < stage_count {
+                    let dir = final_build_dir
+                        .with_file_name(format!(
+                            ".wbox-stage-{}-{}",
+                            std::process::id(),
+                            this_stage
+                        ));
+                    build_dir = dir.clone();
+                    stage_dirs.push(dir);
+                } else {
+                    build_dir = final_build_dir.clone();
+                }
+                rootfs = build_dir.join("rootfs");
+                // 每个阶段的 config 独立：A 阶段的 ENV/CMD 不该漏进 B 阶段，
+                // 最终镜像只该带最后一个阶段的配置（docker 同此语义）。
+                cfg = ConfigAccum::default();
+                if let Some(name) = as_name {
+                    stage_roots.insert(name.clone(), rootfs.clone());
+                }
                 let base_ref = crate::oci::ImageRef::parse(base, None)?;
                 let base_dir = crate::oci::image_dir(&base_ref)?;
                 if !base_dir.join("rootfs").is_dir() {
@@ -670,7 +1045,10 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                         base, base
                     )));
                 }
-                println!("[{}/{}] FROM {}", step, instructions.len(), base);
+                match as_name {
+                    Some(n) => println!("[{}/{}] FROM {} AS {}", step, instructions.len(), base, n),
+                    None => println!("[{}/{}] FROM {}", step, instructions.len(), base),
+                }
                 // 重建输出目录：残留的上一次构建会让结果不可复现
                 let _ = std::fs::remove_dir_all(&build_dir);
                 std::fs::create_dir_all(&build_dir)
@@ -699,9 +1077,37 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     cfg.workdir = base_cfg.working_dir.clone();
                 }
             }
-            Instruction::Copy { src, dst } => {
-                println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst);
-                let from = resolve_context_path(&opts.context, src)?;
+            Instruction::Copy { src, dst, from_stage } => {
+                match from_stage {
+                    Some(st) => println!(
+                        "[{}/{}] COPY --from={} {} {}",
+                        step, instructions.len(), st, src, dst
+                    ),
+                    None => println!("[{}/{}] COPY {} {}", step, instructions.len(), src, dst),
+                }
+                let from = match from_stage {
+                    // 从某个阶段取：源在**那个阶段的 rootfs 内**。
+                    // 走 `resolve_rootfs_path` 是为了复用同一份 `..` 逃逸校验——
+                    // 阶段名是 Dockerfile 给的，路径却可能是拼出来的。
+                    Some(st) => {
+                        let root = stage_roots.get(st.as_str()).ok_or_else(|| {
+                            WboxError::args(format!(
+                                "COPY --from={} 引用了未定义的阶段（阶段要先用 \
+                                 `FROM <镜像> AS {}` 声明，且必须在本条之前）",
+                                st, st
+                            ))
+                        })?;
+                        let p = resolve_rootfs_path(root, src)?;
+                        if !p.exists() {
+                            return Err(WboxError::args(format!(
+                                "COPY --from={}：该阶段里没有 '{}'",
+                                st, src
+                            )));
+                        }
+                        p
+                    }
+                    None => resolve_context_path(&opts.context, src)?,
+                };
                 let to = resolve_rootfs_path(&rootfs, dst)?;
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent)
@@ -717,11 +1123,62 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                         .map_err(|e| WboxError::args(format!("COPY '{}' 失败：{}", src, e)))?;
                 }
             }
+            Instruction::Add { src, dst } => {
+                println!("[{}/{}] ADD {} {}", step, instructions.len(), src, dst);
+                let from = resolve_context_path(&opts.context, src)?;
+                let to = resolve_rootfs_path(&rootfs, dst)?;
+                if from.is_dir() {
+                    // 目录：与 COPY 完全一致（docker 也不对目录做解包）
+                    std::fs::create_dir_all(&to)
+                        .map_err(|e| WboxError::args(format!("创建 ADD 目标目录失败：{}", e)))?;
+                    copy_build_tree(&from, &to)?;
+                } else if is_tar_archive(&from) {
+                    // **ADD 与 COPY 的唯一区别**：本地 tar 解开到目标目录。
+                    // 目标当成目录（docker 同此语义：ADD x.tar /dst 解到 /dst/）。
+                    std::fs::create_dir_all(&to)
+                        .map_err(|e| WboxError::args(format!("创建 ADD 目标目录失败：{}", e)))?;
+                    let n = extract_tar_into(&from, &to)?;
+                    println!("      （识别为 tar，已解开 {} 个条目）", n);
+                } else {
+                    if let Some(parent) = to.parent() {
+                        std::fs::create_dir_all(parent).map_err(|e| {
+                            WboxError::args(format!("创建 ADD 目标目录失败：{}", e))
+                        })?;
+                    }
+                    #[cfg(windows)]
+                    copy_file_contents(&from, &to)?;
+                    #[cfg(not(windows))]
+                    std::fs::copy(&from, &to)
+                        .map_err(|e| WboxError::args(format!("ADD '{}' 失败：{}", src, e)))?;
+                }
+            }
             Instruction::Env { key, value } => {
                 cfg.env.retain(|(k, _)| k != key);
                 cfg.env.push((key.clone(), value.clone()));
             }
             Instruction::Workdir(w) => cfg.workdir = Some(w.clone()),
+            Instruction::Label { key, value } => {
+                cfg.labels.retain(|(k, _)| k != key);
+                cfg.labels.push((key.clone(), value.clone()));
+            }
+            Instruction::Expose(port) => {
+                // 补默认协议，与 docker 一致：`EXPOSE 80` → `80/tcp`
+                let norm = if port.contains('/') {
+                    port.clone()
+                } else {
+                    format!("{}/tcp", port)
+                };
+                if !cfg.exposed.contains(&norm) {
+                    cfg.exposed.push(norm);
+                }
+            }
+            Instruction::User(u) => cfg.user = Some(u.clone()),
+            Instruction::Arg { key, default } => {
+                // 构建期变量：进 RUN 的环境，但不进镜像 config（见 to_json 的说明）
+                cfg.args.retain(|(k, _)| k != key);
+                cfg.args
+                    .push((key.clone(), default.clone().unwrap_or_default()));
+            }
             Instruction::Cmd(c) => cfg.cmd = Some(c.clone()),
             Instruction::Entrypoint(e) => cfg.entrypoint = Some(e.clone()),
             Instruction::Run(cmd) if linked_base => {
@@ -763,6 +1220,11 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
         crate::backend::copy_rootfs_tree(&rootfs, &out_dir.join("rootfs"))?;
+    }
+
+    // 阶段临时目录只在构建期有用，留着会在镜像缓存旁边堆一堆半成品 rootfs
+    for d in &stage_dirs {
+        let _ = std::fs::remove_dir_all(d);
     }
 
     std::fs::write(out_dir.join("config.json"), cfg.to_json())
