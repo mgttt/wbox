@@ -420,10 +420,16 @@ jobs:
           command -v wine64 wine || ls -l /usr/lib/wine/ || true
           (wine64 --version || /usr/lib/wine/wine64 --version) 2>&1 | head -2 || true
       # 整套跑（W 段是重点；其余段落顺带再验一遍，成本很低）。
-      # REQUIRE=1 同样适用：这台 runner 也是专门配齐依赖的。
+      # 两个 REQUIRE 都要设，各管一件事：
+      #   WBOX_LBE_REQUIRE=1  —— userns 等 wbox 自身硬前置缺失记 FAIL
+      #   WBOX_WINE_REQUIRE=1 —— wine/mingw 缺失记 FAIL
+      # 不设第二个的话，上面的 apt 装包一旦失败（或包名随发行版改了），
+      # W 段会整段 SKIP 而这个 job 照样变绿——一个"什么都没测"的 required
+      # job，还是 release 的前置。脚本另有一条兜底：W 段没产出任何断言也红。
       - name: 端到端 —— 含 W 段（台阶③ wine 执行器）
         env:
           WBOX_LBE_REQUIRE: '1'
+          WBOX_WINE_REQUIRE: '1'
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
 
   # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；

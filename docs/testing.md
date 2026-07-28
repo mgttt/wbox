@@ -74,9 +74,29 @@ scripts/test-matrix.sh target/release/wbox-linux.exe ./busybox
 scripts/test-linux-backend.sh target/debug/wbox ./busybox
 ```
 
-需要静态 busybox 和 unprivileged user namespace。`WBOX_LBE_REQUIRE=1` 表示
-宿主能力缺失也算失败，CI 必须设置；普通本地环境可以因能力缺失 SKIP。
-安装 Wine 和 MinGW 后脚本会运行 W 段 PE 夹具。
+需要静态 busybox 和 unprivileged user namespace。安装 Wine 和 MinGW 后脚本会
+运行 W 段 PE 夹具。
+
+两个 `*_REQUIRE` 开关，各管一类依赖，**都是把 SKIP 变成 FAIL**：
+
+| 开关 | 管什么 | 谁必须设 |
+|---|---|---|
+| `WBOX_LBE_REQUIRE=1` | userns、cgroup 等 wbox 自身的硬前置 | `test-linux-backend`、`test-wine-backend` |
+| `WBOX_WINE_REQUIRE=1` | wine 与 mingw（W 段的可选依赖） | 仅 `test-wine-backend` |
+
+普通本地环境两个都不设，能力缺失记 SKIP。
+
+**为什么需要第二个开关**：wine/mingw 对大多数场景确实可选，`test-linux-backend`
+不装它们、记 SKIP 是对的。但 `test-wine-backend` 这个 job 的**全部存在意义就是
+跑 W 段**——那里缺依赖只可能是装包失败或包名随发行版改了。不设的话，一个
+required job 会在"什么都没测"的情况下变绿，而它还是 release 的前置门禁。
+
+脚本另有一条兜底：`WBOX_WINE_REQUIRE=1` 时如果 W 段一条断言都没产出，直接判红
+——挡的是"依赖装上了，但中间某步失败导致整段空跑"这类成因。
+
+这两条都源自同一个教训（脚本顶部有完整记述）：**凡是"缺依赖就 SKIP"的段落，
+都要问一句——有没有哪个 job 的全部存在意义就是跑这一段？** 有的话，那个 job
+必须有开关把 SKIP 变成 FAIL。
 
 cgroup v2 的存在不等于当前进程获得委派。诊断时同时记录：
 

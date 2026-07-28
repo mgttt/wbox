@@ -24,11 +24,38 @@
 # (`kernel.apparmor_restrict_unprivileged_userns=1`)，脚本老实地 SKIP 了全部
 # 用例并返回 0，于是门禁变成装饰。SKIP 语义本身是对的，错在没人区分
 # "本地机器恰好不支持"与"专门为这条门禁准备的 runner 竟然不支持"。
+#
+# **同一个坑咬了第二次**：W 段（wine）的可选依赖也走 SKIP，且刻意不受
+# WBOX_LBE_REQUIRE 管辖，于是 test-wine-backend 这个 required job 在
+# wine/mingw 装不上时同样"全绿却零用例"，还是 release 的前置。现已补上
+# WBOX_WINE_REQUIRE（见下），外加一条"W 段没产出任何断言就红"的兜底。
+#
+# 规律：**凡是"缺依赖就 SKIP"的段落，都要问一句——有没有哪个 job 的全部
+# 存在意义就是跑这一段？** 有的话，那个 job 必须有开关把 SKIP 变成 FAIL。
 set -u
 
 REQUIRE=${WBOX_LBE_REQUIRE:-0}
 # 能力缺失时的记法：CI 里是 FAIL，本地是 SKIP
 absent() { if [ "$REQUIRE" = 1 ]; then report FAIL "$1" "$2（WBOX_LBE_REQUIRE=1：本环境本应具备该能力）"; else report SKIP "$1" "$2"; fi; }
+
+# W 段（wine）的可选依赖单独一个开关。
+#
+# 为什么不复用 WBOX_LBE_REQUIRE：wine 与 mingw 对**大多数**场景是可选的
+# ——test-linux-backend 那个 job 并不装它们，那里 SKIP 是对的。但
+# **test-wine-backend 这个 job 的全部存在意义就是跑 W 段**，它装齐了依赖，
+# 那里缺依赖只可能是装包失败或名字变了，绝不该记 SKIP。
+#
+# 这就是脚本开头那条教训的第二个实例：SKIP 语义没错，错在没区分
+# "本地机器恰好没有"与"专门为这条门禁准备的 runner 竟然没有"。
+# 上一次是 AppArmor 关掉 userns，这一次是 wine——同一个形状。
+WINE_REQUIRE=${WBOX_WINE_REQUIRE:-0}
+wine_absent() {
+  if [ "$WINE_REQUIRE" = 1 ]; then
+    report FAIL "$1" "$2（WBOX_WINE_REQUIRE=1：这台 runner 本应装齐 wine 与 mingw）"
+  else
+    report SKIP "$1" "$2"
+  fi
+}
 
 WBOX=${1:-target/debug/wbox}
 BUSYBOX=${2:-./busybox}
@@ -459,16 +486,22 @@ reap_check "L3.2 镜像模式 wbox 被 SIGKILL 后无残留进程" \
 echo
 echo "=== W 台阶③：Linux 上跑 Windows 程序（集成 wine）==="
 
-# 前置：一个真 PE（用 mingw 现场编）+ 一个 wine 加载器。缺任一记 SKIP——
-# 这两样是可选依赖，不像 userns 那样是 wbox 自身的硬前置，故**不**受
-# WBOX_LBE_REQUIRE 管辖（专门的 test-wine-backend job 会装齐再跑）。
+# 前置：一个真 PE（用 mingw 现场编）+ 一个 wine 加载器。这两样是**可选**
+# 依赖，不像 userns 那样是 wbox 自身的硬前置，所以不受 WBOX_LBE_REQUIRE
+# 管辖——本地开发与 test-linux-backend 那个 job 都不装它们，记 SKIP 是对的。
+#
+# 但**专门跑 W 段的 test-wine-backend job 必须设 WBOX_WINE_REQUIRE=1**：
+# 那台 runner 装齐了依赖，缺依赖只可能是装包失败或包名变了。不设的话，
+# 一个 required job 会在"什么都没测"的情况下变绿，还能放行 release。
+# W 段开始前的 PASS 计数。收尾时用它确认这一段**真的产出了断言**。
+w_pass_before=$pass
 MINGW=x86_64-w64-mingw32-gcc
 wine_found=$(WBOX_WINE=${WBOX_WINE:-} command -v wine64 || command -v wine || \
              ls /usr/lib/wine/wine64 2>/dev/null | head -1)
 if ! command -v "$MINGW" >/dev/null 2>&1; then
-  report SKIP "W.1-W.4 台阶③" "无 $MINGW，无法现场编 PE 夹具"
+  wine_absent "W.1-W.4 台阶③" "无 $MINGW，无法现场编 PE 夹具"
 elif [ -z "$wine_found" ] && [ -z "${WBOX_WINE:-}" ]; then
-  report SKIP "W.1-W.4 台阶③" "本机没有 wine"
+  wine_absent "W.1-W.4 台阶③" "本机没有 wine"
 else
   cat > "$WORK/hi.c" <<'CEOF'
 #include <stdio.h>
@@ -545,6 +578,17 @@ CEOF
       report FAIL "W.4 ELF 误判" "$(printf '%s' "$OUT" | grep 执行器 | head -c 150)"
     fi
   fi
+fi
+
+# 第二道保险：依赖装上了，也要确认这一段**真的跑出了断言**。
+#
+# 上面那个 WBOX_WINE_REQUIRE 只挡住"依赖缺失"这一种空跑。但空跑的成因不止
+# 一种——将来某个中间步骤失败、某个 if 分支写歪，都可能让整段一条断言都不
+# 产出而脚本照常返回 0。这条直接盯**结果**：W 段没让 PASS 计数涨过，就是
+# 没跑，在 WBOX_WINE_REQUIRE=1 的 runner 上必须红。
+if [ "$WINE_REQUIRE" = 1 ] && [ "$pass" -eq "$w_pass_before" ]; then
+  report FAIL "W 段完全没有产出断言" \
+    "WBOX_WINE_REQUIRE=1 却一条 W.* 都没通过——这个 job 的存在意义就是跑这一段"
 fi
 
 echo
