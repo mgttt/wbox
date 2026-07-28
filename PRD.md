@@ -858,8 +858,9 @@ coreutils，以及 `wbox image pull alpine:3.20` 后其中的动态 musl PIE bus
 因此 `iced-x86` 依赖已移除。
 
 F4.R0 已收口：`vendor/blink=452` 个 native 源全部删除；`native-tls ->
-openssl-sys` 这条 Linux 侧 C 依赖也已换成 rustls + 纯 Rust crypto provider
-（成熟度取舍见 `docs/rust-rewrite.md` §5）。仓库里只剩 `tests/guest=22` 个
+openssl-sys` 这条 Linux 侧 C 依赖先换成 rustls，**现已换成自实现的
+`crates/wbox-tls`**（§2.2.1 第二档，安全声明见 §2.2.2）。仓库里只剩
+`tests/guest=22` 个
 `.c`，它们是**被模拟执行的 guest 夹具**、不进任何发布物；按下面的计划仍应改写成
 no_std Rust，但那不影响 §2.2.1 的发布验收。
 

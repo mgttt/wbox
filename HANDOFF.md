@@ -99,7 +99,8 @@ CLI 参数层也做了一次：`start`/`rm`/`wait` 那种"一个或多个容器�
 
 **`vendor/blink`（约 122k 行 C）已删除**，Linux ELF 引擎换成 `crates/wbox-linux`
 ——纯 Rust、**零第三方依赖**（`libc`/`windows-sys` 只用于宿主 CSPRNG）。
-同一批还把 `native-tls`（Linux 上链系统 OpenSSL）换成 `rustls` + `rustls-rustcrypto`。
+同一批还把 `native-tls`（Linux 上链系统 OpenSSL）换掉了 TLS
+（后来又进一步换成自实现的 `crates/wbox-tls`，见下一节）。
 **产品构建里不再有任何 C/C++**；CI 的 `build-wbox-linux` 不再需要 MSYS2/MinGW。
 
 分层见 `crates/wbox-linux/src/lib.rs` 的模块注释，详细取舍见 `docs/rust-rewrite.md`
@@ -125,13 +126,8 @@ Windows 产品门禁 WP.3W 依赖的就是这一档。
 这条在开发中直接见效——`punpcklqdq` 的高/低半选错时，报错点是 glibc 的
 `__tls_init_tp` 拿到空指针，靠打印出来的字节序列一次定位。
 
-**两个悬而未决、需要人拍板的取舍**（都写进了 PRD，别自行决定）：
+**一个悬而未决、需要人拍板的取舍**（写进了 PRD，别自行决定）：
 
-- `rustls-rustcrypto` 当前是 **`0.0.2-alpha`，README 明说未经安全审计**。这是
-  "纯 Rust"与"密码学成熟度"的真实取舍：rustls 的默认 provider（`aws-lc-rs`/`ring`）
-  都带 C 与汇编，过不了 §2.2.1。影响面只有 `image pull/push` 的 HTTPS，不涉及
-  容器隔离本身。回退只需改 `Cargo.toml` 与 `src/oci/registry.rs::new()` 一处，
-  见 `docs/rust-rewrite.md` §5。
 - 发布物仍是**两个** exe（`wbox.exe` + `wbox-linux.exe`）。合成一个会动到隔离
   架构，见 PRD §4.9 **R8**——当前 Windows 的双层隔离靠"`wbox-linux.exe` 作为独立
   进程跑在 AppContainer + Job 里"，进程内执行会让 supervisor 和 guest 同体。

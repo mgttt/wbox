@@ -10,7 +10,6 @@
 | 项 | 之前 | 现在 |
 |---|---|---|
 | Linux ELF 模拟器（`wbox-linux.exe`） | `vendor/blink`，约 122k 行 C（含 win32 移植层与 third_party） | `crates/wbox-linux`，纯 Rust，零第三方依赖 |
-| OCI registry 的 TLS | `native-tls`：Linux 链接系统 **OpenSSL**（第三方 C 库），Windows 走 schannel | `rustls` + `rustls-rustcrypto`，**纯 Rust** |
 | CI 构建 wbox-linux | windows runner 上装 MSYS2 + MinGW-w64 gcc 编 C11+GNU 扩展 | `cargo build -p wbox-linux`，**CI 不再需要任何 C 工具链** |
 | 后端模块名 | `backend::blink` / `BlinkBackend` | `backend::emu` / `EmuBackend` |
 | JSON / SHA-256 / Base64 / gzip / tar | `serde_json`、`sha2`、`base64`、`flate2`、`tar` 五个第三方 crate | `crates/wbox-codec`，**第一方、零依赖** |
