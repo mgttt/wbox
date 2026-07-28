@@ -130,6 +130,7 @@ $execName = "product-exec"
 $crashName = "product-crash"
 $writeBgName = "product-write-bg"
 $waitName = "product-wait"
+$localAppDataHostProbe = $null
 
 try {
     New-Item -ItemType Directory -Force -Path $bundle, $rootfs | Out-Null
@@ -790,6 +791,36 @@ $packageProbe = [IO.Path]::Combine($env:TEMP, "package-probe.txt")
     }
     Write-Host "PASS WP.25 private temp locations are writable and explicit TMPDIR wins"
 
+    # WP.27 AppContainer rewrites LOCALAPPDATA for ordinary non-UWP programs
+    # to package-private storage. Writing there must not touch the host path.
+    $localAppDataHostProbe = Join-Path $env:LOCALAPPDATA "wbox-product-localappdata.txt"
+    Remove-Item -LiteralPath $localAppDataHostProbe -Force -ErrorAction SilentlyContinue
+    $localAppDataCommand = @'
+[Console]::WriteLine("LOCALAPPDATA=<{0}>", $env:LOCALAPPDATA)
+$probe = [IO.Path]::Combine($env:LOCALAPPDATA, "wbox-product-localappdata.txt")
+[IO.File]::WriteAllText($probe, "PACKAGE_LOCALAPPDATA_OK")
+[Console]::WriteLine([IO.File]::ReadAllText($probe))
+'@
+    $localAppDataOutput = & $portableWbox run --name product-localappdata `
+        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
+        -NonInteractive -Command $localAppDataCommand 2>&1 | Out-String
+    Assert-Exit 0 "WP.27 package-local LOCALAPPDATA" $localAppDataOutput
+    if ($localAppDataOutput -notmatch
+        'LOCALAPPDATA=<.*\\Packages\\product-localappdata\\AC>') {
+        throw "WP.27 LOCALAPPDATA was not package-private: $localAppDataOutput"
+    }
+    if ($localAppDataOutput -notmatch "PACKAGE_LOCALAPPDATA_OK") {
+        throw "WP.27 package-local write did not round-trip: $localAppDataOutput"
+    }
+    if (Test-Path -LiteralPath $localAppDataHostProbe) {
+        throw "WP.27 package-local write leaked to host LOCALAPPDATA: $localAppDataHostProbe"
+    }
+    $localAppDataState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($localAppDataState -match "(?m)^product-localappdata\s+") {
+        throw "WP.27 foreground LOCALAPPDATA probe left a state record: $localAppDataState"
+    }
+    Write-Host "PASS WP.27 LOCALAPPDATA is writable package-private storage"
+
     # WP.26 proves --memory changes workload behavior through the public CLI.
     # The unlimited control must retain all 24 blocks; the 64 MiB Job budget
     # must make the same allocation loop observe OutOfMemoryException.
@@ -926,6 +957,9 @@ finally {
         & $portableWbox rm $createOldName 2>&1 | Out-Null
         & $portableWbox rm $badReadyName 2>&1 | Out-Null
         & $portableWbox rm $badPullName 2>&1 | Out-Null
+    }
+    if ($null -ne $localAppDataHostProbe) {
+        Remove-Item -LiteralPath $localAppDataHostProbe -Force -ErrorAction SilentlyContinue
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {

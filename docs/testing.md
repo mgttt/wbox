@@ -155,6 +155,14 @@ detached 生命周期门禁还覆盖 READY/ERROR：父进程只有在真实 work
 `WP.26` 对照运行同一内存分配 workload：无限额时必须完成，`--memory 64`
 时必须捕获 OOM，防止 Job 参数“设置成功”被误当成真实限额证据。
 
+`WP.27` 验证普通非 UWP 程序的 `LOCALAPPDATA` 位于 AppContainer package
+专属 `AC` 且可写，并断言写入不落到宿主真实 LocalAppData。一次性的
+VirtualStore 边界可用纯 Rust i686 探针复核：
+
+```powershell
+scripts/probe-windows-virtualstore.ps1 -Wbox target/release/wbox.exe
+```
+
 ### 2.6 Windows 原生程序矩阵
 
 ```powershell

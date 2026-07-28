@@ -238,9 +238,9 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | 资源限额（内存/CPU/进程数）| 有 | Job Object；Sandboxie 本身反而不强调这块 |
 | 进程树可靠回收 | 有 | Job `KILL_ON_JOB_CLOSE` |
 | 生命周期（ps/stop/kill/top/rm/logs/exec/inspect/wait）| 有 | F8 全套，含 F1.7.9 `kill` 与 F1.7.10 `top` |
-| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动。**结构性原因**：原生 PE 程序发真 NT 调用，wbox 架构里没有介入点（对比 Q2 有模拟器 VFS）；不注入就无从重定向。已兑现的是「拒绝 + 显式授权」，见 §4.9 W3 |
+| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动。W3 真机取证确认 32 位无 manifest 进程也不会触发 VirtualStore；原生 PE 路径没有介入点。可用近似仅是「拒绝 + 显式授权」以及 AppContainer 自动提供的 package 私有 `LOCALAPPDATA`/临时目录 |
 | **注册表虚拟化** | **不做** | 同上 |
-| 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念；随 §4.9 W3 的结论而定 |
+| 命名沙箱的持久化内容 | 不做 | W3 证实只有 package 私有标准目录可写，且当前 profile 生命周期结束时清理；没有任意路径写重定向可构成 Sandboxie 式持久内容 |
 | 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子，撞天花板一 |
 | GUI 程序沙箱 | 不做 | §2.3 非目标 |
 | `--restart` 重启策略 | 有 | 与 Q3 同一实现（循环在 supervisor 内） |
@@ -444,7 +444,8 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 「随便写，写到别处去」；wbox 的模型是「不给授权就读不到、写不了」。对
 「跑一个不信任的 CLI 工具、别让它翻我的文档」这个主场景，后者够用且更简单；
 对「让程序以为自己改了系统、其实没改」这个 Sandboxie 的招牌场景，wbox 给不了。
-§4.9 W3 要取证的正是**用户态能逼近到什么程度**，结论允许是「只能拒绝」。
+§4.9 W3 已完成真机取证：VirtualStore 不生效；用户态近似止于默认拒绝、显式
+授权和 package 私有标准目录。
 
 ---
 
@@ -516,8 +517,8 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | 象限 | 还差什么 | 打算怎么办 | 归属 |
 |---|---|---|---|
-| Q1 Sandboxie | 文件/注册表写重定向 | **取证而非实现**：用户态能逼近到什么程度，结论允许是"只能拒绝、不能重定向" | §4.9 W3，Windows agent |
-| Q1 Sandboxie | 命名沙箱内容、Forced Programs | 随 W3 结论而定；若 W3 判定用户态只能拒绝，这两项一并转为**不做** | 同上 |
+| Q1 Sandboxie | 文件/注册表写重定向 | **已取证，不做任意路径重定向**；保留 package 私有标准目录近似 | §4.9 W3，已结 |
+| Q1 Sandboxie | 命名沙箱内容、Forced Programs | **不做**；前者缺持久 copy-on-write 层，后者需要驱动或全局钩子 | §4.9 W3，已结 |
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + 模拟器 VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
@@ -551,8 +552,8 @@ F9.1–F9.39 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有�
 
 | # | 能力 | 类别 | 说明与判据 |
 |---|---|---|---|
-| Q1.1 | 写重定向的**用户态可行性取证** | 取证（未做） | §4.9 W3：AppContainer 下 UAC VirtualStore 是否仍生效、per-package 存储对非 UWP 进程是否自动可写。步骤与判据已写好，**只能在真 Windows 上跑**。它的结论决定 Q1.2 存不存在 |
-| Q1.2 | 基于取证结论的写重定向近似 | 取决于 Q1.1 | 若 W3 判定用户态只能「拒绝」，本条转为**不做**并写明；若发现可用的重定向点，再按结论定范围 |
+| Q1.1 | 写重定向的**用户态可行性取证** | **已完成**（W3） | 32 位无 manifest Rust 探针写 Program Files 得到 Win32 5，真实路径和 VirtualStore 均无文件；普通非 UWP 进程的 `LOCALAPPDATA` 被改到 package `AC` 且可写 |
+| Q1.2 | 基于取证结论的写重定向近似 | **边界已定** | 任意路径 copy-on-write 不做；保留默认拒绝和显式 ACL 授权，标准 `LOCALAPPDATA`/`TEMP`/`TMP` 使用 AppContainer package 私有存储（WP.25/WP.27） |
 | Q1.3 | 临时目录私有化（`TMPDIR`/`TEMP`/`TMP` 指向容器私有目录）| **已实现**（`--private-tmp`，门禁 PT.1–PT.5、WP.25）| Linux 三项均指向状态目录；Windows 的 `TMPDIR` 指向状态目录，AppContainer 将 `TEMP`/`TMP` 改到 package 专属 `AC\Temp`。两处均已实机验证可写，且显式 `-e TMPDIR=...` 优先。边界：只覆盖遵守该约定的程序 |
 | Q1.4 | 授权粒度：只读授予 | **已验证**（W7）| AppContainer 真机探针证明 RX ACE 下读取成功，覆盖与新建均返回 `PermissionDenied`；共享镜像缓存已使用该粒度。它不提供路径映射，不能据此宣称 Windows 原生 `-v :ro` 已实现 |
 | Q1.5 | capability 粒度 | **可做**（待 Windows 侧确认）| 现只有 `INTERNET_CLIENT` 一个开关；Windows 还有 `INTERNET_CLIENT_SERVER`、`PRIVATE_NETWORK_CLIENT_SERVER` 等 capability SID，可按需授予。判据：只授客户端能力时监听端口失败 |
@@ -760,6 +761,8 @@ S4 在 Linux 上运行 Windows CLI
   `TEMP`/`TMP` 均可实际写入和读回；显式 `-e TMPDIR=...` 必须优先。
 - `WP.26`：同一 PowerShell 分配 workload 在无限额对照中完成 192 MiB 分配，
   在 `--memory 64` 下必须捕获 `OutOfMemoryException`，证明 Job 限额改变真实行为。
+- `WP.27`：普通非 UWP Windows 程序看到的 `LOCALAPPDATA` 必须位于本容器
+  package 的 `AC` 下且可写，宿主真实 `LOCALAPPDATA` 不得出现该文件。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -1464,9 +1467,10 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 
 #### F9.4 Windows 文件系统写重定向
 
-**F9.4 Windows 文件系统写重定向**。受 §2.4 天花板一约束——不装驱动就做不到
-Sandboxie 级别的完整性。可行的用户态近似需要先取证，属 `[TODO-WINDOW]`
-工作。
+**F9.4 Windows 文件系统写重定向** `[边界已定]`。W3 真机取证确认：不装驱动
+无法获得 Sandboxie 的任意路径 copy-on-write，UAC VirtualStore 在 AppContainer
+内也不生效。可用近似是默认拒绝、显式 ACL 授权，以及 Windows 自动映射的 package
+私有 `LOCALAPPDATA`/临时目录；后两者由 WP.25/WP.27 持续覆盖。
 
 #### F9.6 重启策略
 
@@ -2413,7 +2417,7 @@ rootfs 记进一张表供 `COPY --from` 取。这样指令执行的那一大段�
 TODO-WINDOW
 ├── W1 Windows 侧 stop 的持续门禁                         [done]
 ├── W2 F8.4 exec 的 Windows 原生可对齐子集                [done]
-├── W3 F9.4 Windows 文件系统写重定向取证                  [active] 分析完成，实验待跑
+├── W3 F9.4 Windows 文件系统写重定向取证                  [done] WP.27 + Rust i686 probe
 ├── W4 build 在 Windows 宿主的可行性                      [done]
 ├── W6 Q1 临时目录私有化（TEMP/TMP）                      [done] WP.25
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [done] Win32 真机门禁
@@ -2537,60 +2541,22 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 *因此结论的大致形状可以先写下来*：Q1 的写重定向在"不装驱动 + 不注入"的前提下
 **做不到**；能兑现的是"拒绝 + 显式授权"，即当前状态。
 
-**留给实机取证的只剩两个具体问题**（其余已被上面收敛掉）：
+**Windows 真机结论（2026-07-29）**：
 
-1. AppContainer 下，**旧版应用的 UAC 文件/注册表虚拟化**（`VirtualStore`）
-   还生不生效？若生效，那是 OS 免费给的一层"看似写成功"，值得如实记入 §2.4，
-   哪怕它只覆盖一部分程序。
-2. `%LOCALAPPDATA%\Packages\<pkg>` 这类 per-package 存储，对**非 UWP** 的
-   AppContainer 进程是否真的自动可写；若是，它能否充当"沙箱私有写入区"。
+1. UAC VirtualStore 在 AppContainer 下不生效。`dev/windows-virtualstore-probe.rs`
+   由 `scripts/probe-windows-virtualstore.ps1` 编译为 i686；探针运行时确认
+   `POINTER_WIDTH=32 MANIFEST_PRESENT=false`，再写 Program Files。原始裁决是
+   `WRITE_ERROR kind=PermissionDenied os_error=Some(5)`，真实路径与
+   `%LOCALAPPDATA%\VirtualStore\Program Files\...` 均不存在。该探针修正了旧方案
+   使用带 manifest 的系统 `cmd.exe` 会产生假阴性的缺陷。
+2. per-package 存储可用于普通非 UWP 程序。PowerShell 在容器内看到
+   `LOCALAPPDATA=C:\Users\wjc2022\AppData\Local\Packages\w3b\AC`，写入和读回
+   成功；宿主真实 `%LOCALAPPDATA%\wbox-probe.txt` 不存在，前台退出后 package
+   随 profile 清理。WP.27 将这条转为持续门禁。
 
-这两条都必须在真实 Windows 上测，读代码定不了。**但实验已经设计好了**——
-下面是可直接照跑的步骤与判据，接手的人不必再自己设计，跑完把结论填回
-§2.4 Q1 即可。
-
-###### 取证步骤 A：UAC VirtualStore 在 AppContainer 下还生不生效
-
-VirtualStore 是 Windows 给**旧版应用**的一层免费"看似写成功"：无 manifest 的
-32 位程序写 `%ProgramFiles%` / `HKLM\Software` 时，OS 会悄悄改写到
-`%LOCALAPPDATA%\VirtualStore\...`。若它在 AppContainer 下仍生效，那 Q1 就
-**白得一部分重定向**，值得如实记入 §2.4；若不生效，"只能拒绝"的结论就钉死了。
-
-```powershell
-# 1) 造一个会触发 VirtualStore 的目标路径（需管理员建一次，之后只读即可）
-$probe = "$env:ProgramFiles\wbox-vstore-probe"; New-Item -ItemType Directory -Force $probe
-
-# 2) 在容器内写它。用 cmd 而不是 PowerShell：PowerShell 自带 manifest，
-#    会被排除在 VirtualStore 之外，测出来是假阴性。
-wbox run --name w3a -- cmd.exe /c "echo hello > `"$probe\probe.txt`""
-
-# 3) 三处逐个看
-Test-Path "$probe\probe.txt"                                   # 真实位置
-Test-Path "$env:LOCALAPPDATA\VirtualStore\Program Files\wbox-vstore-probe\probe.txt"
-Get-ChildItem "$env:LOCALAPPDATA\Packages" -Filter "*wbox*" -ErrorAction SilentlyContinue
-```
-
-**判据**：
-- 真实位置有文件 → 隔离本身漏了，**这是缺陷**，优先修，别急着谈重定向。
-- `VirtualStore` 下有文件 → VirtualStore 生效，Q1 记为"部分：旧版应用白得
-  重定向，其余仍是拒绝"，并写明只覆盖无 manifest 的程序。
-- 两处都没有、命令报写入失败 → 结论就是"只能拒绝"，把 §2.4 Q1 那格钉死。
-
-###### 取证步骤 B：per-package 存储对非 UWP 的 AppContainer 进程是否自动可写
-
-```powershell
-# 容器内尝试写自己的 per-package 目录（路径由 AppContainer SID 决定，
-# 先让容器自己打印它看得见的 LOCALAPPDATA，再试写）
-wbox run --name w3b -- cmd.exe /c "echo %LOCALAPPDATA% & echo x > `"%LOCALAPPDATA%\wbox-probe.txt`""
-```
-
-**判据**：容器内写成功且宿主用户的 `%LOCALAPPDATA%` **没有**多出这个文件
-→ 说明 AppContainer 把它重定向到了 per-package 存储，那就是一块现成的
-"沙箱私有写入区"，可以据此设计 F9.4 的最小版本。写失败或落到宿主真实路径
-→ 这条路也不通，与步骤 A 的结论合并即可。
-
-**两步都要在同一台机器上跑，并把原始输出贴进本节**——结论比推测值钱，
-而没有原始输出的结论下一个人还得重跑一遍。
+因此 Q1 的透明任意路径写重定向确定为**不做**；可承诺的是 Windows 自动提供的
+package 私有标准目录和 wbox 的显式授权目录。前者是临时沙箱内容，不是 Sandboxie
+式命名沙箱持久层，因为当前 profile 生命周期结束时会清理 package。
 
 ##### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 
@@ -3043,7 +3009,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.26 进入门禁；私有临时目录与 Job 总内存超限行为均已实机核验 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.27 进入门禁；私有临时目录、package LOCALAPPDATA 与 Job 总内存超限行为均已实机核验 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
@@ -3106,8 +3072,8 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
    产品用例 WP.3W 随之转绿；VFS 的宿主符号链接逃逸已封死（§4.9 L12）。
    下一步是 §4.9 R8（单一 exe）与 x87/socket/MAP_SHARED 三个缺口。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
-4. `[done]` Windows stop、原生 exec 与 Job 总内存超限行为已进入产品门禁；
-   后续按 §4.9 的 W3/W7/W8 继续做 Windows 机制取证。
+4. `[done]` Windows stop、原生 exec、Job 总内存、W3 写路径取证与 W7 ACL
+   粒度均已进入门禁；后续按 §4.9 W8 继续做 capability 取证。
 
 ## 8. 验收与发布
 
