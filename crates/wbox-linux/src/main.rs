@@ -103,15 +103,21 @@ fn run(prog: &str, argv_rest: &[String], strace: bool) -> Result<i32, String> {
     let mut argv: Vec<Vec<u8>> = vec![prog.as_bytes().to_vec()];
     argv.extend(argv_rest.iter().map(|s| s.as_bytes().to_vec()));
 
-    let envp: Vec<Vec<u8>> = std::env::vars_os()
-        .filter_map(|(k, v)| {
-            let k = k.to_string_lossy().into_owned();
-            if INTERNAL_ENV_PREFIXES.iter().any(|p| k.starts_with(p)) {
-                return None;
-            }
-            Some(format!("{k}={}", v.to_string_lossy()).into_bytes())
-        })
-        .collect();
+    let envp: Vec<Vec<u8>> = match std::env::var(wbox_linux::env_payload::ENV_NAME) {
+        Ok(payload) => wbox_linux::env_payload::decode(&payload)?
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}").into_bytes())
+            .collect(),
+        Err(_) => std::env::vars_os()
+            .filter_map(|(k, v)| {
+                let k = k.to_string_lossy().into_owned();
+                if INTERNAL_ENV_PREFIXES.iter().any(|p| k.starts_with(p)) {
+                    return None;
+                }
+                Some(format!("{k}={}", v.to_string_lossy()).into_bytes())
+            })
+            .collect(),
+    };
 
     // 装载走的是和 `execve` 完全同一份代码（ELF、`#!` 脚本、PT_INTERP 都在里面），
     // 这样"直接启动"和"guest 自己 exec 出来"的程序不可能有行为差异。

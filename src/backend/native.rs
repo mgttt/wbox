@@ -48,8 +48,7 @@ impl NativeBackend {
         // 或删除注册项，失败路径也不会留下 profile。
         let profile = token::AppContainerProfile::open_existing(name)?;
         let cmdline = sandbox::build_cmdline(cmd)?;
-        let workdir = workdir.to_string_lossy().into_owned();
-        let workdir = workdir.strip_prefix(r"\\?\").unwrap_or(&workdir).to_string();
+        let workdir = win32_workdir(workdir);
         let env = super::build_sanitized_env(
             &[],
             &[],
@@ -121,8 +120,7 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
 
     // 工作目录：只做存在性校验，不 canonicalize（std 会产生 `\\?\` 扩展
     // 前缀，CreateProcessW 的 lpCurrentDirectory 不接受）。
-    let workdir = prepared.workdir.to_string_lossy().into_owned();
-    let workdir = workdir.strip_prefix(r"\\?\").unwrap_or(&workdir).to_string();
+    let workdir = win32_workdir(&prepared.workdir);
 
     // ---- 1. capability 集合（v1：仅 INTERNET_CLIENT）----
     let mut caps: Vec<token::CapabilitySid> = Vec::new();
@@ -190,6 +188,16 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
     Ok(code)
 }
 
+#[cfg(windows)]
+fn win32_workdir(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +234,19 @@ mod tests {
         assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
         assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
         assert!(p.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn extended_unc_workdir_keeps_unc_prefix() {
+        assert_eq!(
+            win32_workdir(std::path::Path::new(r"\\?\UNC\server\share\dir")),
+            r"\\server\share\dir"
+        );
+        assert_eq!(
+            win32_workdir(std::path::Path::new(r"\\?\C:\long\dir")),
+            r"C:\long\dir"
+        );
     }
 
     #[cfg(not(windows))]

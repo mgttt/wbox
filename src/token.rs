@@ -84,7 +84,9 @@ impl AppContainerProfile {
                     name: name.to_string(),
                     name_wide,
                     sid: derived,
-                    keep: false,
+                    // This instance did not create the profile and therefore
+                    // must not delete another owner's registration on Drop.
+                    keep: true,
                 });
             }
             return Err(crate::error::WboxError::profile(format!(
@@ -352,7 +354,13 @@ mod real_windows_tests {
         let p2 = AppContainerProfile::create(&name, &caps).unwrap();
         let sid2 = p2.sid_string().unwrap();
         assert_eq!(sid1, sid2, "两次 create 的 SID 必须一致（同一 profile）");
-        // p2 Drop 会 DeleteAppContainerProfile，清理掉保留的 profile
+        // p2 只是借用既有 profile，Drop 不得删除别人的注册项。
+        drop(p2);
+        let still_registered = AppContainerProfile::derive_sid(&name).unwrap();
+        unsafe { FreeSid(still_registered) };
+        let nw = to_wide(&name);
+        let hr = unsafe { DeleteAppContainerProfile(nw.as_ptr()) };
+        assert!(hr >= 0, "清理借用 profile 失败 hr=0x{:08X}", hr as u32);
     }
 
     /// INTERNET_CLIENT capability SID 构造 + 字符串校验。

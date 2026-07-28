@@ -240,13 +240,29 @@ fn copy_rootfs_symlink(
     let has_windows_prefix = target
         .components()
         .any(|component| matches!(component, std::path::Component::Prefix(_)));
-    let source_target = if has_windows_prefix {
+    let relative_target = if has_windows_prefix {
         // 私有 rootfs 再复制时，上一轮已经把 Linux 绝对 symlink 重写成了
-        // staging 内的 Windows 绝对路径。直接校验它仍在 source_root 内，
-        // 不能再按容器根路径拼一次。
-        target.clone()
+        // staging 内的 Windows 绝对路径。只做词法边界检查，不能 canonicalize：
+        // Linux/OCI 允许目标尚不存在的悬空链接（如 /etc/mtab -> /proc/mounts）。
+        let canonical_root = std::fs::canonicalize(source_root).map_err(|e| {
+            WboxError::spawn(format!(
+                "规范化共享 rootfs '{}' 失败：{}",
+                source_root.display(),
+                e
+            ))
+        })?;
+        let relative = target
+            .strip_prefix(source_root)
+            .or_else(|_| target.strip_prefix(&canonical_root))
+            .map_err(|_| {
+                WboxError::spawn(format!(
+                    "rootfs symlink '{}' 的目标越出共享 rootfs",
+                    source.display()
+                ))
+            })?;
+        normalize_relative_target(relative)?
     } else if target.has_root() {
-        let relative: std::path::PathBuf = target
+        let relative: PathBuf = target
             .components()
             .filter(|component| {
                 !matches!(
@@ -255,27 +271,17 @@ fn copy_rootfs_symlink(
                 )
             })
             .collect();
-        source_root.join(relative)
+        normalize_relative_target(&relative)?
     } else {
-        source
+        let parent = source
             .parent()
             .ok_or_else(|| WboxError::spawn("rootfs symlink 缺少父目录"))?
-            .join(&target)
+            .strip_prefix(source_root)
+            .map_err(|_| WboxError::spawn("rootfs symlink 父目录越出共享 rootfs"))?;
+        normalize_relative_target(&parent.join(&target))?
     };
-    let source_root = std::fs::canonicalize(source_root).map_err(|e| {
-        WboxError::spawn(format!("规范化共享 rootfs '{}' 失败：{}", source_root.display(), e))
-    })?;
-    let source_target = std::fs::canonicalize(&source_target).map_err(|e| {
-        WboxError::spawn(format!(
-            "rootfs symlink '{}' 的目标不存在或不可解析：{}",
-            source.display(),
-            e
-        ))
-    })?;
-    let relative_target = source_target.strip_prefix(&source_root).map_err(|_| {
-        WboxError::spawn(format!("rootfs symlink '{}' 的目标越出共享 rootfs", source.display()))
-    })?;
-    let private_target = destination_root.join(relative_target);
+    let source_target = source_root.join(&relative_target);
+    let private_target = destination_root.join(&relative_target);
     let target_is_dir = source_target.is_dir();
     let result = if target_is_dir {
         symlink_dir(&private_target, destination)
@@ -290,6 +296,28 @@ fn copy_rootfs_symlink(
             e
         ))
     })
+}
+
+#[cfg(windows)]
+fn normalize_relative_target(path: &Path) -> Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(value) => normalized.push(value),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(WboxError::spawn(
+                        "rootfs symlink 的目标通过 '..' 越出共享 rootfs",
+                    ));
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => {
+                return Err(WboxError::spawn("rootfs symlink 目标不是相对容器路径"));
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 #[cfg(all(unix, test))]
@@ -344,11 +372,32 @@ impl Backend for EmuBackend {
         // 丢弃；BLINK_PREFIX 由 wbox 强制为 rootfs（镜像/宿主均不可覆盖），
         // 子进程环境为显式白名单（不直通宿主环境，H6）。策略实现统一在
         // backend::build_sanitized_env（与 NativeBackend 单一出口）。
-        let forced = [(
+        let guest_env = super::build_sanitized_env(
+            &spec.env,
+            &[],
+            spec.env_pass_all,
+            spec.verbose,
+            super::env::GuestFlavor::Linux,
+        );
+        let forced = [
+            (
             BLINK_PREFIX_ENV.to_string(),
             rootfs.to_string_lossy().into_owned(),
-        )];
-        let env = super::build_sanitized_env(&spec.env, &forced, spec.env_pass_all, spec.verbose, super::env::GuestFlavor::Windows);
+            ),
+            (
+                wbox_linux::env_payload::ENV_NAME.to_string(),
+                wbox_linux::env_payload::encode(&guest_env),
+            ),
+        ];
+        // 外层仍是 Win32 进程，需要 SystemRoot 等最小环境才能由
+        // CreateProcessW 启动；Linux guest 的独立环境由上面的载荷传递。
+        let env = super::build_sanitized_env(
+            &[],
+            &forced,
+            false,
+            spec.verbose,
+            super::env::GuestFlavor::Windows,
+        );
         let cmd = build_emu_command(&exe, &spec.cmd);
         if spec.verbose {
             super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", spec.cmd));
@@ -390,6 +439,16 @@ impl Backend for EmuBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn guest_env(prepared: &Prepared) -> Vec<(String, String)> {
+        let payload = prepared
+            .env
+            .iter()
+            .find(|(key, _)| key == wbox_linux::env_payload::ENV_NAME)
+            .map(|(_, value)| value)
+            .expect("EmuBackend must transport an explicit Linux guest environment");
+        wbox_linux::env_payload::decode(payload).unwrap()
+    }
 
     fn spec(cmd: &[&str]) -> RunSpec {
         RunSpec {
@@ -468,10 +527,31 @@ mod tests {
         s.env.push(("WBOX_VA_BITS".to_string(), "43".to_string()));
         s.env.push(("LANG".to_string(), "C".to_string()));
         let p = EmuBackend.prepare(&s).unwrap();
-        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_ROOT"));
-        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
-        assert!(!p.env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
-        assert!(p.env.iter().any(|(k, v)| k == "LANG" && v == "C"));
+        let env = guest_env(&p);
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_ROOT"));
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
+        assert!(!env.iter().any(|(k, _)| k == "WBOX_REGISTRY_PASS"));
+        assert!(env.iter().any(|(k, v)| k == "LANG" && v == "C"));
+    }
+
+    #[test]
+    fn linux_guest_does_not_receive_windows_host_environment() {
+        let fake = std::env::current_exe().unwrap();
+        let mut g = crate::testenv::EnvGuard::new();
+        g.set(LINUX_EXE_ENV, &fake);
+        g.set("SystemRoot", r"C:\Windows");
+        g.set("COMSPEC", r"C:\Windows\system32\cmd.exe");
+        g.set("USERPROFILE", r"C:\Users\host");
+        let p = EmuBackend.prepare(&spec(&["sh"])).unwrap();
+        let guest_env = guest_env(&p);
+        for key in ["SystemRoot", "COMSPEC", "USERPROFILE"] {
+            assert!(
+                !guest_env
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case(key)),
+                "{key} must not leak into a Linux guest"
+            );
+        }
     }
 
     #[test]
@@ -531,6 +611,30 @@ mod tests {
 
         assert_eq!(std::fs::read(source.join("etc/value")).unwrap(), b"cached");
         assert!(!source.join("created").exists());
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_rootfs_copy_preserves_dangling_symlink_inside_root() {
+        use std::os::windows::fs::symlink_file;
+
+        let source = temp_rootfs("dangling-source");
+        let destination = source.with_file_name(format!(
+            "{}-copy",
+            source.file_name().unwrap().to_string_lossy()
+        ));
+        std::fs::create_dir_all(source.join("etc")).unwrap();
+        std::fs::create_dir_all(source.join("proc")).unwrap();
+        symlink_file(source.join("proc/mounts"), source.join("etc/mtab")).unwrap();
+
+        copy_rootfs_tree(&source, &destination).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(destination.join("etc/mtab")).unwrap(),
+            destination.join("proc/mounts")
+        );
         let _ = std::fs::remove_dir_all(&source);
         let _ = std::fs::remove_dir_all(&destination);
     }

@@ -482,8 +482,18 @@ mod tests {
             .env
             .iter()
             .any(|(k, v)| k == "BLINK_PREFIX" && v == &dir.join("rootfs").to_string_lossy()));
-        // 镜像 Env 注入，敏感键仍在（脱敏只发生在打印路径）
-        assert!(prepared.env.iter().any(|(k, v)| k == "APP_TOKEN" && v == "hunter2"));
+        // 镜像 Env 通过内部载荷注入 Linux guest，敏感键仍在
+        // （脱敏只发生在打印路径），不会混进 Win32 控制层环境。
+        let payload = prepared
+            .env
+            .iter()
+            .find(|(key, _)| key == wbox_linux::env_payload::ENV_NAME)
+            .map(|(_, value)| value)
+            .unwrap();
+        let guest_env = wbox_linux::env_payload::decode(payload).unwrap();
+        assert!(guest_env
+            .iter()
+            .any(|(k, v)| k == "APP_TOKEN" && v == "hunter2"));
         // resolv.conf 已注入（rootfs 原本没有）
         let resolv = std::fs::read_to_string(dir.join("rootfs/etc/resolv.conf")).unwrap();
         assert!(resolv.contains("nameserver"), "{}", resolv);

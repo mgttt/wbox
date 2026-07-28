@@ -159,6 +159,10 @@ where
     let mut inherited_handles = handles.to_vec();
     inherited_handles.sort_unstable_by_key(|handle| *handle as usize);
     inherited_handles.dedup();
+    // HANDLE_FLAG_INHERIT is process-global. Serialize the short mutation
+    // window so concurrent container launches cannot expose a broker/directory
+    // handle to the wrong child.
+    let inherit_lock = (!inherited_handles.is_empty()).then(inherit_handle_lock);
     let _inherit_guards = inherited_handles
         .iter()
         .copied()
@@ -290,6 +294,11 @@ where
             &mut pi,
         )
     };
+    // The attribute list has already been consumed by CreateProcessW. Restore
+    // every source handle immediately instead of leaving it inheritable while
+    // the child runs.
+    drop(_inherit_guards);
+    drop(inherit_lock);
     if ok == 0 {
         let err = unsafe { GetLastError() };
         let hint = match err {
@@ -339,6 +348,15 @@ where
         return Err(crate::error::WboxError::spawn(format!("GetExitCodeProcess 失败，GetLastError={}", err)));
     }
     Ok(code)
+}
+
+fn inherit_handle_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct InheritHandleGuard {

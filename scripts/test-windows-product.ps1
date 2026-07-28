@@ -185,6 +185,20 @@ try {
         Write-Host "PASS WP.4 portable two-executable bundle"
     }
 
+    $linuxEnv = & $portableWbox run --name product-linux-env `
+        -e FOO=upper -e foo=lower local.test/wbox-fixture:latest /busybox env `
+        2>&1 | Out-String
+    Assert-Exit 0 "WP.3E Windows-to-Linux environment boundary" $linuxEnv
+    foreach ($required in @("FOO=upper", "foo=lower")) {
+        if ($linuxEnv -notmatch "(?m)^$([regex]::Escape($required))`r?$") {
+            throw "WP.3E Linux environment lost case-sensitive entry '$required': $linuxEnv"
+        }
+    }
+    if ($linuxEnv -match "(?mi)^(SystemRoot|COMSPEC|USERPROFILE|APPDATA|LOCALAPPDATA|OS)=") {
+        throw "WP.3E Windows host environment leaked into Linux guest: $linuxEnv"
+    }
+    Write-Host "PASS WP.3E Windows-to-Linux environment boundary"
+
     # AppContainer can deny GetFinalPathNameByHandleW while still allowing
     # directory reads. wbox-linux must enumerate through the path remembered
     # by openat(), otherwise language runtimes such as Python see empty stdlib

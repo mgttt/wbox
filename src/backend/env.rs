@@ -31,9 +31,9 @@ pub fn is_reserved_key(key: &str) -> bool {
 /// Linux 上就永远测不到，反之亦然）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestFlavor {
-    /// Windows 子进程（NativeBackend / EmuBackend 的 wbox-linux.exe）
+    /// Windows guest（NativeBackend）
     Windows,
-    /// Linux 子进程（LinuxNativeBackend，容器内直接执行 Linux 程序）
+    /// Linux guest（LinuxNativeBackend，或 EmuBackend 内的 Linux 程序）
     Linux,
 }
 
@@ -108,7 +108,7 @@ pub fn build_child_env(
         for w in whitelist {
             if let Ok(v) = std::env::var(w) {
                 // 白名单内不同大小写别名只保留第一个取到值的
-                if !out.iter().any(|(k, _)| k.eq_ignore_ascii_case(w)) {
+                if !out.iter().any(|(k, _)| keys_equal(flavor, k, w)) {
                     out.push((w.to_string(), v));
                 }
             }
@@ -122,18 +122,26 @@ pub fn build_child_env(
         }
     }
 
-    upsert_all(&mut out, image_env.iter());
-    upsert_all(&mut out, forced.iter());
+    upsert_all(&mut out, image_env.iter(), flavor);
+    upsert_all(&mut out, forced.iter(), flavor);
     out
 }
 
-/// 按键名（大小写不敏感，Windows 语义）覆盖或追加。
+fn keys_equal(flavor: GuestFlavor, left: &str, right: &str) -> bool {
+    match flavor {
+        GuestFlavor::Windows => left.eq_ignore_ascii_case(right),
+        GuestFlavor::Linux => left == right,
+    }
+}
+
+/// 按 guest 平台的环境键语义覆盖或追加。
 fn upsert_all<'a>(
     out: &mut Vec<(String, String)>,
     items: impl Iterator<Item = &'a (String, String)>,
+    flavor: GuestFlavor,
 ) {
     for (k, v) in items {
-        if let Some(e) = out.iter_mut().find(|(ek, _)| ek.eq_ignore_ascii_case(k)) {
+        if let Some(e) = out.iter_mut().find(|(ek, _)| keys_equal(flavor, ek, k)) {
             e.1 = v.clone();
         } else {
             out.push((k.clone(), v.clone()));
@@ -358,6 +366,20 @@ mod tests {
             .map(|(_, v)| v.as_str())
             .collect();
         assert_eq!(paths, vec!["/img/bin"], "PATH 必须唯一且被镜像覆盖");
+    }
+
+    #[test]
+    fn linux_env_keys_are_case_sensitive() {
+        let image = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("path".to_string(), "/image/lower".to_string()),
+        ];
+        let forced = vec![("path".to_string(), "/forced/lower".to_string())];
+        let env = build_child_env(&image, &forced, false, GuestFlavor::Linux);
+        assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/usr/bin"));
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "path" && v == "/forced/lower"));
     }
 
     #[test]

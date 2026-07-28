@@ -275,6 +275,12 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions> {
             }
             "--volume" | "-v" => {
                 let v = super::args::take_value(args, &mut i, "--volume")?;
+                if !cfg!(target_os = "linux") {
+                    return Err(WboxError::args(format!(
+                        "-v 卷挂载目前只在 Linux 宿主可用，未创建或修改卷：'{}'",
+                        v
+                    )));
+                }
                 opts.volumes.push(backend::parse_volume(&v)?);
             }
             "--pull" => opts.pull = true,
@@ -441,6 +447,10 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
 }
 
 fn validate_options(opts: &RunOptions) -> Result<()> {
+    // Must run before the detached supervisor split. Otherwise unsupported
+    // Windows volumes make the parent print a container name and rc=0 while
+    // only the background log records the real failure.
+    backend::reject_volumes_if_unsupported(&opts.volumes)?;
     crate::portfwd::reject_if_unsupported(&opts.ports)?;
     crate::restart::reject_conflicting_rm(opts.restart, opts.auto_remove)?;
     backend::reject_user_if_unsupported(opts.user)?;

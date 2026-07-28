@@ -45,6 +45,7 @@
 pub mod alu;
 pub mod cpu;
 pub mod elf;
+pub mod env_payload;
 pub mod exec;
 pub mod machine;
 pub mod mem;
