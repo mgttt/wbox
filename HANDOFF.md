@@ -137,59 +137,76 @@ Windows 产品门禁 WP.3W 依赖的就是这一档。
   进程跑在 AppContainer + Job 里"，进程内执行会让 supervisor 和 guest 同体。
   两个 exe 都是纯 Rust，不违反 §2.2.1，只是分发上多一个文件。
 
-### 已完成（§2.2.1 第二档：第三方 crate → 第一方实现）
+### 已完成（§2.2.1 第二档：第三方 crate → 第一方实现）**全部达成**
 
 **这一轮把"Rust-only"的口径从「不许有 C」收紧到「承载产品能力的实现必须是
-第一方」。** 前者在删掉 `vendor/blink` 时就达成了；但 `serde_json` 解析
-manifest、`sha2` 算 blob digest、`flate2` 解层、`tar` 解包、`ureq` 跑 registry
-协议——这些都是纯 Rust，却全都承载着镜像管理的核心语义。
+第一方」，并全部落地。** 前者在删掉 `vendor/blink` 时就达成了；但
+`serde_json` 解析 manifest、`sha2` 算 blob digest、`flate2` 解层、`tar` 解包、
+`ureq`/`rustls` 跑 registry 协议与 TLS——这些都是纯 Rust，却全都承载着
+镜像管理的核心语义。
 
 | 原依赖 | 现在 | 要点 |
 |---|---|---|
-| `serde_json` | `wbox_codec::json` | 只做动态 `Value` 一档（本仓从来没用过 derive）。**三条字节级约定不能变**：键按字典序、紧凑输出无空白、非 ASCII 不转义——任何一条变了 config/manifest 的 sha256 就变，缓存与已推上去的镜像会对不上 |
-| `sha2` | `wbox_codec::sha256` | FIPS 向量 + 分片等价 + 55/56/57/64 四个 padding 分界；顺带做了 HMAC |
-| `base64` | `wbox_codec::base64` | 解码**严格**：凭证与证书这两个场景里宽松解码只会掩盖问题 |
-| `flate2` | `wbox_codec::deflate` | **解码器完整**（三种块全支持，真实层是动态 Huffman），**编码器只做固定 Huffman**；gzip 不写 mtime 故层字节可复现 |
-| `tar` | `wbox_codec::tar` | API 形状刻意与 `tar` crate 对齐，调用点只改 `use` 行 |
+| `serde_json` | `wbox_codec::json` | 只做动态 `Value` 一档。**三条字节级约定不能变**：键按字典序、紧凑输出无空白、非 ASCII 不转义——任何一条变了 config/manifest 的 sha256 就变 |
+| `sha2` | `wbox_codec::sha256` | FIPS 向量 + 分片等价 + 四个 padding 分界 |
+| `base64` | `wbox_codec::base64` | 解码**严格**：凭证与证书场景里宽松解码只会掩盖问题 |
+| `flate2` | `wbox_codec::deflate` | **解码器完整**（三种块），**编码器只做固定 Huffman**；gzip 不写 mtime 故层字节可复现 |
+| `tar` | `wbox_codec::tar` | API 形状与 `tar` crate 对齐，调用点只改 `use` 行 |
 | `anyhow` | `src/fault.rs` | 约 120 行 |
 | `ureq` | `crates/wbox-http` | HTTP/1.1、chunked、重定向、代理隧道 |
+| `rustls` + `rustls-rustcrypto` + `webpki-roots` | `crates/wbox-tls` | 自实现 TLS 1.3，见下 |
 
-剩余第三方 crate 只有三个：`rustls` + `rustls-rustcrypto`（TLS，见下）与
-`libc` / `windows-sys`（平台 ABI 声明，§2.2.1 第一档明确允许）。
+**构建图现在只剩五个第一方 crate + `libc`/`windows-sys`（平台 ABI 声明）。**
+`Cargo.lock` 从 119 条降到 16 条。
 
-**TLS 是唯一没做的一处，且不由 agent 自行决定**（PRD §4.9 **L10**）。自己写
-意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签与 X.509 链校验——未经审计、
-非常量时间的密码学。接缝已经切好：`crates/wbox-http/src/transport.rs` 的
-`connect_tls` 一个函数，三个选项与代价见 `docs/rust-rewrite.md` §5.1。
-**这条待决不阻塞任何其它工作。**
+#### 三条棘轮盯死这个结果（都在 `src/runtime/mod.rs`）
 
-#### 这一轮踩到 / 想清楚的几件事
+1. `native_source_debt_cannot_expand_or_escape_legacy_roots`——有没有 C；
+2. `replaced_third_party_crates_cannot_come_back`——被换掉的 crate 有没有
+   重新出现在某个 `Cargo.toml`；
+3. `dependency_graph_is_first_party_plus_platform_abi_only`——直接盯
+   **`Cargo.lock`**。前两条都看不见"直接依赖清白但拖进来一串传递依赖"。
 
-- **"解码面对外部输入、编码面对自己的输出"是贯穿五个模块的同一条取舍。**
-  解码器必须完整、对畸形输入报错、有资源上界；编码器只要合法且对端能读。
-  具体落点：`deflate` 的解码器支持三种块而编码器只出固定 Huffman；`json`
-  的解析器有嵌套深度上限；`wire` 对头部总量/条数/体积三项都设了硬上限。
-- **只测"自产自销的往返"会让解码器的一半代码一行都跑不到。** 我们的编码器
-  只产生固定 Huffman，所以 `deflate` 的动态 Huffman 那条路在往返测试里
-  完全不会被走到——而真实镜像层**全是**动态块。测试里专门放了一段由
-  CPython zlib 产生的动态块夹具，并先断言它确实是 `BTYPE=10`。
+### `crates/wbox-tls`：自实现的 TLS 1.3，以及必须说清的话
+
+**未经第三方安全审计，不是常量时间实现。** 换掉的 `rustls-rustcrypto` 当时
+是 `0.0.2-alpha`、README 同样写明未审计，所以这不是"从审计过的换成没审计
+的"，但**也不构成安全性提升的理由**。选它的理由是第二档口径，不是安全。
+完整论证在 PRD §2.2.2 与 `docs/rust-rewrite.md` §5.1，**改这块前先读那两处**。
+
+范围刻意窄：只做 TLS 1.3 / X25519 / AES-GCM，**不做 TLS 1.2 回退**
+（不实现就不可能被降级——FREAK、Logjam、POODLE 都是回退路径上的洞）、
+不做会话恢复、不做客户端证书、不做吊销检查（CRL/OCSP 都要额外网络请求，
+主流客户端还普遍软失败，等于没查）。
+
+#### 这一轮踩到 / 想清楚的（按"下次还会再踩"排序）
+
+- **只测"自产自销的往返"会让一半代码一行都跑不到。** 两次撞上同一件事：
+  `deflate` 的编码器只产生固定 Huffman，而真实镜像层**全是**动态块——
+  往返测试根本走不到动态块解码那条路（解法：放一段 CPython zlib 产生的
+  动态块夹具，并先断言它确实是 `BTYPE=10`）；签名验证若只有负向用例，
+  一个"永远返回 false"的实现也能全绿（解法：用测试密钥现签真实签名）。
+- **拿到的"官方向量"要先自验一遍再当判据。** 抄 NIST CAVP 的 ECDSA 向量时
+  把不同行的 r/s 混在了一起，向量本身就是无效的，白查了半天实现。
+- **性能问题的瓶颈未必在算术上。** ECDSA 验签第一版 60 秒/次（仿射坐标，
+  每次点运算一次模逆）→ Jacobian 坐标 644 ms → 发现 `BigUint::rem` 每一位
+  都在分配 `Vec`，改成原地无分配后 76 ms。**中间那一步是剖开看才发现的，
+  猜是猜不到的。**
+- **"那就支持它"往往是错的反应。** 老根用 SHA-1 自签、有根用 P-521，
+  第一反应是加支持——但根的自签名在真实链校验里根本不验，信任来自它在
+  信任库里。正确的分界是 `Unsupported` 变体：**解析不失败、验签必失败**。
 - **`json!` 宏的值必须走借用而不是 `From`。** `serde_json` 靠 `Serialize`
-  借用取值，改成 `Value::from` 的话几十个字段都要补 `.clone()`，而且以后
-  每加一个字段都要再想一次。解法是一个 `ToValue` trait。
-- **不要再包一层同形状的结构体。** `registry.rs` 原本有个 `HttpResponse`，
-  字段与 `wbox_http::Response` 一模一样。收敛成类型别名——两个只差名字的
-  类型意味着每加一个字段都要记得同步两处，而漏改一处不会有任何东西提醒你
-  （这正是 `merged_command` / `merged_command_with` 那一课）。
-- **跨主机重定向必须丢掉 `Authorization`。** registry 的 blob 会被重定向到
-  CDN，把 Bearer token 带过去等于把凭证交给第三方。这是 `wbox-http` 里最
-  重要的一条断言，用两个假服务器实测取证。
+  借用取值，改成 `Value::from` 的话几十个字段都要补 `.clone()`。
+- **不要再包一层同形状的结构体。** `registry.rs` 原有的 `HttpResponse` 与
+  `wbox_http::Response` 字段一模一样，收敛成类型别名（`merged_command` 那一课）。
+- **跨主机重定向必须丢掉 `Authorization`。** blob 会被重定向到 CDN，
+  带 token 过去等于把凭证交给第三方。用两个假服务器实测取证。
 - **`HEAD` 与 204/304 不能去读它声明的 `Content-Length`。** registry 用
-  `HEAD` 判断 blob 是否已存在；去读会**挂住**——表现为"卡住"而不是报错，
-  是这类实现里最难查的一种坏法。
-- **棘轮要盯 `Cargo.toml` 而不是 `Cargo.lock`。** lock 里有 `ring` 和 `cc`
-  ——它们因可选 feature 被解析器记下，实际并不在构建图里
-  （`cargo tree --target all -i ring` 是空的）。盯 lock 会得到一个吓人
-  但错误的结论。
+  `HEAD` 判 blob 是否存在，去读会**挂住**——表现为"卡住"而不是报错。
+- **棘轮盯 `Cargo.toml` 还不够，要盯 `Cargo.lock`。** lock 里曾有 `ring`
+  和 `cc`（因可选 feature 被解析器记下，实际不进构建图，
+  `cargo tree --target all -i ring` 是空的）——只看 lock 会得到吓人但错误的
+  结论，只看 toml 又看不见传递依赖。所以两条棘轮都要有。
 
 ### guest C 套件的基线是"如实记录回退"，不是掩盖
 
@@ -331,8 +348,8 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --workspace` → **656 passed / 0 failed**
-  （wbox 422 + wbox-codec 40 + wbox-http 27 + 引擎 167：84 单测 + 61 指令语义 + 22 端到端）
+- `cargo test --workspace` → **756 passed / 0 failed**
+  （wbox 423 + wbox-tls 97 + wbox-codec 40 + wbox-http 27 + 引擎 167）
 - `cargo clippy --workspace --all-targets -- -D warnings` → 干净
 - `cargo clippy -p wbox-linux --target x86_64-pc-windows-msvc --all-targets -- -D warnings` → 干净
 - guest 套件（需 `pip install ziglang`，宿主没有 zig 时 build.sh 会直接失败）：
@@ -351,14 +368,16 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
     30329413767），所以与本轮改动无关。
   - L9 的失败集合已按这次的实测重记（`PZ.1` 转绿、新增 `MS.3`/`INS.4`），
     并写明它是**环境依赖**而非已修。**在不能复现的机器上不要改产品代码去猜。**
-- 端到端取证（本轮新增，验的是六个自实现模块串起来能用）：
-  `wbox pull alpine:3.20` 成功——匿名 Bearer token → 跨主机重定向到 CDN →
-  动态 Huffman 解压真实层 → sha256 校验 → tar 解包；随后 `wbox run` 起容器
-  执行 busybox 成功。push 侧由门禁的 `PSH.1`–`PSH.8c` 覆盖（打到 python stub）。
+- 端到端取证（**整条链路零第三方**）：`wbox pull alpine:3.20` 从 Docker Hub
+  成功——自实现 TLS 1.3 握手（X25519 + AES-GCM + 121 张内置根的链校验）→
+  匿名 Bearer token → 跨主机重定向到 CDN → 动态 Huffman 解压真实层 →
+  sha256 校验 → tar 解包；随后 `wbox run` 起容器执行 busybox 成功。
+  **manifest digest 与换掉 rustls 之前逐字节一致**，这是"行为没变"的硬证据。
+  push 侧由门禁的 `PSH.1`–`PSH.8c` 覆盖（打到 python stub）。
 
-**注意 `--workspace`**：现在是四个包（`wbox` + `crates/wbox-codec` +
-`crates/wbox-http` + `crates/wbox-linux`），不加的话只跑主 crate，
-另外三个包的 234 项一条都不会跑。
+**注意 `--workspace`**：现在是五个包（`wbox` + `crates/wbox-codec` +
+`crates/wbox-http` + `crates/wbox-tls` + `crates/wbox-linux`），
+不加的话只跑主 crate，另外四个包的 331 项一条都不会跑。
 
 **提交前的固定动作，一条都不能省。**
 

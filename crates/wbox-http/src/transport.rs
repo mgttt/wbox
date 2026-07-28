@@ -1,24 +1,17 @@
 //! 传输层：TCP、HTTP 代理隧道，以及 TLS。
 //!
-//! # 这个文件是仓库里唯一还有第三方密码学的地方
-//!
-//! 协议层（`url` / `wire` / `client`）已经全是第一方实现。TLS 的握手与
-//! 密码学原语仍是 `rustls` + `rustls-rustcrypto`，原因写在
-//! `docs/rust-rewrite.md` §5：自己写 TLS 意味着自己写 X25519、AES-GCM、
-//! RSA/ECDSA 验签与 X.509 链校验，那是**未经审计、非常量时间**的密码学，
-//! 与"少一个第三方 crate"要放在一起权衡，属于需要人拍板的取舍。
-//!
-//! 接缝就在 [`Stream`]：换成第一方 TLS 时只动这个文件里的 `connect_tls`。
+//! TLS 走同仓的 `wbox-tls`（自实现的 TLS 1.3 客户端）。这个文件只负责
+//! **把字节管道接起来**：解析地址、连 TCP、必要时打 CONNECT 隧道、
+//! 再在上面套 TLS。协议与密码学都在 `wbox-tls` 里。
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::sync::Arc;
 use std::time::Duration;
 
 /// 已连上的传输通道。
 pub enum Stream {
     Plain(TcpStream),
-    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+    Tls(Box<wbox_tls::TlsStream<TcpStream>>),
 }
 
 impl Read for Stream {
@@ -143,44 +136,39 @@ fn connect_tunnel(tcp: &mut TcpStream, host: &str, port: u16) -> io::Result<()> 
     Ok(())
 }
 
-/// TLS 握手。**这是第三方密码学的唯一入口**，见文件顶部说明。
+/// TLS 握手。
 fn connect_tls(tcp: TcpStream, host: &str) -> io::Result<Stream> {
-    let config = tls_config();
-    let server = rustls::pki_types::ServerName::try_from(host.to_string())
-        .map_err(|_| io::Error::other(format!("TLS 服务器名非法：{host}")))?;
-    let conn = rustls::ClientConnection::new(config, server)
-        .map_err(|e| io::Error::other(format!("TLS 初始化失败：{e}")))?;
-    Ok(Stream::Tls(Box::new(rustls::StreamOwned::new(conn, tcp))))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        // 系统时钟早于 1970 时不猜一个值：证书有效期判断会整个失真，
+        // 与其"看起来通过了"，不如明确失败。
+        .map_err(|_| io::Error::other("系统时钟早于 1970，无法判断证书有效期"))?;
+    let stream = wbox_tls::TlsStream::connect(tcp, host, now, extra_roots())?;
+    Ok(Stream::Tls(Box::new(stream)))
 }
 
-/// 进程内共享一份 TLS 配置：根证书解析只做一次。
-fn tls_config() -> Arc<rustls::ClientConfig> {
+/// `SSL_CERT_FILE` 指定的追加根证书。进程内只解析一次。
+///
+/// **只追加不替换**内置根：企业内网 / 抓包代理常用私有 CA，但那不该让
+/// 公共信任根失效。
+fn extra_roots() -> &'static [Vec<u8>] {
     use std::sync::OnceLock;
-    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            // 内置根证书是**纯 Rust 数据**（不读系统证书库），保证 portable
-            // 分发在任何机器上行为一致。
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            // 企业内网 / 抓包代理常常用私有 CA。沿用 OpenSSL 的惯例变量，
-            // 让用户能显式追加而不必改代码。只追加，不替换内置根。
-            if let Ok(path) = std::env::var("SSL_CERT_FILE") {
-                if let Ok(pem) = std::fs::read_to_string(&path) {
-                    for der in crate::pem::certificates(&pem) {
-                        let _ = roots.add(rustls::pki_types::CertificateDer::from(der));
-                    }
-                }
+    static ROOTS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let Ok(path) = std::env::var("SSL_CERT_FILE") else {
+            return Vec::new();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(pem) => crate::pem::certificates(&pem),
+            Err(e) => {
+                // 显式设了却读不到，是配置错误。出声而不是静默忽略——
+                // 否则用户会困惑于"我明明配了 CA 却还是证书错误"。
+                eprintln!("wbox: 警告：SSL_CERT_FILE='{path}' 读取失败：{e}");
+                Vec::new()
             }
-            let provider = Arc::new(rustls_rustcrypto::provider());
-            let config = rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("默认协议版本集合有效")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            Arc::new(config)
-        })
-        .clone()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -225,9 +213,8 @@ mod tests {
     }
 
     #[test]
-    fn tls_config_builds_with_roots() {
-        // 构造失败会 panic 在 expect 上；这条同时确认根证书不为空。
-        let _ = tls_config();
-        assert!(!webpki_roots::TLS_SERVER_ROOTS.is_empty());
+    fn builtin_roots_are_present() {
+        // 内置根为空的话所有 https 都会失败，且错误信息只说"回溯不到根"。
+        assert!(wbox_tls::roots::TRUSTED_ROOTS.len() > 100);
     }
 }

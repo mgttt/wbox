@@ -196,6 +196,55 @@ mod tests {
         );
     }
 
+    /// §2.2.1 的**总棘轮**：整棵构建图里只允许第一方 crate 与平台 ABI 声明。
+    ///
+    /// 上面两条棘轮各盯一面（有没有 C、某几个 crate 有没有回流），这一条
+    /// 直接盯**结果**：`Cargo.lock` 里除了 `wbox-*` 自己的包，只能有
+    /// `libc` / `windows-sys` 及其 target 垫片。任何新依赖——不管是不是纯
+    /// Rust、不管有没有列进上面的禁用名单——都会在这里变红。
+    ///
+    /// 判据用 `Cargo.lock` 而不是 `Cargo.toml`，因为这里要盯的正是
+    /// **传递依赖**：直接依赖清白但拖进来一串传递依赖，前两条棘轮都看不见。
+    /// （lock 里可能有因可选 feature 被解析器记下、实际不进构建图的条目，
+    /// 所以允许名单里留了 windows 那几个 target 垫片。）
+    #[test]
+    fn dependency_graph_is_first_party_plus_platform_abi_only() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Ok(lock) = std::fs::read_to_string(root.join("Cargo.lock")) else {
+            eprintln!("跳过依赖图断言：读不到 Cargo.lock");
+            return;
+        };
+        // 平台 ABI 声明：只是 extern 声明，不编译任何第三方实现代码。
+        const PLATFORM_ABI: &[&str] = &[
+            "libc",
+            "windows-sys",
+            "windows-targets",
+            "windows_aarch64_gnullvm",
+            "windows_aarch64_msvc",
+            "windows_i686_gnu",
+            "windows_i686_gnullvm",
+            "windows_i686_msvc",
+            "windows_x86_64_gnu",
+            "windows_x86_64_gnullvm",
+            "windows_x86_64_msvc",
+        ];
+        let mut unexpected = Vec::new();
+        for line in lock.lines() {
+            let Some(name) = line.strip_prefix("name = \"") else {
+                continue;
+            };
+            let name = name.trim_end_matches('"');
+            if name.starts_with("wbox") || PLATFORM_ABI.contains(&name) {
+                continue;
+            }
+            unexpected.push(name.to_string());
+        }
+        assert!(
+            unexpected.is_empty(),
+            "构建图里出现了第一方与平台 ABI 之外的 crate：{unexpected:?}（见 PRD §2.2.1）"
+        );
+    }
+
     /// §2.2.1 **第二档**的棘轮：承载产品语义的第三方 crate 不得回流。
     ///
     /// 上一条棘轮盯的是"有没有 C"。那是必要条件不是充分条件——`serde_json`
@@ -220,6 +269,12 @@ mod tests {
             "anyhow",
             "ureq",
             "reqwest",
+            "rustls",
+            "rustls-rustcrypto",
+            "webpki-roots",
+            "native-tls",
+            "openssl",
+            "ring",
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         for manifest in [
@@ -227,6 +282,7 @@ mod tests {
             root.join("crates/wbox-codec/Cargo.toml"),
             root.join("crates/wbox-http/Cargo.toml"),
             root.join("crates/wbox-linux/Cargo.toml"),
+            root.join("crates/wbox-tls/Cargo.toml"),
         ] {
             let Ok(text) = std::fs::read_to_string(&manifest) else {
                 continue;

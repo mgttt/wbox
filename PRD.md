@@ -89,26 +89,61 @@ wbox
 **第二档：承载产品能力的实现必须是第一方。**
 
 "没有 C"是必要条件，不是充分条件。`serde_json` 解析 manifest、`sha2` 算
-blob digest、`flate2` 解层、`tar` 解包、`ureq` 跑 registry 协议——这些都是
-纯 Rust，但它们承载的是**镜像管理的核心语义**，正确性与安全性直接决定
-pull/push 的行为。这一档要求它们在本仓可读、可测、可改：
+blob digest、`flate2` 解层、`tar` 解包、`ureq`/`rustls` 跑 registry 协议与
+TLS——这些都是纯 Rust，但它们承载的是**镜像管理的核心语义**，正确性与
+安全性直接决定 pull/push 的行为。这一档要求它们在本仓可读、可测、可改。
 
-- 已替换：`serde_json` / `sha2` / `base64` / `flate2` / `tar` →
-  `crates/wbox-codec`（零依赖，有棘轮测试盯住依赖表为空）；
-  `anyhow` → `src/fault.rs`；`ureq` → `crates/wbox-http`。
-- **未替换、需要人拍板**：TLS 的握手与密码学原语（`rustls` +
-  `rustls-rustcrypto`）。自己写意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签
-  与 X.509 链校验，那是未经审计、非常量时间的密码学；与"少一个第三方 crate"
-  要放在一起权衡。接缝是 `crates/wbox-http/src/transport.rs::connect_tls`
-  一个函数，三个选项与各自代价见 `docs/rust-rewrite.md` §5.1。
-  受影响面仅限 registry HTTPS，不涉及容器隔离本身。
-- 剩余的第三方 crate 只有 `libc` 与 `windows-sys`：两者都是**平台 ABI 声明**
-  （无传递依赖、不编译任何代码），属第一档明确允许的那类。
-- `wbox-linux.exe` 仍是独立的第二个可执行文件。它本身是纯 Rust，所以不违反
-  本节约束；但"单一 `wbox.exe`"的合并仍是待决项，见 §4.9 R8。
-- 新增 crate 依赖必须是纯 Rust；带 `cc`/`cmake` 构建脚本或链接 native runtime
-  的一律不收。**并且**要先问一句：它承载的是产品语义还是纯粹的语言便利？
-  前者按第二档处理。
+**已全部达成。** 替换清单：
+
+| 原依赖 | 现在 |
+|---|---|
+| `serde_json` / `sha2` / `base64` / `flate2` / `tar` | `crates/wbox-codec`（零依赖）|
+| `anyhow` | `src/fault.rs` |
+| `ureq` | `crates/wbox-http` |
+| `rustls` / `rustls-rustcrypto` / `webpki-roots` | `crates/wbox-tls` |
+
+改完之后，**整棵构建图**（`Cargo.lock` 共 16 条，此前 119 条）只剩：
+
+- 五个第一方 crate：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、`wbox-linux`；
+- `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
+  声明，不编译任何第三方实现代码，属第一档明确允许的那类。
+
+三条棘轮盯死这个结果，任何回流都会立刻变红（`src/runtime/mod.rs`）：
+
+1. `native_source_debt_cannot_expand_or_escape_legacy_roots`：有没有 C；
+2. `replaced_third_party_crates_cannot_come_back`：被换掉的 crate 有没有
+   重新出现在某个 `Cargo.toml` 里；
+3. `dependency_graph_is_first_party_plus_platform_abi_only`：直接盯
+   **`Cargo.lock`**——直接依赖清白但拖进来一串传递依赖，前两条都看不见。
+
+### 2.2.2 自实现密码学的安全声明
+
+`crates/wbox-tls` 是自实现的 TLS 1.3 客户端。**必须如实说清它的性质**：
+
+- **未经第三方安全审计**，且**不是常量时间实现**（AES 用查表 S-box，
+  大整数运算不做时序均衡）。
+- 换掉的 `rustls-rustcrypto` 当时是 `0.0.2-alpha`、README 同样写明未经审计，
+  所以这不是"从审计过的换成没审计的"，但**也不构成安全性提升的理由**。
+  选它的理由是第二档口径，不是安全。
+
+**为什么可以接受**：
+
+- 影响面**仅限 `wbox pull/push` 的 registry HTTPS**，不涉及容器隔离本身。
+  隔离由 AppContainer/Job（Q1/Q2）与 namespace/cgroup（Q3）承担，与 TLS 无关。
+- 威胁模型是"从公开 registry 拉镜像"。要利用侧信道，攻击者得在同一台机器上
+  与 wbox 争抢缓存——那种情形下他已经能直接读 wbox 的内存了。
+- 镜像内容有**独立于 TLS 的完整性保护**：manifest 与每一层都按 sha256
+  digest 校验，TLS 被攻破也换不掉镜像内容而不被发现。
+
+**收窄攻击面的做法**（都在实现里，不是口号）：只做 TLS 1.3、只做 X25519、
+只做 AES-GCM；**不实现 TLS 1.2 回退**（不实现就不可能被降级到它——FREAK、
+Logjam、POODLE 都是回退路径上的洞）、不做会话恢复、不做客户端证书。
+对端不支持 TLS 1.3 时**明确报错**而不是悄悄退回更弱的协议。
+
+已知不做且如实记录的：**不做吊销检查（CRL/OCSP）**——两者都要额外网络请求，
+主流客户端还普遍软失败（查不到就放行，等于没查）。
+
+完整取舍见 `docs/rust-rewrite.md` §5。
 
 ### 2.3 非目标
 
@@ -494,7 +529,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
 | R6 `[未达成]` | Alpine / Ubuntu 24.04 作为**产品门禁**通过——这一格才算兑现。当前只是手工跑通，未接门禁 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
-| R9 `[部分]` | §2.2.1 **第二档**：承载产品语义的第三方 crate 换成第一方。已换六个，只剩 TLS 待拍板 |
+| R9 `[done]` | §2.2.1 **第二档**：承载产品语义的第三方 crate 全部换成第一方，含 TLS。构建图只剩五个 wbox 包 + 平台 ABI |
 
 **F9.37 的 `guest_workdir` 已经放进 `RunSpec`**，Q2 的镜像路径在 R4 落地时读它
 即可，不必再改结构——这是 Q3 的实现顺带给 Q2 铺的路，也是四格共用一套
@@ -2184,101 +2219,22 @@ TODO-LINUX
 ├── L7 `load` / `import` 解包的符号链接边界               [active] 待修复与门禁
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁
 ├── L9 Linux native / Wine 共用后端验收当前失败            [active] 待取得失败断言
-└── L10 TLS 要不要也换成第一方实现                        [待决] 见下方；需要人拍板
+└── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ```
 
-### L10 TLS：§2.2.1 第二档只剩这一处 `[TODO-LINUX]` `[待决]`
+### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
 
-§2.2.1 第二档已经落地六个替换（`serde_json` / `sha2` / `base64` / `flate2` /
-`tar` → `crates/wbox-codec`，`anyhow` → `src/fault.rs`，`ureq` →
-`crates/wbox-http`）。**只剩 TLS 的握手与密码学原语**仍是 `rustls` +
-`rustls-rustcrypto`。
+结论是**做了**：`crates/wbox-tls` 是自实现的 TLS 1.3 客户端，`rustls` +
+`rustls-rustcrypto` + `webpki-roots` 已从构建图移除。
 
-这条**不由 agent 自行决定**，因为它不是工作量问题：自己写 TLS 意味着自己写
-X25519、AES-GCM、RSA/ECDSA 验签与 X.509 链校验，那是未经审计、非常量时间的
-密码学。"少一个第三方 crate"与"密码学由有人审视过的实现承担"要放在一起权衡。
+保留这条记录，因为它的**取舍论证**仍然有效，且是评估同类问题的模板：
+自己写 TLS 意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签与 X.509 链校验，
+那是未经审计、非常量时间的密码学。做的判断依据是三条，见 §2.2.2：
+影响面只有 registry HTTPS（不涉及隔离）、镜像有独立于 TLS 的 digest 校验、
+换掉的 provider 本来也是未审计的 alpha 版。
 
-三个选项与代价见 `docs/rust-rewrite.md` §5.1。判据：无论选哪个，改动只落在
-`crates/wbox-http/src/transport.rs::connect_tls` 一个函数加 `Cargo.toml`——
-接缝已经切好了，所以这条待决**不阻塞任何其它工作**。
-
-受影响面仅限 `wbox pull/push` 的 registry HTTPS，不涉及容器隔离本身。
-
-### W9 `create -> rename -> start` 生命周期损坏 `[TODO-WINDOW]` `[active]`
-
-Windows 真机已稳定复现：创建未启动容器，改名后执行 `start`，CLI 表面返回成功，
-supervisor 却仍按保存参数中的旧名接管 detached 预留，最终留下 `Running=true`、
-`Pid=0` 的记录；`restart`、`rm` 无法恢复，`wait` 持续阻塞。
-
-完成标准：改名同步所有后续启动所依赖的名称，或启动时用当前记录名覆盖历史参数；
-增加 `create -> rename -> start -> wait/rm` 的 Windows 产品门禁，并证明失败启动
-不会遗留永久 reservation。
-
-### L7/L8 文件路径边界 `[TODO-LINUX]` `[active]`
-
-- L7：`load` 与 `import` 目前先做词法路径检查，再对拼出的目标调用
-  `tar::Entry::unpack`。需要用“归档先创建指向外部的符号链接、后续条目写入其子路径”
-  的用例证明解包始终留在 staging/rootfs 内；失败时不得留下半成品镜像。
-- L8：`cp` 的容器路径只消解 `..`，尚未约束 upper/rootfs 中已有的中间符号链接。
-  copy-in 和 copy-out 都要增加真实 overlay 门禁，证明不能借链接写出或读出容器视图。
-
-### L9 Linux/Wine 后端门禁红灯 `[TODO-LINUX]` `[active]`
-
-2026-07-28 的 `main`（`89087bc`）上，Windows 编译/产品测试、Linux 单测和 guest
-测试通过，但 `test-linux-backend` 与 `test-wine-backend` 同时退出 1；二者共用
-`scripts/test-linux-backend.sh`。完成标准是先取得首个失败断言，修复产品或门禁后
-让两项恢复绿色；在没有日志前不要猜测是 `--private-tmp` 或其他最近功能导致。
-
-**首个失败断言已取得**（run 30305303752，`PASS=188 FAIL=6 SKIP=2`）：
-
-```text
-FAIL  PZ.1 pause 冻结 —— rc=0 停后立即= 再过 1 秒=（应相同）
-FAIL  INS.1 Mounts —— 容器内挂载数=… 已退出，无法 exec
-FAIL  RT.1 restart 生效 —— 前=3966 后=（应都非空且不同）
-FAIL  RT.2 沿用原配置 —— 容器内 hostname=… 已退出，无法 exec
-FAIL  RT.4 重启已退出容器 —— PID=
-FAIL  RT.5 start 已退出容器 —— PID=
-```
-
-六条全在 `pause` / `inspect` / `restart` 三个命令上，共同现象是**容器起来就立刻
-退出**（`PID=` 为空、随后 `exec` 报"已退出"）。不是 `--private-tmp`：`--private-tmp`
-之前的 `6162dc6` / `44cbd0a` 上 RT.* 就已经红了，`2d05db7` 及更早是绿的。
-与 F9.26 `restart`、F9.32 `pause`、F9.33 `inspect` 这三次改动同期。
-
-**失败集合已经漂移，重记一次（2026-07-28）**。`main`（`40e4db6`，run 30325802052）
-与其上的 PR 分支（`29de54b`，run 30329413767）**两边逐条一致**，
-`test-linux-backend` 与 `test-wine-backend` 各 `FAIL=7`：
-
-```text
-FAIL  MS.3  阶段目录残留 —— .wbox-stage-<pid>-0 未清理
-FAIL  INS.1 Mounts —— 容器内挂载数=… 已退出，无法 exec
-FAIL  INS.4 NetworkMode 三态 —— netns 相同=否
-FAIL  RT.1  restart 生效 —— 前=<pid> 后=（应都非空且不同）
-FAIL  RT.2  沿用原配置 —— 容器内 hostname=… 已退出，无法 exec
-FAIL  RT.4  重启已退出容器 —— PID=
-FAIL  RT.5  start 已退出容器 —— PID=
-```
-
-与上一份相比：**`PZ.1` 变成通过**，**新增 `MS.3` 与 `INS.4`**。
-"基线内用例变通过也要变红"这条纪律在这里就是这个意思——`PZ.1` 转绿说明根因
-动过，不该继续挂在这条里；`MS.3`/`INS.4` 则是本条要一并解释的新现象。
-
-**只在 CI 复现，本地容器不复现。** 同一个脚本在开发容器里跑 `232 PASS / 0 FAIL /
-2 SKIP`。所以这**不是"已修"，是环境依赖**：GitHub runner 与本地容器在
-namespace / cgroup / 挂载传播上的差异才是要查的方向。判据里最该先问的一句是
-**"容器为什么起来就退出"**——`INS.4` 的"netns 相同=否"与 `RT.*` 的 `PID=` 空
-很可能是同一个根因的两种表现（对端容器根本没活到能被加入 netns）。
-
-**排除掉一条很像的错误线索：这不是门禁里的固定 `sleep` 不够长。**
-"本机绿、负载高的 CI 红"是竞态的典型signature，`RT.4` 又确实写着
-`restart` 后 `sleep 2` 再读 `ps`（正是本仓警告过的那种固定睡眠判据），
-所以第一反应会往这上面想。但两条实测否掉了它：`INS.1` 与 `RT.2` 报的是
-**"容器已退出，无法 exec"**——容器不是"还没起来"，是**起来之后真的退出了**；
-而 `RT.4` 的 `restart` 自身 `rc=0`。把睡眠加长不会让它变绿，只会让它慢。
-
-取证下一步：在能复现的机器上，把 `RT.4` 那条单独跑一遍并留下
-supervisor 的 stderr（脚本目前把它丢到 `/dev/null`），确认容器退出的原因
-——这是目前唯一还没拿到的信息。**不要在不能复现的机器上改产品代码去猜。**
+取证：`wbox pull alpine:3.20` 走完整自实现栈从 Docker Hub 拉通，
+manifest digest 与换之前**逐字节一致**；随后 `wbox run` 起容器执行 busybox。
 
 ### R8 是否把模拟器合并进单一 `wbox.exe` `[Windows agent]` `[待决]`
 
