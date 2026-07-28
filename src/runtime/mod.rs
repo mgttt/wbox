@@ -195,4 +195,56 @@ mod tests {
             counts[1]
         );
     }
+
+    /// §2.2.1 **第二档**的棘轮：承载产品语义的第三方 crate 不得回流。
+    ///
+    /// 上一条棘轮盯的是"有没有 C"。那是必要条件不是充分条件——`serde_json`
+    /// 解析 manifest、`sha2` 算 digest、`flate2` 解层、`ureq` 跑 registry
+    /// 协议，全都是纯 Rust，却全都承载着镜像管理的核心语义。它们已经换成
+    /// 第一方实现，这条断言防的是"顺手 `cargo add` 一个回来"。
+    ///
+    /// **判据是 `Cargo.toml` 而不是 `Cargo.lock`**：lock 里会出现一些因
+    /// 可选 feature 而被解析器记下、实际并不进构建图的条目（`ring`、`cc`
+    /// 就在里面）。盯 lock 会得到一个吓人但错误的结论。
+    #[test]
+    fn replaced_third_party_crates_cannot_come_back() {
+        // 名字取得刻意宽松（带 `-`/`_` 两形），免得换个同类 crate 就绕过去。
+        const FORBIDDEN: &[&str] = &[
+            "serde_json",
+            "serde-json",
+            "sha2",
+            "base64",
+            "flate2",
+            "miniz_oxide",
+            "tar",
+            "anyhow",
+            "ureq",
+            "reqwest",
+        ];
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for manifest in [
+            root.join("Cargo.toml"),
+            root.join("crates/wbox-codec/Cargo.toml"),
+            root.join("crates/wbox-http/Cargo.toml"),
+            root.join("crates/wbox-linux/Cargo.toml"),
+        ] {
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            for line in text.lines() {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with('#') || t.starts_with('[') {
+                    continue;
+                }
+                let Some(name) = t.split(['=', ' ']).next() else {
+                    continue;
+                };
+                assert!(
+                    !FORBIDDEN.contains(&name),
+                    "{} 重新引入了 {name}——它已有第一方实现，见 PRD §2.2.1 第二档",
+                    manifest.display()
+                );
+            }
+        }
+    }
 }

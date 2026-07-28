@@ -1,0 +1,11 @@
+[package]
+name = "wbox-codec"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "wbox 自实现的格式/摘要原语（JSON、SHA-256、Base64、DEFLATE/gzip、tar），零依赖"
+license = "MIT OR Apache-2.0"
+
+# 零依赖。本 crate 的存在理由就是替掉 serde_json / sha2 / base64 / flate2 / tar
+# 这五个第三方 crate（PRD §2.2.1：承载产品能力的实现必须是第一方 Rust）。
+# 这里只用 std，不允许再引入任何依赖。
+[dependencies]

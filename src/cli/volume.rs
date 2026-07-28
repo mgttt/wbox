@@ -117,8 +117,8 @@ fn inspect(args: &[String]) -> Result<u32> {
         if !dir.is_dir() {
             return Err(WboxError::args(format!("卷 '{}' 不存在", n)));
         }
-        out.push(serde_json::json!({
-            "Name": n,
+        out.push(wbox_codec::json!({
+            "Name": *n,
             // 与 docker 的字段名对齐；wbox 只有 local 一种驱动（没有插件机制）
             "Driver": "local",
             "Mountpoint": dir.to_string_lossy(),
@@ -127,8 +127,7 @@ fn inspect(args: &[String]) -> Result<u32> {
     }
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::Value::Array(out))
-            .map_err(|e| WboxError::args(format!("序列化失败：{}", e)))?
+        wbox_codec::json::Value::Array(out).to_string_pretty()
     );
     Ok(0)
 }

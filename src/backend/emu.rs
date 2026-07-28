@@ -374,7 +374,10 @@ impl Backend for EmuBackend {
         super::native::spawn_native(
             spec,
             prepared,
-            &format!("wbox-linux（blink 模拟器，BLINK_PREFIX={}）", prepared.workdir.display()),
+            &format!(
+                "wbox-linux（纯 Rust 模拟器，BLINK_PREFIX={}）",
+                prepared.workdir.display()
+            ),
         )
     }
 

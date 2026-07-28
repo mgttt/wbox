@@ -12,7 +12,7 @@
 //!   WorkingDir 为空字符串时按 docker 语义视为未设置（默认 `/`）。
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 use std::path::Path;
 
 /// 已 pull 镜像的 config.json 中 `config` 段摘要。
@@ -39,19 +39,19 @@ impl ImageConfig {
             Err(e) => {
                 return Err(WboxError::new(
                     ErrKind::Registry,
-                    anyhow::anyhow!(e).context(format!("读取 {} 失败", path.display())),
+                    crate::fail!(e).context(format!("读取 {} 失败", path.display())),
                 ))
             }
         };
-        let v: serde_json::Value = serde_json::from_str(&text)
+        let v: wbox_codec::json::Value = wbox_codec::json::from_str(&text)
             .with_context(|| format!("解析 {} 失败", path.display()))
             .ctx(ErrKind::Registry)?;
         Ok(Some(Self::from_json(&v)))
     }
 
     /// 从完整 config.json 的 JSON Value 提取 config 段。
-    pub fn from_json(v: &serde_json::Value) -> Self {
-        let cfg = v.get("config").cloned().unwrap_or(serde_json::Value::Null);
+    pub fn from_json(v: &wbox_codec::json::Value) -> Self {
+        let cfg = v.get("config").cloned().unwrap_or(wbox_codec::json::Value::Null);
 
         let str_list = |key: &str| -> Vec<String> {
             cfg.get(key)
@@ -147,7 +147,7 @@ mod tests {
 
     #[test]
     fn parse_full_config() {
-        let v = serde_json::json!({
+        let v = wbox_codec::json!({
             "architecture": "amd64",
             "config": {
                 "Env": ["PATH=/usr/bin", "FOO=bar=baz"],
@@ -172,10 +172,10 @@ mod tests {
     #[test]
     fn parse_missing_config_section_and_empty_workdir() {
         // 无 config 段：全部默认
-        let c = ImageConfig::from_json(&serde_json::json!({"architecture": "amd64"}));
+        let c = ImageConfig::from_json(&wbox_codec::json!({"architecture": "amd64"}));
         assert_eq!(c, ImageConfig::default());
         // WorkingDir 空字符串 = 未设置
-        let c = ImageConfig::from_json(&serde_json::json!({"config": {"WorkingDir": ""}}));
+        let c = ImageConfig::from_json(&wbox_codec::json!({"config": {"WorkingDir": ""}}));
         assert_eq!(c.working_dir, None);
     }
 
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn parse_skips_malformed_env_entries() {
-        let v = serde_json::json!({"config": {"Env": ["OK=1", "NO_EQUALS", "", "=emptykey", "A=B=C"]}});
+        let v = wbox_codec::json!({"config": {"Env": ["OK=1", "NO_EQUALS", "", "=emptykey", "A=B=C"]}});
         let c = ImageConfig::from_json(&v);
         // 拆不出 '=' 的项跳过；值内 '=' 保留
         assert_eq!(
@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn parse_non_array_fields_fall_back_to_default() {
         // Cmd/Entrypoint/Env 不是数组（如 docker 允许的字符串形式）→ 按未设置处理
-        let v = serde_json::json!({
+        let v = wbox_codec::json!({
             "config": {"Cmd": "bash", "Entrypoint": 42, "Env": {"A": "1"}, "WorkingDir": 7}
         });
         let c = ImageConfig::from_json(&v);
@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn parse_null_config_section() {
-        let c = ImageConfig::from_json(&serde_json::json!({"config": null}));
+        let c = ImageConfig::from_json(&wbox_codec::json!({"config": null}));
         assert_eq!(c, ImageConfig::default());
     }
 
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn parse_env_entry_with_only_equals_and_empty_values() {
-        let v = serde_json::json!({"config": {"Env": ["=", "K="]}});
+        let v = wbox_codec::json!({"config": {"Env": ["=", "K="]}});
         let c = ImageConfig::from_json(&v);
         assert_eq!(
             c.env,

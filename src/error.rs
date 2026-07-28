@@ -51,16 +51,16 @@ impl ErrKind {
     }
 }
 
-/// 带退出码语义的 wbox 错误，内部用 anyhow 携带上下文链。
+/// 带退出码语义的 wbox 错误，内部用 [`crate::fault::Error`] 携带上下文链。
 #[derive(Debug)]
 pub struct WboxError {
     kind: ErrKind,
-    inner: anyhow::Error,
+    inner: crate::fault::Error,
 }
 
 impl WboxError {
     /// 构造指定类别的错误。
-    pub fn new(kind: ErrKind, inner: anyhow::Error) -> Self {
+    pub fn new(kind: ErrKind, inner: crate::fault::Error) -> Self {
         Self { kind, inner }
     }
 
@@ -108,7 +108,7 @@ impl WboxError {
 
     /// 内部：字符串消息版构造（便捷构造共用）。
     fn msg(kind: ErrKind, msg: impl Into<String>) -> Self {
-        Self::new(kind, anyhow::anyhow!(msg.into()))
+        Self::new(kind, crate::fail!(msg.into()))
     }
 
     /// 对应的进程退出码。
@@ -138,13 +138,13 @@ impl std::error::Error for WboxError {
 /// wbox 统一 Result 别名。
 pub type Result<T> = std::result::Result<T, WboxError>;
 
-/// 把 anyhow::Error 包装成指定类别的 WboxError 的辅助 trait，
+/// 把 crate::fault::Error 包装成指定类别的 WboxError 的辅助 trait，
 /// 用法：`foo().ctx(ErrKind::Job)?`。
 pub trait KindExt<T> {
     fn ctx(self, kind: ErrKind) -> Result<T>;
 }
 
-impl<T> KindExt<T> for anyhow::Result<T> {
+impl<T> KindExt<T> for crate::fault::Result<T> {
     fn ctx(self, kind: ErrKind) -> Result<T> {
         self.map_err(|e| WboxError::new(kind, e))
     }
@@ -184,8 +184,8 @@ mod tests {
     }
 
     #[test]
-    fn ctx_wraps_anyhow_with_kind() {
-        let r: anyhow::Result<()> = Err(anyhow::anyhow!("底层原因"));
+    fn ctx_wraps_fault_error_with_kind() {
+        let r: crate::fault::Result<()> = Err(crate::fail!("底层原因"));
         let e = r.ctx(ErrKind::Job).unwrap_err();
         assert_eq!(e.kind(), ErrKind::Job);
         assert_eq!(e.exit_code(), 3);

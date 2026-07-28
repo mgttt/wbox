@@ -25,7 +25,7 @@
 //! 归档里的路径永远拼不出 `rootfs/` 以外的位置。
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug)]
@@ -92,7 +92,7 @@ pub fn cmd_export(args: &[String]) -> Result<u32> {
         let file = std::fs::File::create(&o.out)
             .with_context(|| format!("创建 '{}' 失败", o.out.display()))
             .ctx(ErrKind::Args)?;
-        let mut b = tar::Builder::new(file);
+        let mut b = wbox_codec::tar::Builder::new(file);
         b.follow_symlinks(false);
         let r = crate::oci::push::append_dir(&mut b, &staging, &staging)
             .and_then(|_| b.finish().context("打包失败").ctx(ErrKind::Args));
@@ -169,9 +169,9 @@ pub fn cmd_import(args: &[String]) -> Result<u32> {
         .ctx(ErrKind::Registry)?;
 
     let mut count = 0usize;
-    let mut ar = tar::Archive::new(std::io::Cursor::new(&bytes));
+    let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(&bytes));
     for entry in ar.entries().context("读取归档失败").ctx(ErrKind::Registry)? {
-        let mut e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
+        let e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
         let path = e
             .path()
             .context("归档条目路径非法")
@@ -213,7 +213,7 @@ pub fn cmd_import(args: &[String]) -> Result<u32> {
     // 命令，而它其实是 wbox 猜的。
     std::fs::write(
         staging.join("config.json"),
-        serde_json::json!({
+        wbox_codec::json!({
             "config": { "Env": [], "Cmd": [], "Entrypoint": [], "WorkingDir": "" }
         })
         .to_string(),
@@ -321,7 +321,7 @@ mod tests {
         let _home = crate::testenv::TempHome::new("importempty");
         let f = std::env::temp_dir().join(format!("wbox-imp-{}.tar", std::process::id()));
         {
-            let mut b = tar::Builder::new(std::fs::File::create(&f).unwrap());
+            let mut b = wbox_codec::tar::Builder::new(std::fs::File::create(&f).unwrap());
             b.finish().unwrap();
         }
         let m = format!(

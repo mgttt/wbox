@@ -274,13 +274,13 @@ fn is_tar_archive(path: &Path) -> bool {
 fn extract_tar_into(src: &Path, dst: &Path) -> Result<usize> {
     let bytes = std::fs::read(src)
         .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", src.display(), e)))?;
-    let mut ar = tar::Archive::new(std::io::Cursor::new(&bytes));
+    let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(&bytes));
     let mut count = 0usize;
     let entries = ar
         .entries()
         .map_err(|e| WboxError::args(format!("读取归档失败：{}", e)))?;
     for entry in entries {
-        let mut e = entry.map_err(|e| WboxError::args(format!("读取归档条目失败：{}", e)))?;
+        let e = entry.map_err(|e| WboxError::args(format!("读取归档条目失败：{}", e)))?;
         let path = e
             .path()
             .map_err(|e| WboxError::args(format!("归档条目路径非法：{}", e)))?
@@ -337,7 +337,7 @@ fn strip_quotes(v: &str) -> &str {
 fn parse_exec_form(rest: &str) -> Vec<String> {
     let t = rest.trim();
     if t.starts_with('[') && t.ends_with(']') {
-        if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(t) {
+        if let Ok(wbox_codec::json::Value::Array(items)) = wbox_codec::json::from_str(t) {
             return items
                 .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -457,7 +457,7 @@ mod tests {
         cfg.exposed.push("80/tcp".into());
         cfg.user = Some("1000".into());
         cfg.args.push(("SECRET".into(), "shh".into()));
-        let v: serde_json::Value = serde_json::from_str(&cfg.to_json()).unwrap();
+        let v: wbox_codec::json::Value = wbox_codec::json::from_str(&cfg.to_json()).unwrap();
         assert_eq!(v["config"]["Labels"]["a"], "1");
         // ExposedPorts 的值是空对象，与 OCI 一致
         assert!(v["config"]["ExposedPorts"]["80/tcp"].is_object());
@@ -615,40 +615,40 @@ impl ConfigAccum {
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
-        let mut cfg = serde_json::Map::new();
-        cfg.insert("Env".into(), serde_json::json!(env));
+        let mut cfg = wbox_codec::json::Map::new();
+        cfg.insert("Env".into(), wbox_codec::json!(env));
         if let Some(w) = &self.workdir {
-            cfg.insert("WorkingDir".into(), serde_json::json!(w));
+            cfg.insert("WorkingDir".into(), wbox_codec::json!(w));
         }
         if let Some(c) = &self.cmd {
-            cfg.insert("Cmd".into(), serde_json::json!(c));
+            cfg.insert("Cmd".into(), wbox_codec::json!(c));
         }
         if let Some(e) = &self.entrypoint {
-            cfg.insert("Entrypoint".into(), serde_json::json!(e));
+            cfg.insert("Entrypoint".into(), wbox_codec::json!(e));
         }
         if !self.labels.is_empty() {
-            let map: serde_json::Map<String, serde_json::Value> = self
+            let map: wbox_codec::json::Map = self
                 .labels
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                .map(|(k, v)| (k.clone(), wbox_codec::json!(v)))
                 .collect();
-            cfg.insert("Labels".into(), serde_json::Value::Object(map));
+            cfg.insert("Labels".into(), wbox_codec::json::Value::Object(map));
         }
         if !self.exposed.is_empty() {
             // OCI/docker 的形状是 {"80/tcp": {}}，值是个空对象
-            let map: serde_json::Map<String, serde_json::Value> = self
+            let map: wbox_codec::json::Map = self
                 .exposed
                 .iter()
-                .map(|p| (p.clone(), serde_json::json!({})))
+                .map(|p| (p.clone(), wbox_codec::json!({})))
                 .collect();
-            cfg.insert("ExposedPorts".into(), serde_json::Value::Object(map));
+            cfg.insert("ExposedPorts".into(), wbox_codec::json::Value::Object(map));
         }
         if let Some(u) = &self.user {
-            cfg.insert("User".into(), serde_json::json!(u));
+            cfg.insert("User".into(), wbox_codec::json!(u));
         }
         // ARG 刻意不写进 config：构建参数常带凭证（token、密码），
         // 落进镜像等于随镜像一起发出去。docker 也不把 ARG 写进 config。
-        serde_json::json!({ "config": cfg }).to_string()
+        wbox_codec::json!({ "config": cfg }).to_string()
     }
 }
 
@@ -830,8 +830,7 @@ fn cache_root() -> Result<PathBuf> {
 /// 键一起哈希进去（链式），而 `COPY` 还要额外把**源文件内容**算进去，
 /// 只看路径的话改了文件也会命中旧层。
 fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
+    let mut h = wbox_codec::Sha256::new();
     h.update(prev.as_bytes());
     h.update(format!("{:?}", ins).as_bytes());
     // 源内容变了就必须失效。目录则按"路径+内容"逐个文件累加。
@@ -850,11 +849,10 @@ fn step_key(prev: &str, ins: &Instruction, context: &Path) -> Result<String> {
         let from = resolve_context_path(context, src)?;
         hash_path_into(&from, &mut h)?;
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(wbox_codec::sha256::hex(&h.finalize()))
 }
 
-fn hash_path_into(p: &Path, h: &mut sha2::Sha256) -> Result<()> {
-    use sha2::Digest;
+fn hash_path_into(p: &Path, h: &mut wbox_codec::Sha256) -> Result<()> {
     let md = std::fs::metadata(p)
         .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", p.display(), e)))?;
     if md.is_dir() {
@@ -1264,7 +1262,7 @@ fn write_layered_manifest(
     let Ok(base_manifest) = std::fs::read(base_dir.join("manifest.json")) else {
         return Ok(None);
     };
-    let Ok(bm) = serde_json::from_slice::<serde_json::Value>(&base_manifest) else {
+    let Ok(bm) = wbox_codec::json::from_slice(&base_manifest) else {
         return Ok(None);
     };
     let Some(base_layers) = bm.get("layers").and_then(|l| l.as_array()) else {
@@ -1301,19 +1299,19 @@ fn write_layered_manifest(
     }
     std::fs::write(crate::oci::blob_path(out_dir, &delta.digest), &delta.gzipped)
         .map_err(|e| WboxError::args(format!("写增量层失败：{}", e)))?;
-    layers.push(serde_json::json!({
+    layers.push(wbox_codec::json!({
         "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
         "digest": delta.digest,
         "size": delta.gzipped.len(),
     }));
 
     // config 要把增量层的 diff_id 追加进去，否则拉取方按 diff_ids 复原会对不上
-    let base_diff_ids: Vec<serde_json::Value> = bm
+    let base_diff_ids: Vec<wbox_codec::json::Value> = bm
         .get("config")
         .and_then(|_| {
             std::fs::read(base_dir.join("config.json"))
                 .ok()
-                .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|b| wbox_codec::json::from_slice(&b).ok())
         })
         .and_then(|c| {
             c.get("rootfs")
@@ -1323,25 +1321,24 @@ fn write_layered_manifest(
         })
         .unwrap_or_default();
     let mut diff_ids = base_diff_ids;
-    diff_ids.push(serde_json::json!(delta.diff_id));
-    let mut config: serde_json::Value = serde_json::from_str(&cfg.to_json())
-        .unwrap_or_else(|_| serde_json::json!({}));
+    diff_ids.push(wbox_codec::json!(delta.diff_id));
+    let mut config: wbox_codec::json::Value = wbox_codec::json::from_str(&cfg.to_json())
+        .unwrap_or_else(|_| wbox_codec::json!({}));
     if let Some(o) = config.as_object_mut() {
-        o.insert("architecture".into(), serde_json::json!("amd64"));
-        o.insert("os".into(), serde_json::json!("linux"));
+        o.insert("architecture".into(), wbox_codec::json!("amd64"));
+        o.insert("os".into(), wbox_codec::json!("linux"));
         o.insert(
             "rootfs".into(),
-            serde_json::json!({"type": "layers", "diff_ids": diff_ids}),
+            wbox_codec::json!({"type": "layers", "diff_ids": diff_ids}),
         );
-        o.insert("history".into(), serde_json::json!([]));
+        o.insert("history".into(), wbox_codec::json!([]));
     }
-    let config_bytes = serde_json::to_vec(&config)
-        .map_err(|e| WboxError::args(format!("序列化 config 失败：{}", e)))?;
+    let config_bytes = wbox_codec::json::to_vec(&config);
     let config_digest = crate::oci::push::sha256_hex(&config_bytes);
     std::fs::write(out_dir.join("config.json"), &config_bytes)
         .map_err(|e| WboxError::args(format!("写 config.json 失败：{}", e)))?;
 
-    let manifest = serde_json::json!({
+    let manifest = wbox_codec::json!({
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
         "config": {
@@ -1351,8 +1348,7 @@ fn write_layered_manifest(
         },
         "layers": layers,
     });
-    let manifest_bytes = serde_json::to_vec(&manifest)
-        .map_err(|e| WboxError::args(format!("序列化 manifest 失败：{}", e)))?;
+    let manifest_bytes = wbox_codec::json::to_vec(&manifest);
     std::fs::write(out_dir.join("manifest.json"), &manifest_bytes)
         .map_err(|e| WboxError::args(format!("写 manifest.json 失败：{}", e)))?;
     let digests: Vec<String> = manifest["layers"]
@@ -1363,7 +1359,7 @@ fn write_layered_manifest(
         .collect();
     std::fs::write(
         out_dir.join("layers.json"),
-        serde_json::to_string_pretty(&digests).unwrap_or_else(|_| "[]".into()),
+        wbox_codec::json::Value::from(&digests).to_string_pretty(),
     )
     .map_err(|e| WboxError::args(format!("写 layers.json 失败：{}", e)))?;
     println!(

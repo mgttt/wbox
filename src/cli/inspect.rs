@@ -5,7 +5,7 @@ use crate::error::{Result, WboxError};
 use crate::oci;
 use crate::runstate::{self, Liveness};
 
-fn container_value(name: &str) -> Result<serde_json::Value> {
+fn container_value(name: &str) -> Result<wbox_codec::json::Value> {
     let dir = runstate::resolve_existing(name)?;
     let entry = runstate::read_meta(&dir)
         .ok_or_else(|| WboxError::args(format!("容器 '{}' 的 meta.json 缺失或不可读", name)))?;
@@ -17,17 +17,17 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
     let status = super::status::label(&dir, liveness);
     let paused = status == "paused";
     let exit_code = if liveness != Liveness::Exited {
-        serde_json::Value::Null
+        wbox_codec::json::Value::Null
     } else {
         runstate::read_exit_code(&dir)
-            .map(serde_json::Value::from)
-            .unwrap_or(serde_json::Value::Null)
+            .map(wbox_codec::json::Value::from)
+            .unwrap_or(wbox_codec::json::Value::Null)
     };
     // `Mounts` 与端口原本是写死的空数组／缺席——容器明明挂着卷、发布着端口，
     // `inspect` 却说没有。docker 用户读 `.Mounts` 与 `.HostConfig.PortBindings`，
     // 给一个恒空的字段比不给更糟。
     let ctx = entry.exec_context.as_ref();
-    let mounts: Vec<serde_json::Value> = ctx
+    let mounts: Vec<wbox_codec::json::Value> = ctx
         .map(|c| c.volumes.as_slice())
         .unwrap_or_default()
         .iter()
@@ -39,7 +39,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
                 None => (v.strip_suffix(":rw").unwrap_or(v), false),
             };
             let (host, guest) = rest.rsplit_once(':').unwrap_or((rest, ""));
-            serde_json::json!({
+            wbox_codec::json!({
                 "Type": "bind",
                 "Source": host,
                 "Destination": guest,
@@ -47,7 +47,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
             })
         })
         .collect();
-    let port_bindings: serde_json::Map<String, serde_json::Value> = ctx
+    let port_bindings: wbox_codec::json::Map = ctx
         .map(|c| c.ports.as_slice())
         .unwrap_or_default()
         .iter()
@@ -57,7 +57,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
                 // docker 的键形如 "80/tcp"。wbox 的 -p 只支持 TCP（F9.2），
                 // 写死 tcp 是如实的，不是偷懒。
                 format!("{}/tcp", guest),
-                serde_json::json!([{ "HostIp": "", "HostPort": host }]),
+                wbox_codec::json!([{ "HostIp": "", "HostPort": host }]),
             ))
         })
         .collect();
@@ -77,7 +77,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
         })
         .unwrap_or(("unknown".to_string(), ""));
 
-    Ok(serde_json::json!({
+    Ok(wbox_codec::json!({
         "Id": entry.name,
         "Name": format!("/{}", entry.name),
         "Created": entry.created_unix,
@@ -109,7 +109,7 @@ fn container_value(name: &str) -> Result<serde_json::Value> {
     }))
 }
 
-fn image_value(reference: &str) -> Result<serde_json::Value> {
+fn image_value(reference: &str) -> Result<wbox_codec::json::Value> {
     let iref = oci::ImageRef::parse(reference, None)?;
     let dir = oci::image_dir(&iref)?;
     if !dir.is_dir() {
@@ -127,8 +127,8 @@ fn image_value(reference: &str) -> Result<serde_json::Value> {
         .collect::<Vec<_>>();
     let manifest = std::fs::read_to_string(dir.join("manifest.json"))
         .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .unwrap_or(serde_json::Value::Null);
+        .and_then(|text| wbox_codec::json::from_str(&text).ok())
+        .unwrap_or(wbox_codec::json::Value::Null);
     let id = manifest
         .pointer("/config/digest")
         .and_then(|value| value.as_str())
@@ -144,7 +144,7 @@ fn image_value(reference: &str) -> Result<serde_json::Value> {
         })
         .unwrap_or_default();
 
-    Ok(serde_json::json!({
+    Ok(wbox_codec::json!({
         "Id": id,
         "RepoTags": [iref.qualified_ref()],
         "Architecture": "amd64",
@@ -173,10 +173,12 @@ fn image_value(reference: &str) -> Result<serde_json::Value> {
     }))
 }
 
-fn print_values(values: Vec<serde_json::Value>) -> Result<u32> {
-    let text = serde_json::to_string_pretty(&values)
-        .map_err(|e| WboxError::args(format!("序列化 inspect JSON 失败：{}", e)))?;
-    println!("{}", text);
+fn print_values(values: Vec<wbox_codec::json::Value>) -> Result<u32> {
+    // 序列化不会失败（Value 里装不下无法表示的东西），所以这里没有错误分支。
+    println!(
+        "{}",
+        wbox_codec::json::Value::Array(values).to_string_pretty()
+    );
     Ok(0)
 }
 
@@ -231,7 +233,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("meta.json"),
-            serde_json::json!({
+            wbox_codec::json!({
                 "name": "c", "pid": 1, "created_unix": 1,
                 "cmd": ["x"], "target": "t",
                 "exec_context": {

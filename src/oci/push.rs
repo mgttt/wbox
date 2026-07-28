@@ -17,7 +17,7 @@
 //! 是两件事，PRD §2.4 已分开记。
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
-use anyhow::Context;
+use crate::fault::Context;
 use std::io::Write;
 use std::path::Path;
 
@@ -47,10 +47,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
 
 /// 计算 `sha256:<hex>`。
 fn sha256_of(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(data);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", wbox_codec::sha256_hex(data))
 }
 
 /// 把 rootfs 目录打成单层 tar.gz。
@@ -66,7 +63,7 @@ pub fn flatten_rootfs(rootfs: &Path) -> Result<FlatLayer> {
     }
     let mut tar_bytes = Vec::new();
     {
-        let mut builder = tar::Builder::new(&mut tar_bytes);
+        let mut builder = wbox_codec::tar::Builder::new(&mut tar_bytes);
         // follow_symlinks(false)：rootfs 里的符号链接要原样进 tar。
         // 跟随的话会把链接展开成内容副本，既撑大体积又丢掉语义
         // （busybox 的 applet 链接就全废了）。
@@ -79,7 +76,7 @@ pub fn flatten_rootfs(rootfs: &Path) -> Result<FlatLayer> {
     }
     let diff_id = sha256_of(&tar_bytes);
 
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut enc = wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
     enc.write_all(&tar_bytes)
         .and_then(|_| enc.try_finish())
         .context("压缩层失败")
@@ -106,13 +103,13 @@ pub fn flatten_rootfs(rootfs: &Path) -> Result<FlatLayer> {
 pub fn diff_rootfs(base: &Path, built: &Path) -> Result<FlatLayer> {
     let mut tar_bytes = Vec::new();
     {
-        let mut b = tar::Builder::new(&mut tar_bytes);
+        let mut b = wbox_codec::tar::Builder::new(&mut tar_bytes);
         b.follow_symlinks(false);
         diff_dir(&mut b, base, built, Path::new(""))?;
         b.finish().context("打包增量层失败").ctx(ErrKind::Registry)?;
     }
     let diff_id = sha256_of(&tar_bytes);
-    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut enc = wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
     enc.write_all(&tar_bytes)
         .and_then(|_| enc.try_finish())
         .context("压缩增量层失败")
@@ -128,7 +125,7 @@ pub fn diff_rootfs(base: &Path, built: &Path) -> Result<FlatLayer> {
 
 /// 两棵树的同一相对目录做比对。
 fn diff_dir<W: Write>(
-    b: &mut tar::Builder<W>,
+    b: &mut wbox_codec::tar::Builder<W>,
     base: &Path,
     built: &Path,
     rel: &Path,
@@ -182,10 +179,10 @@ fn diff_dir<W: Write>(
             }
             let mut wh = std::ffi::OsString::from(".wh.");
             wh.push(&name);
-            let mut hdr = tar::Header::new_gnu();
+            let mut hdr = wbox_codec::tar::Header::new_gnu();
             hdr.set_size(0);
             hdr.set_mode(0o644);
-            hdr.set_entry_type(tar::EntryType::Regular);
+            hdr.set_entry_type(wbox_codec::tar::EntryType::Regular);
             hdr.set_cksum();
             b.append_data(&mut hdr, rel.join(&wh), std::io::empty())
                 .map_err(|e| fail("写 whiteout", &base_dir.join(&name), e))?;
@@ -216,7 +213,7 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// 递归把目录内容加进 tar，路径相对 `base`。
-pub(crate) fn append_dir<W: Write>(b: &mut tar::Builder<W>, base: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn append_dir<W: Write>(b: &mut wbox_codec::tar::Builder<W>, base: &Path, dir: &Path) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("读取目录 '{}' 失败", dir.display()))
         .ctx(ErrKind::Registry)?;
@@ -257,24 +254,24 @@ pub(crate) fn append_dir<W: Write>(b: &mut tar::Builder<W>, base: &Path, dir: &P
 /// 只把 `rootfs.diff_ids` 换成平铺后的单个 id、`history` 清空——保留旧 history
 /// 会与"只有一层"自相矛盾，拉取方按 history 复原会对不上。
 pub fn build_config(local_config: &[u8], diff_id: &str, arch: &str, os: &str) -> Result<Vec<u8>> {
-    let mut v: serde_json::Value = serde_json::from_slice(local_config)
+    let mut v: wbox_codec::json::Value = wbox_codec::json::from_slice(local_config)
         .context("本地 config.json 不是合法 JSON")
         .ctx(ErrKind::Registry)?;
     if !v.is_object() {
-        v = serde_json::json!({});
+        v = wbox_codec::json!({});
     }
     let obj = v.as_object_mut().expect("已确保是 object");
-    obj.insert("architecture".into(), serde_json::json!(arch));
-    obj.insert("os".into(), serde_json::json!(os));
+    obj.insert("architecture".into(), wbox_codec::json!(arch));
+    obj.insert("os".into(), wbox_codec::json!(os));
     obj.insert(
         "rootfs".into(),
-        serde_json::json!({ "type": "layers", "diff_ids": [diff_id] }),
+        wbox_codec::json!({ "type": "layers", "diff_ids": [diff_id] }),
     );
-    obj.insert("history".into(), serde_json::json!([]));
-    obj.entry("config").or_insert_with(|| serde_json::json!({}));
-    serde_json::to_vec(&v)
-        .context("序列化 config 失败")
-        .ctx(ErrKind::Registry)
+    obj.insert("history".into(), wbox_codec::json!([]));
+    obj.entry("config".to_string())
+        .or_insert_with(|| wbox_codec::json!({}));
+    // 序列化不会失败：Value 里装不下无法表示成 JSON 的东西。
+    Ok(wbox_codec::json::to_vec(&v))
 }
 
 /// 生成单层 manifest。
@@ -284,7 +281,7 @@ pub fn build_manifest(
     layer_digest: &str,
     layer_size: usize,
 ) -> Result<Vec<u8>> {
-    let m = serde_json::json!({
+    let m = wbox_codec::json!({
         "schemaVersion": 2,
         "mediaType": MT_MANIFEST,
         "config": {
@@ -298,9 +295,7 @@ pub fn build_manifest(
             "size": layer_size,
         }],
     });
-    serde_json::to_vec(&m)
-        .context("序列化 manifest 失败")
-        .ctx(ErrKind::Registry)
+    Ok(wbox_codec::json::to_vec(&m))
 }
 
 /// 原样回推所需的全部材料：原始 manifest 字节 + 它引用的每个 blob。
@@ -321,7 +316,7 @@ struct Verbatim {
 /// 层也与上游共享。这正是 L5 的判据。
 fn try_verbatim(dir: &std::path::Path) -> Option<Verbatim> {
     let manifest = std::fs::read(dir.join("manifest.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
+    let v: wbox_codec::json::Value = wbox_codec::json::from_slice(&manifest).ok()?;
     let config_digest = v.get("config")?.get("digest")?.as_str()?.to_string();
     let layers = v.get("layers")?.as_array()?;
     if layers.is_empty() {
@@ -520,7 +515,7 @@ mod tests {
         let l1 = b"layer-one-bytes".to_vec();
         let l2 = b"layer-two-bytes".to_vec();
         let (d1, d2) = (sha256_of(&l1), sha256_of(&l2));
-        let manifest = serde_json::json!({
+        let manifest = wbox_codec::json!({
             "schemaVersion": 2,
             "mediaType": MT_MANIFEST,
             "config": {"mediaType": MT_CONFIG, "digest": cdig, "size": config.len()},
@@ -529,7 +524,7 @@ mod tests {
                 {"mediaType": MT_LAYER, "digest": d2, "size": l2.len()},
             ],
         });
-        let mbytes = serde_json::to_vec(&manifest).unwrap();
+        let mbytes = wbox_codec::json::to_vec(&manifest);
         std::fs::write(d.join("manifest.json"), &mbytes).unwrap();
         std::fs::write(d.join("config.json"), &config).unwrap();
         std::fs::create_dir_all(d.join(super::super::BLOBS_DIR)).unwrap();
@@ -581,7 +576,7 @@ mod tests {
             "rootfs":{"type":"layers","diff_ids":["sha256:old1","sha256:old2"]},
             "history":[{"created_by":"old"}]}"#;
         let out = build_config(local, "sha256:new", "amd64", "linux").unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let v: wbox_codec::json::Value = wbox_codec::json::from_slice(&out).unwrap();
         assert_eq!(v["config"]["Env"][0], "A=1");
         assert_eq!(v["config"]["Cmd"][0], "/bin/sh");
         assert_eq!(v["rootfs"]["diff_ids"].as_array().unwrap().len(), 1);
@@ -600,7 +595,7 @@ mod tests {
     #[test]
     fn manifest_shape_matches_oci_single_layer() {
         let m = build_manifest("sha256:c", 12, "sha256:l", 34).unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&m).unwrap();
+        let v: wbox_codec::json::Value = wbox_codec::json::from_slice(&m).unwrap();
         assert_eq!(v["schemaVersion"], 2);
         assert_eq!(v["mediaType"], MT_MANIFEST);
         assert_eq!(v["config"]["digest"], "sha256:c");

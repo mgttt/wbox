@@ -29,7 +29,7 @@ use windows_sys::Win32::Security::{
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
 use crate::token::to_wide;
-use anyhow::Context;
+use crate::fault::Context;
 
 /// "ALL APPLICATION PACKAGES" 知名 SID（S-1-15-2-1）。
 const ALL_APP_PACKAGES_SID: &str = "S-1-15-2-1";

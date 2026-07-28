@@ -137,6 +137,60 @@ Windows 产品门禁 WP.3W 依赖的就是这一档。
   进程跑在 AppContainer + Job 里"，进程内执行会让 supervisor 和 guest 同体。
   两个 exe 都是纯 Rust，不违反 §2.2.1，只是分发上多一个文件。
 
+### 已完成（§2.2.1 第二档：第三方 crate → 第一方实现）
+
+**这一轮把"Rust-only"的口径从「不许有 C」收紧到「承载产品能力的实现必须是
+第一方」。** 前者在删掉 `vendor/blink` 时就达成了；但 `serde_json` 解析
+manifest、`sha2` 算 blob digest、`flate2` 解层、`tar` 解包、`ureq` 跑 registry
+协议——这些都是纯 Rust，却全都承载着镜像管理的核心语义。
+
+| 原依赖 | 现在 | 要点 |
+|---|---|---|
+| `serde_json` | `wbox_codec::json` | 只做动态 `Value` 一档（本仓从来没用过 derive）。**三条字节级约定不能变**：键按字典序、紧凑输出无空白、非 ASCII 不转义——任何一条变了 config/manifest 的 sha256 就变，缓存与已推上去的镜像会对不上 |
+| `sha2` | `wbox_codec::sha256` | FIPS 向量 + 分片等价 + 55/56/57/64 四个 padding 分界；顺带做了 HMAC |
+| `base64` | `wbox_codec::base64` | 解码**严格**：凭证与证书这两个场景里宽松解码只会掩盖问题 |
+| `flate2` | `wbox_codec::deflate` | **解码器完整**（三种块全支持，真实层是动态 Huffman），**编码器只做固定 Huffman**；gzip 不写 mtime 故层字节可复现 |
+| `tar` | `wbox_codec::tar` | API 形状刻意与 `tar` crate 对齐，调用点只改 `use` 行 |
+| `anyhow` | `src/fault.rs` | 约 120 行 |
+| `ureq` | `crates/wbox-http` | HTTP/1.1、chunked、重定向、代理隧道 |
+
+剩余第三方 crate 只有三个：`rustls` + `rustls-rustcrypto`（TLS，见下）与
+`libc` / `windows-sys`（平台 ABI 声明，§2.2.1 第一档明确允许）。
+
+**TLS 是唯一没做的一处，且不由 agent 自行决定**（PRD §4.9 **L10**）。自己写
+意味着自己写 X25519、AES-GCM、RSA/ECDSA 验签与 X.509 链校验——未经审计、
+非常量时间的密码学。接缝已经切好：`crates/wbox-http/src/transport.rs` 的
+`connect_tls` 一个函数，三个选项与代价见 `docs/rust-rewrite.md` §5.1。
+**这条待决不阻塞任何其它工作。**
+
+#### 这一轮踩到 / 想清楚的几件事
+
+- **"解码面对外部输入、编码面对自己的输出"是贯穿五个模块的同一条取舍。**
+  解码器必须完整、对畸形输入报错、有资源上界；编码器只要合法且对端能读。
+  具体落点：`deflate` 的解码器支持三种块而编码器只出固定 Huffman；`json`
+  的解析器有嵌套深度上限；`wire` 对头部总量/条数/体积三项都设了硬上限。
+- **只测"自产自销的往返"会让解码器的一半代码一行都跑不到。** 我们的编码器
+  只产生固定 Huffman，所以 `deflate` 的动态 Huffman 那条路在往返测试里
+  完全不会被走到——而真实镜像层**全是**动态块。测试里专门放了一段由
+  CPython zlib 产生的动态块夹具，并先断言它确实是 `BTYPE=10`。
+- **`json!` 宏的值必须走借用而不是 `From`。** `serde_json` 靠 `Serialize`
+  借用取值，改成 `Value::from` 的话几十个字段都要补 `.clone()`，而且以后
+  每加一个字段都要再想一次。解法是一个 `ToValue` trait。
+- **不要再包一层同形状的结构体。** `registry.rs` 原本有个 `HttpResponse`，
+  字段与 `wbox_http::Response` 一模一样。收敛成类型别名——两个只差名字的
+  类型意味着每加一个字段都要记得同步两处，而漏改一处不会有任何东西提醒你
+  （这正是 `merged_command` / `merged_command_with` 那一课）。
+- **跨主机重定向必须丢掉 `Authorization`。** registry 的 blob 会被重定向到
+  CDN，把 Bearer token 带过去等于把凭证交给第三方。这是 `wbox-http` 里最
+  重要的一条断言，用两个假服务器实测取证。
+- **`HEAD` 与 204/304 不能去读它声明的 `Content-Length`。** registry 用
+  `HEAD` 判断 blob 是否已存在；去读会**挂住**——表现为"卡住"而不是报错，
+  是这类实现里最难查的一种坏法。
+- **棘轮要盯 `Cargo.toml` 而不是 `Cargo.lock`。** lock 里有 `ring` 和 `cc`
+  ——它们因可选 feature 被解析器记下，实际并不在构建图里
+  （`cargo tree --target all -i ring` 是空的）。盯 lock 会得到一个吓人
+  但错误的结论。
+
 ### guest C 套件的基线是"如实记录回退"，不是掩盖
 
 `tests/run-guest-tests.sh` 按**容器语义**跑（`WBOX_PREFIX` 指向 workdir），门禁靠
@@ -277,8 +331,8 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
 
 ### 当前基线（接手时应能复现）
 
-- `cargo test --workspace` → **424 passed / 0 failed**
-  （wbox 417 + 引擎 167：84 单测 + 61 指令语义 + 22 端到端）
+- `cargo test --workspace` → **656 passed / 0 failed**
+  （wbox 422 + wbox-codec 40 + wbox-http 27 + 引擎 167：84 单测 + 61 指令语义 + 22 端到端）
 - `cargo clippy --workspace --all-targets -- -D warnings` → 干净
 - `cargo clippy -p wbox-linux --target x86_64-pc-windows-msvc --all-targets -- -D warnings` → 干净
 - guest 套件（需 `pip install ziglang`，宿主没有 zig 时 build.sh 会直接失败）：
@@ -290,13 +344,21 @@ AF.3 当场变红——这正是它该做的：提醒我「文档里那句『不
   git clean -fdq tests/guest               # 跑完必清，用例会在 tests/guest 里落文件
   ```
 
-- `scripts/test-linux-backend.sh` → **当前红**，但**不是本仓 Rust 化引入的**：
-  失败是 `PZ.1` / `INS.1` / `RT.1` / `RT.2` / `RT.4` / `RT.5`，全在 `pause` /
-  `inspect` / `restart` 上，共同现象是容器起来就立刻退出（`PID=` 为空）。
-  已取证并写进 PRD §4.9 **L9**。接手时**先看 L9**，别重新怀疑引擎。
+- `scripts/test-linux-backend.sh` → **本机绿、CI 红，两边都要看**：
+  - 开发容器里 **232 PASS / 0 FAIL / 2 SKIP**（exit 0）；
+  - GitHub runner 上 **FAIL=7**：`MS.3` / `INS.1` / `INS.4` / `RT.1` / `RT.2` /
+    `RT.4` / `RT.5`。**`main` 与 PR 分支逐条一致**（run 30325802052 vs
+    30329413767），所以与本轮改动无关。
+  - L9 的失败集合已按这次的实测重记（`PZ.1` 转绿、新增 `MS.3`/`INS.4`），
+    并写明它是**环境依赖**而非已修。**在不能复现的机器上不要改产品代码去猜。**
+- 端到端取证（本轮新增，验的是六个自实现模块串起来能用）：
+  `wbox pull alpine:3.20` 成功——匿名 Bearer token → 跨主机重定向到 CDN →
+  动态 Huffman 解压真实层 → sha256 校验 → tar 解包；随后 `wbox run` 起容器
+  执行 busybox 成功。push 侧由门禁的 `PSH.1`–`PSH.8c` 覆盖（打到 python stub）。
 
-**注意 `--workspace`**：现在是 workspace（`wbox` + `crates/wbox-linux`），
-不加的话只跑主 crate，引擎那 167 项一条都不会跑。
+**注意 `--workspace`**：现在是四个包（`wbox` + `crates/wbox-codec` +
+`crates/wbox-http` + `crates/wbox-linux`），不加的话只跑主 crate，
+另外三个包的 234 项一条都不会跑。
 
 **提交前的固定动作，一条都不能省。**
 

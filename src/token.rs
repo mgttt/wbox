@@ -232,12 +232,12 @@ impl CapabilitySid {
 }
 
 /// 把 SID 转成字符串形式（S-1-15-2-...）。
-pub(crate) fn sid_to_string(sid: PSID) -> anyhow::Result<String> {
+pub(crate) fn sid_to_string(sid: PSID) -> crate::fault::Result<String> {
     let mut buf: windows_sys::core::PWSTR = std::ptr::null_mut();
     // # Safety: sid 为有效 SID；buf 为有效输出指针，成功后用 LocalFree 释放。
     let ok = unsafe { ConvertSidToStringSidW(sid, &mut buf) };
     if ok == 0 {
-        return Err(anyhow::anyhow!("ConvertSidToStringSidW 失败"));
+        return Err(crate::fail!("ConvertSidToStringSidW 失败"));
     }
     // # Safety: buf 为 NUL 结尾 UTF-16，由本函数独占；读取后立即 LocalFree。
     let s = unsafe {
