@@ -170,6 +170,10 @@ Windows PowerShell 解释器/CLR、`hostname.exe`、`whoami.exe`、子进程、�
 目前不能自动发现 `Write-Output` 所在的宿主 PowerShell 模块；因此该矩阵不代表
 所有标准 cmdlet 已兼容，模块加载需单独建立跨宿主行为门禁。
 
+`cargo test` 中的 Win32 真机模块还直接以 AppContainer 子测试进程验证 ACL：
+RX 目录必须可读，覆盖和新建必须返回 `PermissionDenied`。这验证授权粒度，
+不把 Windows 原生 `-v` 误报为已支持。
+
 ### 2.7 Windows 网络行为门禁
 
 ```powershell

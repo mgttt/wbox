@@ -58,6 +58,8 @@ Job Object 提供：
 将 OCI rootfs 作为 guest 前缀，再经相同 AppContainer/Job 启动链执行。
 镜像缓存只向 AppContainer 提供读取执行权限；Windows 运行前在容器状态目录
 创建完整的私有 rootfs 副本，并只向该 profile 的确定性 SID 授予修改权。
+Win32 真机测试同时验证了 RX ACE 的行为：AppContainer 可读文件，但覆盖和新建
+均被拒绝；该 ACL 粒度本身不提供 Windows 原生 bind mount 的路径映射。
 前台退出随状态登记清理，后台实例保留到 `rm`。全量复制是语义正确的首版，
 后续稀疏层必须保持相同生命周期、cache isolation 与 write/rename/delete 契约。
 detached 父进程在全局状态操作锁内预留名称，supervisor 只能凭一次性令牌接管；

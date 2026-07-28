@@ -790,6 +790,73 @@ mod real_windows_tests {
         )
     }
 
+    #[test]
+    fn read_only_acl_child_probe() {
+        let Ok(root) = std::env::var("WBOX_TEST_READ_ONLY_ROOT") else {
+            return;
+        };
+        let root = std::path::Path::new(&root);
+        assert_eq!(
+            std::fs::read(root.join("canary.txt")).unwrap(),
+            b"read-only-canary"
+        );
+
+        for path in [root.join("canary.txt"), root.join("created.txt")] {
+            let error = std::fs::write(&path, b"must-not-write").unwrap_err();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "RX ACE 下写入 '{}' 应被拒绝：{}",
+                path.display(),
+                error
+            );
+        }
+    }
+
+    /// RX ACE 必须提供真正的“可读、不可写”语义，不能只检查 ACL API 返回成功。
+    #[test]
+    fn read_only_acl_allows_reads_and_denies_writes() {
+        let base = std::env::temp_dir().join(unique_name("readonly_acl"));
+        let exec_dir = base.join("exec");
+        let read_only_dir = base.join("read-only");
+        std::fs::create_dir_all(&exec_dir).unwrap();
+        std::fs::create_dir_all(&read_only_dir).unwrap();
+        std::fs::write(read_only_dir.join("canary.txt"), b"read-only-canary").unwrap();
+
+        let child = exec_dir.join("wbox-read-only-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+        crate::acl::grant_read_recursive(&exec_dir).unwrap();
+        crate::acl::grant_read_recursive(&read_only_dir).unwrap();
+
+        let profile = create_profile(&unique_name("readonly_profile"), &[]);
+        let mut job = Job::create(Limits::default()).unwrap();
+        let cmdline = build_cmdline(&[
+            child.to_string_lossy().into_owned(),
+            "--exact".to_string(),
+            "sandbox::real_windows_tests::read_only_acl_child_probe".to_string(),
+            "--nocapture".to_string(),
+        ])
+        .unwrap();
+        let mut env = minimal_process_env();
+        env.push((
+            "WBOX_TEST_READ_ONLY_ROOT".to_string(),
+            read_only_dir.to_string_lossy().into_owned(),
+        ));
+        let rc = run_container(
+            &profile,
+            &[],
+            &cmdline,
+            &exec_dir.to_string_lossy(),
+            &mut job,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "AppContainer RX ACE 行为探针失败");
+
+        drop(profile);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[repr(C)]
     struct NtUnicodeString {
         length: u16,

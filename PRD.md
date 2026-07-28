@@ -554,7 +554,7 @@ F9.1–F9.39 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有�
 | Q1.1 | 写重定向的**用户态可行性取证** | 取证（未做） | §4.9 W3：AppContainer 下 UAC VirtualStore 是否仍生效、per-package 存储对非 UWP 进程是否自动可写。步骤与判据已写好，**只能在真 Windows 上跑**。它的结论决定 Q1.2 存不存在 |
 | Q1.2 | 基于取证结论的写重定向近似 | 取决于 Q1.1 | 若 W3 判定用户态只能「拒绝」，本条转为**不做**并写明；若发现可用的重定向点，再按结论定范围 |
 | Q1.3 | 临时目录私有化（`TMPDIR`/`TEMP`/`TMP` 指向容器私有目录）| **已实现**（`--private-tmp`，门禁 PT.1–PT.5、WP.25）| Linux 三项均指向状态目录；Windows 的 `TMPDIR` 指向状态目录，AppContainer 将 `TEMP`/`TMP` 改到 package 专属 `AC\Temp`。两处均已实机验证可写，且显式 `-e TMPDIR=...` 优先。边界：只覆盖遵守该约定的程序 |
-| Q1.4 | 授权粒度：只读授予 | **可做**（待 Windows 侧确认）| 目前给 rootfs 授 ACE 是读写一档；ACL 本身支持只读授予，可对应 `-v` 的 `:ro` 语义。判据：授只读后容器内写入被拒 |
+| Q1.4 | 授权粒度：只读授予 | **已验证**（W7）| AppContainer 真机探针证明 RX ACE 下读取成功，覆盖与新建均返回 `PermissionDenied`；共享镜像缓存已使用该粒度。它不提供路径映射，不能据此宣称 Windows 原生 `-v :ro` 已实现 |
 | Q1.5 | capability 粒度 | **可做**（待 Windows 侧确认）| 现只有 `INTERNET_CLIENT` 一个开关；Windows 还有 `INTERNET_CLIENT_SERVER`、`PRIVATE_NETWORK_CLIENT_SERVER` 等 capability SID，可按需授予。判据：只授客户端能力时监听端口失败 |
 | — | 注册表虚拟化 | **不做** | 与写重定向同一介入点问题（§2.4.2 Q1） |
 | — | 强制入盒（Forced Programs）| **不做** | 需全局钩子或驱动（§2.5 天花板一） |
@@ -2416,7 +2416,7 @@ TODO-WINDOW
 ├── W3 F9.4 Windows 文件系统写重定向取证                  [active] 分析完成，实验待跑
 ├── W4 build 在 Windows 宿主的可行性                      [done]
 ├── W6 Q1 临时目录私有化（TEMP/TMP）                      [done] WP.25
-├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
+├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [done] Win32 真机门禁
 ├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
@@ -2643,10 +2643,16 @@ Windows 真机门禁 `WP.25` 已用 PowerShell 分别在状态目录 `TMPDIR` �
 再向该容器的确定性 profile SID 授予文件级 modify 权限；权限不含
 `WRITE_DAC`/`WRITE_OWNER`，没有用 `GENERIC_ALL` 扩大边界。
 
-**W7 只读授权粒度**。现在给 rootfs 授 ACE 是读写一档；ACL 本身支持只读授予。
-- 为什么值得做：这是 Q1 能兑现 `-v ... :ro` 语义的唯一途径（那一格没有挂载层，
-  隔离靠授权）。
-- 判据：授只读后，容器内对该目录的写入被拒绝，读取正常；授读写时两者都通过。
+**W7 只读授权粒度** `[done：Win32 真机门禁]`。共享镜像缓存已经通过
+`grant_read_recursive` 获得 RX ACE，私有 rootfs/tmp 则只向容器 profile SID
+授予不含 `WRITE_DAC`/`WRITE_OWNER` 的 modify 权限。真机测试
+`read_only_acl_allows_reads_and_denies_writes` 复制测试进程并以 AppContainer +
+Job 启动：子进程能读取 canary，但覆盖已有文件和创建新文件都得到
+`PermissionDenied`。
+
+该结论只证明**授权粒度**，不提供路径映射。Q1 原生 Windows 程序没有 mount/VFS
+介入点，因此 `-v host:guest:ro` 仍明确拒绝；未来 Q2 guest VFS volume 可以把
+只读 ACE 作为宿主侧最小授权，但还必须在每个 guest 写入口执行 `EROFS` 语义。
 
 **W8 capability 粒度**。现在只有 `INTERNET_CLIENT` 一个开关。
 - 为什么值得做：`--allow-network` 现在是「全有或全无」。Windows 的 capability SID
