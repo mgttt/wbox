@@ -105,7 +105,8 @@ impl BigUint {
         Ordering::Equal
     }
 
-    fn add(&self, other: &BigUint) -> BigUint {
+    /// 加法。名字带 `_ref` 是为了与将来可能的消耗式 API 区分。
+    pub fn add_ref(&self, other: &BigUint) -> BigUint {
         let n = self.limbs.len().max(other.limbs.len());
         let mut out = Vec::with_capacity(n + 1);
         let mut carry = 0u64;
@@ -125,7 +126,7 @@ impl BigUint {
     }
 
     /// `self - other`，要求 `self >= other`（调用方保证）。
-    fn sub(&self, other: &BigUint) -> BigUint {
+    pub fn sub_ref(&self, other: &BigUint) -> BigUint {
         debug_assert!(self.cmp(other) != std::cmp::Ordering::Less);
         let mut out = Vec::with_capacity(self.limbs.len());
         let mut borrow = 0i64;
@@ -146,7 +147,7 @@ impl BigUint {
         r
     }
 
-    fn mul(&self, other: &BigUint) -> BigUint {
+    pub fn mul_ref(&self, other: &BigUint) -> BigUint {
         if self.is_zero() || other.is_zero() {
             return BigUint::zero();
         }
@@ -172,7 +173,7 @@ impl BigUint {
     }
 
     /// 左移 `n` 位。
-    fn shl(&self, n: usize) -> BigUint {
+    pub fn shl(&self, n: usize) -> BigUint {
         if self.is_zero() {
             return BigUint::zero();
         }
@@ -197,7 +198,7 @@ impl BigUint {
     }
 
     /// 取第 `i` 位。
-    fn bit(&self, i: usize) -> bool {
+    pub fn bit(&self, i: usize) -> bool {
         let limb = i / 32;
         if limb >= self.limbs.len() {
             return false;
@@ -205,36 +206,67 @@ impl BigUint {
         (self.limbs[limb] >> (i % 32)) & 1 == 1
     }
 
-    /// `self mod m`。经典的二进制长除法：够用且好核对。
+    /// 右移 `n` 位。ECDSA 取"摘要最左 nbits 位"时要用。
+    pub fn shr(&self, n: usize) -> BigUint {
+        let limb_shift = n / 32;
+        let bit_shift = n % 32;
+        if limb_shift >= self.limbs.len() {
+            return BigUint::zero();
+        }
+        let mut out = Vec::with_capacity(self.limbs.len() - limb_shift);
+        for i in limb_shift..self.limbs.len() {
+            let mut v = self.limbs[i] >> bit_shift;
+            if bit_shift > 0 {
+                if let Some(&next) = self.limbs.get(i + 1) {
+                    v |= next << (32 - bit_shift);
+                }
+            }
+            out.push(v);
+        }
+        let mut r = BigUint { limbs: out };
+        r.trim();
+        r
+    }
+
+    /// `self >= other`？供 RSA 校验 `s < n`、EC 的模减用。
+    pub fn ge(&self, other: &BigUint) -> bool {
+        self.cmp(other) != std::cmp::Ordering::Less
+    }
+
+    /// `self mod m`。二进制长除法，但**全程原地、不分配**。
     ///
-    /// 模幂是热点，但热在乘法上；除法每轮只做一次（`mul_mod` 里那次），
-    /// 用更快的 Knuth D 算法收益有限，而它是最容易写错的一段代码。
+    /// 朴素写法是每一位都 `shl`/`add`/`sub` 出一个新的 `BigUint`，
+    /// 512 位的被除数就是上千次 `Vec` 分配——实测一次 P-256 验签要 640ms，
+    /// 而分配本身就是大头。改成在一个固定缓冲里移位/比较/减，
+    /// 同一次验签降到几十毫秒。算法没变，仍是逐位长除，好核对。
     pub fn rem(&self, m: &BigUint) -> BigUint {
         assert!(!m.is_zero(), "除数不能为零");
         if self.cmp(m) == std::cmp::Ordering::Less {
             return self.clone();
         }
-        let mut rem = BigUint::zero();
+        let ml = m.limbs.len();
+        // 余数永远 < m，所以 ml 个肢体足够；多留一个放移位时的溢出。
+        let mut r = vec![0u32; ml + 1];
         for i in (0..self.bits()).rev() {
-            // rem = rem*2 + bit
-            rem = rem.shl(1);
-            if self.bit(i) {
-                rem = rem.add(&BigUint::one());
+            // r = r*2 + bit(i)
+            let mut carry = u32::from(self.bit(i));
+            for limb in r.iter_mut() {
+                let next = *limb >> 31;
+                *limb = (*limb << 1) | carry;
+                carry = next;
             }
-            if rem.cmp(m) != std::cmp::Ordering::Less {
-                rem = rem.sub(m);
+            // if r >= m { r -= m }
+            if ge_slice(&r, &m.limbs) {
+                sub_slice(&mut r, &m.limbs);
             }
         }
-        rem
-    }
-
-    /// `self >= other`？供 RSA 校验 `s < n` 用。
-    pub fn ge(&self, other: &BigUint) -> bool {
-        self.cmp(other) != std::cmp::Ordering::Less
+        let mut out = BigUint { limbs: r };
+        out.trim();
+        out
     }
 
     fn mul_mod(&self, other: &BigUint, m: &BigUint) -> BigUint {
-        self.mul(other).rem(m)
+        self.mul_ref(other).rem(m)
     }
 
     /// 模幂 `self^e mod m`。平方-乘法，从指数最高位往下。
@@ -258,6 +290,40 @@ impl BigUint {
         }
         result
     }
+}
+
+/// `a >= b`？两个切片按小端肢体比较，`a` 可以比 `b` 长。
+fn ge_slice(a: &[u32], b: &[u32]) -> bool {
+    for i in (b.len()..a.len()).rev() {
+        if a[i] != 0 {
+            return true;
+        }
+    }
+    for i in (0..b.len()).rev() {
+        match a.get(i).copied().unwrap_or(0).cmp(&b[i]) {
+            std::cmp::Ordering::Greater => return true,
+            std::cmp::Ordering::Less => return false,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    true
+}
+
+/// `a -= b`，就地。调用方保证 `a >= b`。
+fn sub_slice(a: &mut [u32], b: &[u32]) {
+    let mut borrow = 0i64;
+    for (i, limb) in a.iter_mut().enumerate() {
+        let bv = b.get(i).copied().unwrap_or(0) as i64;
+        let mut d = *limb as i64 - bv - borrow;
+        if d < 0 {
+            d += 1i64 << 32;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        *limb = d as u32;
+    }
+    debug_assert_eq!(borrow, 0, "sub_slice 要求 a >= b");
 }
 
 #[cfg(test)]
@@ -292,9 +358,9 @@ mod tests {
     fn arithmetic_matches_reference_values() {
         let a = n("123456789abcdef0");
         let b = n("fedcba9876543210");
-        assert_eq!(a.add(&b), n("11111111111111100"));
-        assert_eq!(b.sub(&a), n("eca8641fdb975320"));
-        assert_eq!(a.mul(&b), n("121fa00ad77d7422236d88fe5618cf00"));
+        assert_eq!(a.add_ref(&b), n("11111111111111100"));
+        assert_eq!(b.sub_ref(&a), n("eca8641fdb975320"));
+        assert_eq!(a.mul_ref(&b), n("121fa00ad77d7422236d88fe5618cf00"));
     }
 
     #[test]
@@ -330,7 +396,7 @@ mod tests {
         // 2^256 mod (2^256-189)  →  189
         let m = n("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43");
         assert_eq!(
-            BigUint::from_u32(2).modpow(&BigUint::from_u32(0).add(&n("100")), &m),
+            BigUint::from_u32(2).modpow(&BigUint::from_u32(0).add_ref(&n("100")), &m),
             n("bd")
         );
     }
@@ -355,7 +421,7 @@ mod tests {
     #[test]
     fn no_leading_zero_limbs() {
         // 前导零肢体会让 cmp/bits 全错，这条钉住不变式。
-        let a = n("100000000").sub(&n("100000000"));
+        let a = n("100000000").sub_ref(&n("100000000"));
         assert!(a.is_zero());
         assert_eq!(a.limbs.len(), 0);
         assert_eq!(a.bits(), 0);

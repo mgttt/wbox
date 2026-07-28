@@ -4,6 +4,7 @@
 
 pub mod aes;
 pub mod bigint;
+pub mod ec;
 pub mod hash;
 pub mod rsa;
 pub mod sha512;
