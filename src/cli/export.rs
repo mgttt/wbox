@@ -187,16 +187,13 @@ pub fn cmd_import(args: &[String]) -> Result<u32> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let target = rootfs.join(&rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .context("创建解包目录失败")
-                .ctx(ErrKind::Registry)?;
-        }
         // 解包失败不中止整个归档：裸 rootfs 里常有本机建不出来的条目
         // （设备节点要 root，属主可能不存在）。中止的话，绝大多数 rootfs
         // 都 import 不进来——那才是真正无用的行为。
-        if e.unpack(&target).is_ok() {
+        //
+        // 走 `unpack_in` 而不是自己拼路径：词法检查（`safe_import_path`）
+        // 挡不住"先建外指符号链接、再写它的子路径"，那一层在 unpack_in 里。
+        if e.unpack_in(&rootfs, &rel).is_ok() {
             count += 1;
         }
     }

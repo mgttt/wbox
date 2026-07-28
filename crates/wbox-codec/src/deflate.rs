@@ -192,9 +192,24 @@ const CLEN_ORDER: [usize; 19] = [
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
 ];
 
-/// 解压裸 DEFLATE 码流。
+/// 解压产物的默认上限。
+///
+/// **压缩炸弹的防线。** DEFLATE 的理论压缩比超过 1000:1，一个几百 KB 的
+/// 层可以解出几百 GB。上限设在 8 GiB：真实镜像层解开后最大也就几个 GB
+/// （Ubuntu 完整桌面镜像约 4 GB），而 8 GiB 足以让任何炸弹撞墙。
+pub const MAX_INFLATE_BYTES: u64 = 8 << 30;
+
+/// 解压裸 DEFLATE 码流（用默认上限）。
 pub fn inflate(data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len() * 4);
+    inflate_limited(data, MAX_INFLATE_BYTES)
+}
+
+/// 解压裸 DEFLATE 码流，输出超过 `max` 字节即报错。
+pub fn inflate_limited(data: &[u8], max: u64) -> io::Result<Vec<u8>> {
+    // 初始容量按输入的 4 倍猜，但**不超过上限**——否则一个声称要解出
+    // 很多的输入光是预留就把内存吃掉了。
+    let guess = (data.len() as u64).saturating_mul(4).min(max).min(1 << 24);
+    let mut out = Vec::with_capacity(guess as usize);
     let mut br = BitReader::new(data);
     loop {
         let last = br.take(1)?;
@@ -207,17 +222,23 @@ pub fn inflate(data: &[u8]) -> io::Result<Vec<u8>> {
                 if len != (!nlen & 0xffff) {
                     return Err(err("stored 块的 LEN/NLEN 不互补"));
                 }
+                if (out.len() + len) as u64 > max {
+                    return Err(err("DEFLATE 解压产物超过上限（疑似压缩炸弹）"));
+                }
                 br.read_bytes(&mut out, len)?;
             }
             1 => {
                 let (lit, dist) = fixed_tables()?;
-                inflate_block(&mut br, &mut out, &lit, &dist)?;
+                inflate_block(&mut br, &mut out, &lit, &dist, max)?;
             }
             2 => {
                 let (lit, dist) = dynamic_tables(&mut br)?;
-                inflate_block(&mut br, &mut out, &lit, &dist)?;
+                inflate_block(&mut br, &mut out, &lit, &dist, max)?;
             }
             _ => return Err(err("DEFLATE 块类型非法（3）")),
+        }
+        if out.len() as u64 > max {
+            return Err(err("DEFLATE 解压产物超过上限（疑似压缩炸弹）"));
         }
         if last == 1 {
             break;
@@ -303,6 +324,7 @@ fn inflate_block(
     out: &mut Vec<u8>,
     lit: &Huffman,
     dist: &Huffman,
+    max: u64,
 ) -> io::Result<()> {
     loop {
         let sym = lit.decode(br)?;
@@ -319,6 +341,10 @@ fn inflate_block(
                 let d = DIST_BASE[dsym] as usize + br.take(DIST_EXTRA[dsym] as u32)? as usize;
                 if d > out.len() {
                     return Err(err("回溯距离超出已解出的数据"));
+                }
+                if (out.len() + len) as u64 > max {
+                    // 块内也要查：单个块就能解出几百 GB，等到块尾再查就晚了。
+                    return Err(err("DEFLATE 解压产物超过上限（疑似压缩炸弹）"));
                 }
                 // 重叠拷贝（d < len）是合法且常见的，必须逐字节。
                 let start = out.len() - d;
@@ -559,9 +585,14 @@ pub fn gzip_compress(data: &[u8], level: Level) -> Vec<u8> {
     out
 }
 
-/// gzip 解压。校验 CRC32 与长度——层的完整性不能只靠外层 digest，
-/// 这里报错比把半截数据当成 rootfs 解出来好得多。
+/// gzip 解压（用默认上限）。
 pub fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
+    gzip_decompress_limited(data, MAX_INFLATE_BYTES)
+}
+
+/// gzip 解压，产物超过 `max` 字节即报错。校验 CRC32 与长度——层的完整性
+/// 不能只靠外层 digest，这里报错比把半截数据当成 rootfs 解出来好得多。
+pub fn gzip_decompress_limited(data: &[u8], max: u64) -> io::Result<Vec<u8>> {
     if data.len() < 18 {
         return Err(err("gzip 数据太短"));
     }
@@ -594,7 +625,7 @@ pub fn gzip_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
         return Err(err("gzip 头部截断"));
     }
     let body = &data[p..data.len() - 8];
-    let out = inflate(body)?;
+    let out = inflate_limited(body, max)?;
     let tail = &data[data.len() - 8..];
     let want_crc = u32::from_le_bytes([tail[0], tail[1], tail[2], tail[3]]);
     let want_len = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
@@ -829,6 +860,33 @@ mod tests {
         let mut out = Vec::new();
         GzDecoder::new(&gz[..]).read_to_end(&mut out).unwrap();
         assert_eq!(out, data);
+    }
+
+    #[test]
+    fn rejects_decompression_bombs() {
+        // **压缩炸弹**：4 MiB 的全零压出来只有几 KB，解开却要 4 MiB。
+        // 把上限压到 1 KiB，解压必须报错而不是照单全收。
+        let data = vec![0u8; 4 << 20];
+        let bomb = deflate(&data, Level::Default);
+        assert!(bomb.len() < 64 * 1024, "夹具本身要足够小：{}", bomb.len());
+
+        assert!(inflate_limited(&bomb, 1024).is_err(), "超上限必须报错");
+        // 上限之内照常解——只测"挡得住"会让恒失败的实现也变绿。
+        assert_eq!(inflate_limited(&bomb, 8 << 20).unwrap(), data);
+
+        // gzip 那条路同样要有上限。
+        let gz = gzip_compress(&data, Level::Default);
+        assert!(gzip_decompress_limited(&gz, 1024).is_err());
+        assert_eq!(gzip_decompress_limited(&gz, 8 << 20).unwrap().len(), data.len());
+    }
+
+    #[test]
+    fn limit_is_checked_inside_a_block_not_only_at_its_end() {
+        // 单个 DEFLATE 块就能解出几百 GB。等到块尾再查，内存早就没了。
+        let data = vec![0x41u8; 1 << 20];
+        let c = deflate(&data, Level::Default);
+        // 上限远小于单块产物 → 必须在块**内**就断掉。
+        assert!(inflate_limited(&c, 4096).is_err());
     }
 
     #[test]

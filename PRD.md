@@ -143,6 +143,11 @@ Logjam、POODLE 都是回退路径上的洞）、不做会话恢复、不做客�
 已知不做且如实记录的：**不做吊销检查（CRL/OCSP）**——两者都要额外网络请求，
 主流客户端还普遍软失败（查不到就放行，等于没查）。
 
+**资源上界**（自实现的格式栈面对的都是网络输入，每一处都要有上界）：
+HTTP 响应体 8 GiB、gzip/DEFLATE **解压产物** 8 GiB（压缩炸弹的防线——
+DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌套深度 128、
+响应头总量 256 KiB / 条数 200、TLS 记录按 RFC 8446 的 2^14。
+
 完整取舍见 `docs/rust-rewrite.md` §5。
 
 ### 2.3 非目标
@@ -2217,7 +2222,7 @@ TODO-LINUX
 ├── L5 镜像分层存储                                       [done] F9.16-F9.18
 ├── L6 pod 抽象是否值得做                                 [done] 结论是不做
 ├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
-├── L7 `load` / `import` 解包的符号链接边界               [active] 待修复与门禁
+├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁
 ├── L9 Linux native / Wine 共用后端验收当前失败            [active] 待取得失败断言
 └── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
@@ -2236,6 +2241,35 @@ TODO-LINUX
 
 取证：`wbox pull alpine:3.20` 走完整自实现栈从 Docker Hub 拉通，
 manifest digest 与换之前**逐字节一致**；随后 `wbox run` 起容器执行 busybox。
+
+### L7 归档解包的符号链接越界 `[TODO-LINUX]` `[done]`
+
+**已修复。** 由 Windows 侧 agent 的代码审查指出：`load` / `import` /
+Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不是绝对路径），
+然后把拼好的目标交给不带根约束的解包函数。
+
+**攻击形态**：归档先放一个 `evil -> /tmp` 的符号链接，再放一个名为
+`evil/pwned` 的普通文件。`evil/pwned` 词法上完全合法，词法检查放行；
+写下去时内核跟着符号链接走，文件落到 `/tmp/pwned`——**已经在根之外了**。
+
+**修法**：`wbox_codec::tar` 新增 `Entry::unpack_in(root, rel)`，逐段检查
+路径——任何一段如果已存在且**是符号链接**就拒绝，缺失的段按目录创建。
+三个调用点（`oci::archive`、`cli::export`、`build`）全部切过去。
+`oci::image` 的层解包**保持用 `unpack`**：那里有一整套 whiteout / 越权路径 /
+符号链接规则，比这一层严格，两套叠加只会互相干扰。
+
+**顺带修掉的两条**（同一次审查）：
+
+- 硬链接目标按**归档根**解析，不是按进程 cwd（`fs::hard_link` 的默认行为
+  会链到一个完全无关的文件上）；
+- tar **绝不按头部声明的长度预分配**内存。一个 512 字节的归档可以声称里面
+  有个 4 GiB 的文件，照着分配就是一次拒绝服务。改成让缓冲随实际到达的数据
+  增长，撒谎的头部只会撞上 EOF 然后报错；另加单条目 4 GiB 硬上限。
+
+判据：`unpack_in_blocks_symlink_escape`（造上述归档，断言文件**没有**落到
+根外）、`unpack_in_still_allows_normal_nested_paths`（只测"挡得住"会让恒
+失败的实现也变绿）、`lying_size_header_does_not_allocate`、
+`absurd_size_header_is_rejected_outright`。
 
 ### R8 是否把模拟器合并进单一 `wbox.exe` `[Windows agent]` `[待决]`
 

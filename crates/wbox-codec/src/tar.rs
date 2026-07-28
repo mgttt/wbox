@@ -17,15 +17,30 @@
 //!
 //! # 安全
 //!
-//! 解包**不在这里做**路径校验——调用方（`oci::image`）有一整套 whiteout /
-//! 越权路径 / 符号链接逃逸的规则，比"tar 库里顺手挡一下"严格得多。这里只
-//! 保证：不会因为畸形头部而 panic，size/类型字段是校验过的。
+//! 两个入口，**默认那个是安全的**：
+//!
+//! - [`Entry::unpack_in`]：把条目落到指定根目录下，逐段确保**不会经由符号
+//!   链接逸出**。通用归档（`wbox load` / `import` / Dockerfile 的 `ADD`）
+//!   一律走这个。
+//! - [`Entry::unpack`]：不做路径校验，由调用方负责。只有 `oci::image` 的
+//!   层解包用它——那里有一整套 whiteout / 越权路径 / 符号链接规则，比这里
+//!   严格，两套叠加只会互相干扰。
+//!
+//! 另外两条对敌意归档的硬约束：单条目字节数有上限
+//! （[`MAX_ENTRY_BYTES`]），且**绝不按头部声明的长度预分配内存**——
+//! 一个 512 字节的归档可以声称里面有个 4 GiB 的文件。
 
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const BLOCK: usize = 512;
+
+/// 单个条目的字节上限。
+///
+/// 镜像层里最大的东西是语言运行时的二进制，几百 MB 顶天；4 GiB 已经宽松到
+/// 不可能误伤，同时挡住"头部声称有 2^63 字节"这类畸形归档。
+pub const MAX_ENTRY_BYTES: u64 = 4 << 30;
 
 fn err(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -544,6 +559,8 @@ pub struct Entry {
     path: PathBuf,
     link: Option<PathBuf>,
     data: Vec<u8>,
+    /// `unpack_in` 记下的归档根，用于把硬链接目标解析到正确的位置。
+    unpack_root: Option<PathBuf>,
 }
 
 impl Entry {
@@ -569,9 +586,40 @@ impl Entry {
         &self.data
     }
 
+    /// 把条目落到 `root` 下的相对路径 `rel`，**并保证不逸出 `root`**。
+    ///
+    /// # 为什么必须有这个函数，而不是让调用方自己拼路径
+    ///
+    /// 调用方普遍只做**词法**检查（路径里有没有 `..`、是不是绝对路径）。
+    /// 那挡不住这一手：归档先放一个 `evil -> /tmp` 的符号链接，再放一个
+    /// 名为 `evil/pwned` 的普通文件。`evil/pwned` 词法上完全合法，但写下去
+    /// 时内核会跟着符号链接走，文件落在 `/tmp/pwned`——**已经在根之外了**。
+    ///
+    /// 这里逐段检查路径：任何一段如果已经存在且**是符号链接**，就拒绝。
+    /// 缺失的段按目录创建。硬链接的目标也重新按 `root` 解析并校验。
+    pub fn unpack_in(&self, root: &Path, rel: &Path) -> io::Result<()> {
+        let dest = safe_join(root, rel)?;
+        let mut with_root = self.shallow_clone();
+        with_root.unpack_root = Some(root.to_path_buf());
+        with_root.unpack(&dest)
+    }
+
+    /// 复制元数据但不复制内容（`unpack_in` 只是要塞一个 root 进去）。
+    fn shallow_clone(&self) -> Entry {
+        Entry {
+            header: self.header.clone(),
+            path: self.path.clone(),
+            link: self.link.clone(),
+            data: std::mem::take(&mut self.data.clone()),
+            unpack_root: self.unpack_root.clone(),
+        }
+    }
+
     /// 把条目落到 `dest`。
     ///
-    /// **不做任何路径校验**：调用方要先决定 `dest` 是否安全（见模块注释）。
+    /// **不做任何路径校验**——调用方要先决定 `dest` 是否安全。除非你确实
+    /// 需要绕过根目录约束（`oci::image` 的层解包有自己一整套 whiteout 与
+    /// 符号链接规则），否则应当用 [`Entry::unpack_in`]。
     pub fn unpack(&self, dest: &Path) -> io::Result<()> {
         match self.header.entry_type() {
             EntryType::Directory => {
@@ -586,8 +634,17 @@ impl Entry {
                 symlink(&target, dest)
             }
             EntryType::Link => {
+                // 归档里的硬链接目标是**相对归档根**的，不是相对进程的
+                // 当前目录。直接交给 `fs::hard_link` 会按 cwd 解析，
+                // 链到一个完全无关的文件上去（或者失败，看运气）。
                 let target = self.link.clone().ok_or_else(|| err("硬链接条目没有目标"))?;
-                fs::hard_link(&target, dest)
+                let Some(root) = self.unpack_root.as_ref() else {
+                    return Err(err(
+                        "硬链接条目要求用 unpack_in 解包（目标需按归档根解析）",
+                    ));
+                };
+                let resolved = safe_join(root, &target)?;
+                fs::hard_link(&resolved, dest)
             }
             EntryType::Regular => {
                 if let Some(parent) = dest.parent() {
@@ -610,6 +667,58 @@ impl Read for Entry {
         self.data.drain(..n);
         Ok(n)
     }
+}
+
+/// 把 `rel` 安全地拼到 `root` 下，并**逐段确保不会经由符号链接逸出**。
+///
+/// 规则：
+/// - `rel` 里不允许出现 `..`、绝对路径、盘符（词法层）；
+/// - 已存在的中间段必须是**真目录**，是符号链接就拒绝（语义层，这一条才是
+///   关键——词法检查挡不住"先建外指链接、再写它的子路径"）；
+/// - 缺失的中间段按目录创建。
+pub fn safe_join(root: &Path, rel: &Path) -> io::Result<PathBuf> {
+    use std::path::Component;
+    let mut cur = root.to_path_buf();
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in rel.components() {
+        match c {
+            Component::Normal(seg) => parts.push(seg),
+            Component::CurDir => {}
+            _ => {
+                return Err(err(format!(
+                    "归档条目路径 '{}' 含绝对路径或 '..'，拒绝解包",
+                    rel.display()
+                )))
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(err("归档条目路径为空"));
+    }
+    // 最后一段是条目本身，不参与"必须是目录"的检查。
+    let (last, dirs) = parts.split_last().unwrap();
+    for seg in dirs {
+        cur.push(seg);
+        match fs::symlink_metadata(&cur) {
+            Ok(md) => {
+                if md.file_type().is_symlink() {
+                    return Err(err(format!(
+                        "解包路径经过符号链接 '{}'，拒绝（可能逸出归档根）",
+                        cur.display()
+                    )));
+                }
+                if !md.is_dir() {
+                    return Err(err(format!(
+                        "解包路径上的 '{}' 不是目录",
+                        cur.display()
+                    )));
+                }
+            }
+            Err(_) => fs::create_dir_all(&cur)?,
+        }
+    }
+    cur.push(last);
+    Ok(cur)
 }
 
 #[cfg(unix)]
@@ -668,14 +777,20 @@ impl<R: Read> Entries<'_, R> {
     }
 
     fn read_data(&mut self, size: u64) -> io::Result<Vec<u8>> {
+        if size > MAX_ENTRY_BYTES {
+            return Err(err(format!(
+                "tar 条目声明 {size} 字节，超过上限 {MAX_ENTRY_BYTES}"
+            )));
+        }
         let padded = size.div_ceil(BLOCK as u64) * BLOCK as u64;
-        let mut buf = vec![0u8; padded as usize];
-        let mut got = 0usize;
-        while got < buf.len() {
-            match self.inner.read(&mut buf[got..])? {
-                0 => return Err(err("tar 条目数据截断")),
-                n => got += n,
-            }
+        // **绝不按头部声明的长度预分配**：一个 512 字节的归档可以声称
+        // 里面有个 4 GiB 的文件，照着分配就是一次拒绝服务。
+        // `take(...).read_to_end(...)` 让缓冲随**实际到达的数据**增长，
+        // 撒谎的头部只会撞上 EOF 然后报错。
+        let mut buf = Vec::new();
+        let n = self.inner.by_ref().take(padded).read_to_end(&mut buf)?;
+        if (n as u64) < padded {
+            return Err(err("tar 条目数据截断"));
         }
         buf.truncate(size as usize);
         Ok(buf)
@@ -735,6 +850,7 @@ impl<R: Read> Entries<'_, R> {
                 path,
                 link,
                 data,
+                unpack_root: None,
             }));
         }
     }
@@ -962,6 +1078,125 @@ mod tests {
         h.bytes[124] = 0x80;
         h.bytes[124 + 11] = 0x2a;
         assert_eq!(h.size().unwrap(), 42);
+    }
+
+    #[test]
+    fn unpack_in_blocks_symlink_escape() {
+        // **这是 L7 那条漏洞的回归用例。** 归档先放一个指向外部的符号链接，
+        // 再放一个名为 `evil/pwned` 的普通文件——`evil/pwned` 在**词法上
+        // 完全合法**（没有 `..`、不是绝对路径），所以只做词法检查的实现
+        // 会放行，而写下去时内核跟着链接走，文件落到根之外。
+        let base = std::env::temp_dir().join(format!("wbox-esc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let tar = build(&[
+            ("evil", EntryType::Symlink, outside.to_str().unwrap(), b""),
+            ("evil/pwned", EntryType::Regular, "", b"escaped!"),
+        ]);
+        let mut ar = Archive::new(&tar[..]);
+        let mut blocked = false;
+        for e in ar.entries().unwrap() {
+            let e = e.unwrap();
+            let rel = e.path().unwrap().into_owned();
+            if e.unpack_in(&root, &rel).is_err() {
+                blocked = true;
+            }
+        }
+        assert!(blocked, "写穿符号链接的那一条必须被拒绝");
+        assert!(
+            !outside.join("pwned").exists(),
+            "文件写到了归档根之外：{}",
+            outside.join("pwned").display()
+        );
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn unpack_in_still_allows_normal_nested_paths() {
+        // 只测"挡得住"会让一个恒返回错误的实现也变绿。
+        let base = std::env::temp_dir().join(format!("wbox-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let tar = build(&[("a/b/c.txt", EntryType::Regular, "", b"deep")]);
+        let mut ar = Archive::new(&tar[..]);
+        for e in ar.entries().unwrap() {
+            let e = e.unwrap();
+            let rel = e.path().unwrap().into_owned();
+            e.unpack_in(&base, &rel).unwrap();
+        }
+        assert_eq!(fs::read(base.join("a/b/c.txt")).unwrap(), b"deep");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn unpack_in_rejects_dotdot_and_absolute() {
+        let base = std::env::temp_dir().join(format!("wbox-lex-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        assert!(safe_join(&base, Path::new("../escape")).is_err());
+        assert!(safe_join(&base, Path::new("/etc/passwd")).is_err());
+        assert!(safe_join(&base, Path::new("a/../../b")).is_err());
+        assert!(safe_join(&base, Path::new("")).is_err());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn hard_link_target_resolves_against_the_archive_root() {
+        // 归档里的硬链接目标是**相对归档根**的。直接交给 fs::hard_link
+        // 会按进程 cwd 解析——链到一个完全无关的文件上，或者失败。
+        let base = std::env::temp_dir().join(format!("wbox-hl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let tar = build(&[
+            ("target.txt", EntryType::Regular, "", b"content"),
+            ("alias.txt", EntryType::Link, "target.txt", b""),
+        ]);
+        let mut ar = Archive::new(&tar[..]);
+        for e in ar.entries().unwrap() {
+            let e = e.unwrap();
+            let rel = e.path().unwrap().into_owned();
+            e.unpack_in(&base, &rel).unwrap();
+        }
+        assert_eq!(fs::read(base.join("alias.txt")).unwrap(), b"content");
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn lying_size_header_does_not_allocate() {
+        // 一个 512 字节的归档声称里面有个 4 GiB 的文件。按头部预分配的实现
+        // 会当场吃掉 4 GiB；正确的行为是撞上 EOF 然后报错。
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Regular);
+        h.set_size(3 << 30); // 3 GiB
+        h.set_path("liar");
+        h.set_cksum();
+        let tar = h.bytes.to_vec(); // 只有头，没有数据
+
+        let mut ar = Archive::new(&tar[..]);
+        let first = ar.entries().unwrap().next().unwrap();
+        assert!(first.is_err(), "撒谎的 size 必须报错而不是分配 3 GiB");
+    }
+
+    #[test]
+    fn absurd_size_header_is_rejected_outright() {
+        // 超过 MAX_ENTRY_BYTES 的声明连读都不该开始。
+        let mut h = Header::new_gnu();
+        h.set_entry_type(EntryType::Regular);
+        h.bytes[124] = 0x80; // base-256 编码
+        h.bytes[124 + 4..124 + 12].copy_from_slice(&u64::MAX.to_be_bytes());
+        h.set_path("huge");
+        h.set_cksum();
+        let mut ar = Archive::new(&h.bytes[..]);
+        let first = ar.entries().unwrap().next().unwrap();
+        let e = match first {
+            Err(e) => e,
+            Ok(_) => panic!("声称 u64::MAX 字节的条目必须被拒绝"),
+        };
+        assert!(e.to_string().contains("超过上限"), "{e}");
     }
 
     #[test]

@@ -98,13 +98,10 @@ pub fn load(archive: &Path, tag_override: Option<&str>) -> Result<()> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        let target = staging.join(&rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .context("创建解包目录失败")
-                .ctx(ErrKind::Registry)?;
-        }
-        e.unpack(&target)
+        // `safe_relative` 只是**词法**检查（有没有 `..`、是不是绝对路径）。
+        // 真正挡住"先建外指符号链接、再写它的子路径"的是 `unpack_in`——
+        // 它逐段确认中间路径不是符号链接。两层都要，缺一不可。
+        e.unpack_in(&staging, &rel)
             .with_context(|| format!("解包 '{}' 失败", rel.display()))
             .ctx(ErrKind::Registry)?;
     }

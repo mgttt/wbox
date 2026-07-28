@@ -872,9 +872,14 @@ impl<'a> Parser<'a> {
             // 超出 64 位整数范围时退回浮点，而不是报错——registry 不会给出
             // 这种值，但拒绝一个合法 JSON 文档的代价更大。
         }
-        text.parse::<f64>()
-            .map(|f| Value::Number(Number::Float(f)))
-            .map_err(|_| self.err("数字非法"))
+        let f = text.parse::<f64>().map_err(|_| self.err("数字非法"))?;
+        // `1e9999` 会 parse 成 inf。放行的话序列化时会吐出 `inf`——**那不是
+        // 合法 JSON**，等于我们自己产出了读不回来的文档。JSON 规范也没有
+        // 无穷与 NaN 的表示，所以这里拒绝是唯一自洽的选择。
+        if !f.is_finite() {
+            return Err(self.err("数字超出可表示范围（JSON 没有 inf/NaN）"));
+        }
+        Ok(Value::Number(Number::Float(f)))
     }
 }
 
@@ -1087,6 +1092,36 @@ mod tests {
         assert_eq!(from_str("1.0").unwrap(), v);
         // 非有限值 JSON 表示不了，与 serde_json 一样落成 null。
         assert!(Value::from(f64::NAN).is_null());
+    }
+
+    #[test]
+    fn rejects_numbers_that_overflow_to_infinity() {
+        // `1e9999` parse 成 inf。放行的话序列化会吐出 `inf`——那不是合法
+        // JSON，等于我们自己产出了读不回来的文档。
+        for bad in ["1e9999", "-1e9999", "1e400", "1E999999999"] {
+            let e = from_str(bad).unwrap_err();
+            assert!(e.to_string().contains("超出可表示范围"), "{bad}: {e}");
+        }
+        // 边界之内照常解析。
+        assert!(from_str("1e308").is_ok());
+        assert!(from_str("1e-308").is_ok());
+    }
+
+    #[test]
+    fn every_parsed_value_reserializes_to_parsable_json() {
+        // 更强的不变式：解析出来的东西再序列化，必须还能解析回来。
+        // 这条能兜住"某个分支产出了非法字面量"的一整类问题。
+        for src in [
+            r#"{"a":1e308,"b":-0.0,"c":1.5,"d":[1,2,3]}"#,
+            r#"{"big":18446744073709551615,"neg":-9223372036854775808}"#,
+            r#"{"s":"😀 emoji","esc":"a\\b\"c","ctl":"\n\t"}"#,
+        ] {
+            let v = from_str(src).unwrap();
+            let text = v.to_string();
+            let back = from_str(&text)
+                .unwrap_or_else(|e| panic!("重新序列化后解析不回来：{text} → {e}"));
+            assert_eq!(back, v, "往返不一致：{src}");
+        }
     }
 
     #[test]
