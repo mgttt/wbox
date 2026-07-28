@@ -4,8 +4,11 @@
 
 pub mod aes;
 pub mod bigint;
+pub mod der;
 pub mod ec;
 pub mod hash;
+pub mod roots;
 pub mod rsa;
 pub mod sha512;
 pub mod x25519;
+pub mod x509;
