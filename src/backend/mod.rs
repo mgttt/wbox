@@ -3,17 +3,17 @@
 //!
 //! - [`NativeBackend`]：包装现有 AppContainer + Job Object 隔离逻辑，
 //!   直接运行 Windows 原生程序（v1 能力）。
-//! - [`BlinkBackend`]：Linux 用户态模拟后端骨架。定位 `wbox-linux.exe`
-//!   （blink 的 wbox 移植版，exe 同目录或 `WBOX_LINUX` 环境变量），
+//! - [`EmuBackend`]：Linux 用户态模拟后端骨架。定位 `wbox-linux.exe`
+//!   （纯 Rust 模拟器，exe 同目录或 `WBOX_LINUX` 环境变量），
 //!   构造 rootfs / `BLINK_PREFIX` 参数后，**仍经 NativeBackend 的
 //!   AppContainer 拉起 wbox-linux.exe**（双层隔离：外层 AppContainer
 //!   关住模拟器，模拟器再关住 guest Linux 进程）。
-//!   blink 的 Win32 移植尚未完成，故找不到 exe 时给出明确错误。
+//!   找不到 exe 时给出明确错误，不静默降级。
 //!
-//! 该模块跨平台可编译（Windows 专属部分在 native.rs / blink.rs 内 cfg），
+//! 该模块跨平台可编译（Windows 专属部分在 native.rs / emu.rs 内 cfg），
 //! 使命令行合并、exe 定位等纯逻辑能在 Linux 沙箱单测。
 
-mod blink;
+mod emu;
 pub mod env;
 // Linux 原生后端（见 PRD.md F5 / docs/architecture.md §3）。
 // prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
@@ -30,12 +30,12 @@ pub mod wine;
 // 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;
 
-use blink::ensure_resolv_conf;
-pub use blink::BlinkBackend;
+use emu::ensure_resolv_conf;
+pub use emu::EmuBackend;
 #[cfg(windows)]
-pub(crate) use blink::create_private_rootfs;
+pub(crate) use emu::create_private_rootfs;
 #[cfg(windows)]
-pub(crate) use blink::copy_rootfs_tree;
+pub(crate) use emu::copy_rootfs_tree;
 pub use linux::{LinuxMode, LinuxNativeBackend};
 /// rootless overlay 是否可用（build 用它决定能否硬链接铺基础层，PRD L5b）。
 #[cfg(target_os = "linux")]
@@ -203,7 +203,7 @@ pub trait Backend {
     fn spawn(&self, spec: &RunSpec, prepared: &Prepared) -> Result<u32>;
 }
 
-// ---- 后端共享的 prepare 辅助（native / blink 公共逻辑下沉）----
+// ---- 后端共享的 prepare 辅助（native / emu 公共逻辑下沉）----
 
 /// `CreateAppContainerProfile` 对 `pszAppContainerName` 的长度上限（字符）。
 /// 见 Win32 文档；超限只会得到 E_INVALIDARG，与其他参数错误无法区分。
@@ -228,7 +228,7 @@ pub(crate) fn validate_container_name(name: &str) -> Result<()> {
 
 /// 校验镜像 rootfs 目录存在。
 ///
-/// Blink 与 LinuxNative 两个镜像后端各自写过一遍几乎一样的检查与文案；
+/// 模拟器与 LinuxNative 两个镜像后端各自写过一遍几乎一样的检查与文案；
 /// 收到这里保证**报错口径一致**——同一个"没 pull 成功"的处境，不该因为
 /// 宿主不同而给出两种说法。
 pub(crate) fn require_rootfs_dir(rootfs: &std::path::Path) -> Result<()> {
@@ -280,13 +280,13 @@ pub(crate) fn build_sanitized_env(
 /// 镜像目标在**当前宿主**上应走的后端。
 ///
 /// Windows 宿主：guest 是 Linux ELF，宿主跑不了，必须经 wbox-linux 模拟
-/// （BlinkBackend），外层再套 AppContainer+Job。
+/// （EmuBackend），外层再套 AppContainer+Job。
 /// Linux 宿主：宿主本身就能执行 Linux ELF，走原生 namespace 隔离
 /// （LinuxNativeBackend），无需模拟器——见 docs/architecture.md §3。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageBackendKind {
-    /// 模拟执行（wbox-linux / blink）
-    Blink,
+    /// 用户态模拟执行（wbox-linux，纯 Rust 模拟器）
+    Emu,
     /// 宿主原生执行（Linux namespace）
     LinuxNative,
 }
@@ -295,7 +295,7 @@ pub enum ImageBackendKind {
 /// 而不是散落在 cli 的 cfg 分支里。
 pub const fn image_backend_kind() -> ImageBackendKind {
     if cfg!(windows) {
-        ImageBackendKind::Blink
+        ImageBackendKind::Emu
     } else {
         ImageBackendKind::LinuxNative
     }
@@ -411,7 +411,7 @@ mod tests {
     fn image_backend_follows_host() {
         let k = super::image_backend_kind();
         if cfg!(windows) {
-            assert_eq!(k, super::ImageBackendKind::Blink, "Windows 宿主必须走模拟器");
+            assert_eq!(k, super::ImageBackendKind::Emu, "Windows 宿主必须走模拟器");
         } else {
             assert_eq!(
                 k,

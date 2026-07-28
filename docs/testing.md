@@ -45,12 +45,12 @@ cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnin
 
 前置：
 
-- 已构建的 `vendor/blink/build-win32/wbox-linux.exe`。
+- 已构建的 `target/release/wbox-linux.exe`（`cargo build --release -p wbox-linux`）。
 - Zig，用于把 `tests/guest/t_*.c` 编译为静态 x86-64 Linux ELF。
 - Windows 上使用 Git Bash/MSYS2 运行脚本。
 
 ```bash
-WBOX_LINUX=vendor/blink/build-win32/wbox-linux.exe bash tests/run.sh
+WBOX_LINUX=target/release/wbox-linux.exe bash tests/run.sh
 ```
 
 单项可直接运行构建后的 guest ELF。构建与 runner 细节见
@@ -59,7 +59,7 @@ WBOX_LINUX=vendor/blink/build-win32/wbox-linux.exe bash tests/run.sh
 ### 2.3 Windows/wine 场景矩阵
 
 ```bash
-scripts/test-matrix.sh vendor/blink/build-win32/wbox-linux.exe ./busybox
+scripts/test-matrix.sh target/release/wbox-linux.exe ./busybox
 ```
 
 常用环境：
@@ -95,7 +95,7 @@ cgroup v2 的存在不等于当前进程获得委派。诊断时同时记录：
 ```powershell
 scripts/test-windows-product.ps1 `
   -Wbox target/debug/wbox.exe `
-  -WboxLinux vendor/blink/build-win32/wbox-linux.exe `
+  -WboxLinux target/release/wbox-linux.exe `
   -Busybox busybox
 ```
 

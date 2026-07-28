@@ -2,7 +2,7 @@
 //!
 //! 把 v1 的隔离编排（AppContainer profile + capability + Job Object +
 //! attribute-list CreateProcessW）收编为 [`Backend`] 实现。
-//! 同时暴露 [`spawn_native`] 供 BlinkBackend 复用——wbox-linux.exe
+//! 同时暴露 [`spawn_native`] 供 EmuBackend 复用——wbox-linux.exe
 //! 也是 Windows 原生程序，经同一条隔离链路启动即成"双层隔离"。
 
 // prepare 的校验与环境构造为纯逻辑，跨平台可编译/可测；

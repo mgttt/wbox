@@ -5,15 +5,98 @@
 > 行改成"已修复"。判定语义（失败 ⊆ 基线放行 / 基线外新失败为回归 /
 > 基线内用例变通过视为基线过期）见 `docs/testing.md` §一.2。
 
+## 2026-07-27：引擎换成纯 Rust 后重定基线
+
+> **这一节是当前状态，下面 blink 时代的记录仅作历史参照。**
+
+引擎从 `vendor/blink`（C，已删除）换成 `crates/wbox-linux`（纯 Rust）后，
+本套件的通过率**真实下降**：
+
+| 引擎 | 结果 |
+|---|---|
+| blink（旧，C） | 21 个用例中除 `t_net_sockopt @wine` 外全通 |
+| wbox-linux（新，纯 Rust） | **5 PASS / 16 FAIL** |
+
+这是一次**真实的 guest ABI 覆盖回退**，不是测试环境问题，也不打算用基线
+掩盖过去。之所以仍然合入：全 Rust 化本身是 PRD §2.2.1 列为发布验收条件的
+硬约束（旧引擎是 122k 行 C），而补齐 ABI 是 §4.9 F4.R3–R6 明确在跟踪的
+后续工作。基线如实记录现状——任何**新**回归照样让门禁变红，任何修好的项
+也会强制回来收紧 `tests/known-failures.txt`。
+
+失败按根因分组（逐条见 `docs/rust-rewrite.md` §4）：
+
+| 组 | 缺口 | 用例 |
+|---|---|---|
+| A | `MAP_SHARED` 不跨进程共享、文件映射不写回 | `t_exec` `t_fork_mem` |
+| B | socket 族与 epoll 未实现；rlimit 边界校验 | `t_net_epoll` `t_net_sockopt` `t_negative` |
+| C | eventfd/timerfd/signalfd 未实现；信号不投递 | `t_eventfd` `t_timerfd` `t_signalfd` `t_signal_timer` |
+| D | 快照式 fork 的并发语义差异 | `t_proc` |
+| E | `mount(2)` 未实现 | `t_mount_ro` |
+| F | file description 级共享状态未建模 | `t_fd_open` `t_fd_rw` |
+| G | mmap 精度（私有文件映射的 mremap 增长回读） | `t_mmap` |
+| H | 宿主 symlink 不防护 | `t_sec_path` `t_sec_linkabs` |
+
+### 进程族已补齐（原 A 组的主体）
+
+`fork`/`vfork`/`clone`/`execve`/`wait4` 现在按 blink 同一套**快照式 fork**
+实现（`crates/wbox-linux/src/syscall/process.rs` 顶部有完整取舍说明）：fork
+时克隆整个稀疏页表与 CPU 状态，**子进程先完整跑到退出**，父进程再继续。
+连带修掉的还有：管道写端全关时读端要报 EOF（否则 `$(cmd)` 无限自旋）、
+管道能被 `dup`（shell 重定向的前提）、`readlink /proc/self/exe` 给真路径、
+`O_TMPFILE`、合成的 `/dev/{null,zero,full,random,urandom,tty}`、
+`nanosleep`、`preadv`/`pwritev`、`F_GETLK`、`FIOCLEX`。
+
+效果：`t_stress` **全通并已从基线移出**；`t_exec` 从 7 个失败降到 2 个，
+`t_fork_mem` 从 19 个降到 12 个，`t_proc` 从 300s 超时变成快速失败
+（`pause()` 不再空转）。三者剩下的失败集中在 `MAP_SHARED`（A 组）与
+快照式 fork 的并发语义（D 组）。
+
+D 组的两个可观察差异是**取舍而非 bug**：子进程在 `fork` 返回前就跑完了，
+所以 `waitpid(WNOHANG)` 不可能看到"还在运行"，父进程也无法给运行中的
+子进程发信号。真并发要把 `Machine` 变成可调度的协程集合，并给每个阻塞点
+实现让出与唤醒，是另一个量级的工程。
+
+**H 组是唯一带安全含义的一组，且范围已收窄。** 本次同时做了两件事：
+
+1. runner 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）。这套用例本
+   就是这么设计的——`t_sec_path.c` 开头写明它测的是"confines guest paths to
+   the rootfs (BLINK_PREFIX)"。旧引擎默认模式也一律走 VFS 收敛，所以不设
+   前缀也能过；新引擎默认是直通（guest `/` 就是宿主 `/`），不设前缀等于
+   "没有沙箱"，那些断言测的东西根本不对。`WBOX_GUEST_NO_PREFIX=1` 可回到直通。
+2. 越根路径由"夹到根"改成**直接拒绝**（`EACCES`）。内核语义会把 `/..` 夹成
+   `/` 于是 open 成功；夹住不会逃出 rootfs，但本仓的安全审计要求更严的一档。
+   改完 `t_sec_path_abshost` 与 `t_sec_path_relesc` **全通**并留在基线之外，
+   `t_sec_path` 从 3/16 升到 12/16。
+
+剩在 H 组里的就是 symlink 链——rootfs 内指向外部的符号链接仍可被顺出去，
+与旧引擎**同样**的限制（不是新增风险）。
+
+### 基线新增 `@linux` / `@windows` 标注
+
+原先只有运行**模式**标注（`@native` / `@wine`），表达不了**宿主 OS** 差异：
+guest-tests job 在 Windows 上跑 native，本地 Linux 开发也常用 native，
+同为 native 却结果不同。实测有两处这样的差异，都是宿主能力差异而非引擎回归：
+
+| 用例 | 标注 | 原因 |
+|---|---|---|
+| `t_path` | `@windows` | Windows 侧 `stat` 的 `st_nlink` 是合成值（拿不到真实硬链接数）；建 symlink 需要特权，symlink 环路（ELOOP）搭不起来。Linux 宿主上通过。 |
+| `t_sec_linkabs` | `@linux` | Linux 上宿主 symlink 不防护（G 组缺口）。Windows 上因为建不了 symlink，逃逸链搭不起来，该用例反而通过。 |
+
+没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧报"回归"。
+
+---
+
+## 历史：blink（C）时代的基线
+
 基线来源：`tests/run-guest-tests.sh`。真 Windows 机器基线为空；Wine 因
 宿主 Winsock 不支持 AF_UNIX，登记 `t_net_sockopt @wine`。格式支持
 `@native` / `@wine` 标注，以便精确登记环境专有缺陷
 （无标注 = 两种模式都算）。
 
-| 环境 | 当前基线 | 失败项 |
+| 环境 | 当时基线 | 失败项 |
 |---|---|---|
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
-| wine（当前机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
+| wine（当时机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
 
 真机断言级统计为 **1226 条：pass=1217 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。

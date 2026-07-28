@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
 
   # ①b Windows 真机单测：sandbox/acl/job/token 等 cfg(windows) 模块的测试
   #     只能在 windows runner 上跑（Linux 上整个 mod sandbox 不编译）。
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --locked
+      - run: cargo test --locked --workspace
 
   # ② Windows 目标编译检查：Win32 专属代码（job/token/sandbox/acl/backend native）
   #    只能在 windows target 下编译，作为 Windows 代码的编译期门禁
@@ -60,7 +60,9 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --locked --target x86_64-pc-windows-msvc
+      # --workspace：wbox-linux 也必须过 windows 目标的编译门禁
+      # （它就是给 Windows 用的），否则新 crate 完全不在 CI 视野里。
+      - run: cargo check --locked --workspace --target x86_64-pc-windows-msvc
       # docs/testing.md §二 与 DEVELOPMENT §3 把"0 warning"写成硬门槛，但此前
       # CI 只跑 cargo check——check **不因 warning 失败**，且完全没跑 clippy，
       # 于是该标准从未被真正强制过（实证：21730c1 引入的两条 clippy 告警
@@ -71,9 +73,9 @@ jobs:
       # target 下参与编译，host 侧 clippy 根本看不到它们——上述两条告警正是
       # 出在 sandbox.rs，只有 windows target 的 clippy 能发现。
       - name: clippy —— host 目标（-D warnings）
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --locked --workspace -- -D warnings
       - name: clippy —— windows-msvc 目标（-D warnings）
-        run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+        run: cargo clippy --all-targets --locked --workspace --target x86_64-pc-windows-msvc -- -D warnings
 
   # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
   smoke-windows:
@@ -108,37 +110,27 @@ jobs:
             exit /b 0
           )
 
-  # ④ 构建 wbox-linux.exe（blink Win32 移植，C11 + GNU 扩展）。
-  #    MSVC 无法编译 GNU 扩展，故用 windows runner 自带 MSYS2 的
-  #    MinGW-w64 gcc 跑 vendor/blink/win32/build-mingw.sh。
+  # ④ 构建 wbox-linux.exe（纯 Rust 模拟器，crates/wbox-linux）。
+  #    这一步以前要 MSYS2 + MinGW-w64 编译 vendor/blink 的 C11+GNU 扩展源码；
+  #    模拟器改成 Rust 之后，runner 自带的 cargo 就够了——**CI 里不再需要
+  #    任何 C 工具链**，也不再有 MSVC 编不了 GNU 扩展这个约束。
   #    构建后在**真 Windows** 上跑完整验收矩阵（scripts/test-matrix.sh）。
   build-wbox-linux:
     runs-on: windows-latest
     # 上界：构建约 2 分钟，矩阵含网络用例与 guest 套件。没有上界时，
     # guest 侧一旦挂死会一直烧到 GitHub 默认的 6 小时才被杀。
     timeout-minutes: 30
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      # `shell: msys2 {0}` 这个 shell 是由 msys2/setup-msys2 注册的，不是
-      # runner 自带；缺了它任何 run: 步骤都会以 "msys2: command not found" 失败。
-      # 工具链经 action 的 install: 装（等价于原来的 pacman -Sy），
-      # msystem: UCRT64 会把 ucrt64/bin 放进 PATH，故不再手工 export。
-      - name: 准备 MSYS2 + MinGW-w64 工具链
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: false
-          install: >-
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-binutils
       - name: 构建 wbox-linux.exe
-        run: WBOX_CC=x86_64-w64-mingw32-gcc sh vendor/blink/win32/build-mingw.sh
-      - name: 冒烟 —— wbox-linux.exe 能启动并跑内置用法输出
+        run: cargo build --release -p wbox-linux
+      # 模拟器自己的门禁：指令语义 + syscall + 真 ELF 端到端。
+      # 在 Windows 上跑这套很关键——它是 wbox-linux 的实际部署平台。
+      - name: 模拟器单测与端到端用例
+        run: cargo test --release -p wbox-linux
+      - name: 冒烟 —— wbox-linux.exe 能启动并报版本
         shell: cmd
-        run: .\vendor\blink\build-win32\wbox-linux.exe --help || ver > nul
+        run: .\target\release\wbox-linux.exe --version
       # guest C 套件（矩阵 F 组）要把 t_*.c 交叉编译成 x86_64-linux-musl 静态
       # ELF，需要 zig；缺了它 F 组以 "no zig compiler found" 计 FAIL。
       # 装不上不致命——F 组会自行 SKIP，其余组照跑。
@@ -149,6 +141,7 @@ jobs:
       # （PR 核心组不跑矩阵，跳过下载省时间。）
       - name: 下载 Linux x86_64 静态 busybox（矩阵用）
         if: github.event_name != 'pull_request'
+        shell: bash
         run: |
           curl -fsSL --retry 3 -o busybox \
             https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox
@@ -178,9 +171,10 @@ jobs:
           # 实测通过项里最慢的是 D 组 wget 公网下载，约 0.6s，20s 有 30 倍余量，
           # 信号一点不丢。W1 修复后可视情况调回。
           WBOX_MATRIX_TIMEOUT: 20
+        shell: bash
         run: |
           scripts/test-matrix.sh \
-            vendor/blink/build-win32/wbox-linux.exe ./busybox 2>&1 | tee matrix.log
+            target/release/wbox-linux.exe ./busybox 2>&1 | tee matrix.log
       - name: 上传验收矩阵日志
         if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
@@ -196,7 +190,7 @@ jobs:
         if: always()
         with:
           name: wbox-linux.exe
-          path: vendor/blink/build-win32/wbox-linux.exe
+          path: target/release/wbox-linux.exe
           retention-days: 30
 
   # ⑤ guest 测试：tests/ 目录下的 guest 级测试。
@@ -243,13 +237,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: wbox-linux.exe
-          path: vendor/blink/build-win32
+          path: target/release
       # 退出码即测试结果。判定经 tests/known-failures.txt 基线：
       #   失败 ⊆ 基线 → 0；出现基线外新失败 → 1（回归）；
       #   基线内用例变通过 → 1（基线过期，强制同步收紧）。
       - name: guest C 回归套件（基线判定）
         run: |
-          exe=vendor/blink/build-win32/wbox-linux.exe
+          exe=target/release/wbox-linux.exe
           if [ ! -f "$exe" ]; then
             echo "::error::未取到 $exe —— required guest gate 无法执行"
             exit 1

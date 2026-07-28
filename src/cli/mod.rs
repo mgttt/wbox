@@ -127,7 +127,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   首个位置参数默认是镜像引用（如 ubuntu:24.04），其后参数全部原样属于 guest。
   明确的本机可执行路径仍按本机程序处理；无歧义写法是 `run -- PROGRAM`。
   镜像自动按 docker 规则合并 config.json 的 Entrypoint/Cmd，
-  注入 Env，rootfs 作为工作目录。镜像经 wbox-linux（blink 移植，开发中）
+  注入 Env，rootfs 作为工作目录。镜像经 wbox-linux（纯 Rust 模拟器）
   模拟执行，未就绪时会得到明确错误。
 
 兼容范围:
@@ -457,7 +457,7 @@ mod tests {
         };
         assert_eq!(iref.repo, "library/fake");
 
-        // 4. run-prepare：config 合并 + BlinkBackend 执行计划（不 spawn）
+        // 4. run-prepare：config 合并 + EmuBackend 执行计划（不 spawn）
         let dir = oci::image_dir(&iref).unwrap();
         let cfg = oci::config::ImageConfig::load(&dir).unwrap().unwrap();
         let merged = cfg.merged_command(&[], None); // 无显式 cmd：Entrypoint + Cmd
@@ -465,7 +465,7 @@ mod tests {
         assert_eq!(cfg.working_dir.as_deref(), Some("/root"));
 
         let fake_exe = std::env::current_exe().unwrap();
-        // WBOX_LINUX 环境变量（blink::LINUX_EXE_ENV，模块私有故此处用字面量）
+        // WBOX_LINUX 环境变量（emu::LINUX_EXE_ENV，模块私有故此处用字面量）
         home.env().set("WBOX_LINUX", &fake_exe);
         let spec = backend::RunSpec {
             name: "t".to_string(),
@@ -474,7 +474,7 @@ mod tests {
             env: cfg.env.clone(),
             ..backend::RunSpec::default()
         };
-        let prepared = backend::BlinkBackend.prepare(&spec).unwrap();
+        let prepared = backend::EmuBackend.prepare(&spec).unwrap();
         // 执行计划：wbox-linux + 合并命令；BLINK_PREFIX 指向 rootfs
         assert_eq!(prepared.cmd[0], fake_exe.to_string_lossy());
         assert_eq!(&prepared.cmd[1..], &["/bin/sh", "-l"]);

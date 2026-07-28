@@ -16,7 +16,7 @@
    差在哪、为什么**、§2.4.3 说**接下来往哪走**、§2.4.4 是**四格等深度的能力
    路线图**（Q1 的条目多数标着「待 Windows 侧确认」，接手前先验证再实现）。
 2. 按任务阅读 `docs/architecture.md`、`docs/testing.md` 或
-   `vendor/blink/WIN32-PORT.md`，不要无差别加载全部历史。
+   `docs/rust-rewrite.md`，不要无差别加载全部历史。
 3. 查看 `git status`、近期提交和相关代码。仓库可能有其他 agent 的并行改动，
    不覆盖、不回退不属于当前任务的修改。
 4. 实现后运行与改动范围匹配的测试。有可独立交付的进展时提交并推送 `main`；
@@ -78,11 +78,17 @@ wbox
   和系统动态加载器；这些是平台 ABI，不等于引入第三方 C/C++ 实现。
 - Rust crate 依赖必须审计其传递依赖和 `build.rs`，不得在构建时编译 C/C++，
   也不得链接项目自带或第三方 native runtime。
-- 当前 `vendor/blink` 和 `wbox-linux.exe` 是不符合目标架构的历史实现，只能作为
-  行为基线；必须由纯 Rust Linux ELF/OCI 执行引擎替换并最终从仓库、CI 和发布物
-  删除。在迁移完成前，不得把 Windows Linux guest 标为 Rust-only 完成。
-- 新功能不得继续修改或扩展 Blink/C 层。迁移期只允许删除旧 C/C++ 代码，或读取
-  其测试作为行为参考。
+- `vendor/blink`（约 122k 行 C）**已删除**，由纯 Rust 执行引擎
+  `crates/wbox-linux` 取代；registry 的 TLS 也已从 native-tls（Linux 链接系统
+  OpenSSL）换成 rustls + 纯 Rust 密码学 provider。仓库里不再有任何参与产品
+  构建的 C/C++ 源码，CI 也不再需要 C 工具链。取舍与剩余缺口见
+  `docs/rust-rewrite.md`。
+- 仍然保留在仓库里的非 Rust 文件只有 `tests/guest/*.c` 与预编译 `busybox`：
+  它们是**被模拟执行的 guest 输入**（测试夹具），不是库，也不链接进任何发布物。
+- `wbox-linux.exe` 仍是独立的第二个可执行文件。它本身是纯 Rust，所以不违反本节
+  约束；但"单一 `wbox.exe`"的合并仍是待决项，见 §4.9 R8。
+- 新增 crate 依赖必须是纯 Rust；带 `cc`/`cmake` 构建脚本或链接 native runtime
+  的一律不收。
 
 ### 2.3 非目标
 
@@ -117,7 +123,7 @@ wbox
 | 资源限额（内存/CPU/进程数）| 有 | Job Object；Sandboxie 本身反而不强调这块 |
 | 进程树可靠回收 | 有 | Job `KILL_ON_JOB_CLOSE` |
 | 生命周期（ps/stop/kill/top/rm/logs/exec/inspect/wait）| 有 | F8 全套，含 F1.7.9 `kill` 与 F1.7.10 `top` |
-| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动。**结构性原因**：原生 PE 程序发真 NT 调用，wbox 架构里没有介入点（对比 Q2 有 Blink VFS）；不注入就无从重定向。已兑现的是「拒绝 + 显式授权」，见 §4.9 W3 |
+| **文件系统写重定向（copy-on-write）** | **不做** | Sandboxie 用 minifilter 驱动。**结构性原因**：原生 PE 程序发真 NT 调用，wbox 架构里没有介入点（对比 Q2 有模拟器 VFS）；不注入就无从重定向。已兑现的是「拒绝 + 显式授权」，见 §4.9 W3 |
 | **注册表虚拟化** | **不做** | 同上 |
 | 命名沙箱的持久化内容 | 无 | 没有写重定向，就没有"沙箱内容"这个概念；随 §4.9 W3 的结论而定 |
 | 强制程序入沙箱（Forced Programs）| 无 | 需要驱动或全局钩子，撞天花板一 |
@@ -154,7 +160,7 @@ wbox
 | 镜像 push | 有 | F9.13 是纯 Rust 且不带平台 cfg，与 Q3 同一实现 |
 | `--cap-*` / seccomp / healthcheck | 不做 | 同 Q1：均为 Linux 原语，明确报错 |
 | compose 多服务 | 不做 | 同 Q1：依赖共享 netns |
-| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + Blink；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED`；F9.36 的四条新指令是纯解析与 config 写入，两平台一致 |
+| 镜像构建 | 部分 | F9.3 子集；Windows `RUN` 经 AppContainer + 模拟器；**分层缓存与 Q3 同一实现**，WP.18 断言二次构建出现 `CACHED`；F9.36 的四条新指令是纯解析与 config 写入，两平台一致 |
 | restart policy | 有 | 与 Q3 同一实现：循环在 supervisor 内，不引入常驻服务 |
 | `--user UID[:GID]` | 不做 | AppContainer 没有 uid 映射语义，明确报错而非静默忽略 |
 | 完整 syscall 覆盖 | 部分 | 缺口见 F4：异步信号语义、glibc pthread/clone、ptrace |
@@ -396,7 +402,7 @@ wbox
 |---|---|---|---|
 | Q1 Sandboxie | 文件/注册表写重定向 | **取证而非实现**：用户态能逼近到什么程度，结论允许是"只能拒绝、不能重定向" | §4.9 W3，Windows agent |
 | Q1 Sandboxie | 命名沙箱内容、Forced Programs | 随 W3 结论而定；若 W3 判定用户态只能拒绝，这两项一并转为**不做** | 同上 |
-| Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + Blink VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
+| Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + 模拟器 VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
 | Q3 Podman | —— | F9.1–F9.39 已全部完成并各有门禁 | — |
@@ -584,9 +590,10 @@ S4 在 Linux 上运行 Windows CLI
 | F3.1-F3.4 引用、认证、manifest、digest | `src/oci` | G2 | Rust 严格错误测试 + 可选 pull；真实 pull 不能替代离线失败路径 |
 | F3.5-F3.7 层、链接和路径 | `oci/image.rs` | G2 | 构造 tar 与真实 Alpine 3.20 applet 链接通过；dangling symlink 仍有缺口 |
 | F3.8/F3.9 缓存管理与 config 合并 | `src/oci`、`cli/image.rs` | G2 | 缓存仅以 `rootfs` 目录判完成，失败/并发 pull 原子性未门禁 |
-| F4.R0 移除 C/C++ runtime | 全仓、CI、发布脚本 | G0 pending | native 源、Cargo native 依赖和发布物导入表门禁 |
-| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `src/runtime` | G0 planned | 纯 Rust 单元测试与预构建 ELF fixtures |
-| F4 Windows 完整 Linux guest 路径 | Rust runtime + F2/F3 | blocked | `WP.3` 改由单一 `wbox.exe` 在 AppContainer 内执行 Alpine/Ubuntu |
+| F4.R0 移除 C/C++ runtime | 全仓、CI、发布脚本 | `[done]` | `vendor/blink` 已删除；TLS 去 OpenSSL；CI 不再装 C 工具链 |
+| F4.R1-F4.R4 ELF/CPU/syscall/VFS | `crates/wbox-linux` | G1 | `cargo test -p wbox-linux`（167 项）；实测跑通静态/动态 glibc、busybox、Alpine 镜像、shell 的 fork/exec 与管道。x87/socket/MAP_SHARED 仍是缺口，见 `docs/rust-rewrite.md` §4 |
+| F4.R8 合并成单一 `wbox.exe` | `src/runtime` + `EmuBackend` | `[planned]` | 见 §4.9 R8：需先决定进程内执行如何保留"AppContainer 套模拟器"的双层隔离 |
+| F4 Windows 完整 Linux guest 路径 | Rust runtime + F2/F3 | G3 | `WP.3`：portable artifact 在 AppContainer 内执行 BusyBox（当前仍是两个 exe） |
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
 | F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
 | F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
@@ -598,7 +605,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
 | F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
 | F8.8 detached 管道 EOF | `src/cli/run.rs` | G4 Windows | WP.22：重定向输出及时 EOF且 workload 继续运行；提交 `55761da`、CI 30272887266 |
-| F9.1 bind volume | `linux_ns.rs`、Blink `vfs.c` | G3 Linux / G2 Blink | Linux V.1-V.4；Blink `t_mount_ro` 覆盖 `MS_RDONLY` 全局写门禁，Windows HANDLE 数据面仍 active |
+| F9.1 bind volume | `linux_ns.rs`、模拟器 VFS | G3 Linux / G2 模拟器 | Linux V.1-V.4；模拟器 `t_mount_ro` 覆盖 `MS_RDONLY` 全局写门禁，Windows HANDLE 数据面仍 active |
 
 `WP.*` 是 `scripts/test-windows-product.ps1` 的产品门禁：
 
@@ -771,27 +778,33 @@ F3
 
 ```text
 F4
-├── F4.R0 `[active]` 删除 Blink/C 产品依赖与构建链
-├── F4.R1 `[active]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈
-├── F4.R2 `[active]` 纯 Rust x86-64 解释执行器；JIT 只能使用纯 Rust backend
-├── F4.R3 `[planned]` 纯 Rust Linux syscall、fd、信号和进程模型
-├── F4.R4 `[planned]` 纯 Rust guest VFS、rootfs、/proc、/dev 和只读卷
-├── F4.R5 `[planned]` 动态 glibc、线程、fork/exec、epoll、socket
-├── F4.R6 `[planned]` Alpine/Ubuntu 24.04 产品门禁
-└── F4.R7 `[planned]` 从仓库、CI、文档和发布物删除 vendor/blink
+├── F4.R0 `[done]` 删除 Blink/C 产品依赖与构建链（含 native-tls -> 纯 Rust TLS）
+├── F4.R1 `[done]` 纯 Rust ELF64 loader、虚拟内存和初始进程栈（含 auxv）
+├── F4.R2 `[done]` 纯 Rust x86-64 解释执行器（整数全集 + SSE/SSE2）；JIT 未做
+├── F4.R3 `[active]` Linux syscall 与 fd 已可用（约 80 个）；进程族（快照式
+│                   fork/execve/wait4）已做，信号投递未做
+├── F4.R4 `[active]` guest VFS 与 rootfs 前缀约束已做；/dev/{null,zero,full,
+│                   random,tty} 与 /proc/self/exe 已合成，procfs 其余未做
+├── F4.R5 `[active]` 动态 glibc、shell 的 fork/exec 与管道已跑通；
+│                   线程、epoll、socket、MAP_SHARED 跨进程共享未做
+├── F4.R6 `[active]` Alpine 已手工跑通；Ubuntu 与产品门禁未接
+└── F4.R7 `[done]` vendor/blink 已从仓库、CI、文档和发布物删除
 ```
 
-2026-07-28 的首个纯 Rust 纵切已落在 `src/runtime`：安全解析 little-endian
-x86-64 `ET_EXEC` 的 `PT_LOAD`、建立带执行权限检查的 guest 地址空间，解释
-`MOV r64,imm` 与 `syscall`，并由手工构造的 ELF 执行 Linux `exit(42)`。当前仅是
-G0 骨架，尚无栈、通用指令或产品 backend，不能运行 BusyBox/Ubuntu。指令解码
-使用仅启用 `std+decoder` 的纯 Rust `iced-x86`；wbox 自己实现 CPU 状态与语义，
-不引入 C/C++ decoder。
+首个纯 Rust 纵切落在 `src/runtime`（`MOV r64,imm` + `syscall`，跑手工构造的
+`exit(42)`）。此后引擎移到独立 crate `crates/wbox-linux` 并补齐到可用：
+整数指令全集、SSE/SSE2（含浮点）、约 50 个 syscall、带 `../` 逃逸防护的 VFS。
+实测跑通静态与动态 glibc 程序、仓库内静态 busybox 多个 applet、真实动态
+coreutils，以及 `wbox image pull alpine:3.20` 后其中的动态 musl PIE busybox。
+门禁 142 项；`src/runtime` 现在是同一引擎的**进程内入口**，不再是第二份实现。
+指令解码是自己写的（`crates/wbox-linux/src/exec.rs`），不依赖外部 decoder crate，
+因此 `iced-x86` 依赖已移除。
 
-F4.R0 初次审计发现 native 源只存在于两个遗留根：`vendor/blink=452`、
-`tests/guest=22`；Rust 门禁要求数量只能下降且不得扩散。Cargo 在 Windows 当前
-走系统 Schannel，但 Linux target 的 `native-tls -> openssl-sys` 仍是 C 依赖，
-必须改为纯 Rust TLS/crypto 或用纯 Rust 重写后才能满足 §2.2.1。
+F4.R0 已收口：`vendor/blink=452` 个 native 源全部删除；`native-tls ->
+openssl-sys` 这条 Linux 侧 C 依赖也已换成 rustls + 纯 Rust crypto provider
+（成熟度取舍见 `docs/rust-rewrite.md` §5）。仓库里只剩 `tests/guest=22` 个
+`.c`，它们是**被模拟执行的 guest 夹具**、不进任何发布物；按下面的计划仍应改写成
+no_std Rust，但那不影响 §2.2.1 的发布验收。
 
 **vendor/blink Rust 替换图**：
 
@@ -803,7 +816,7 @@ F4.R0 初次审计发现 native 源只存在于两个遗留根：`vendor/blink=4
 └── libz C；产品 OCI gzip 已使用 flate2 的纯 Rust backend
 
 按产品纵切迁移
-├── R1 iced-x86 decoder + Rust CPU/register/flags/instruction semantics
+├── R1 自研 decoder + Rust CPU/register/flags/instruction semantics
 ├── R2 ELF64、动态加载、guest memory、stack/auxv、mmap/brk
 ├── R3 Linux syscall dispatcher、errno、fd 与时间
 ├── R4 Rust VFS/rootfs/proc/dev、路径边界、volume ro/rw
@@ -819,7 +832,7 @@ F4.R0 初次审计发现 native 源只存在于两个遗留根：`vendor/blink=4
 以下 Blink 结果仅作为纯 Rust 迁移的行为基线，不再证明目标架构完成。历史上直接
 运行 `wbox-linux.exe` 的 G1 组件测试已覆盖主流单线程 CLI、动态 glibc
 程序、shell 管道/命令替换/后台任务、fork 子 DNS 和 `apt-get update`。这些
-结果不再表述为 Windows 产品路径已完成；`BlinkBackend` 经 AppContainer 的 G3
+结果不再表述为 Windows 产品路径已完成；`EmuBackend` 经 AppContainer 的 G3
 仍由 WP.3 裁决。组件层仍有限制：
 
 - 宿主异步信号语义不完整。
@@ -882,7 +895,7 @@ dpkg amd64、64 位 glibc、宿主文件系统隔离和退出码 37 透传全部
 `dnf --version` 暴露容器环境缺少 `HOME`，镜像默认环境现补为 `/root`，显式
 `-e HOME=...` 仍优先。补齐 `HOME` 后 `dnf5 --version` 在 AppContainer 内外
 均超过 10 秒无输出，排除 AppContainer 权限层后仍可复现；该项是独立的
-Blink/Linux ABI、线程或同步原语兼容缺口，必须以有界超时门禁继续定位，当前
+模拟器/Linux ABI、线程或同步原语兼容缺口，必须以有界超时门禁继续定位，当前
 不得标记为通过。5 秒 `LD_DEBUG`/内存诊断证明动态链接已完成，进程进入 RPM
 SQLite 初始化后反复打开 `rpmdb.sqlite-shm`，CPU 时间约 1.1 秒；下一步优先
 核对 Win32 SQLite 共享内存、文件锁与 mmap 语义。恢复 syscall trace 后确认
@@ -928,7 +941,7 @@ Python 四层镜像暴露两个独立问题：
    `platform.machine()=x86_64`，该问题关闭。
 
 验收基线由 `tests/run.sh` 裁决；技术范围见
-`vendor/blink/WIN32-PORT.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
+`docs/rust-rewrite.md`，问题台账见 `tests/KNOWN-FAILURES.md`。
 
 ### F5 Linux 原生后端 `[active]`
 
@@ -1100,7 +1113,7 @@ supervisor 登记前失败必须恢复 `created`，不得留下假 running。登
 **F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.25 覆盖完整生命周期；
 Windows 由 WP.6–WP.22 覆盖 detach、ps、logs、stop、rm、kill/top、create/start、管道 EOF 与原生 exec，其中
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
-OCI/Blink exec 不在承诺范围，必须明确拒绝。
+OCI/模拟器 exec 不在承诺范围，必须明确拒绝。
 
 detached supervisor 在释放 owner 锁前把 guest 退出码写到状态目录的
 `exit-code`；`wbox wait NAME...` 等待锁释放后打印该值，`inspect` 的
@@ -1111,7 +1124,7 @@ unknown，不能编造为 0。`wbox inspect`、`image inspect` 与
 **F8.d 两侧可对齐范围**。`ps/stop/rm/logs/--detach` 语义可完全对齐。
 `exec` 只能部分对齐：Linux 进入已有 namespace；Windows 原生目标重新使用同一
 AppContainer SID、网络 capability 与命名 Job，并继承记录的工作目录。Windows
-OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 exec 也不继承
+OCI/模拟器 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 exec 也不继承
 原 run 的自定义环境：状态文件刻意不落环境变量或凭证；需要这类语义时应由未来
 的 supervisor 控制通道传递，而不是把秘密写入 `meta.json`。
 
@@ -1122,7 +1135,7 @@ OCI/Blink 的 rootfs 与镜像环境无法可靠重建，明确拒绝。原生 e
 | F8.1 `[done]` | 状态目录 + `wbox ps`（只读） | P.1–P.5、WN.8、WNET.4 与 WP.5 已通过；跨进程 register/rm 竞态 G0 与 CI 30250676453 通过 |
 | F8.2 `[done]` | `--detach` + `logs` | **已完成**（门禁 P.9–P.14）：detach 立即返回、容器后台续跑、stdout/stderr 分别落盘可读、退出后保留记录供事后查看、体积有界且截断可见 |
 | F8.3 `[done]` | `stop` / `rm` | **已完成**：`stop` 收走整棵进程树（P.15，3→0 后代）、状态转 exited 并保留（P.16）、幂等（P.17）、不存在时报错（P.18）；`rm` 拒绝删存活容器（P.6/P.7/P.8）|
-| F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/Blink 明确拒绝 |
+| F8.4 `[done]` | `exec` | Linux P.19-P.22 与 Windows 原生 WP.13-WP.17 在 CI 30250676453 通过；Windows OCI/模拟器 明确拒绝 |
 | F8.5 `[done]` | `wait` + container/image `inspect` | Rust 跨平台状态测试；Windows 双 exe 产品路径 WP.7B/WP.7C |
 | F8.6 `[done]` | `kill` + `top` | Linux P.23/P.24；Windows WP.19/WP.20；Windows `top` 查询 Job 成员，`kill` 清空三层进程树 |
 | F8.7 `[done]` | `create` + `start` | Rust 原子状态机与 CLI 测试、Linux P.25、Windows WP.21 均通过；提交 `1caada0`、CI 30271007552 |
@@ -1240,7 +1253,7 @@ guest 服务可能晚于宿主 listener 就绪，连接端做 5 秒有界重试�
 
 - **`RUN` 直接复用运行期的容器路径**（同一 backend、同一套 namespace 与限额），
   所以构建期与运行期隔离强度一致，不存在"构建时能做、运行时不能"的错位。
-- Windows 使用 staging rootfs：`RUN` 经 AppContainer + Blink 执行，临时 profile
+- Windows 使用 staging rootfs：`RUN` 经 AppContainer + 模拟器执行，临时 profile
   SID 只对 staging 有修改权；发布时重新复制内容与 symlink，不能把临时写 ACE
   带进共享镜像缓存。Windows 绝对 symlink 与 Linux 根路径分别解析，最终仍用
   `strip_prefix(source_root)` 拒绝越界。
@@ -2168,6 +2181,46 @@ supervisor 却仍按保存参数中的旧名接管 detached 预留，最终留�
 `scripts/test-linux-backend.sh`。完成标准是先取得首个失败断言，修复产品或门禁后
 让两项恢复绿色；在没有日志前不要猜测是 `--private-tmp` 或其他最近功能导致。
 
+**首个失败断言已取得**（run 30305303752，`PASS=188 FAIL=6 SKIP=2`）：
+
+```text
+FAIL  PZ.1 pause 冻结 —— rc=0 停后立即= 再过 1 秒=（应相同）
+FAIL  INS.1 Mounts —— 容器内挂载数=… 已退出，无法 exec
+FAIL  RT.1 restart 生效 —— 前=3966 后=（应都非空且不同）
+FAIL  RT.2 沿用原配置 —— 容器内 hostname=… 已退出，无法 exec
+FAIL  RT.4 重启已退出容器 —— PID=
+FAIL  RT.5 start 已退出容器 —— PID=
+```
+
+六条全在 `pause` / `inspect` / `restart` 三个命令上，共同现象是**容器起来就立刻
+退出**（`PID=` 为空、随后 `exec` 报"已退出"）。不是 `--private-tmp`：`--private-tmp`
+之前的 `6162dc6` / `44cbd0a` 上 RT.* 就已经红了，`2d05db7` 及更早是绿的。
+与 F9.26 `restart`、F9.32 `pause`、F9.33 `inspect` 这三次改动同期。
+
+### R8 是否把模拟器合并进单一 `wbox.exe` `[Windows agent]` `[待决]`
+
+**背景**：§2.2.1 的 Rust-only 约束已兑现（`vendor/blink` 删除，引擎是
+`crates/wbox-linux`）。但发布物仍是**两个** exe：`wbox.exe` + `wbox-linux.exe`。
+引擎同时提供 lib 与 bin 两种形态，`src/runtime` 是 lib 的进程内入口，
+`EmuBackend` 走的是 bin 形态。
+
+**待决的不是"能不能"，而是"合并后隔离怎么算"**：
+
+当前 Windows 上的隔离是**双层**——`EmuBackend` 让 `wbox-linux.exe` 作为独立
+进程跑在 AppContainer + Job 里（§2.4 Q2 的"双层隔离"就是指这个）。如果改成
+`wbox.exe` 进程内执行 guest，那么：
+
+- 承载 guest 的进程同时也是 CLI 与 supervisor 进程。要么整个 `wbox.exe` 自己
+  降权进 AppContainer（那 supervisor 就失去了它需要的权限），要么 guest 不再被
+  AppContainer 包住（**隔离降级，不可接受**）。
+- 可行方向是 `wbox.exe` 以"再执行一次自己 + 隐藏子命令"的形式重入
+  （类似 `wbox --internal-guest`），发布物仍是单文件，隔离层不变。
+  这条路要先确认 AppContainer 内重入自身 exe 的路径可达性与 ACL。
+
+**怎样算做完**：单文件发布物 + `WP.3` 在 AppContainer 内跑通 guest + 明确记录
+guest 与 supervisor 的权限边界。做不到就如实保留两个 exe——两个 exe 都是纯
+Rust，本身不违反 §2.2.1，只是分发上多一个文件。
+
 ### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
 
 `WP.8-WP.12` 已加入 `test-windows-product.ps1` 并在 Windows 实机通过：
@@ -2184,12 +2237,13 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 
 **结论：Windows 宿主上 `-p` 没有可兑现的语义，应保持明确拒绝。**
 
-取证靠读本仓库里 vendored 的 blink 源码即可，不需要 Windows 机器：
-
-- `blink/hostfs.c` 的 `HostfsSocket` 直接调宿主 `socket()`；
-  `HostfsBind` 对非 `AF_UNIX` 直接调宿主 `bind()`；
-  `HostfsListen` 直接 `listen(hostinfo->filefd, backlog)`。
-- 仓库里没有任何自建网络栈（无 slirp / usermode TCP 之类）。
+取证靠读模拟器源码即可，不需要 Windows 机器。当年读的是 vendored 的
+blink C 源码（`blink/hostfs.c` 里 `HostfsSocket`/`HostfsBind`/`HostfsListen`
+都是直接转调宿主同名 API）；那份 C 实现已被 `crates/wbox-linux` 取代，
+但结论不变，且现在更彻底——**Rust 模拟器连 socket 族都还没实现**
+（`syscall/mod.rs` 对 socket 相关调用返回 `-ENOSYS`，见
+`docs/rust-rewrite.md` §4）。两代实现都没有自建网络栈
+（无 slirp / usermode TCP 之类）。
 
 于是 **guest 的 socket 就是宿主的 socket**：Linux guest 在 Windows 上
 `bind(0.0.0.0:80)` 绑的就是 Windows 的 80 端口。既然容器端口本来就是宿主端口，
@@ -2200,7 +2254,7 @@ detached workload 用专属 PID 文件证明 supervisor、guest、child 三层�
 Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 靠 AppContainer
 不授 `INTERNET_CLIENT` 能力——是能力开关，不是独立网络栈。两者默认都断网，
 但强度与形态不一样，§2.4 Q2 已补上这一行。想在 Q2 得到 netns 级隔离，只能给
-blink 加一层用户态网络栈，那是另一个数量级的工作。
+模拟器加一层用户态网络栈，那是另一个数量级的工作。
 
 保持现状（Windows 上 `-p` 明确报错）是对的，但报错文案已按这个结论修正：
 不是"Windows 没有对应原语"，而是"guest 端口即宿主端口，没有可映射的东西"。
@@ -2282,7 +2336,7 @@ Windows 改写为该 AppContainer package 的 `AC\Temp`。两者都是容器私�
 
 *重定向那一档，差的是"介入点"，不是 API。* 这一条是两个象限的结构差异：
 
-- **Q2（Linux 镜像）有介入点**：guest 的每次文件操作都过 Blink 的 VFS
+- **Q2（Linux 镜像）有介入点**：guest 的每次文件操作都过模拟器的 VFS
   （`vfs.c` / `hostfs.c`），所以 Windows 侧的 `-v` 才可能靠 broker + VFS 数据面
   做出来——那正是 Windows agent 在推进的路。
 - **Q1（原生 Windows 程序）没有介入点**：PE 程序发的是真的 NT 系统调用，
@@ -2350,7 +2404,7 @@ wbox run --name w3b -- cmd.exe /c "echo %LOCALAPPDATA% & echo x > `"%LOCALAPPDAT
 
 ### W2 F8.4 `exec` 的 Windows 原生可对齐子集 `[Windows agent]` `[done]`
 
-**结论：只能部分对齐，原生目标可实现，OCI/Blink 目标不可可靠实现。**
+**结论：只能部分对齐，原生目标可实现，OCI/模拟器 目标不可可靠实现。**
 
 Windows 原生 exec 派生运行中容器的同一 AppContainer SID，按记录重建
 INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Job 后再恢复。
@@ -2359,7 +2413,7 @@ INTERNET_CLIENT capability，并把挂起创建的新进程加入同一命名 Jo
 同一组经 ACL 授权的宿主路径。
 
 环境变量不写入状态文件，避免把 token、密码和调用方秘密落盘，因此当前 exec
-只使用最小清洗环境，不继承原 `run -e`。Windows OCI/Blink 还需要重建 rootfs、
+只使用最小清洗环境，不继承原 `run -e`。Windows OCI/模拟器 还需要重建 rootfs、
 镜像 Env 与 guest 工作目录，当前状态记录不足以兑现，CLI 必须明确拒绝，不能
 退化为在宿主执行。
 
@@ -2483,12 +2537,12 @@ F9.14 的 compose 提供。再引入一个 pod 对象，得到的只是换个说
 ### W4 `build` 在 Windows 宿主的可行性 `[Windows agent]` `[done]`
 
 Windows 已能执行 F9.3 子集。`FROM` 先复制到 staging rootfs，`RUN` 复用
-AppContainer + Blink 运行路径并默认授予网络 capability；每一步使用临时容器记录，
+AppContainer + 模拟器运行路径并默认授予网络 capability；每一步使用临时容器记录，
 满足 NativeBackend 的 Job/停止协议。构建成功后不直接 rename staging，因为其 DACL
 含临时 profile SID 的修改 ACE；发布阶段重新创建目录、只复制文件内容与 symlink，
 让最终镜像继承干净 DACL。
 
-Windows symlink 复制复用 Blink 的逃逸约束。Linux `/etc/...` 根路径按容器根解析；
+Windows symlink 复制复用模拟器的逃逸约束。Linux `/etc/...` 根路径按容器根解析；
 已经重写到 staging 内的 `C:\...` 目标按 Windows 绝对路径解析，二者最终都必须
 `strip_prefix(source_root)` 成功。
 
@@ -2593,7 +2647,7 @@ WP.18 在 Windows 真机从 fixture 构建 `COPY + RUN + CMD` 镜像，立即重
 | Rust 主机逻辑 | G0 complete | 2026-07-27 Windows 本地 249 pass、0 fail、1 个公网测试 ignored |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | complete | Linux P.6-P.22 与 Windows WP.6-WP.17 在 CI 30250676453 通过；Windows OCI/Blink exec 明确不支持 |
+| 后台生命周期管理 | complete | Linux P.6-P.22 与 Windows WP.6-WP.17 在 CI 30250676453 通过；Windows OCI/模拟器 exec 明确不支持 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
@@ -2605,7 +2659,7 @@ Rust-only 发布门禁。纯 Rust runtime 接管 WP.3 前，Windows OCI 能力�
 
 ```text
 2026-07-23
-└── 验证 blink 路线，确定 Windows 上运行 Linux ELF 的架构
+└── 验证用户态模拟路线，确定 Windows 上运行 Linux ELF 的架构
 
 2026-07-24
 ├── OCI/rootfs 与动态 glibc 基础链路
@@ -2637,8 +2691,11 @@ Rust-only 发布门禁。纯 Rust runtime 接管 WP.3 前，Windows OCI 能力�
 
 1. `[done]` Linux cgroup v2 改为兄弟 leaf（父级不可写时退回 supervisor/target
    双 leaf），CI 现造委派子树做门禁，已取得实际限额证据。
-2. `[active]` 完成 F4.R0–F4.R2：清点并移除 C/C++ 构建依赖，建立纯 Rust ELF64
-   loader、进程初始栈和首批 x86-64 指令执行门禁。
+2. `[done]` F4.R0–F4.R4：C/C++ 依赖已清零，纯 Rust ELF64 loader、初始栈、
+   x86-64 整数指令全集 + SSE/SSE2、约 50 个 syscall 与 VFS 前缀约束均已落地
+   并有门禁（167 项）。进程族（快照式 fork/execve/wait4）已补齐，Windows
+   产品用例 WP.3W 随之转绿。下一步是 §4.9 R8（单一 exe）与
+   x87/socket/MAP_SHARED 三个缺口。
 3. `[planned]` 决定是否发布新的 rc；要求全部发布门禁通过且 PRD 状态同步。
 4. `[done]` Windows stop 与原生 exec 门禁已通过 CI 30250676453；下一步补资源
    超限 workload 行为门禁，并评估 supervisor 控制通道是否值得支持 exec 环境继承。

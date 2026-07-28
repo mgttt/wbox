@@ -5,22 +5,36 @@ edition = "2021"
 description = "Portable Windows 进程容器（AppContainer + Job Object，无需 VT-x / 管理员权限）"
 license = "MIT OR Apache-2.0"
 
+# 全 Rust 实现（PRD §2.2 依赖红线）：根包是 CLI 与宿主隔离后端，
+# crates/wbox-linux 是 vendor/blink（C）的纯 Rust 重写，两者同一 workspace，
+# 一条 `cargo build` 出齐 portable 分发的两个 exe。
+[workspace]
+members = [".", "crates/wbox-linux"]
+
 [dependencies]
 anyhow = "1"
 
 # ---- OCI 镜像拉取（src/oci/）----
 # 全部选用纯 Rust / 无 tokio 的小依赖，保证 windows-msvc 可编译。
-# 阻塞式 HTTP(S)。TLS 用 native-tls：Windows 走 schannel（纯 FFI，无需 MSVC lib.exe，
-# cargo check --target windows-msvc 在 Linux 沙箱也能过）；Linux 走系统 OpenSSL。
-# （rustls/ring 路线需要 lib.exe 汇编，无法在无 MSVC 的沙箱完成 windows-msvc check。）
-ureq = { version = "2", default-features = false, features = ["native-tls"] }
-native-tls = "0.2"   # ureq 需显式注入 TlsConnector（Windows=schannel，Linux=OpenSSL）
+#
+# TLS 是**纯 Rust**：rustls 做协议，rustls-rustcrypto 做密码学原语。
+# 之所以不用 rustls 的默认 provider——aws-lc-rs 和 ring 都带 C 与汇编源码，
+# 违反"不引第三方 C/C++"这条约束（也正是当初选 native-tls 的原因：
+# 那条路避开了 ring 的汇编，但代价是 Linux 上链接系统 OpenSSL，仍是 C 库）。
+ureq = { version = "3", default-features = false, features = [
+    "rustls-no-provider",   # 要 rustls，但不要它自带的 C/汇编 provider
+    "rustls-webpki-roots",  # 内置根证书（纯 Rust 数据，不读系统证书库）
+] }
+rustls-rustcrypto = "0.0.2-alpha" # 纯 Rust 密码学 provider（成熟度见 docs/rust-rewrite.md）
 tar = "0.4"          # tar 层解包
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] } # gzip 解压（miniz_oxide 纯 Rust）
 sha2 = "0.10"        # blob digest 校验（sha256）
 serde_json = "1"     # manifest / config JSON 解析（用 Value，不引入 serde derive）
 base64 = "0.22"      # 认证 token 请求等编码辅助
-iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder"] }
+
+# 纯 Rust Linux guest 引擎。同一份实现同时产出 wbox-linux.exe（EmuBackend 用）
+# 与进程内入口（src/runtime），避免两份实现慢慢漂移。
+wbox-linux = { path = "crates/wbox-linux" }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。
@@ -61,9 +75,16 @@ features = [
     "Win32_Storage_FileSystem",
 ]
 
+# wbox.exe 优先小体积（portable 单文件分发）。
 [profile.release]
-opt-level = "z"     # 优先小体积（portable 单文件）
+opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# 模拟器是热路径，按速度编译；wbox.exe 仍然按体积。
+# 用 per-package 覆盖是因为 workspace 的 [profile] 只能定义在根。
+[profile.release.package.wbox-linux]
+opt-level = 3
+codegen-units = 1

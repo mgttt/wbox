@@ -88,8 +88,8 @@ Linux 走 `setns`，Windows 没有对应原语，可行性取证见 PRD §4.9 W2
 - [PRD.md](PRD.md)：功能树、需求、验收标准、进度、时间线和 agent 工作约定。
 - [docs/architecture.md](docs/architecture.md)：后端、OCI、隔离和运行时技术参考。
 - [docs/testing.md](docs/testing.md)：本地验证、测试分层和 CI 门禁。
-- [vendor/blink/WIN32-PORT.md](vendor/blink/WIN32-PORT.md)：`wbox-linux` Win32
-  移植手册。
+- [docs/rust-rewrite.md](docs/rust-rewrite.md)：`wbox-linux` 纯 Rust 模拟器的
+  架构、已验证范围与剩余缺口。
 - [tests/KNOWN-FAILURES.md](tests/KNOWN-FAILURES.md)：guest 回归问题台账。
 - [CHANGELOG.md](CHANGELOG.md)：按版本记录的已交付变更。
 

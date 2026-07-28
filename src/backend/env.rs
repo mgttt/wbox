@@ -2,7 +2,7 @@
 //!
 //! 威胁模型：
 //! - 恶意镜像可在 config.json `Env` 中设置 `BLINK_PREFIX=/`、`WBOX_ROOT=C:\`、
-//!   `WBOX_VA_BITS=43` 等键，关闭 blink 层隔离或放大 guest 内存（H2）；
+//!   `WBOX_VA_BITS=43` 等键，关闭模拟器层隔离或放大 guest 内存（H2）；
 //! - 子进程若直通 wbox 的全部宿主环境，`WBOX_REGISTRY_PASS` 等机密会泄露给
 //!   不可信负载（H6）。
 //!
@@ -14,7 +14,7 @@
 //!    逃生口下也仍过滤保留键并应用强制覆盖；
 //! 3. [`redact_value`]：verbose / `image show` 打印时按键名脱敏。
 
-/// 保留键前缀（大小写不敏感）：blink 隔离旋钮与 wbox 自身配置/凭证。
+/// 保留键前缀（大小写不敏感）：模拟器隔离旋钮与 wbox 自身配置/凭证。
 const RESERVED_PREFIXES: &[&str] = &["WBOX_", "BLINK_"];
 
 /// 判定键是否属于隔离/凭证相关的保留键。
@@ -31,7 +31,7 @@ pub fn is_reserved_key(key: &str) -> bool {
 /// Linux 上就永远测不到，反之亦然）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestFlavor {
-    /// Windows 子进程（NativeBackend / BlinkBackend 的 wbox-linux.exe）
+    /// Windows 子进程（NativeBackend / EmuBackend 的 wbox-linux.exe）
     Windows,
     /// Linux 子进程（LinuxNativeBackend，容器内直接执行 Linux 程序）
     Linux,

@@ -1,0 +1,27 @@
+[package]
+name = "wbox-linux"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "x86-64 Linux 用户态模拟器（纯 Rust，替代 vendor/blink）"
+license = "MIT OR Apache-2.0"
+
+# 零第三方依赖。宿主 syscall 一律经 std；需要 std 未暴露的原语时用
+# 目标限定的 libc/windows-sys FFI（两者都只是 OS ABI 声明，不编译 C 代码）。
+[dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows 侧只用来接系统 CSPRNG（guest 的 getrandom）。windows-sys 是纯
+# FFI 声明，不编译任何 C 代码，与根包用的是同一个版本。
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = ["Win32_Foundation", "Win32_Security_Cryptography"]
+
+[[bin]]
+name = "wbox-linux"
+path = "src/main.rs"
+
+[lib]
+name = "wbox_linux"
+path = "src/lib.rs"

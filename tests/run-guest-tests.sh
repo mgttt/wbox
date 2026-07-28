@@ -7,7 +7,7 @@
 #   tests/run-guest-tests.sh [wbox-linux.exe] [--skip-slow]
 #
 # Env:
-#   WBOX_LINUX          wbox-linux.exe path (else $1, else ./vendor/blink/build-win32/wbox-linux.exe)
+#   WBOX_LINUX          wbox-linux.exe path (else $1, else ./target/release/wbox-linux.exe)
 #   WBOX_MATRIX_MODE    native|wine|auto (same detection as test-matrix.sh)
 #   WINE                wine binary (wine mode)
 #   WBOX_GUEST_PREBUILT=1  do NOT compile; use prebuilt tests/guest/bin/*
@@ -32,7 +32,7 @@ for a in "$@"; do
   esac
 done
 if [ -z "$WBOX_LINUX" ]; then
-  for c in ./vendor/blink/build-win32/wbox-linux.exe ./wbox-linux.exe; do
+  for c in ./target/release/wbox-linux.exe ./wbox-linux.exe; do
     [ -f "$c" ] && WBOX_LINUX=$c && break
   done
 fi
@@ -98,6 +98,18 @@ for b in "${built[@]}"; do cp "$b" "$WORK/"; done
 WBOX_ABS=$(cd "$(dirname "$WBOX_LINUX")" && pwd)/$(basename "$WBOX_LINUX")
 cd "$WORK" || die "cannot cd $WORK"
 
+# 这套用例是**按容器语义**写的：t_sec_path.c 开头就写明"wbox-linux confines
+# guest paths to the rootfs (BLINK_PREFIX)"，它断言的越根拒绝只有在设了
+# rootfs 前缀时才有意义。历史上这里不设前缀也能过，是因为旧引擎（blink）
+# 在默认模式下也一律走 VFS 收敛；新引擎默认是直通（guest / == 宿主 /），
+# 不设前缀就等于"没有沙箱"，那些安全断言自然全红——测的东西都不对了。
+#
+# 所以把 workdir 本身当 rootfs：guest 看到的 / 就是 $WORK，用例二进制在
+# / 下，越根尝试可被如实拒绝。WBOX_GUEST_NO_PREFIX=1 可回到直通模式。
+if [ "${WBOX_GUEST_NO_PREFIX:-0}" != 1 ]; then
+  export WBOX_PREFIX="$WORK"
+fi
+
 TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
 [ "$LIST" = 1 ] || {
   echo "[mode] $MODE"
@@ -107,6 +119,11 @@ TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
 
 for b in "$WORK"/t_*; do
   name=$(basename "$b")
+  # **一律用 ./name，不要写成 /name。** MSYS2 会把看起来像 POSIX 绝对路径的
+  # 参数自动改写成宿主路径（`/t_foo` -> `D:/a/_temp/msys64/t_foo`），于是
+  # guest 拿到一个根本不存在的路径，21 个用例全以 rc=127 假失败——PRD §4.9
+  # 开头记的就是这个坑，这里又踩了一次。相对路径 MSYS2 不动。
+  # 容器模式下 guest 的 cwd 是 /，`./name` 解析到 <prefix>/name，效果相同。
   rel=./$name
   case $name in
     t_stress*) [ "$SKIP_SLOW" = 1 ] && { report SKIP "$name" "slow (--skip-slow)"; continue; } ;;
@@ -187,11 +204,26 @@ if [ "${WBOX_GUEST_NO_BASELINE:-0}" = 1 ] || [ ! -f "$BASELINE" ]; then
   exit $?
 fi
 
-# 基线条目支持可选的模式标注：`<用例名> [@native|@wine]`。
-# 起因（实测）：t_path 的 path/long-nested 只在**真 Windows** 上失败——
-# 宿主绝对路径超过 MAX_PATH(260)，而 wine 无此限制故通过。没有模式标注时，
-# 把它写进基线会让 wine 下报"基线过期"，不写又会让真机报"回归"，
-# 两种环境无法共用一份基线。带标注的条目只在对应模式下生效。
+# 基线条目支持可选标注：`<用例名> [@native|@wine|@linux|@windows]`。
+#
+# 两类标注解决两种不同的环境差异：
+#
+# ① 运行**模式**（@native / @wine）。起因（实测）：t_path 的 path/long-nested
+#    只在真 Windows 上失败——宿主绝对路径超过 MAX_PATH(260)，wine 无此限制。
+#
+# ② **宿主 OS**（@linux / @windows）。模式标注表达不了这一类：guest-tests job
+#    在 Windows 上跑 native，本地 Linux 开发也常用 native，两者同为 native
+#    却结果不同。实测差异有两处，都是宿主能力差异而非引擎回归：
+#      - t_path   @windows：Windows 侧 stat 的 st_nlink 是合成值（拿不到真实
+#                 硬链接数），且建 symlink 需要特权，symlink 环路测不起来；
+#      - t_sec_linkabs @linux：Linux 上宿主 symlink 不防护（已知缺口）；
+#                 Windows 上因为建不了 symlink，该用例反而通过。
+#    没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧
+#    报"回归"。
+host_os=linux
+case "$(uname -s 2>/dev/null || echo unknown)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT) host_os=windows ;;
+esac
 known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' |
   while read -r name tag _rest; do
     [ -n "$name" ] || continue
@@ -199,7 +231,9 @@ known=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$BASELINE" | tr -d '\r' |
       "")        printf '%s ' "$name" ;;
       @native)   [ "$MODE" = native ] && printf '%s ' "$name" ;;
       @wine)     [ "$MODE" = wine ]   && printf '%s ' "$name" ;;
-      *) echo "guest-suite: 基线条目 '$name' 的标注 '$tag' 无法识别（仅支持 @native/@wine）" >&2 ;;
+      @linux)    [ "$host_os" = linux ]   && printf '%s ' "$name" ;;
+      @windows)  [ "$host_os" = windows ] && printf '%s ' "$name" ;;
+      *) echo "guest-suite: 基线条目 '$name' 的标注 '$tag' 无法识别（支持 @native/@wine/@linux/@windows）" >&2 ;;
     esac
   done)
 regressions=; fixed=

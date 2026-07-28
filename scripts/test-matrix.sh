@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-matrix.sh —— wbox-linux 验收矩阵产品化脚本
 #
-# 矩阵内容（与 vendor/blink/WIN32-PORT.md §7/§7.3/§7.4 的 wine 实测口径一致）：
+# 矩阵内容（口径见 docs/rust-rewrite.md）：
 #   A. 基础矩阵 12 项（uname/架构/echo/cat/ls/stat/find/重定向/退出码…）
 #   B. shell 矩阵 8 项（管道/命令替换/后台+wait/重定向链/dev/null/fork 子 exec）
 #   C. fork 矩阵（子 shell 顺序/嵌套命令替换/后台任务产出）
@@ -14,7 +14,7 @@
 #
 # 输入（位置参数优先，其次环境变量）：
 #   $1 / WBOX_LINUX     wbox-linux.exe 路径
-#                       （默认 ./vendor/blink/build-win32/wbox-linux.exe 或 ./wbox-linux.exe）
+#                       （默认 ./target/release/wbox-linux.exe 或 ./wbox-linux.exe）
 #   $2 / BUSYBOX        Linux x86_64 **静态** busybox 路径（默认 ./busybox）
 #   WINE                wine 二进制（wine 模式默认 `wine`）
 #   EPOLL_TEST_BIN      epoll loopback 静态单测二进制（可选；缺失则 SKIP）
@@ -29,7 +29,7 @@ set -u
 WBOX_LINUX=${1:-${WBOX_LINUX:-}}
 BUSYBOX=${2:-${BUSYBOX:-}}
 if [ -z "$WBOX_LINUX" ]; then
-  for c in ./vendor/blink/build-win32/wbox-linux.exe ./wbox-linux.exe; do
+  for c in ./target/release/wbox-linux.exe ./wbox-linux.exe; do
     [ -f "$c" ] && WBOX_LINUX=$c && break
   done
 fi
