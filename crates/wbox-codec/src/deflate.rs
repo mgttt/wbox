@@ -569,10 +569,14 @@ pub fn crc32(data: &[u8]) -> u32 {
 pub fn gzip_compress(data: &[u8], level: Level) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&[
-        0x1f, 0x8b, // magic
+        0x1f,
+        0x8b, // magic
         0x08, // CM = deflate
         0x00, // FLG：无文件名、无注释
-        0x00, 0x00, 0x00, 0x00, // MTIME = 0（不写时间：层的字节要可复现）
+        0x00,
+        0x00,
+        0x00,
+        0x00, // MTIME = 0（不写时间：层的字节要可复现）
         match level {
             Level::Default => 0x00,
             _ => 0x04, // XFL：4 = 最快
@@ -738,7 +742,7 @@ mod tests {
             Vec::new(),
             b"a".to_vec(),
             b"hello hello hello hello hello".to_vec(),
-            vec![0u8; 100_000],                          // 极端可压缩
+            vec![0u8; 100_000],                                // 极端可压缩
             (0..70_000u32).map(|i| (i % 256) as u8).collect(), // 周期性、超窗口
             {
                 // 伪随机：几乎不可压缩，走的是字面量路径
@@ -877,7 +881,10 @@ mod tests {
         // gzip 那条路同样要有上限。
         let gz = gzip_compress(&data, Level::Default);
         assert!(gzip_decompress_limited(&gz, 1024).is_err());
-        assert_eq!(gzip_decompress_limited(&gz, 8 << 20).unwrap().len(), data.len());
+        assert_eq!(
+            gzip_decompress_limited(&gz, 8 << 20).unwrap().len(),
+            data.len()
+        );
     }
 
     #[test]

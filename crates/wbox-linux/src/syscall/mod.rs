@@ -9,8 +9,8 @@
 pub mod fs;
 pub mod process;
 
-use crate::cpu::{RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11};
-use crate::machine::{ExecResult, Exception, Machine};
+use crate::cpu::{R10, R11, R8, R9, RAX, RCX, RDI, RDX, RSI};
+use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::{PAGE_MASK, PROT_EXEC, PROT_READ, PROT_WRITE};
 use fs::{Fd, FdKind, FdTable, Vfs};
 use std::cell::Cell;
@@ -227,7 +227,15 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         5 => sys_fstat(m, a[0] as i32, a[1]),
         6 => sys_stat_path(m, AT_FDCWD, a[0], a[1], false),
         8 => sys_lseek(m, a[0] as i32, a[1] as i64, a[2] as i32),
-        9 => sys_mmap(m, a[0], a[1], a[2] as i32, a[3] as i32, a[4] as i32, a[5] as i64),
+        9 => sys_mmap(
+            m,
+            a[0],
+            a[1],
+            a[2] as i32,
+            a[3] as i32,
+            a[4] as i32,
+            a[5] as i64,
+        ),
         10 => sys_mprotect(m, a[0], a[1], a[2] as i32),
         11 => sys_munmap(m, a[0], a[1]),
         12 => sys_brk(m, a[0]),
@@ -245,14 +253,14 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         21 => sys_access(m, a[0], a[1] as i32),
         24 => 0, // sched_yield：单线程下无事可做
         25 => sys_mremap(m, a[0], a[1], a[2], a[3] as i32, a[4]),
-        28 => 0,  // madvise：建议性，忽略即为正确实现
+        28 => 0, // madvise：建议性，忽略即为正确实现
         32 => sys_dup(m, a[0] as i32),
         33 => sys_dup2(m, a[0] as i32, a[1] as i32),
         39 | 102 | 104 | 107 | 108 | 110 | 111 => match nr {
-            39 => m.os.pid as i64,  // getpid
+            39 => m.os.pid as i64,   // getpid
             110 => m.os.ppid as i64, // getppid
-            111 => m.os.pid as i64, // getpgrp
-            _ => 0,                 // getuid/getgid/geteuid/getegid：容器内是 root
+            111 => m.os.pid as i64,  // getpgrp
+            _ => 0,                  // getuid/getgid/geteuid/getegid：容器内是 root
         },
         // ---- 进程族（快照式 fork，见 syscall/process.rs） ----
         56 => process::sys_clone(m, a[0], a[1], ret_rip),
@@ -271,8 +279,8 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         234 => process::sys_kill(m, a[0] as i32, a[2] as i32)?,
         // 进程组/会话：模拟器里只有一个组、一个会话，`setpgid` 无副作用，
         // 查询一律回自己的 pid（shell 的作业控制会读这几个值做判断）。
-        109 => 0,                             // setpgid
-        112 | 121 | 124 => m.os.pid as i64,   // setsid / getpgid / getsid
+        109 => 0,                           // setpgid
+        112 | 121 | 124 => m.os.pid as i64, // setsid / getpgid / getsid
         60 | 231 => return Err(Exception::Exit(a[0] as i32 & 0xff)),
         63 => sys_uname(m, a[0]),
         72 => sys_fcntl(m, a[0] as i32, a[1] as i32, a[2]),
@@ -473,8 +481,12 @@ fn sys_pread(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
             r
         }
         // 管道与字符设备不可寻址：Linux 给 ESPIPE，不是 EBADF。
-        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) | Some(FdKind::Dev(_))
-        | Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => return -ESPIPE,
+        Some(FdKind::PipeRead(_))
+        | Some(FdKind::PipeWrite(_))
+        | Some(FdKind::Dev(_))
+        | Some(FdKind::Stdin)
+        | Some(FdKind::Stdout)
+        | Some(FdKind::Stderr) => return -ESPIPE,
         Some(_) => return -EBADF,
         None => return -EBADF,
     };
@@ -502,11 +514,15 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
     let r = match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
         Some(FdKind::Stdout) => {
             let mut o = std::io::stdout();
-            o.write_all(data).and_then(|_| o.flush()).map(|_| data.len())
+            o.write_all(data)
+                .and_then(|_| o.flush())
+                .map(|_| data.len())
         }
         Some(FdKind::Stderr) => {
             let mut o = std::io::stderr();
-            o.write_all(data).and_then(|_| o.flush()).map(|_| data.len())
+            o.write_all(data)
+                .and_then(|_| o.flush())
+                .map(|_| data.len())
         }
         Some(FdKind::File(f)) => f.write(data),
         Some(FdKind::Dir { .. }) => return -EBADF,
@@ -516,7 +532,9 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
             fs::DevKind::Null | fs::DevKind::Zero | fs::DevKind::Random => Ok(data.len()),
             fs::DevKind::Tty => {
                 let mut o = std::io::stdout();
-                o.write_all(data).and_then(|_| o.flush()).map(|_| data.len())
+                o.write_all(data)
+                    .and_then(|_| o.flush())
+                    .map(|_| data.len())
             }
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
@@ -680,8 +698,11 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
         // 字符设备可以 seek，但位置恒为 0（Linux 对 /dev/null 就是这样）。
         Some(FdKind::Dev(_)) => 0,
         // 标准流可能是管道；管道本身也不可 seek。
-        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr)
-        | Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) => -ESPIPE,
+        Some(FdKind::Stdin)
+        | Some(FdKind::Stdout)
+        | Some(FdKind::Stderr)
+        | Some(FdKind::PipeRead(_))
+        | Some(FdKind::PipeWrite(_)) => -ESPIPE,
         Some(_) => -EBADF,
         None => -EBADF,
     }
@@ -731,7 +752,11 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
     };
     let flags = m.os.fds.get(fd).map(|f| f.flags).unwrap_or(0);
     // dup/dup2 产生的新 fd **不继承** O_CLOEXEC，这是 POSIX 明确规定的。
-    let nf = Fd { kind, cloexec: false, flags };
+    let nf = Fd {
+        kind,
+        cloexec: false,
+        flags,
+    };
     match at {
         None => m.os.fds.alloc_min(nf, min) as i64,
         Some(n) => {
@@ -944,7 +969,11 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
             Err(e) => return host_err(&e),
         };
         let fd = Fd {
-            kind: FdKind::Dir { path: host, entries, pos: 0 },
+            kind: FdKind::Dir {
+                path: host,
+                entries,
+                pos: 0,
+            },
             cloexec: flags & O_CLOEXEC != 0,
             flags,
         };
@@ -1146,7 +1175,11 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
             b[24..28].copy_from_slice(&0o020620u32.to_le_bytes()); // S_IFCHR
             b[16..24].copy_from_slice(&1u64.to_le_bytes());
             b[56..64].copy_from_slice(&1024i64.to_le_bytes());
-            return if m.mem.write(out, &b).is_err() { -EFAULT } else { 0 };
+            return if m.mem.write(out, &b).is_err() {
+                -EFAULT
+            } else {
+                0
+            };
         }
         _ => return -EBADF,
     };
@@ -1168,7 +1201,11 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
         b[24..28].copy_from_slice(&0o020666u32.to_le_bytes()); // S_IFCHR | 0666
         b[16..24].copy_from_slice(&1u64.to_le_bytes()); // st_nlink
         b[56..64].copy_from_slice(&4096i64.to_le_bytes()); // st_blksize
-        return if m.mem.write(out, &b).is_err() { -EFAULT } else { 0 };
+        return if m.mem.write(out, &b).is_err() {
+            -EFAULT
+        } else {
+            0
+        };
     }
     let host = match resolve_at(m, dirfd, &path) {
         Ok(p) => p,
@@ -1327,15 +1364,7 @@ fn prot_from_guest(p: i32) -> u8 {
     o
 }
 
-fn sys_mmap(
-    m: &mut Machine,
-    addr: u64,
-    len: u64,
-    prot: i32,
-    flags: i32,
-    fd: i32,
-    off: i64,
-) -> i64 {
+fn sys_mmap(m: &mut Machine, addr: u64, len: u64, prot: i32, flags: i32, fd: i32, off: i64) -> i64 {
     if len == 0 {
         return -EINVAL;
     }
@@ -1430,7 +1459,14 @@ fn sys_munmap(m: &mut Machine, addr: u64, len: u64) -> i64 {
 const MREMAP_MAYMOVE: i32 = 1;
 const MREMAP_FIXED: i32 = 2;
 
-fn sys_mremap(m: &mut Machine, old: u64, old_len: u64, new_len: u64, flags: i32, new_addr: u64) -> i64 {
+fn sys_mremap(
+    m: &mut Machine,
+    old: u64,
+    old_len: u64,
+    new_len: u64,
+    flags: i32,
+    new_addr: u64,
+) -> i64 {
     if old & PAGE_MASK != 0 || new_len == 0 {
         return -EINVAL;
     }
@@ -1521,11 +1557,19 @@ fn sys_arch_prctl(m: &mut Machine, code: i32, addr: u64) -> i64 {
         }
         ARCH_GET_FS => {
             let v = m.cpu.fs_base;
-            if m.mem.write_u64(addr, v).is_err() { -EFAULT } else { 0 }
+            if m.mem.write_u64(addr, v).is_err() {
+                -EFAULT
+            } else {
+                0
+            }
         }
         ARCH_GET_GS => {
             let v = m.cpu.gs_base;
-            if m.mem.write_u64(addr, v).is_err() { -EFAULT } else { 0 }
+            if m.mem.write_u64(addr, v).is_err() {
+                -EFAULT
+            } else {
+                0
+            }
         }
         _ => -EINVAL,
     }
@@ -1828,8 +1872,12 @@ fn sys_pwrite(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
                 Err(e) => host_err(&e),
             }
         }
-        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) | Some(FdKind::Dev(_))
-        | Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => -ESPIPE,
+        Some(FdKind::PipeRead(_))
+        | Some(FdKind::PipeWrite(_))
+        | Some(FdKind::Dev(_))
+        | Some(FdKind::Stdin)
+        | Some(FdKind::Stdout)
+        | Some(FdKind::Stderr) => -ESPIPE,
         Some(_) => -EBADF,
         None => -EBADF,
     }

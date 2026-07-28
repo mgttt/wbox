@@ -91,11 +91,14 @@ fn load_depth(
     let loaded = elf::load(mem, &image, |interp| {
         // PT_INTERP 走同一套前缀，否则动态链接器会命中宿主的 /lib64/ld-linux
         // 而不是 rootfs 里的那个。
-        let hp = vfs.host_path_confined(interp).ok_or_else(|| {
-            format!("动态链接器 '{interp}' 越出了 rootfs")
-        })?;
+        let hp = vfs
+            .host_path_confined(interp)
+            .ok_or_else(|| format!("动态链接器 '{interp}' 越出了 rootfs"))?;
         std::fs::read(&hp).map_err(|e| {
-            format!("读取动态链接器 '{}'（guest '{interp}'）失败：{e}", hp.display())
+            format!(
+                "读取动态链接器 '{}'（guest '{interp}'）失败：{e}",
+                hp.display()
+            )
         })
     })
     .map_err(|e| LoadFail {
@@ -109,7 +112,10 @@ fn load_depth(
 
 /// 解析 `#!` 行：返回（解释器, 可选的单个参数）。
 fn parse_shebang(prog: &str, image: &[u8]) -> Result<(String, Option<String>), LoadFail> {
-    let end = image.iter().position(|&b| b == b'\n').unwrap_or(image.len());
+    let end = image
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(image.len());
     let line = String::from_utf8_lossy(&image[2..end]).trim().to_string();
     let mut it = line.splitn(2, char::is_whitespace);
     let interp = it.next().unwrap_or("").to_string();

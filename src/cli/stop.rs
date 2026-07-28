@@ -28,9 +28,9 @@ fn parse_many(args: &[String]) -> Result<(Vec<&str>, u64)> {
         match args[i].as_str() {
             "-t" | "--timeout" => {
                 i += 1;
-                let v = args.get(i).ok_or_else(|| {
-                    WboxError::args("stop: --timeout 缺少取值（秒）")
-                })?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| WboxError::args("stop: --timeout 缺少取值（秒）"))?;
                 timeout = v.parse::<u64>().map_err(|_| {
                     WboxError::args(format!("stop: --timeout 取值 '{}' 不是合法秒数", v))
                 })?;
@@ -59,14 +59,7 @@ pub fn cmd_stop(args: &[String]) -> Result<u32> {
     // 回显交给 `stop_with` 自己（它还要区分"已经是停止状态"那种情形），
     // 所以这里用 Echo::Nothing——否则同一个名字会打两遍。
     super::args::each_named(&owned, "停止", super::args::Echo::Nothing, |name| {
-        stop_with(
-            &StopOptions {
-                name,
-                timeout,
-            },
-            Say::Name,
-        )
-        .map(|_| ())
+        stop_with(&StopOptions { name, timeout }, Say::Name).map(|_| ())
     })
 }
 
@@ -112,29 +105,29 @@ fn stop_with(opts: &StopOptions, say: Say) -> Result<u32> {
 
     #[cfg(unix)]
     {
-    // 先礼：请它自己退出，让 guest 有机会跑完清理。
-    runstate::terminate_pid(pid, Kill::Graceful);
-    // Registration::drop 同样要取得操作锁后才能释放 owner 锁，等待前必须放锁。
-    drop(locked);
-    if wait_exit(&dir, opts.timeout) {
-        announce(opts.name.to_string());
-        return Ok(0);
-    }
+        // 先礼：请它自己退出，让 guest 有机会跑完清理。
+        runstate::terminate_pid(pid, Kill::Graceful);
+        // Registration::drop 同样要取得操作锁后才能释放 owner 锁，等待前必须放锁。
+        drop(locked);
+        if wait_exit(&dir, opts.timeout) {
+            announce(opts.name.to_string());
+            return Ok(0);
+        }
 
-    // 后兵：超时未退则强制终止。
-    runstate::terminate_pid(pid, Kill::Forceful);
-    if wait_exit(&dir, 5) {
-        eprintln!(
-            "wbox: 容器 '{}' 未在 {} 秒内自行退出，已强制终止",
-            opts.name, opts.timeout
-        );
-        announce(opts.name.to_string());
-        return Ok(0);
-    }
-    Err(WboxError::args(format!(
-        "容器 '{}' 强制终止后仍未退出（pid={}）",
-        opts.name, pid
-    )))
+        // 后兵：超时未退则强制终止。
+        runstate::terminate_pid(pid, Kill::Forceful);
+        if wait_exit(&dir, 5) {
+            eprintln!(
+                "wbox: 容器 '{}' 未在 {} 秒内自行退出，已强制终止",
+                opts.name, opts.timeout
+            );
+            announce(opts.name.to_string());
+            return Ok(0);
+        }
+        Err(WboxError::args(format!(
+            "容器 '{}' 强制终止后仍未退出（pid={}）",
+            opts.name, pid
+        )))
     }
 
     #[cfg(windows)]
@@ -143,22 +136,21 @@ fn stop_with(opts: &StopOptions, say: Say) -> Result<u32> {
         locked.mark_stopping()?;
         // 必须直接终止命名 Job。只杀 supervisor 并依赖 KILL_ON_JOB_CLOSE 不够：
         // 并发 exec 控制器可能仍持有同一 Job 的另一个 handle。
-        let job = match crate::job::Job::wait_for_container(
-            opts.name,
-            std::time::Duration::from_secs(2),
-        ) {
-            Ok(job) => job,
-            Err(open_error) => {
-                // 主进程可能已退出并销毁 Job、但 Registration 正在等我们释放
-                // operation lock 才能标记 Exited。先放锁再复核，避免把正常退出报错。
-                drop(locked);
-                if wait_exit(&dir, 1) {
-                    announce(opts.name.to_string());
-                    return Ok(0);
+        let job =
+            match crate::job::Job::wait_for_container(opts.name, std::time::Duration::from_secs(2))
+            {
+                Ok(job) => job,
+                Err(open_error) => {
+                    // 主进程可能已退出并销毁 Job、但 Registration 正在等我们释放
+                    // operation lock 才能标记 Exited。先放锁再复核，避免把正常退出报错。
+                    drop(locked);
+                    if wait_exit(&dir, 1) {
+                        announce(opts.name.to_string());
+                        return Ok(0);
+                    }
+                    return Err(open_error);
                 }
-                return Err(open_error);
-            }
-        };
+            };
         job.terminate(1)?;
         drop(locked);
         if wait_exit(&dir, opts.timeout) {
@@ -221,7 +213,10 @@ mod tests {
         assert_eq!(parse_many(&c).unwrap().0, vec!["a", "b"]);
 
         assert!(parse_many(&[]).is_err());
-        assert!(parse_many(&["--timeout".to_string()]).is_err(), "缺取值应报错");
+        assert!(
+            parse_many(&["--timeout".to_string()]).is_err(),
+            "缺取值应报错"
+        );
         assert!(
             parse_many(&["c".to_string(), "-t".to_string(), "x".to_string()]).is_err(),
             "非数字应报错"

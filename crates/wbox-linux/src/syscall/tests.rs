@@ -85,7 +85,10 @@ fn mmap_anonymous_honours_requested_prot() {
     assert!(a > 0, "mmap 应返回地址，实际 {a}");
     let a = a as u64;
     assert!(m.mem.read_u8(a).is_ok());
-    assert!(m.mem.write_u8(a, 1).is_err(), "只请求了 PROT_READ，不该可写");
+    assert!(
+        m.mem.write_u8(a, 1).is_err(),
+        "只请求了 PROT_READ，不该可写"
+    );
     // 内容必须清零——匿名映射的 Linux 语义
     assert_eq!(m.mem.read_u8(a).unwrap(), 0);
 }
@@ -194,7 +197,10 @@ fn getrandom_returns_requested_bytes() {
     assert_eq!(n, 32, "getrandom 应返回写入字节数");
     let mut buf = [0u8; 32];
     m.mem.read(at, &mut buf).unwrap();
-    assert!(buf.iter().any(|&b| b != 0), "32 字节全 0 几乎不可能，疑似没真填");
+    assert!(
+        buf.iter().any(|&b| b != 0),
+        "32 字节全 0 几乎不可能，疑似没真填"
+    );
 }
 
 #[test]
@@ -358,8 +364,12 @@ fn wait4_reports_recorded_children_and_then_echild() {
     assert_eq!(process::sys_wait4(&mut m, -1, at, 0), -ECHILD);
 
     // 快照式 fork 下子进程在 fork 返回前就跑完了，僵尸表里直接记账。
-    m.os.zombies.push(process::ZombieChild { pid: 7, status: 42 << 8 });
-    m.os.zombies.push(process::ZombieChild { pid: 8, status: 9 });
+    m.os.zombies.push(process::ZombieChild {
+        pid: 7,
+        status: 42 << 8,
+    });
+    m.os.zombies
+        .push(process::ZombieChild { pid: 8, status: 9 });
 
     // 指定 pid 收指定的那个
     assert_eq!(process::sys_wait4(&mut m, 8, at, 0), 8);
@@ -367,19 +377,25 @@ fn wait4_reports_recorded_children_and_then_echild() {
 
     // -1 收任意一个
     assert_eq!(process::sys_wait4(&mut m, -1, at, 0), 7);
-    assert_eq!(m.mem.read_u32(at).unwrap(), 42 << 8, "正常退出：码在 8..16 位");
+    assert_eq!(
+        m.mem.read_u32(at).unwrap(),
+        42 << 8,
+        "正常退出：码在 8..16 位"
+    );
 
     // 收干净之后再 wait 是 ECHILD
     assert_eq!(process::sys_wait4(&mut m, -1, at, 0), -ECHILD);
     // 不是自己孩子的 pid 也是 ECHILD
-    m.os.zombies.push(process::ZombieChild { pid: 7, status: 0 });
+    m.os.zombies
+        .push(process::ZombieChild { pid: 7, status: 0 });
     assert_eq!(process::sys_wait4(&mut m, 999, at, 0), -ECHILD);
 }
 
 #[test]
 fn wait4_rejects_unknown_options_and_bad_status_pointers() {
     let mut m = mach();
-    m.os.zombies.push(process::ZombieChild { pid: 3, status: 0 });
+    m.os.zombies
+        .push(process::ZombieChild { pid: 3, status: 0 });
     assert_eq!(process::sys_wait4(&mut m, -1, 0, 0x4000), -EINVAL);
     // 坏指针：账不能被吞掉，否则这个子进程永远收不回来
     assert_eq!(process::sys_wait4(&mut m, -1, 0xdead_0000, 0), -EFAULT);
@@ -391,7 +407,10 @@ fn clone_with_thread_flags_is_enosys_not_a_silent_fork() {
     let mut m = mach();
     // CLONE_VM|CLONE_THREAD|CLONE_SIGHAND = 线程创建。假装成功会让 guest
     // 以为多了一个执行流，之后的行为完全不可预测。
-    assert_eq!(process::sys_clone(&mut m, 0x1_0000 | 0x100 | 0x800, 0, 0), -ENOSYS);
+    assert_eq!(
+        process::sys_clone(&mut m, 0x1_0000 | 0x100 | 0x800, 0, 0),
+        -ENOSYS
+    );
 }
 
 #[test]

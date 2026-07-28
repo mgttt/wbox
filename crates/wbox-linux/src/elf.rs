@@ -106,9 +106,7 @@ pub fn parse(image: &[u8]) -> Result<(u16, u64, Vec<Phdr>), LoadError> {
         ));
     }
     if e_type != ET_EXEC && e_type != ET_DYN {
-        return err(format!(
-            "只支持 ET_EXEC/ET_DYN，该文件 e_type={e_type}"
-        ));
+        return err(format!("只支持 ET_EXEC/ET_DYN，该文件 e_type={e_type}"));
     }
     let e_entry = rd64(image, 24);
     let e_phoff = rd64(image, 32) as usize;
@@ -263,7 +261,8 @@ pub fn load(
             return err("PT_INTERP 越过文件末尾");
         }
         let raw = &image[o..n + o];
-        let path = String::from_utf8_lossy(raw.split(|&b| b == 0).next().unwrap_or(raw)).into_owned();
+        let path =
+            String::from_utf8_lossy(raw.split(|&b| b == 0).next().unwrap_or(raw)).into_owned();
         let interp_image = resolve_interp(&path).map_err(LoadError)?;
         let (it, ie, iph) = parse(&interp_image)?;
         let ibias = if it == ET_DYN { INTERP_BASE } else { 0 };

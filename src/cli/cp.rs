@@ -24,9 +24,17 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 enum Direction {
     /// 容器 → 宿主
-    Out { container: String, guest: String, host: PathBuf },
+    Out {
+        container: String,
+        guest: String,
+        host: PathBuf,
+    },
     /// 宿主 → 容器
-    In { container: String, host: PathBuf, guest: String },
+    In {
+        container: String,
+        host: PathBuf,
+        guest: String,
+    },
 }
 
 /// 判断一个参数是不是 `<容器>:<路径>` 形式。
@@ -43,10 +51,7 @@ fn split_container(arg: &str) -> Option<(String, String)> {
 }
 
 fn parse(args: &[String]) -> Result<Direction> {
-    let pos: Vec<&String> = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .collect();
+    let pos: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if pos.len() != args.len() {
         return Err(WboxError::args(
             "cp: 暂不支持选项（用法：wbox cp <容器>:<路径> <宿主路径> 或反向）",
@@ -150,8 +155,8 @@ fn copy_any(src: &Path, dst: &Path) -> Result<()> {
     let _ = std::fs::remove_file(dst);
     #[cfg(unix)]
     if meta.file_type().is_symlink() {
-        let target = std::fs::read_link(src)
-            .map_err(|e| WboxError::args(format!("读取链接失败：{}", e)))?;
+        let target =
+            std::fs::read_link(src).map_err(|e| WboxError::args(format!("读取链接失败：{}", e)))?;
         std::os::unix::fs::symlink(&target, dst)
             .map_err(|e| WboxError::args(format!("创建链接失败：{}", e)))?;
         return Ok(());
@@ -206,6 +211,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let m = format!("{}", copy_out("c", "/x", Path::new("/tmp/x")).unwrap_err());
         assert!(m.contains("overlay"), "{}", m);
-        assert!(m.contains("cp 无法取得"), "错误里要说清是哪件事做不成：{}", m);
+        assert!(
+            m.contains("cp 无法取得"),
+            "错误里要说清是哪件事做不成：{}",
+            m
+        );
     }
 }

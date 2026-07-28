@@ -975,7 +975,6 @@ macro_rules! json_internal {
 mod tests {
     use super::*;
 
-
     #[test]
     fn parse_and_reserialize_keeps_key_order_sorted() {
         // 键序是 digest 的一部分（模块注释第 1 条），必须与 serde_json 一致：
@@ -1069,9 +1068,7 @@ mod tests {
         struct S {
             name: String,
         }
-        let s = S {
-            name: "x".into(),
-        };
+        let s = S { name: "x".into() };
         let v = json!({ "ref": s.name.to_uppercase(), "n": 1 + 1 });
         assert_eq!(v.to_string(), r#"{"n":2,"ref":"X"}"#);
     }
@@ -1118,8 +1115,8 @@ mod tests {
         ] {
             let v = from_str(src).unwrap();
             let text = v.to_string();
-            let back = from_str(&text)
-                .unwrap_or_else(|e| panic!("重新序列化后解析不回来：{text} → {e}"));
+            let back =
+                from_str(&text).unwrap_or_else(|e| panic!("重新序列化后解析不回来：{text} → {e}"));
             assert_eq!(back, v, "往返不一致：{src}");
         }
     }

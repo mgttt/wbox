@@ -62,7 +62,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cmd_rename(&["old".to_string(), "new".to_string()]).unwrap(), 0);
+        assert_eq!(
+            cmd_rename(&["old".to_string(), "new".to_string()]).unwrap(),
+            0
+        );
         assert!(!dir.exists(), "旧目录应已不在");
         let newdir = runstate::dir_for("new").unwrap();
         assert!(newdir.exists());

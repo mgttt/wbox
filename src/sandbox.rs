@@ -17,12 +17,11 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, TerminateProcess,
-    InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
+    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    STARTUPINFOEXW, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
 };
 
 use crate::error::Result;
@@ -45,15 +44,7 @@ pub fn run_container(
     job: &mut crate::job::Job,
     env: &[(String, String)],
 ) -> Result<u32> {
-    run_container_with_handles(
-        profile,
-        capabilities,
-        cmdline,
-        workdir,
-        job,
-        env,
-        &[],
-    )
+    run_container_with_handles(profile, capabilities, cmdline, workdir, job, env, &[])
 }
 
 /// 与 [`run_container`] 相同，并只向子进程继承 `handles` 中列出的句柄。
@@ -200,7 +191,10 @@ where
     }
     if attr_list_size == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}", err)));
+        return Err(crate::error::WboxError::spawn(format!(
+            "InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}",
+            err
+        )));
     }
     // 用 u64 对齐的缓冲区承载 attribute list。
     let mut attr_buf = vec![0u64; attr_list_size.div_ceil(8)];
@@ -212,7 +206,10 @@ where
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!("InitializeProcThreadAttributeList 失败，GetLastError={}", err)));
+        return Err(crate::error::WboxError::spawn(format!(
+            "InitializeProcThreadAttributeList 失败，GetLastError={}",
+            err
+        )));
     }
     // RAII：离开作用域时销毁 attribute list。
     let _attr_guard = AttrListGuard(attr_list);
@@ -234,7 +231,10 @@ where
     };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!("UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}", err)));
+        return Err(crate::error::WboxError::spawn(format!(
+            "UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}",
+            err
+        )));
     }
 
     if !inherited_handles.is_empty() {
@@ -307,9 +307,9 @@ where
             _ => "",
         };
         return Err(crate::error::WboxError::spawn(format!(
-                "CreateProcessW 失败，GetLastError={}{}",
-                err, hint
-            )));
+            "CreateProcessW 失败，GetLastError={}{}",
+            err, hint
+        )));
     }
     let process = OwnedHandle(pi.hProcess);
     let thread = OwnedHandle(pi.hThread);
@@ -333,19 +333,27 @@ where
     if prev == u32::MAX {
         let err = unsafe { GetLastError() };
         // 进程已入 Job，KILL_ON_JOB_CLOSE 会负责收割；直接报错即可。
-        return Err(crate::error::WboxError::spawn(format!("ResumeThread 失败，GetLastError={}", err)));
+        return Err(crate::error::WboxError::spawn(format!(
+            "ResumeThread 失败，GetLastError={}",
+            err
+        )));
     }
     on_started(job);
 
     // ---- 等待退出并转发退出码 ----
     // # Safety: 进程句柄有效，INFINITE 等待进程退出。
-    unsafe { WaitForSingleObject(process.raw(), u32::MAX /* INFINITE */) };
+    unsafe {
+        WaitForSingleObject(process.raw(), u32::MAX /* INFINITE */)
+    };
     let mut code: u32 = 0;
     // # Safety: 进程句柄有效且进程已退出，code 为有效输出指针。
     let ok = unsafe { GetExitCodeProcess(process.raw(), &mut code) };
     if ok == 0 {
         let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!("GetExitCodeProcess 失败，GetLastError={}", err)));
+        return Err(crate::error::WboxError::spawn(format!(
+            "GetExitCodeProcess 失败，GetLastError={}",
+            err
+        )));
     }
     Ok(code)
 }
@@ -439,11 +447,8 @@ impl Drop for AttrListGuard {
 }
 
 fn push_cmdline_arg(out: &mut String, arg: &str, force_quote: bool) {
-    let quote = force_quote
-        || arg.is_empty()
-        || arg
-            .chars()
-            .any(|c| c == ' ' || c == '\t' || c == '"');
+    let quote =
+        force_quote || arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !quote {
         out.push_str(arg);
         return;
@@ -482,7 +487,9 @@ fn push_cmdline_arg(out: &mut String, arg: &str, force_quote: bool) {
 /// CommandLineToArgvW 规则无损编码每个参数。
 pub fn build_cmdline(cmd: &[String]) -> Result<String> {
     if cmd.is_empty() {
-        return Err(crate::error::WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"));
+        return Err(crate::error::WboxError::args(
+            "缺少要执行的命令（-- <CMD> [ARGS...]）",
+        ));
     }
     if cmd.iter().any(|arg| arg.contains('\0')) {
         return Err(crate::error::WboxError::args("命令或参数不能包含 NUL 字符"));
@@ -510,7 +517,10 @@ mod tests {
     #[test]
     fn build_cmdline_single_program_quoted() {
         // 即使程序名无空格也加引号（与 cmd.exe 风格一致）
-        assert_eq!(build_cmdline(&["cmd.exe".to_string()]).unwrap(), r#""cmd.exe""#);
+        assert_eq!(
+            build_cmdline(&["cmd.exe".to_string()]).unwrap(),
+            r#""cmd.exe""#
+        );
     }
 
     #[test]
@@ -546,61 +556,40 @@ mod tests {
 
     #[test]
     fn build_cmdline_arg_with_tab_is_quoted() {
-        let s = build_cmdline(&[
-            "cmd.exe".to_string(),
-            "a\tb".to_string(),
-        ])
-        .unwrap();
+        let s = build_cmdline(&["cmd.exe".to_string(), "a\tb".to_string()]).unwrap();
         assert_eq!(s, r#""cmd.exe" "a	b""#);
     }
 
     #[test]
     fn build_cmdline_empty_arg_is_quoted() {
         // 空参数必须加引号，���则 CommandLineToArgvW 会丢失它
-        let s = build_cmdline(&[
-            "cmd.exe".to_string(),
-            "".to_string(),
-            "x".to_string(),
-        ])
-        .unwrap();
+        let s = build_cmdline(&["cmd.exe".to_string(), "".to_string(), "x".to_string()]).unwrap();
         assert_eq!(s, r#""cmd.exe" "" x"#);
     }
 
     #[test]
     fn build_cmdline_embedded_quote_is_escaped() {
         // 内嵌引号 → \" 转义 + 整体加引号
-        let s = build_cmdline(&[
-            "cmd.exe".to_string(),
-            r#"he said "hi""#.to_string(),
-        ])
-        .unwrap();
+        let s = build_cmdline(&["cmd.exe".to_string(), r#"he said "hi""#.to_string()]).unwrap();
         assert_eq!(s, r#""cmd.exe" "he said \"hi\"""#);
     }
 
     #[test]
     fn build_cmdline_doubles_trailing_backslashes_in_quoted_arg() {
-        let s = build_cmdline(&[
-            "cmd.exe".to_string(),
-            r"C:\path with space\".to_string(),
-        ])
-        .unwrap();
+        let s =
+            build_cmdline(&["cmd.exe".to_string(), r"C:\path with space\".to_string()]).unwrap();
         assert_eq!(s, r#""cmd.exe" "C:\path with space\\""#);
     }
 
     #[test]
     fn build_cmdline_escapes_backslash_quote_sequence() {
-        let s = build_cmdline(&[
-            "cmd.exe".to_string(),
-            r#"x\"y"#.to_string(),
-        ])
-        .unwrap();
+        let s = build_cmdline(&["cmd.exe".to_string(), r#"x\"y"#.to_string()]).unwrap();
         assert_eq!(s, r#""cmd.exe" "x\\\"y""#);
     }
 
     #[test]
     fn build_cmdline_rejects_nul() {
-        let err = build_cmdline(&["cmd.exe".to_string(), "a\0b".to_string()])
-            .unwrap_err();
+        let err = build_cmdline(&["cmd.exe".to_string(), "a\0b".to_string()]).unwrap_err();
         assert!(format!("{err}").contains("NUL"));
     }
 
@@ -744,12 +733,10 @@ mod real_windows_tests {
         DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows_sys::Win32::System::Threading::{
-        CreateEventW, GetCurrentProcess, SetEvent,
-    };
+    use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, SetEvent};
 
     fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
         AppContainerProfile::create(name, caps)
@@ -792,7 +779,12 @@ mod real_windows_tests {
     }
 
     fn minimal_process_env() -> Vec<(String, String)> {
-        crate::backend::env::build_child_env(&[], &[], false, crate::backend::env::GuestFlavor::Windows)
+        crate::backend::env::build_child_env(
+            &[],
+            &[],
+            false,
+            crate::backend::env::GuestFlavor::Windows,
+        )
     }
 
     #[repr(C)]
@@ -875,9 +867,7 @@ mod real_windows_tests {
                 0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 FILE_OPEN,
-                FILE_NON_DIRECTORY_FILE
-                    | FILE_SYNCHRONOUS_IO_NONALERT
-                    | FILE_OPEN_REPARSE_POINT,
+                FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
                 std::ptr::null_mut(),
                 0,
             )
@@ -1004,9 +994,7 @@ mod real_windows_tests {
             .into_owned();
         let env = minimal_process_env();
         let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
-        let source = unsafe {
-            OwnedHandle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()))
-        };
+        let source = unsafe { OwnedHandle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())) };
         assert!(!source.raw().is_null(), "CreateEventW 失败");
         let mut roundtrip = None;
 
@@ -1023,10 +1011,16 @@ mod real_windows_tests {
                 let mut child_handle = std::ptr::null_mut();
                 if unsafe {
                     DuplicateHandle(
-                        current, source.raw(), child_process, &mut child_handle,
-                        0, 0, DUPLICATE_SAME_ACCESS,
+                        current,
+                        source.raw(),
+                        child_process,
+                        &mut child_handle,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS,
                     )
-                } == 0 {
+                } == 0
+                {
                     return Err(crate::error::WboxError::spawn(format!(
                         "DuplicateHandle(注入子进程) 失败，GetLastError={}",
                         unsafe { GetLastError() }
@@ -1035,10 +1029,16 @@ mod real_windows_tests {
                 let mut copied_back = std::ptr::null_mut();
                 if unsafe {
                     DuplicateHandle(
-                        child_process, child_handle, current, &mut copied_back,
-                        0, 0, DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
+                        child_process,
+                        child_handle,
+                        current,
+                        &mut copied_back,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE,
                     )
-                } == 0 {
+                } == 0
+                {
                     return Err(crate::error::WboxError::spawn(format!(
                         "DuplicateHandle(从子进程取回) 失败，GetLastError={}",
                         unsafe { GetLastError() }
@@ -1084,7 +1084,11 @@ mod real_windows_tests {
             |_, _| Err(crate::error::WboxError::spawn("broker setup probe failed")),
         )
         .unwrap_err();
-        assert!(format!("{}", err).contains("broker setup probe failed"), "{}", err);
+        assert!(
+            format!("{}", err).contains("broker setup probe failed"),
+            "{}",
+            err
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if job.process_ids().unwrap().is_empty() {
@@ -1197,7 +1201,11 @@ mod real_windows_tests {
         assert!(res.is_err());
         let msg = format!("{}", res.unwrap_err());
         // error.rs 里 args 类退出码 1，错误信息含\"缺少要执行的命令\"
-        assert!(msg.contains("缺少"), "应报\"缺少要执行的命令\"，实得：{}", msg);
+        assert!(
+            msg.contains("缺少"),
+            "应报\"缺少要执行的命令\"，实得：{}",
+            msg
+        );
     }
 
     /// workdir 不存在 → CreateProcessW 在 lpCurrentDirectory 阶段失败，

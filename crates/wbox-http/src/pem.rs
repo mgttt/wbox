@@ -14,7 +14,10 @@ pub fn certificates(pem: &str) -> Vec<Vec<u8>> {
     while let Some(start) = rest.find(BEGIN) {
         let after = &rest[start + BEGIN.len()..];
         let Some(end) = after.find(END) else { break };
-        let b64: String = after[..end].chars().filter(|c| !c.is_whitespace()).collect();
+        let b64: String = after[..end]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
         if let Ok(der) = wbox_codec::base64::decode(&b64) {
             out.push(der);
         }
@@ -29,9 +32,7 @@ mod tests {
 
     #[test]
     fn extracts_multiple_certificates() {
-        let pem = format!(
-            "# 注释\n{BEGIN}\nAAEC\n{END}\n杂项\n{BEGIN}\nAwQF\n{END}\n"
-        );
+        let pem = format!("# 注释\n{BEGIN}\nAAEC\n{END}\n杂项\n{BEGIN}\nAwQF\n{END}\n");
         let got = certificates(&pem);
         assert_eq!(got, vec![vec![0, 1, 2], vec![3, 4, 5]]);
     }

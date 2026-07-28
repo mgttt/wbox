@@ -29,9 +29,7 @@ fn parse<'a>(args: &'a [String]) -> Result<Options<'a>> {
         }),
         // 不支持"省略镜像名自动生成"：docker 会给个随机 ID，而那对
         // wbox 的按名寻址缓存布局没有意义，还会留下一堆没人认领的镜像。
-        _ => Err(WboxError::args(
-            "commit 需要两个参数：<容器> <镜像[:标签]>",
-        )),
+        _ => Err(WboxError::args("commit 需要两个参数：<容器> <镜像[:标签]>")),
     }
 }
 

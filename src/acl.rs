@@ -16,11 +16,10 @@
 
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{GetLastError, HLOCAL, LocalFree};
+use windows_sys::Win32::Foundation::{GetLastError, LocalFree, HLOCAL};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
-    EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, TRUSTEE_IS_SID,
-    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
@@ -28,8 +27,8 @@ use windows_sys::Win32::Security::{
 };
 
 use crate::error::{ErrKind, KindExt, Result, WboxError};
-use crate::token::to_wide;
 use crate::fault::Context;
+use crate::token::to_wide;
 
 /// "ALL APPLICATION PACKAGES" 知名 SID（S-1-15-2-1）。
 const ALL_APP_PACKAGES_SID: &str = "S-1-15-2-1";
@@ -133,7 +132,11 @@ fn grant_ace(path: &Path, is_dir: bool, sid_text: &str, access: u32) -> Result<(
         )
     };
     if ret != 0 {
-        return Err(WboxError::registry(format!("GetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret)));
+        return Err(WboxError::registry(format!(
+            "GetNamedSecurityInfoW('{}') 失败，错误码={}",
+            path.display(),
+            ret
+        )));
     }
     let _sd_guard = LocalGuard(sd as HLOCAL);
 
@@ -162,7 +165,11 @@ fn grant_ace(path: &Path, is_dir: bool, sid_text: &str, access: u32) -> Result<(
     // new_dacl 为有效输出指针，成功后由 LocalFree 释放。
     let ret = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
     if ret != 0 {
-        return Err(WboxError::registry(format!("SetEntriesInAclW('{}') 失败，错误码={}", path.display(), ret)));
+        return Err(WboxError::registry(format!(
+            "SetEntriesInAclW('{}') 失败，错误码={}",
+            path.display(),
+            ret
+        )));
     }
     let _acl_guard = LocalGuard(new_dacl as HLOCAL);
 
@@ -179,7 +186,11 @@ fn grant_ace(path: &Path, is_dir: bool, sid_text: &str, access: u32) -> Result<(
         )
     };
     if ret != 0 {
-        return Err(WboxError::registry(format!("SetNamedSecurityInfoW('{}') 失败，错误码={}", path.display(), ret)));
+        return Err(WboxError::registry(format!(
+            "SetNamedSecurityInfoW('{}') 失败，错误码={}",
+            path.display(),
+            ret
+        )));
     }
     Ok(())
 }

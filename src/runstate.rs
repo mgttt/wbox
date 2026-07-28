@@ -453,9 +453,8 @@ pub fn create_pending(
 /// 更容易被同机别的用户读到。
 fn write_run_config(path: &Path, args: &[String]) -> Result<()> {
     let config = wbox_codec::json!({ "schema": 1, "run_args": args });
-    std::fs::write(path, config.to_string()).map_err(|e| {
-        WboxError::args(format!("写 {} 失败：{}", path.display(), e))
-    })?;
+    std::fs::write(path, config.to_string())
+        .map_err(|e| WboxError::args(format!("写 {} 失败：{}", path.display(), e)))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -512,7 +511,11 @@ fn restore_created_dir(dir: &Path) {
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if name == CREATE_CONFIG || name == RUN_ARGS || name == "meta.json" || name == CREATED_MARKER {
+        if name == CREATE_CONFIG
+            || name == RUN_ARGS
+            || name == "meta.json"
+            || name == CREATED_MARKER
+        {
             continue;
         }
         let path = entry.path();
@@ -752,9 +755,8 @@ pub fn register_with_context(
     let _operation_lock = lock_operations(root)?;
     if dir.exists() && keep_logs {
         // detach 的子进程只允许凭父进程写下的同一令牌接管。
-        let expected = reservation_token.ok_or_else(|| {
-            WboxError::args(format!("容器 '{}' 缺少 detached 预留令牌", name))
-        })?;
+        let expected = reservation_token
+            .ok_or_else(|| WboxError::args(format!("容器 '{}' 缺少 detached 预留令牌", name)))?;
         let reservation = dir.join(DETACHED_RESERVATION);
         let actual = std::fs::read_to_string(&reservation).map_err(|_| {
             WboxError::args(format!("容器 '{}' 的 detached 预留不存在或不可读", name))
@@ -940,9 +942,8 @@ pub fn lock_existing(name: &str) -> Result<LockedEntry> {
     if !dir.exists() {
         return Err(missing_record(name));
     }
-    let entry = read_meta(&dir).ok_or_else(|| {
-        WboxError::args(format!("容器 '{}' 的 meta.json 不可读", name))
-    })?;
+    let entry = read_meta(&dir)
+        .ok_or_else(|| WboxError::args(format!("容器 '{}' 的 meta.json 不可读", name)))?;
     Ok(LockedEntry {
         dir,
         entry,
@@ -1190,17 +1191,15 @@ mod tests {
         assert_eq!(liveness(&dir), Liveness::Running);
         assert!(register("reserved", &["x".into()], "(native)").is_err());
         assert!(remove("reserved").is_err());
-        assert!(
-            register_with_context(
-                "reserved",
-                &["x".into()],
-                "(native)",
-                true,
-                None,
-                Some("wrong-token"),
-            )
-            .is_err()
-        );
+        assert!(register_with_context(
+            "reserved",
+            &["x".into()],
+            "(native)",
+            true,
+            None,
+            Some("wrong-token"),
+        )
+        .is_err());
 
         let reg = register_with_context(
             "reserved",
@@ -1244,14 +1243,7 @@ mod tests {
             "--".to_string(),
             "echo".to_string(),
         ];
-        create_pending(
-            "saved",
-            &args,
-            &["echo".to_string()],
-            "(native)",
-            None,
-        )
-        .unwrap();
+        create_pending("saved", &args, &["echo".to_string()], "(native)", None).unwrap();
         let dir = dir_for("saved").unwrap();
         assert_eq!(liveness(&dir), Liveness::Created);
         assert_eq!(read_create_args(&dir).unwrap(), args);
@@ -1376,8 +1368,7 @@ mod tests {
 
     #[test]
     fn old_meta_without_exec_context_remains_readable() {
-        let old =
-            r#"{"name":"old","pid":1,"created_unix":1,"cmd":["x"],"target":"(native)"}"#;
+        let old = r#"{"name":"old","pid":1,"created_unix":1,"cmd":["x"],"target":"(native)"}"#;
         let entry = Entry::from_json(old).unwrap();
         assert!(!entry.stopping);
         assert!(entry.exec_context.is_none());
@@ -1494,7 +1485,10 @@ mod cap_tests {
         // 未超限的不动
         std::fs::write(d.join(LOG_STDERR), b"small").unwrap();
         enforce_log_cap(&d, LOG_STDERR);
-        assert_eq!(std::fs::read_to_string(d.join(LOG_STDERR)).unwrap(), "small");
+        assert_eq!(
+            std::fs::read_to_string(d.join(LOG_STDERR)).unwrap(),
+            "small"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

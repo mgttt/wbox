@@ -30,16 +30,16 @@ pub mod wine;
 // 使命令校验/环境构造可在 Linux 沙箱单测。
 mod native;
 
-use emu::ensure_resolv_conf;
-pub use emu::EmuBackend;
-#[cfg(windows)]
-pub(crate) use emu::create_private_rootfs;
 #[cfg(windows)]
 pub(crate) use emu::copy_rootfs_tree;
-pub use linux::{LinuxMode, LinuxNativeBackend};
+#[cfg(windows)]
+pub(crate) use emu::create_private_rootfs;
+use emu::ensure_resolv_conf;
+pub use emu::EmuBackend;
 /// rootless overlay 是否可用（build 用它决定能否硬链接铺基础层，PRD L5b）。
 #[cfg(target_os = "linux")]
 pub(crate) use linux::ns::rootless_overlay_available;
+pub use linux::{LinuxMode, LinuxNativeBackend};
 pub use native::NativeBackend;
 
 use crate::error::Result;
@@ -548,20 +548,28 @@ mod tests {
         assert!(!env.iter().any(|(k, _)| k == "WBOX_VA_BITS"));
         assert!(env.iter().any(|(k, v)| k == "LANG" && v == "C"));
         // SystemRoot 兜底存在（白名单路径）
-        assert!(env.iter().any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
+        assert!(env
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("SystemRoot")));
     }
 
     // ---- Limits → Win32 数值换算 ----
 
     #[test]
     fn memory_limit_zero_means_unlimited() {
-        let l = Limits { memory_mb: 0, ..Default::default() };
+        let l = Limits {
+            memory_mb: 0,
+            ..Default::default()
+        };
         assert_eq!(l.memory_limit_bytes().unwrap(), None);
     }
 
     #[test]
     fn memory_limit_converts_mb_to_bytes() {
-        let l = Limits { memory_mb: 256, ..Default::default() };
+        let l = Limits {
+            memory_mb: 256,
+            ..Default::default()
+        };
         assert_eq!(l.memory_limit_bytes().unwrap(), Some(256 * 1024 * 1024));
     }
 
@@ -569,7 +577,10 @@ mod tests {
     fn memory_limit_overflow_is_error_not_wraparound() {
         // 静默回绕会把"极大上限"变成一个很小的值 —— 反而收紧限制且无从察觉，
         // 故必须报错。错误须归类为 Job 错误（退出码 3）。
-        let l = Limits { memory_mb: u64::MAX, ..Default::default() };
+        let l = Limits {
+            memory_mb: u64::MAX,
+            ..Default::default()
+        };
         let err = l.memory_limit_bytes().unwrap_err();
         assert_eq!(err.exit_code(), 3, "{}", err);
         assert!(format!("{}", err).contains("溢出"), "{}", err);
@@ -577,11 +588,39 @@ mod tests {
 
     #[test]
     fn cpu_rate_is_percent_times_100() {
-        assert_eq!(Limits { cpu_pct: 0, ..Default::default() }.cpu_rate(), None);
-        assert_eq!(Limits { cpu_pct: 1, ..Default::default() }.cpu_rate(), Some(100));
-        assert_eq!(Limits { cpu_pct: 50, ..Default::default() }.cpu_rate(), Some(5000));
+        assert_eq!(
+            Limits {
+                cpu_pct: 0,
+                ..Default::default()
+            }
+            .cpu_rate(),
+            None
+        );
+        assert_eq!(
+            Limits {
+                cpu_pct: 1,
+                ..Default::default()
+            }
+            .cpu_rate(),
+            Some(100)
+        );
+        assert_eq!(
+            Limits {
+                cpu_pct: 50,
+                ..Default::default()
+            }
+            .cpu_rate(),
+            Some(5000)
+        );
         // CLI 已把上限卡在 100（parse 时校验），此处确认边界不越出 Win32 的 10000
-        assert_eq!(Limits { cpu_pct: 100, ..Default::default() }.cpu_rate(), Some(10000));
+        assert_eq!(
+            Limits {
+                cpu_pct: 100,
+                ..Default::default()
+            }
+            .cpu_rate(),
+            Some(10000)
+        );
     }
 
     // ---- 容器名校验（AppContainer profile 名 1..=64 字符）----
@@ -605,15 +644,26 @@ mod tests {
         // 错误须归类为参数错误（退出码 1），而不是 profile 错误（退出码 2）：
         // 这是用户输入问题，不是 AppContainer 子系统问题。
         assert_eq!(err.exit_code(), 1, "{}", err);
-        assert!(format!("{}", err).contains("65"), "错误应报出实际长度：{}", err);
+        assert!(
+            format!("{}", err).contains("65"),
+            "错误应报出实际长度：{}",
+            err
+        );
     }
 
     #[test]
     fn container_name_counts_chars_not_bytes() {
         // 64 个中文字符 = 192 字节；按字节判会误拒。Win32 的限制是字符数。
         let cjk = "容".repeat(MAX_CONTAINER_NAME_CHARS);
-        assert_eq!(cjk.len(), MAX_CONTAINER_NAME_CHARS * 3, "前提：每字符 3 字节");
-        assert!(validate_container_name(&cjk).is_ok(), "64 个非 ASCII 字符应接受");
+        assert_eq!(
+            cjk.len(),
+            MAX_CONTAINER_NAME_CHARS * 3,
+            "前提：每字符 3 字节"
+        );
+        assert!(
+            validate_container_name(&cjk).is_ok(),
+            "64 个非 ASCII 字符应接受"
+        );
         let over = "容".repeat(MAX_CONTAINER_NAME_CHARS + 1);
         assert!(validate_container_name(&over).is_err(), "65 个字符应拒绝");
     }
@@ -673,7 +723,9 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
         Some((body, "rw")) => (body, Some("rw")),
         _ => (spec, None),
     };
-    let (host, guest) = body.rsplit_once(':').ok_or_else(|| bad("缺少容器路径分隔符"))?;
+    let (host, guest) = body
+        .rsplit_once(':')
+        .ok_or_else(|| bad("缺少容器路径分隔符"))?;
     let read_only = match mode {
         None | Some("rw") => false,
         Some("ro") => true,
@@ -689,6 +741,21 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     // 这条不是防手滑，是防"一条命令就让沙箱失效"。
     if guest == "/" {
         return Err(bad("不允许挂载到容器根 '/'——那会让隔离失效"));
+    }
+    // 安全断言二：容器路径里不许有 `..`。
+    //
+    // 落地时目标是 `rootfs.join(guest.trim_start_matches('/'))`，
+    // 所以 `-v /tmp/x:/../../etc` 会 join 成 `<rootfs>/../../etc`——
+    // **指到 rootfs 外面的宿主目录**，而且随后的 `create_dir_all` 会真的
+    // 在宿主上把它建出来，bind mount 也照挂。只查前导 '/' 挡不住这个。
+    //
+    // 这里选择**直接拒绝**而不是规范化后接受：`-v` 的目标是用户显式写的，
+    // 带 `..` 一定是笔误或攻击，静默改写成别的路径只会让人更迷惑。
+    if std::path::Path::new(guest)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(bad("容器路径不允许包含 '..'——它会让挂载点落到容器根之外"));
     }
     // 不含路径分隔符 = **命名卷**（F9.35），与 docker 同一条规则。
     // 这条规则要简单且可预测，它决定了"数据写到哪"；任何"先当路径试试、
@@ -708,13 +775,15 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     }
     let host_path = PathBuf::from(host);
     if !host_path.exists() {
-        return Err(bad("宿主路径不存在（wbox 不会替你创建：拼错的路径会变成一个\
+        return Err(bad(
+            "宿主路径不存在（wbox 不会替你创建：拼错的路径会变成一个\
                         空目录，等你发现数据不见了才知道挂错了）；\
-                        若本意是命名卷，写成不含 '/' 的名字即可（如 -v mydata:/data）"));
+                        若本意是命名卷，写成不含 '/' 的名字即可（如 -v mydata:/data）",
+        ));
     }
-    let host_path = host_path.canonicalize().map_err(|e| {
-        WboxError::args(format!("-v '{}'：解析宿主路径失败：{}", spec, e))
-    })?;
+    let host_path = host_path
+        .canonicalize()
+        .map_err(|e| WboxError::args(format!("-v '{}'：解析宿主路径失败：{}", spec, e)))?;
     Ok(VolumeMount {
         host: host_path,
         guest: guest.to_string(),
@@ -745,14 +814,51 @@ mod volume_tests {
         assert!(format!("{}", e).contains("隔离失效"), "{}", e);
     }
 
+    /// **容器路径里的 `..` 会让挂载点落到 rootfs 之外。**
+    ///
+    /// 落地时是 `rootfs.join(guest.trim_start_matches('/'))`，所以
+    /// `/../../etc` 会 join 成 `<rootfs>/../../etc`——指到宿主目录，
+    /// 而且随后的 `create_dir_all` 会真的在宿主上建出来。只查前导 '/'
+    /// 挡不住它。
+    #[test]
+    fn rejects_parent_dir_traversal_in_container_path() {
+        let t = std::env::temp_dir();
+        let t = t.to_str().unwrap();
+        for guest in ["/../escape", "/a/../../escape", "/data/..", "/../"] {
+            let e = match parse_volume(&format!("{t}:{guest}")) {
+                Err(e) => e,
+                Ok(v) => panic!("'{guest}' 应被拒绝，却解析成了 {:?}", v.guest),
+            };
+            assert!(
+                format!("{e}").contains(".."),
+                "{guest} 的报错没点明 '..'：{e}"
+            );
+        }
+        // 正常路径仍要通过——只测"挡得住"会让恒失败的实现也变绿。
+        assert_eq!(parse_volume(&format!("{t}:/data")).unwrap().guest, "/data");
+        assert_eq!(
+            parse_volume(&format!("{t}:/a/b/c")).unwrap().guest,
+            "/a/b/c"
+        );
+    }
+
     #[test]
     fn rejects_malformed_specs() {
         let t = std::env::temp_dir();
         let t = t.to_str().unwrap();
         assert!(parse_volume("nocolon").is_err(), "缺冒号");
-        assert!(parse_volume(&format!("{}:relative", t)).is_err(), "容器路径须绝对");
-        assert!(parse_volume(&format!("{}:/d:bogus", t)).is_err(), "未知模式");
-        assert!(parse_volume(&format!("{}:/d:ro:extra", t)).is_err(), "段数过多");
+        assert!(
+            parse_volume(&format!("{}:relative", t)).is_err(),
+            "容器路径须绝对"
+        );
+        assert!(
+            parse_volume(&format!("{}:/d:bogus", t)).is_err(),
+            "未知模式"
+        );
+        assert!(
+            parse_volume(&format!("{}:/d:ro:extra", t)).is_err(),
+            "段数过多"
+        );
         assert!(parse_volume(":/d").is_err(), "空宿主路径");
     }
 
@@ -816,9 +922,8 @@ pub struct UserSpec {
 /// 正确的名字解析，不如明说只收数字——docker 在无法解析名字时也是直接报错。
 pub fn parse_user(spec: &str) -> Result<UserSpec> {
     use crate::error::WboxError;
-    let bad = |why: &str| {
-        WboxError::args(format!("--user '{}' 无效：{}（用法 UID[:GID]）", spec, why))
-    };
+    let bad =
+        |why: &str| WboxError::args(format!("--user '{}' 无效：{}（用法 UID[:GID]）", spec, why));
     let num = |s: &str| -> Result<u32> {
         if s.is_empty() {
             return Err(bad("缺少数值"));
@@ -904,7 +1009,13 @@ mod network_container_tests {
 
     #[test]
     fn no_peer_is_always_fine() {
-        assert!(reject_network_container_conflicts(None, true, &[pm()], Some(UserSpec { uid: 1, gid: 1 })).is_ok());
+        assert!(reject_network_container_conflicts(
+            None,
+            true,
+            &[pm()],
+            Some(UserSpec { uid: 1, gid: 1 })
+        )
+        .is_ok());
     }
 
     /// 三种冲突各自要报错并说清**为什么**——静默让一方胜出会把另一方变成谎言。
@@ -926,7 +1037,10 @@ mod network_container_tests {
         let m = format!(
             "{}",
             reject_network_container_conflicts(
-                Some("a"), false, &[], Some(UserSpec { uid: 5, gid: 5 })
+                Some("a"),
+                false,
+                &[],
+                Some(UserSpec { uid: 5, gid: 5 })
             )
             .unwrap_err()
         );
@@ -952,8 +1066,20 @@ mod user_tests {
 
     #[test]
     fn parses_uid_and_optional_gid() {
-        assert_eq!(parse_user("1000").unwrap(), UserSpec { uid: 1000, gid: 1000 });
-        assert_eq!(parse_user("1000:2000").unwrap(), UserSpec { uid: 1000, gid: 2000 });
+        assert_eq!(
+            parse_user("1000").unwrap(),
+            UserSpec {
+                uid: 1000,
+                gid: 1000
+            }
+        );
+        assert_eq!(
+            parse_user("1000:2000").unwrap(),
+            UserSpec {
+                uid: 1000,
+                gid: 2000
+            }
+        );
         assert_eq!(parse_user("0").unwrap(), UserSpec { uid: 0, gid: 0 });
     }
 

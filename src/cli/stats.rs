@@ -197,14 +197,19 @@ mod linux {
                 continue;
             };
             // comm 字段可能含空格和括号，必须从**最后**一个 ')' 之后开始切
-            let Some(close) = stat.rfind(')') else { continue };
+            let Some(close) = stat.rfind(')') else {
+                continue;
+            };
             let f: Vec<&str> = stat[close + 2..].split_whitespace().collect();
             // 跳过 state 后，utime/stime 是第 11、12 个（0 基）
             let utime = f.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             let stime = f.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
             cpu_ns += (utime + stime) * tick;
             if let Ok(statm) = std::fs::read_to_string(format!("/proc/{}/statm", pid)) {
-                if let Some(res) = statm.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok())
+                if let Some(res) = statm
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<u64>().ok())
                 {
                     mem += res * page;
                 }
@@ -292,7 +297,10 @@ pub fn cmd_stats(args: &[String]) -> Result<u32> {
         std::thread::sleep(WINDOW);
         let elapsed = t0.elapsed();
 
-        println!("{:<20} {:>8} {:>12} {:>6}  来源", "容器", "CPU %", "内存", "进程");
+        println!(
+            "{:<20} {:>8} {:>12} {:>6}  来源",
+            "容器", "CPU %", "内存", "进程"
+        );
         let mut proc_used = false;
         for (name, root, before, _) in rows {
             let (after, src) = linux::sample(root);

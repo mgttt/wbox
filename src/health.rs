@@ -92,9 +92,9 @@ impl HealthSpec {
 
 /// 把秒数取值解析成 `Duration`，取值必须为正整数秒。
 pub fn parse_secs(flag: &str, v: &str) -> Result<Duration> {
-    let n = v.parse::<u64>().map_err(|_| {
-        WboxError::args(format!("{} 取值 '{}' 不是合法秒数", flag, v))
-    })?;
+    let n = v
+        .parse::<u64>()
+        .map_err(|_| WboxError::args(format!("{} 取值 '{}' 不是合法秒数", flag, v)))?;
     Ok(Duration::from_secs(n))
 }
 

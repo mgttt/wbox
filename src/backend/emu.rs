@@ -62,10 +62,10 @@ fn locate_linux_exe() -> Result<(PathBuf, &'static str)> {
 /// 统一的"后端未就绪"错误（退出码 4 = 进程创建类，语义最接近）。
 fn not_ready_error(detail: String) -> WboxError {
     WboxError::spawn(format!(
-            "Linux 后端不可用：{}。请把 wbox-linux.exe 与 wbox.exe 放在一起\
+        "Linux 后端不可用：{}。请把 wbox-linux.exe 与 wbox.exe 放在一起\
              （portable 分发形态就是这两个文件），或用 WBOX_LINUX 指向它",
-            detail
-        ))
+        detail
+    ))
 }
 
 /// 公共 DNS（阿里公共 DNS）。rootfs 内缺失 /etc/resolv.conf 时注入，
@@ -108,13 +108,8 @@ pub(super) fn ensure_resolv_conf(rootfs: &Path) -> Result<bool> {
             e
         ))
     })?;
-    std::fs::write(&resolv, format!("nameserver {}\n", DEFAULT_DNS)).map_err(|e| {
-        WboxError::registry(format!(
-            "写入 '{}' 失败：{}",
-            resolv.display(),
-            e
-        ))
-    })?;
+    std::fs::write(&resolv, format!("nameserver {}\n", DEFAULT_DNS))
+        .map_err(|e| WboxError::registry(format!("写入 '{}' 失败：{}", resolv.display(), e)))?;
     Ok(true)
 }
 
@@ -160,15 +155,19 @@ fn copy_rootfs_tree_inner(
             e
         ))
     })?;
-    let entries = std::fs::read_dir(source).map_err(|e| {
-        WboxError::spawn(format!("读取 rootfs '{}' 失败：{}", source.display(), e))
-    })?;
+    let entries = std::fs::read_dir(source)
+        .map_err(|e| WboxError::spawn(format!("读取 rootfs '{}' 失败：{}", source.display(), e)))?;
     for entry in entries {
-        let entry = entry.map_err(|e| WboxError::spawn(format!("读取 rootfs 目录项失败：{}", e)))?;
+        let entry =
+            entry.map_err(|e| WboxError::spawn(format!("读取 rootfs 目录项失败：{}", e)))?;
         let src = entry.path();
         let dst = destination.join(entry.file_name());
         let ty = entry.file_type().map_err(|e| {
-            WboxError::spawn(format!("读取 rootfs 项 '{}' 类型失败：{}", src.display(), e))
+            WboxError::spawn(format!(
+                "读取 rootfs 项 '{}' 类型失败：{}",
+                src.display(),
+                e
+            ))
         })?;
         if ty.is_dir() {
             copy_rootfs_tree_inner(&src, &dst, source_root, destination_root)?;
@@ -192,7 +191,11 @@ fn copy_rootfs_file(source: &Path, destination: &Path) -> Result<()> {
     // 修改 ACE 就可能泄漏进最终镜像缓存。显式新建目标并只复制内容，让目标继承
     // destination 父目录的干净 DACL。
     let mut input = std::fs::File::open(source).map_err(|e| {
-        WboxError::spawn(format!("打开 rootfs 文件 '{}' 失败：{}", source.display(), e))
+        WboxError::spawn(format!(
+            "打开 rootfs 文件 '{}' 失败：{}",
+            source.display(),
+            e
+        ))
     })?;
     let mut output = std::fs::File::create(destination).map_err(|e| {
         WboxError::spawn(format!(
@@ -235,7 +238,11 @@ fn copy_rootfs_symlink(
     use std::os::windows::fs::{symlink_dir, symlink_file};
 
     let target = std::fs::read_link(source).map_err(|e| {
-        WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
+        WboxError::spawn(format!(
+            "读取 rootfs symlink '{}' 失败：{}",
+            source.display(),
+            e
+        ))
     })?;
     let has_windows_prefix = target
         .components()
@@ -328,7 +335,11 @@ fn copy_rootfs_symlink(
     _destination_root: &Path,
 ) -> Result<()> {
     let target = std::fs::read_link(source).map_err(|e| {
-        WboxError::spawn(format!("读取 rootfs symlink '{}' 失败：{}", source.display(), e))
+        WboxError::spawn(format!(
+            "读取 rootfs symlink '{}' 失败：{}",
+            source.display(),
+            e
+        ))
     })?;
     std::os::unix::fs::symlink(&target, destination).map_err(|e| {
         WboxError::spawn(format!(
@@ -381,8 +392,8 @@ impl Backend for EmuBackend {
         );
         let forced = [
             (
-            BLINK_PREFIX_ENV.to_string(),
-            rootfs.to_string_lossy().into_owned(),
+                BLINK_PREFIX_ENV.to_string(),
+                rootfs.to_string_lossy().into_owned(),
             ),
             (
                 wbox_linux::env_payload::ENV_NAME.to_string(),
@@ -400,7 +411,10 @@ impl Backend for EmuBackend {
         );
         let cmd = build_emu_command(&exe, &spec.cmd);
         if spec.verbose {
-            super::verbose_kv("guest 命令行（Entrypoint/Cmd 合并后）", format!("{:?}", spec.cmd));
+            super::verbose_kv(
+                "guest 命令行（Entrypoint/Cmd 合并后）",
+                format!("{:?}", spec.cmd),
+            );
             super::verbose_kv("最终命令行", format!("{:?}", cmd));
             for (k, v) in &env {
                 if k == BLINK_PREFIX_ENV {
@@ -432,7 +446,9 @@ impl Backend for EmuBackend {
 
     #[cfg(not(windows))]
     fn spawn(&self, _spec: &RunSpec, _prepared: &Prepared) -> Result<u32> {
-        Err(WboxError::spawn("Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）"))
+        Err(WboxError::spawn(
+            "Linux 后端仅在 Windows 上可用（外层隔离为 AppContainer/Job Object）",
+        ))
     }
 }
 
@@ -546,9 +562,7 @@ mod tests {
         let guest_env = guest_env(&p);
         for key in ["SystemRoot", "COMSPEC", "USERPROFILE"] {
             assert!(
-                !guest_env
-                    .iter()
-                    .any(|(k, _)| k.eq_ignore_ascii_case(key)),
+                !guest_env.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)),
                 "{key} must not leak into a Linux guest"
             );
         }
@@ -564,11 +578,8 @@ mod tests {
 
     /// 建一个临时 rootfs（含唯一目录名，避免并发冲突）。
     fn temp_rootfs(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "wbox-test-rootfs-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let d =
+            std::env::temp_dir().join(format!("wbox-test-rootfs-{}-{}", std::process::id(), tag));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

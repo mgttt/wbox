@@ -76,7 +76,8 @@ pub fn flatten_rootfs(rootfs: &Path) -> Result<FlatLayer> {
     }
     let diff_id = sha256_of(&tar_bytes);
 
-    let mut enc = wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
+    let mut enc =
+        wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
     enc.write_all(&tar_bytes)
         .and_then(|_| enc.try_finish())
         .context("压缩层失败")
@@ -106,15 +107,21 @@ pub fn diff_rootfs(base: &Path, built: &Path) -> Result<FlatLayer> {
         let mut b = wbox_codec::tar::Builder::new(&mut tar_bytes);
         b.follow_symlinks(false);
         diff_dir(&mut b, base, built, Path::new(""))?;
-        b.finish().context("打包增量层失败").ctx(ErrKind::Registry)?;
+        b.finish()
+            .context("打包增量层失败")
+            .ctx(ErrKind::Registry)?;
     }
     let diff_id = sha256_of(&tar_bytes);
-    let mut enc = wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
+    let mut enc =
+        wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Default);
     enc.write_all(&tar_bytes)
         .and_then(|_| enc.try_finish())
         .context("压缩增量层失败")
         .ctx(ErrKind::Registry)?;
-    let gzipped = enc.finish().context("压缩增量层失败").ctx(ErrKind::Registry)?;
+    let gzipped = enc
+        .finish()
+        .context("压缩增量层失败")
+        .ctx(ErrKind::Registry)?;
     let digest = sha256_of(&gzipped);
     Ok(FlatLayer {
         gzipped,
@@ -140,7 +147,10 @@ fn diff_dir<W: Write>(
     if built_dir.is_dir() {
         let rd = std::fs::read_dir(&built_dir).map_err(|e| fail("读取目录", &built_dir, e))?;
         for e in rd {
-            built_names.push(e.map_err(|e| fail("枚举目录项", &built_dir, e))?.file_name());
+            built_names.push(
+                e.map_err(|e| fail("枚举目录项", &built_dir, e))?
+                    .file_name(),
+            );
         }
     }
     built_names.sort();
@@ -194,10 +204,7 @@ fn diff_dir<W: Write>(
 /// 两个路径是否"内容相同"。**按内容比而不是 mtime**：构建过程会刷新 mtime，
 /// 看 mtime 会把整棵树都判成改过，增量层就退化成全量。
 fn same_file(a: &Path, b: &Path) -> bool {
-    let (Ok(ma), Ok(mb)) = (
-        std::fs::symlink_metadata(a),
-        std::fs::symlink_metadata(b),
-    ) else {
+    let (Ok(ma), Ok(mb)) = (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) else {
         return false;
     };
     if ma.file_type() != mb.file_type() {
@@ -213,15 +220,17 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// 递归把目录内容加进 tar，路径相对 `base`。
-pub(crate) fn append_dir<W: Write>(b: &mut wbox_codec::tar::Builder<W>, base: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn append_dir<W: Write>(
+    b: &mut wbox_codec::tar::Builder<W>,
+    base: &Path,
+    dir: &Path,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("读取目录 '{}' 失败", dir.display()))
         .ctx(ErrKind::Registry)?;
     // 排序后再打包：同样的 rootfs 必须得到同样的 digest，否则"内容没变却
     // 每次都重传一层"，blob_exists 的省事也就白费了。read_dir 顺序不保证。
-    let mut paths: Vec<_> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut paths: Vec<_> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
     for path in paths {
         let rel = path
@@ -381,7 +390,11 @@ pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> 
             if verbose {
                 println!(
                     "wbox: {} {}（{} 字节）",
-                    if sent { "上传" } else { "跳过（registry 已有）" },
+                    if sent {
+                        "上传"
+                    } else {
+                        "跳过（registry 已有）"
+                    },
                     digest,
                     bytes.len()
                 );
@@ -389,13 +402,19 @@ pub fn push(image_ref: &str, registry_override: Option<&str>, verbose: bool) -> 
         }
         if skipped > 0 {
             // 这句是分层复用的收益体现，值得默认打印
-            println!("wbox: {} 层已在 registry 上，跳过上传；实传 {} 层", skipped, uploaded);
+            println!(
+                "wbox: {} 层已在 registry 上，跳过上传；实传 {} 层",
+                skipped, uploaded
+            );
         }
         let reported =
             client.put_manifest(&iref.repo, &iref.reference, &v.media_type, &v.manifest)?;
         let local = sha256_of(&v.manifest);
         println!("wbox: 完成 —— {}", iref.qualified_ref());
-        println!("wbox: manifest digest: {}", reported.clone().unwrap_or_else(|| local.clone()));
+        println!(
+            "wbox: manifest digest: {}",
+            reported.clone().unwrap_or_else(|| local.clone())
+        );
         // registry 回报的 digest 若与本地算的不同，说明它改写了 manifest，
         // "原样"这个承诺就没兑现——必须说出来，不能让用户以为分层还在。
         if let Some(r) = reported {
@@ -545,7 +564,10 @@ mod tests {
 
         // config 被动过：digest 对不上，必须退回而不是推个自相矛盾的镜像
         std::fs::write(d.join("config.json"), br#"{"architecture":"arm64"}"#).unwrap();
-        assert!(try_verbatim(&d).is_none(), "config digest 不符时不该原样回推");
+        assert!(
+            try_verbatim(&d).is_none(),
+            "config digest 不符时不该原样回推"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }

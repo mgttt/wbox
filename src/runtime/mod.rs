@@ -79,13 +79,22 @@ mod tests {
 
     fn exit_elf(code: u32) -> Vec<u8> {
         let program = [
-            0x48, 0xc7, 0xc0, 60, 0, 0, 0, // mov rax, SYS_exit
-            0x48, 0xc7, 0xc7, // mov rdi, code
+            0x48,
+            0xc7,
+            0xc0,
+            60,
+            0,
+            0,
+            0, // mov rax, SYS_exit
+            0x48,
+            0xc7,
+            0xc7, // mov rdi, code
             code as u8,
             (code >> 8) as u8,
             (code >> 16) as u8,
             (code >> 24) as u8,
-            0x0f, 0x05, // syscall
+            0x0f,
+            0x05, // syscall
         ];
         let mut elf = vec![0u8; 0x100 + program.len()];
         elf[0..16].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);

@@ -73,11 +73,7 @@ pub fn write_request(
 }
 
 /// 读入状态行 + 头部 + 响应体。
-pub fn read_response(
-    stream: impl Read,
-    method: &str,
-    max_body: u64,
-) -> io::Result<Response> {
+pub fn read_response(stream: impl Read, method: &str, max_body: u64) -> io::Result<Response> {
     let mut r = BufReader::new(stream);
 
     // 1xx 是中间响应（如 100 Continue），要跳过后继续读真正的那一个。
@@ -270,7 +266,11 @@ mod tests {
         let r = resp("HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n", "HEAD").unwrap();
         assert_eq!(r.status, 200);
         assert!(r.body.is_empty());
-        let r = resp("HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n", "GET").unwrap();
+        let r = resp(
+            "HTTP/1.1 204 No Content\r\nContent-Length: 5\r\n\r\n",
+            "GET",
+        )
+        .unwrap();
         assert!(r.body.is_empty());
     }
 
@@ -337,6 +337,8 @@ mod tests {
         // 没有体的 PUT 也要写 Content-Length: 0，否则对端会一直等着读。
         let mut out = Vec::new();
         write_request(&mut out, "PUT", "/", "h", &[], None).unwrap();
-        assert!(String::from_utf8(out).unwrap().contains("Content-Length: 0"));
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("Content-Length: 0"));
     }
 }

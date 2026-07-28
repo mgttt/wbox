@@ -16,6 +16,12 @@
 //! 一张公开的信任列表换成自己"实现"一份没有意义。
 
 /// 受信任的根证书（DER 编码）。
+///
+/// **不让 rustfmt 碰这张表。** 它是生成数据不是手写代码：每张证书一条注释
+/// 加一行字节串，一行一张，人扫一眼就能对上是哪个 CA。rustfmt 会把每个
+/// 字节串按行宽拆开重排，一个文件产生上万行改动，git blame 与 diff 全废，
+/// 而可读性只会更差。
+#[rustfmt::skip]
 pub static TRUSTED_ROOTS: &[&[u8]] = &[
     // DigiCert TLS ECC P384 Root G5
     &[
@@ -4489,8 +4495,7 @@ mod tests {
         let mut rsa = 0;
         let mut ec = 0;
         for (i, der) in TRUSTED_ROOTS.iter().enumerate() {
-            let c = Certificate::parse(der)
-                .unwrap_or_else(|e| panic!("根证书 #{i} 解析失败：{e}"));
+            let c = Certificate::parse(der).unwrap_or_else(|e| panic!("根证书 #{i} 解析失败：{e}"));
             assert!(c.is_ca, "根证书 #{i} 应当带 CA 标志");
             assert!(
                 !c.has_unsupported_critical_extension(),

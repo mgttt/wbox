@@ -271,9 +271,7 @@ pub fn pull_image(
         // blob，push 才能原样回推、digest 不变。写在解包**之前**：解包失败时
         // 整个 staging 会被丢弃，不存在半份 blob 留在正式缓存里的可能。
         std::fs::create_dir_all(staging.path.join(super::BLOBS_DIR))
-            .and_then(|_| {
-                std::fs::write(super::blob_path(&staging.path, digest), &blob)
-            })
+            .and_then(|_| std::fs::write(super::blob_path(&staging.path, digest), &blob))
             .context(format!("保存原始层 {} 失败", digest))
             .ctx(ErrKind::Registry)?;
         unpack_layer_with_state(&blob, &rootfs, media_type, &mut symlinks)
@@ -402,7 +400,10 @@ fn is_zstd(data: &[u8]) -> bool {
 
 /// 按 layer mediaType（辅以小端 magic 嗅探）把 blob 解成 tar 字节。
 /// 显式拒绝不支持的压缩格式（zstd 等），而不是误当 tar 解出垃圾。
-fn decompress_layer(blob: &[u8], media_type: &str) -> crate::fault::Result<Vec<u8>> {
+fn decompress_layer<'a>(
+    blob: &'a [u8],
+    media_type: &str,
+) -> crate::fault::Result<std::borrow::Cow<'a, [u8]>> {
     let mt = media_type.to_ascii_lowercase();
     if mt.contains("zstd") || (mt.is_empty() && is_zstd(blob)) {
         crate::bail!(
@@ -414,11 +415,14 @@ fn decompress_layer(blob: &[u8], media_type: &str) -> crate::fault::Result<Vec<u
     if want_gzip {
         let mut out = Vec::new();
         wbox_codec::deflate::GzDecoder::new(blob).read_to_end(&mut out)?;
-        Ok(out)
+        Ok(std::borrow::Cow::Owned(out))
     } else if mt.is_empty() || mt.ends_with("+tar") || mt.contains("tar") || mt.contains("layer") {
         // 未压缩 tar：application/vnd.oci.image.layer.v1.tar、
         // application/vnd.docker.image.rootfs.diff.tar 等。
-        Ok(blob.to_vec())
+        //
+        // **借用而不是 `to_vec()`**：未压缩层本来就已经完整在内存里，
+        // 再拷一份等于把这一层的内存占用翻倍，白白多出几百 MB。
+        Ok(std::borrow::Cow::Borrowed(blob))
     } else {
         crate::bail!("不支持的 layer 压缩/格式：mediaType={}", media_type)
     }
@@ -559,9 +563,8 @@ fn materialize_symlink_as_copy(
         if let Some(p) = dst.parent() {
             std::fs::create_dir_all(p)?;
         }
-        std::fs::copy(&src, &dst).map_err(|e| {
-            crate::fail!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e)
-        })?;
+        std::fs::copy(&src, &dst)
+            .map_err(|e| crate::fail!("symlink 降级复制失败 {:?} <- {:?}: {}", link_rel, src, e))?;
     }
     Ok(())
 }
@@ -912,10 +915,8 @@ mod tests {
 
     fn gzip(data: &[u8]) -> Vec<u8> {
         use std::io::Write;
-        let mut e = wbox_codec::deflate::GzEncoder::new(
-            Vec::new(),
-            wbox_codec::deflate::Level::Fast,
-        );
+        let mut e =
+            wbox_codec::deflate::GzEncoder::new(Vec::new(), wbox_codec::deflate::Level::Fast);
         e.write_all(data).unwrap();
         e.finish().unwrap()
     }
@@ -1324,7 +1325,8 @@ mod tests {
             dir_header.set_mode(0o755);
             dir_header.set_size(0);
             dir_header.set_cksum();
-            b.append_data(&mut dir_header, "usr/local/bin/", &[][..]).unwrap();
+            b.append_data(&mut dir_header, "usr/local/bin/", &[][..])
+                .unwrap();
 
             let mut link_header = wbox_codec::tar::Header::new_gnu();
             link_header.set_entry_type(wbox_codec::tar::EntryType::Symlink);
@@ -1338,8 +1340,14 @@ mod tests {
         unpack_layer_with_state(&second, &rootfs, "", &mut symlinks).unwrap();
         finalize_symlinks(&rootfs, &symlinks).unwrap();
 
-        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python3")).unwrap(), b"python");
-        assert_eq!(std::fs::read(rootfs.join("usr/local/bin/python")).unwrap(), b"python");
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/local/bin/python3")).unwrap(),
+            b"python"
+        );
+        assert_eq!(
+            std::fs::read(rootfs.join("usr/local/bin/python")).unwrap(),
+            b"python"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

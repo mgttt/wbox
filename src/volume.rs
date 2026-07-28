@@ -37,11 +37,7 @@ pub fn volumes_root() -> Result<PathBuf> {
 /// 判据与 docker 一致：不含路径分隔符即为名字。`.`/`..` 单独列出来挡掉——
 /// 它们不含 `/` 却明显是路径意图，当成卷名会造出一个叫 `..` 的目录。
 pub fn looks_like_name(src: &str) -> bool {
-    !src.is_empty()
-        && !src.contains('/')
-        && !src.contains('\\')
-        && src != "."
-        && src != ".."
+    !src.is_empty() && !src.contains('/') && !src.contains('\\') && src != "." && src != ".."
 }
 
 /// 校验卷名并给出它的目录。

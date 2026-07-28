@@ -14,8 +14,16 @@
 use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
 
-/// 单个 HTTP 响应体的上限。镜像层可以很大，但也不该无上限地吃内存。
-const MAX_RESPONSE_BYTES: u64 = 8 << 30; // 8 GiB
+/// 单个 HTTP 响应体的上限（**压缩后**的层字节）。
+///
+/// 之前是 8 GiB，与解压侧的 8 GiB 上限叠加，最坏情况下同时持有约 16 GiB。
+/// 收到 2 GiB：真实镜像层压缩后极少超过几百 MB（Ubuntu 完整 rootfs 约
+/// 30 MB，带 CUDA 的大镜像单层也在 2 GiB 以内），2 GiB 已经宽松到不会
+/// 误伤，同时把最坏内存占用从 16 GiB 压到 10 GiB。
+///
+/// **这仍然不是流式下载**——整层要先进内存才能算 digest。真正的解法是
+/// 边下载边做 digest、解压、解包，那是一次单独的改造，见 PRD §4.9 L11。
+const MAX_RESPONSE_BYTES: u64 = 2 << 30; // 2 GiB
 
 /// manifest / manifest list 的 Accept 集合（OCI + Docker 两种 media type）。
 const ACCEPT_MANIFEST: &str = concat!(
@@ -364,8 +372,7 @@ impl RegistryClient {
         body: &[u8],
     ) -> crate::error::Result<Option<String>> {
         let url = format!("{}/manifests/{}", self.v2(repo), reference);
-        let resp =
-            self.request_authed("PUT", &url, None, Some(content_type), Some(body))?;
+        let resp = self.request_authed("PUT", &url, None, Some(content_type), Some(body))?;
         if resp.status != 201 && resp.status != 200 {
             return Err(WboxError::registry(format!(
                 "推送 manifest 失败：HTTP {}（{}）\n{}",
@@ -462,8 +469,7 @@ fn url_host_matches(url: &str, registry: &str) -> bool {
 fn realm_host_allowed(realm: &str, registry: &str) -> bool {
     match url_host(realm) {
         Some(h) => {
-            h == registry.to_ascii_lowercase()
-                || ALLOWED_REALM_HOSTS.iter().any(|a| h == *a)
+            h == registry.to_ascii_lowercase() || ALLOWED_REALM_HOSTS.iter().any(|a| h == *a)
         }
         None => false,
     }
@@ -502,10 +508,7 @@ mod tests {
         );
         assert_eq!(m.get("realm").unwrap(), "https://auth.docker.io/token");
         assert_eq!(m.get("service").unwrap(), "registry.docker.io");
-        assert_eq!(
-            m.get("scope").unwrap(),
-            "repository:library/ubuntu:pull"
-        );
+        assert_eq!(m.get("scope").unwrap(), "repository:library/ubuntu:pull");
     }
 
     // ---- L10：realm 仅允许 https ----
@@ -563,19 +566,28 @@ mod tests {
             "https://localhost:5000/auth",
             "localhost:5000"
         ));
-        assert!(!realm_host_allowed("https://localhost:6000/auth", "localhost:5000"));
+        assert!(!realm_host_allowed(
+            "https://localhost:6000/auth",
+            "localhost:5000"
+        ));
         // 允许列表：Docker Hub 的 auth.docker.io
         assert!(realm_host_allowed(
             "https://auth.docker.io/token",
             "registry-1.docker.io"
         ));
         // 不同 host / 无 scheme / 相似域名欺骗均拒绝
-        assert!(!realm_host_allowed("https://evil.example/token", "registry.example.com"));
+        assert!(!realm_host_allowed(
+            "https://evil.example/token",
+            "registry.example.com"
+        ));
         assert!(!realm_host_allowed(
             "https://registry.example.com.evil.example/token",
             "registry.example.com"
         ));
-        assert!(!realm_host_allowed("//evil.example/token", "registry.example.com"));
+        assert!(!realm_host_allowed(
+            "//evil.example/token",
+            "registry.example.com"
+        ));
     }
 
     #[test]
@@ -608,9 +620,17 @@ mod tests {
     fn realm_host_allowed_table() {
         let cases: &[(&str, &str, bool)] = &[
             // 同 host
-            ("https://registry.example.com/token", "registry.example.com", true),
+            (
+                "https://registry.example.com/token",
+                "registry.example.com",
+                true,
+            ),
             // 同 host 大小写不敏感
-            ("https://REGISTRY.EXAMPLE.COM/token", "registry.example.com", true),
+            (
+                "https://REGISTRY.EXAMPLE.COM/token",
+                "registry.example.com",
+                true,
+            ),
             // 同 host 带端口一致
             ("https://localhost:5000/auth", "localhost:5000", true),
             // 端口不一致
@@ -621,19 +641,40 @@ mod tests {
             // 跨 host
             ("https://evil.example/token", "registry.example.com", false),
             // 相似域名欺骗
-            ("https://registry.example.com.evil.io/t", "registry.example.com", false),
-            ("https://evil-registry.example.com/t", "registry.example.com", false),
+            (
+                "https://registry.example.com.evil.io/t",
+                "registry.example.com",
+                false,
+            ),
+            (
+                "https://evil-registry.example.com/t",
+                "registry.example.com",
+                false,
+            ),
             // 无 scheme / 空 host
-            ("//registry.example.com/token", "registry.example.com", false),
+            (
+                "//registry.example.com/token",
+                "registry.example.com",
+                false,
+            ),
             ("registry.example.com/token", "registry.example.com", false),
             ("https:///token", "registry.example.com", false),
             // 注意：http 同 host 在 url_host 层面匹配；https 强制由 authenticate
             // 的 scheme 检查单独保证（见 realm_must_be_https）
-            ("http://registry.example.com/token", "registry.example.com", true),
+            (
+                "http://registry.example.com/token",
+                "registry.example.com",
+                true,
+            ),
         ];
         for (realm, registry, want) in cases {
-            assert_eq!(realm_host_allowed(realm, registry), *want,
-                "realm={} registry={}", realm, registry);
+            assert_eq!(
+                realm_host_allowed(realm, registry),
+                *want,
+                "realm={} registry={}",
+                realm,
+                registry
+            );
         }
     }
 
@@ -650,8 +691,13 @@ mod tests {
             ("https://reg.example.evil/v2/x", "reg.example", false),
         ];
         for (url, registry, want) in cases {
-            assert_eq!(url_host_matches(url, registry), *want,
-                "url={} registry={}", url, registry);
+            assert_eq!(
+                url_host_matches(url, registry),
+                *want,
+                "url={} registry={}",
+                url,
+                registry
+            );
         }
     }
 
@@ -708,7 +754,9 @@ mod tests {
         // （说明 scheme 检查大小写不敏感，不触发网络）
         let client = RegistryClient::new("example.com");
         let e = client
-            .authenticate(&resp401(Some(r#"Bearer realm="HTTPS://evil.example/token""#)))
+            .authenticate(&resp401(Some(
+                r#"Bearer realm="HTTPS://evil.example/token""#,
+            )))
             .unwrap_err();
         assert!(e.to_string().contains("不在允许列表"), "{}", e);
     }

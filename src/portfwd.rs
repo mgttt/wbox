@@ -95,8 +95,8 @@ mod imp {
     use std::io;
     use std::net::TcpListener;
     use std::os::fd::OwnedFd;
-    use std::os::unix::process::CommandExt;
     use std::os::unix::io::AsRawFd;
+    use std::os::unix::process::CommandExt;
 
     fn namespace_files(container_pid: u32) -> io::Result<Vec<(std::fs::File, libc::c_int)>> {
         [("user", libc::CLONE_NEWUSER), ("net", libc::CLONE_NEWNET)]
@@ -157,10 +157,7 @@ mod imp {
                     continue;
                 };
                 if let Err(error) = spawn_relay(container_pid, map.guest, host_stream) {
-                    eprintln!(
-                        "wbox: 端口 {}->{} 连接失败：{}",
-                        map.host, map.guest, error
-                    );
+                    eprintln!("wbox: 端口 {}->{} 连接失败：{}", map.host, map.guest, error);
                 }
             }
         });
@@ -244,9 +241,21 @@ mod tests {
 
     #[test]
     fn parses_both_forms() {
-        assert_eq!(parse_port("8080:80").unwrap(), PortMap { host: 8080, guest: 80 });
+        assert_eq!(
+            parse_port("8080:80").unwrap(),
+            PortMap {
+                host: 8080,
+                guest: 80
+            }
+        );
         // 单端口两端同号，与 docker 习惯一致
-        assert_eq!(parse_port("8080").unwrap(), PortMap { host: 8080, guest: 8080 });
+        assert_eq!(
+            parse_port("8080").unwrap(),
+            PortMap {
+                host: 8080,
+                guest: 8080
+            }
+        );
     }
 
     #[test]
@@ -261,7 +270,10 @@ mod tests {
     fn port_conflicts_with_allow_network() {
         let p = [PortMap { host: 1, guest: 1 }];
         assert!(reject_conflicting_network(&p, false).is_ok());
-        assert!(reject_conflicting_network(&[], true).is_ok(), "没给 -p 时不该报错");
+        assert!(
+            reject_conflicting_network(&[], true).is_ok(),
+            "没给 -p 时不该报错"
+        );
         let e = reject_conflicting_network(&p, true).unwrap_err();
         assert!(format!("{}", e).contains("不能同时使用"), "{}", e);
     }

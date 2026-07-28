@@ -255,7 +255,10 @@ impl FdTable {
                 },
             );
         }
-        Ok(FdTable { map, next: self.next })
+        Ok(FdTable {
+            map,
+            next: self.next,
+        })
     }
 }
 
@@ -419,7 +422,10 @@ mod tests {
     #[test]
     fn dotdot_cannot_escape_root() {
         let v = vfs(None);
-        assert_eq!(v.normalize("/../../etc/passwd"), PathBuf::from("/etc/passwd"));
+        assert_eq!(
+            v.normalize("/../../etc/passwd"),
+            PathBuf::from("/etc/passwd")
+        );
         assert_eq!(v.normalize("/a/../../.."), PathBuf::from("/"));
     }
 
@@ -542,7 +548,11 @@ mod tests {
     #[test]
     fn prefix_mode_still_confines_windows_style_input() {
         let v = vfs(Some("/srv/rootfs"));
-        for probe in [r"C:\Windows\System32", r"..\..\Windows", "/../../etc/shadow"] {
+        for probe in [
+            r"C:\Windows\System32",
+            r"..\..\Windows",
+            "/../../etc/shadow",
+        ] {
             let got = v.host_path(probe);
             assert!(
                 got.starts_with("/srv/rootfs"),
@@ -563,20 +573,40 @@ mod tests {
     #[test]
     fn alloc_reuses_lowest_free_fd() {
         let mut t = FdTable::new();
-        let a = t.alloc(Fd { kind: FdKind::Closed, cloexec: false, flags: 0 });
-        let b = t.alloc(Fd { kind: FdKind::Closed, cloexec: false, flags: 0 });
+        let a = t.alloc(Fd {
+            kind: FdKind::Closed,
+            cloexec: false,
+            flags: 0,
+        });
+        let b = t.alloc(Fd {
+            kind: FdKind::Closed,
+            cloexec: false,
+            flags: 0,
+        });
         assert_eq!((a, b), (3, 4));
         t.remove(3);
         // Linux 保证下一个 open 拿到最小空号
-        let c = t.alloc(Fd { kind: FdKind::Closed, cloexec: false, flags: 0 });
+        let c = t.alloc(Fd {
+            kind: FdKind::Closed,
+            cloexec: false,
+            flags: 0,
+        });
         assert_eq!(c, 3);
     }
 
     #[test]
     fn close_on_exec_drops_only_cloexec_fds() {
         let mut t = FdTable::new();
-        let keep = t.alloc(Fd { kind: FdKind::Closed, cloexec: false, flags: 0 });
-        let drop = t.alloc(Fd { kind: FdKind::Closed, cloexec: true, flags: 0 });
+        let keep = t.alloc(Fd {
+            kind: FdKind::Closed,
+            cloexec: false,
+            flags: 0,
+        });
+        let drop = t.alloc(Fd {
+            kind: FdKind::Closed,
+            cloexec: true,
+            flags: 0,
+        });
         t.close_on_exec();
         assert!(t.contains(keep));
         assert!(!t.contains(drop));

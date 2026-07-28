@@ -7,15 +7,14 @@
 //!   在 attribute-list 启动路径上额外指定。
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
-use windows_sys::Win32::Security::PSID;
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeleteAppContainerProfile,
-    DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
+use windows_sys::Win32::Security::PSID;
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, FreeSid, WinCapabilityInternetClientSid, SID_AND_ATTRIBUTES,
-    SECURITY_MAX_SID_SIZE,
+    CreateWellKnownSid, FreeSid, WinCapabilityInternetClientSid, SECURITY_MAX_SID_SIZE,
+    SID_AND_ATTRIBUTES,
 };
 
 use crate::error::{ErrKind, KindExt, Result};
@@ -112,7 +111,10 @@ impl AppContainerProfile {
         // # Safety: name_wide 为 NUL 结尾 UTF-16；sid 为有效输出指针。
         let hr = unsafe { DeriveAppContainerSidFromAppContainerName(name_wide.as_ptr(), &mut sid) };
         if hr < 0 {
-            return Err(crate::error::WboxError::profile(format!("DeriveAppContainerSidFromAppContainerName 失败，HRESULT=0x{:08X}", hr as u32)));
+            return Err(crate::error::WboxError::profile(format!(
+                "DeriveAppContainerSidFromAppContainerName 失败，HRESULT=0x{:08X}",
+                hr as u32
+            )));
         }
         Ok(sid)
     }
@@ -209,7 +211,10 @@ impl CapabilitySid {
         };
         if ok == 0 {
             let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::profile(format!("CreateWellKnownSid(InternetClient) 失败，GetLastError={}", err)));
+            return Err(crate::error::WboxError::profile(format!(
+                "CreateWellKnownSid(InternetClient) 失败，GetLastError={}",
+                err
+            )));
         }
         buffer.truncate(size as usize);
         let sid = buffer.as_mut_ptr() as PSID;
@@ -296,12 +301,7 @@ mod real_windows_tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!(
-            "wboxtest_{}_{}_{}",
-            std::process::id(),
-            n,
-            label
-        )
+        format!("wboxtest_{}_{}_{}", std::process::id(), n, label)
     }
 
     /// 真机 round-trip：create → sid 字符串非空 → keep → Drop 后 derive 找不到。

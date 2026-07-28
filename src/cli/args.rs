@@ -155,7 +155,10 @@ mod tests {
 
     #[test]
     fn take_container_names_rejects_flags_and_empty() {
-        assert_eq!(take_container_names(&v(&["a", "b"]), "rm").unwrap(), vec!["a", "b"]);
+        assert_eq!(
+            take_container_names(&v(&["a", "b"]), "rm").unwrap(),
+            vec!["a", "b"]
+        );
         let e = format!("{}", take_container_names(&v(&[]), "rm").unwrap_err());
         assert!(e.contains("wbox rm"), "用法提示要带上动词：{}", e);
         assert!(take_container_names(&v(&["-f", "a"]), "rm").is_err());
@@ -177,7 +180,11 @@ mod tests {
         });
         assert_eq!(seen, vec!["ok1", "bad", "ok2"], "失败之后仍要继续走完");
         let m = format!("{}", r.unwrap_err());
-        assert!(m.contains('1') && m.contains('3'), "要汇总几个失败/共几个：{}", m);
+        assert!(
+            m.contains('1') && m.contains('3'),
+            "要汇总几个失败/共几个：{}",
+            m
+        );
 
         // 全成功 → 0
         assert_eq!(

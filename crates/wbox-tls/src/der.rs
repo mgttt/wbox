@@ -248,7 +248,10 @@ mod tests {
         ];
         let mut r = Reader::new(&der);
         let mut seq = r.sequence().unwrap();
-        assert_eq!(seq.expect(TAG_INTEGER).unwrap().integer_bytes().unwrap(), [1]);
+        assert_eq!(
+            seq.expect(TAG_INTEGER).unwrap().integer_bytes().unwrap(),
+            [1]
+        );
         let mut inner = seq.sequence().unwrap();
         assert_eq!(inner.expect(TAG_OCTET_STRING).unwrap().value, b"hi");
         assert_eq!(seq.expect(TAG_NULL).unwrap().value, b"");
@@ -280,7 +283,10 @@ mod tests {
         // 这一组是 DER 与 BER 的分界。宽松解析会让同一份逻辑内容有多种字节
         // 表示，而签名是按字节算的——"同一证书两种解读"就是这么来的。
         let cases: &[(&[u8], &str)] = &[
-            (&[0x04, 0x81, 0x05, 1, 2, 3, 4, 5], "短形式装得下却用了长形式"),
+            (
+                &[0x04, 0x81, 0x05, 1, 2, 3, 4, 5],
+                "短形式装得下却用了长形式",
+            ),
             (&[0x04, 0x82, 0x00, 0x05, 1, 2, 3, 4, 5], "长形式首字节为零"),
             (&[0x04, 0x80], "不定长编码"),
             (&[0x04, 0x85, 1, 2, 3, 4, 5], "长度字段过长"),

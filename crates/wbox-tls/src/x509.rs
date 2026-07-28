@@ -226,12 +226,8 @@ pub fn verify_with_key(key: &PublicKey, alg: SigAlg, msg: &[u8], sig: &[u8]) -> 
     match (key, alg) {
         (PublicKey::Rsa(k), SigAlg::RsaPkcs1(h)) => crate::rsa::verify_pkcs1v15(k, h, msg, sig),
         (PublicKey::Rsa(k), SigAlg::RsaPss(h)) => crate::rsa::verify_pss(k, h, msg, sig),
-        (PublicKey::EcP256(pt), SigAlg::Ecdsa(h)) => {
-            ecdsa_verify(&ec::p256(), pt, h, msg, sig)
-        }
-        (PublicKey::EcP384(pt), SigAlg::Ecdsa(h)) => {
-            ecdsa_verify(&ec::p384(), pt, h, msg, sig)
-        }
+        (PublicKey::EcP256(pt), SigAlg::Ecdsa(h)) => ecdsa_verify(&ec::p256(), pt, h, msg, sig),
+        (PublicKey::EcP384(pt), SigAlg::Ecdsa(h)) => ecdsa_verify(&ec::p384(), pt, h, msg, sig),
         // 认不出的算法、或密钥类型与签名算法对不上：一律拒绝，
         // 不做任何"聪明"的回退。
         _ => false,
@@ -298,7 +294,9 @@ fn parse_sig_alg(r: &mut Reader<'_>) -> Result<SigAlg> {
 /// 从 RSASSA-PSS 参数里取哈希算法。
 fn parse_pss_hash(params: &[u8]) -> Result<HashAlg> {
     let mut r = Reader::new(params);
-    let mut p = r.sequence().map_err(|_| "X.509：PSS 缺少参数".to_string())?;
+    let mut p = r
+        .sequence()
+        .map_err(|_| "X.509：PSS 缺少参数".to_string())?;
     // [0] hashAlgorithm
     let Some(h) = p.take_if(0xa0)? else {
         return Err("X.509：PSS 未指定哈希（默认 SHA-1 不予接受）".into());
@@ -651,7 +649,10 @@ mod tests {
         assert!(y1950 < 0, "1950 应当在纪元之前");
         // GeneralizedTime 用四位年份
         let g = mk(der::TAG_GENERALIZED_TIME, "20240229123456Z").unwrap();
-        assert_eq!(g, days_from_civil(2024, 2, 29) * 86400 + 12 * 3600 + 34 * 60 + 56);
+        assert_eq!(
+            g,
+            days_from_civil(2024, 2, 29) * 86400 + 12 * 3600 + 34 * 60 + 56
+        );
     }
 
     #[test]

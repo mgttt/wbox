@@ -404,10 +404,16 @@ mod tests {
         let mut t = tag;
         t[15] ^= 1;
         assert!(gcm.open(&nonce, aad, &mut sealed.clone(), &t).is_err());
-        assert!(gcm.open(&nonce, b"other", &mut sealed.clone(), &tag).is_err());
-        assert!(gcm.open(&[3u8; 12], aad, &mut sealed.clone(), &tag).is_err());
+        assert!(gcm
+            .open(&nonce, b"other", &mut sealed.clone(), &tag)
+            .is_err());
+        assert!(gcm
+            .open(&[3u8; 12], aad, &mut sealed.clone(), &tag)
+            .is_err());
         // 短 tag 直接拒绝，不做截断比较。
-        assert!(gcm.open(&nonce, aad, &mut sealed.clone(), &tag[..8]).is_err());
+        assert!(gcm
+            .open(&nonce, aad, &mut sealed.clone(), &tag[..8])
+            .is_err());
     }
 
     #[test]

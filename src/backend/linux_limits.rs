@@ -34,7 +34,10 @@ pub(super) enum LimitPlan {
     /// - `nproc`：RLIMIT_NPROC ≈ `--max-procs`。**语义差异**：它是
     ///   *按 uid 计* 的全局进程数，不是本容器的；rootless 下容器内 uid 被
     ///   映射成 0，实际约束的是该映射 uid 的总进程数，仍能挡住 fork 炸弹。
-    Rlimit { as_bytes: Option<u64>, nproc: Option<u64> },
+    Rlimit {
+        as_bytes: Option<u64>,
+        nproc: Option<u64>,
+    },
     /// 无限额需求：不做任何事。
     None,
 }
@@ -227,10 +230,7 @@ fn write_limits(spec: &RunSpec, target: &std::path::Path) -> Option<Vec<String>>
     Some(wrote)
 }
 
-fn try_cgroup_plan(
-    spec: &RunSpec,
-    base: Option<std::path::PathBuf>,
-) -> Result<Option<LimitPlan>> {
+fn try_cgroup_plan(spec: &RunSpec, base: Option<std::path::PathBuf>) -> Result<Option<LimitPlan>> {
     let l = &spec.limits;
     let Some(own) = base else {
         return Ok(None);
@@ -287,7 +287,12 @@ fn try_cgroup_plan(
     // 子 cgroup 中，不影响限额语义；代价是 `wbox-supervisor` 这个目录删不掉
     // （里面有进程），会留在委派根下。它是**固定名字**而非 per-pid，故最多
     // 只留一个，不会累积。
-    if std::fs::write(supervisor.join("cgroup.procs"), std::process::id().to_string()).is_err() {
+    if std::fs::write(
+        supervisor.join("cgroup.procs"),
+        std::process::id().to_string(),
+    )
+    .is_err()
+    {
         return abandon();
     }
     // 下发控制器。已经开好了也无妨（重复写 "+memory" 是幂等的）。
@@ -373,13 +378,19 @@ pub(super) unsafe fn apply_limits(plan: &LimitPlan) -> std::io::Result<()> {
         }
         LimitPlan::Rlimit { as_bytes, nproc } => {
             if let Some(v) = as_bytes {
-                let rl = libc::rlimit { rlim_cur: *v, rlim_max: *v };
+                let rl = libc::rlimit {
+                    rlim_cur: *v,
+                    rlim_max: *v,
+                };
                 if libc::setrlimit(libc::RLIMIT_AS, &rl) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             }
             if let Some(v) = nproc {
-                let rl = libc::rlimit { rlim_cur: *v, rlim_max: *v };
+                let rl = libc::rlimit {
+                    rlim_cur: *v,
+                    rlim_max: *v,
+                };
                 if libc::setrlimit(libc::RLIMIT_NPROC, &rl) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -388,7 +399,6 @@ pub(super) unsafe fn apply_limits(plan: &LimitPlan) -> std::io::Result<()> {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -422,7 +432,11 @@ mod tests {
 
     #[test]
     fn cpu_pct_without_cgroup_errors() {
-        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 50, max_procs: 0 });
+        let s = spec_with(Limits {
+            memory_mb: 0,
+            cpu_pct: 50,
+            max_procs: 0,
+        });
         let e = match build_limit_plan_with_cgroup(&s, None) {
             Err(e) => e,
             Ok(_) => panic!("无 cgroup 时 --cpu-pct 必须报错"),
@@ -433,7 +447,11 @@ mod tests {
 
     #[test]
     fn memory_falls_back_to_rlimit() {
-        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 0 });
+        let s = spec_with(Limits {
+            memory_mb: 16,
+            cpu_pct: 0,
+            max_procs: 0,
+        });
         match build_limit_plan_with_cgroup(&s, None).unwrap() {
             LimitPlan::Rlimit { as_bytes, nproc } => {
                 assert_eq!(as_bytes, Some(16 * 1024 * 1024));
@@ -445,7 +463,11 @@ mod tests {
 
     #[test]
     fn max_procs_fallback_matches_privilege() {
-        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 0, max_procs: 8 });
+        let s = spec_with(Limits {
+            memory_mb: 0,
+            cpu_pct: 0,
+            max_procs: 8,
+        });
         match build_limit_plan_with_cgroup(&s, None) {
             Err(e) if unsafe { libc::geteuid() } == 0 => {
                 let m = format!("{}", e);
@@ -462,7 +484,11 @@ mod tests {
 
     #[test]
     fn cpu_pct_on_this_host_is_cgroup_or_error() {
-        let s = spec_with(Limits { memory_mb: 0, cpu_pct: 50, max_procs: 0 });
+        let s = spec_with(Limits {
+            memory_mb: 0,
+            cpu_pct: 50,
+            max_procs: 0,
+        });
         match build_limit_plan(&s) {
             Ok(LimitPlan::Cgroup { .. }) => {}
             Err(e) => {
@@ -478,7 +504,11 @@ mod tests {
 
     #[test]
     fn memory_and_procs_on_this_host_never_silently_ignored() {
-        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 8 });
+        let s = spec_with(Limits {
+            memory_mb: 16,
+            cpu_pct: 0,
+            max_procs: 8,
+        });
         let is_root = unsafe { libc::geteuid() } == 0;
         match build_limit_plan(&s) {
             Ok(LimitPlan::Cgroup { .. }) => {}
@@ -498,7 +528,11 @@ mod tests {
 
     #[test]
     fn sibling_layout_never_touches_root_cgroup() {
-        let s = spec_with(Limits { memory_mb: 16, cpu_pct: 0, max_procs: 0 });
+        let s = spec_with(Limits {
+            memory_mb: 16,
+            cpu_pct: 0,
+            max_procs: 0,
+        });
         // own 是根的直接子级 → parent 就是根 → 必须拒绝（返回 None 走兜底）
         let own = std::path::Path::new(CGROUP2_ROOT).join("some-toplevel-cg");
         let got = try_sibling_layout(&s, &own).unwrap();
@@ -526,5 +560,4 @@ mod tests {
             );
         }
     }
-
 }

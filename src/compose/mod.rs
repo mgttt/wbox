@@ -122,9 +122,9 @@ pub fn parse(input: &str, project: &str) -> Result<Project> {
 }
 
 fn parse_service(name: &str, node: &Node) -> Result<Service> {
-    let map = node.as_map().ok_or_else(|| {
-        WboxError::args(format!("服务 '{}' 的配置必须是映射", name))
-    })?;
+    let map = node
+        .as_map()
+        .ok_or_else(|| WboxError::args(format!("服务 '{}' 的配置必须是映射", name)))?;
     for (k, _) in map {
         if !SUPPORTED_FIELDS.contains(&k.as_str()) {
             return Err(WboxError::args(format!(
@@ -180,7 +180,10 @@ fn parse_service(name: &str, node: &Node) -> Result<Service> {
         ports: list("ports")?,
         environment,
         depends_on: list("depends_on")?,
-        restart: node.get("restart").and_then(Node::as_str).map(str::to_string),
+        restart: node
+            .get("restart")
+            .and_then(Node::as_str)
+            .map(str::to_string),
         healthcheck: match node.get("healthcheck") {
             None => None,
             Some(h) => Some(parse_health(name, h)?),
@@ -189,9 +192,9 @@ fn parse_service(name: &str, node: &Node) -> Result<Service> {
 }
 
 fn parse_health(service: &str, node: &Node) -> Result<HealthSpec> {
-    let map = node.as_map().ok_or_else(|| {
-        WboxError::args(format!("服务 '{}' 的 healthcheck 必须是映射", service))
-    })?;
+    let map = node
+        .as_map()
+        .ok_or_else(|| WboxError::args(format!("服务 '{}' 的 healthcheck 必须是映射", service)))?;
     for (k, _) in map {
         if !SUPPORTED_HEALTH_FIELDS.contains(&k.as_str()) {
             return Err(WboxError::args(format!(
@@ -202,9 +205,9 @@ fn parse_health(service: &str, node: &Node) -> Result<HealthSpec> {
             )));
         }
     }
-    let raw = node.get("test").ok_or_else(|| {
-        WboxError::args(format!("服务 '{}' 的 healthcheck 缺少 `test`", service))
-    })?;
+    let raw = node
+        .get("test")
+        .ok_or_else(|| WboxError::args(format!("服务 '{}' 的 healthcheck 缺少 `test`", service)))?;
     let items = raw.as_list().ok_or_else(|| {
         WboxError::args(format!("服务 '{}' 的 healthcheck.test 形式不支持", service))
     })?;
@@ -232,14 +235,12 @@ fn parse_health(service: &str, node: &Node) -> Result<HealthSpec> {
     let dur = |key: &str| -> Result<Option<u64>> {
         match node.get(key).and_then(Node::as_str) {
             None => Ok(None),
-            Some(s) => parse_duration(s)
-                .map(Some)
-                .ok_or_else(|| {
-                    WboxError::args(format!(
-                        "服务 '{}' 的 healthcheck.{} 取值 '{}' 无法解析（支持 30s / 5m / 纯秒数）",
-                        service, key, s
-                    ))
-                }),
+            Some(s) => parse_duration(s).map(Some).ok_or_else(|| {
+                WboxError::args(format!(
+                    "服务 '{}' 的 healthcheck.{} 取值 '{}' 无法解析（支持 30s / 5m / 纯秒数）",
+                    service, key, s
+                ))
+            }),
         }
     };
     let retries = match node.get("retries").and_then(Node::as_str) {
@@ -409,7 +410,10 @@ services:
         let p = parse(SAMPLE, "proj").unwrap();
         // db 被 web 依赖，必须排在前面
         assert_eq!(
-            p.services.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            p.services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["db", "web"]
         );
         let web = p.services.iter().find(|s| s.name == "web").unwrap();
@@ -542,10 +546,16 @@ services:
         let p = parse(SAMPLE, "proj").unwrap();
         let web = p.services.iter().find(|s| s.name == "web").unwrap();
         let a = run_args(&p, web, Some("proj_db"), true);
-        assert!(a.windows(2).any(|w| w[0] == "--network" && w[1] == "container:proj_db"));
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--network" && w[1] == "container:proj_db"));
         assert!(!a.contains(&"-p".to_string()), "加入模式不该带 -p：{:?}", a);
         // healthcheck 照常翻译
-        assert!(a.windows(2).any(|w| w[0] == "--health-cmd" && w[1].contains("wget")));
-        assert!(a.windows(2).any(|w| w[0] == "--health-interval" && w[1] == "5"));
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--health-cmd" && w[1].contains("wget")));
+        assert!(a
+            .windows(2)
+            .any(|w| w[0] == "--health-interval" && w[1] == "5"));
     }
 }

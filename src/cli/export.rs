@@ -56,12 +56,15 @@ fn parse_export(args: &[String]) -> Result<ExportOpts> {
         }
         i += 1;
     }
-    let container = container
-        .ok_or_else(|| WboxError::args("export: 缺少容器名（用法：wbox export -o <FILE> <NAME>）"))?;
+    let container = container.ok_or_else(|| {
+        WboxError::args("export: 缺少容器名（用法：wbox export -o <FILE> <NAME>）")
+    })?;
     // 与 `save` 同一条理由：不默认写 stdout。容器 rootfs 动辄几十 MB，
     // 误写进终端是灾难性的体验，而那个默认在管道场景之外几乎只会伤人。
     let out = out.ok_or_else(|| {
-        WboxError::args("export 需要 -o <FILE>：不默认写 stdout（rootfs 动辄几十 MB，误写进终端是灾难）")
+        WboxError::args(
+            "export 需要 -o <FILE>：不默认写 stdout（rootfs 动辄几十 MB，误写进终端是灾难）",
+        )
     })?;
     Ok(ExportOpts {
         container,
@@ -137,8 +140,9 @@ fn parse_import(args: &[String]) -> Result<ImportOpts> {
         }
         i += 1;
     }
-    let file = file
-        .ok_or_else(|| WboxError::args("import: 缺少归档路径（用法：wbox import -t <IMAGE> <FILE>）"))?;
+    let file = file.ok_or_else(|| {
+        WboxError::args("import: 缺少归档路径（用法：wbox import -t <IMAGE> <FILE>）")
+    })?;
     // 裸 rootfs tar 里**没有任何身份信息**（这正是它与 wbox save 归档的区别），
     // 所以 -t 是必需的，猜不出来。
     let tag = tag.ok_or_else(|| {
@@ -170,7 +174,11 @@ pub fn cmd_import(args: &[String]) -> Result<u32> {
 
     let mut count = 0usize;
     let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(&bytes));
-    for entry in ar.entries().context("读取归档失败").ctx(ErrKind::Registry)? {
+    for entry in ar
+        .entries()
+        .context("读取归档失败")
+        .ctx(ErrKind::Registry)?
+    {
         let e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
         let path = e
             .path()
@@ -272,7 +280,10 @@ mod tests {
 
     #[test]
     fn export_requires_output_and_one_container() {
-        let a: Vec<String> = ["-o", "/tmp/x.tar", "c"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["-o", "/tmp/x.tar", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = parse_export(&a).unwrap();
         assert_eq!(o.container, "c");
         assert_eq!(o.out, PathBuf::from("/tmp/x.tar"));
@@ -280,7 +291,13 @@ mod tests {
         let m = format!("{}", parse_export(&["c".to_string()]).unwrap_err());
         assert!(m.contains("stdout"), "{}", m);
         assert!(parse_export(&[]).is_err());
-        assert!(parse_export(&["-o".to_string(), "f".to_string(), "a".to_string(), "b".to_string()]).is_err());
+        assert!(parse_export(&[
+            "-o".to_string(),
+            "f".to_string(),
+            "a".to_string(),
+            "b".to_string()
+        ])
+        .is_err());
         assert!(parse_export(&["--bogus".to_string()]).is_err());
     }
 
@@ -288,12 +305,18 @@ mod tests {
     /// `load`——这两条命令最容易被搞混。
     #[test]
     fn import_requires_tag_and_points_at_load() {
-        let a: Vec<String> = ["-t", "mine:v1", "/tmp/x.tar"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["-t", "mine:v1", "/tmp/x.tar"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = parse_import(&a).unwrap();
         assert_eq!(o.tag, "mine:v1");
         let m = format!("{}", parse_import(&["/tmp/x.tar".to_string()]).unwrap_err());
         assert!(m.contains("wbox load"), "要指出该用哪条命令：{}", m);
-        assert!(parse_import(&["-t".to_string(), "x".to_string()]).is_err(), "缺文件应报错");
+        assert!(
+            parse_import(&["-t".to_string(), "x".to_string()]).is_err(),
+            "缺文件应报错"
+        );
     }
 
     /// 任意来源的 tar 是外部输入，路径穿越是这里唯一真正危险的东西。
@@ -323,11 +346,19 @@ mod tests {
         }
         let m = format!(
             "{}",
-            cmd_import(&["-t".to_string(), "e:v1".to_string(), f.to_string_lossy().to_string()])
-                .unwrap_err()
+            cmd_import(&[
+                "-t".to_string(),
+                "e:v1".to_string(),
+                f.to_string_lossy().to_string()
+            ])
+            .unwrap_err()
         );
         assert!(m.contains("rootfs"), "{}", m);
-        assert!(m.contains("wbox load"), "要指出带身份的归档该用 load：{}", m);
+        assert!(
+            m.contains("wbox load"),
+            "要指出带身份的归档该用 load：{}",
+            m
+        );
         let _ = std::fs::remove_file(&f);
     }
 }

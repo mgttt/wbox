@@ -119,18 +119,23 @@ pub fn load(archive: &Path, tag_override: Option<&str>) -> Result<()> {
     std::fs::rename(&staging, &dest)
         .context("落地镜像失败")
         .ctx(ErrKind::Registry)?;
-    println!("wbox: 已载入 {} ← {}", iref.qualified_ref(), archive.display());
+    println!(
+        "wbox: 已载入 {} ← {}",
+        iref.qualified_ref(),
+        archive.display()
+    );
     Ok(())
 }
 
 fn read_marker(bytes: &[u8]) -> Result<String> {
     let mut ar = wbox_codec::tar::Archive::new(std::io::Cursor::new(bytes));
-    for entry in ar.entries().context("读取归档失败").ctx(ErrKind::Registry)? {
+    for entry in ar
+        .entries()
+        .context("读取归档失败")
+        .ctx(ErrKind::Registry)?
+    {
         let mut e = entry.context("读取归档条目失败").ctx(ErrKind::Registry)?;
-        let is_marker = e
-            .path()
-            .map(|p| p.as_os_str() == MARKER)
-            .unwrap_or(false);
+        let is_marker = e.path().map(|p| p.as_os_str() == MARKER).unwrap_or(false);
         if is_marker {
             let mut s = String::new();
             use std::io::Read;

@@ -74,7 +74,12 @@ mod ratchet {
                 in_deps = t.contains("dependencies");
                 continue;
             }
-            if !in_deps || t.is_empty() || t.starts_with('#') || t.starts_with(']') || t.starts_with('"') {
+            if !in_deps
+                || t.is_empty()
+                || t.starts_with('#')
+                || t.starts_with(']')
+                || t.starts_with('"')
+            {
                 continue;
             }
             let name = t.split(['=', ' ']).next().unwrap_or("");

@@ -9,7 +9,12 @@ use crate::compose::{self, Project};
 use crate::error::{Result, WboxError};
 
 /// 默认文件名，按顺序探测（与 docker compose 一致）。
-const DEFAULT_FILES: &[&str] = &["compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"];
+const DEFAULT_FILES: &[&str] = &[
+    "compose.yaml",
+    "compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+];
 
 struct Options {
     file: Option<String>,
@@ -47,9 +52,7 @@ fn parse(args: &[String]) -> Result<(String, Options)> {
         }
         i += 1;
     }
-    let verb = verb.ok_or_else(|| {
-        WboxError::args("compose 缺少动词（支持 up / down / ps）")
-    })?;
+    let verb = verb.ok_or_else(|| WboxError::args("compose 缺少动词（支持 up / down / ps）"))?;
     Ok((verb, o))
 }
 
@@ -135,7 +138,11 @@ fn up(o: &Options) -> Result<u32> {
     for (idx, svc) in project.services.iter().enumerate() {
         let peer = if idx == 0 { None } else { owner.as_deref() };
         let argv = compose::run_args(&project, svc, peer, true);
-        println!("wbox: 启动服务 '{}' → {}", svc.name, project.container_name(&svc.name));
+        println!(
+            "wbox: 启动服务 '{}' → {}",
+            svc.name,
+            project.container_name(&svc.name)
+        );
         super::run::cmd_run(&argv)?;
     }
     println!("wbox: compose up 完成（项目 {}）", project.name);
@@ -197,13 +204,19 @@ mod tests {
 
     #[test]
     fn parse_reads_verb_and_options() {
-        let a: Vec<String> = ["-f", "x.yaml", "up", "-d"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["-f", "x.yaml", "up", "-d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let (v, o) = parse(&a).unwrap();
         assert_eq!(v, "up");
         assert_eq!(o.file.as_deref(), Some("x.yaml"));
         assert!(o.detach);
 
-        let a: Vec<String> = ["-p", "proj", "down"].iter().map(|s| s.to_string()).collect();
+        let a: Vec<String> = ["-p", "proj", "down"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let (v, o) = parse(&a).unwrap();
         assert_eq!(v, "down");
         assert_eq!(o.project.as_deref(), Some("proj"));
@@ -255,11 +268,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wbox-cmulti-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("compose.yaml");
-        std::fs::write(
-            &f,
-            "services:\n  a:\n    image: x\n  b:\n    image: y\n",
-        )
-        .unwrap();
+        std::fs::write(&f, "services:\n  a:\n    image: x\n  b:\n    image: y\n").unwrap();
         let o = Options {
             file: Some(f.to_string_lossy().to_string()),
             project: Some("t".into()),

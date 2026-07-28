@@ -419,9 +419,15 @@ mod tests {
     fn no_proxy_matching_is_suffix_aware() {
         // 直接测纯函数，不动进程级环境变量（并行用例下改 env 会互相干扰）。
         assert!(super::no_proxy_matches_in("example.com", "example.com"));
-        assert!(super::no_proxy_matches_in("api.example.com", ".example.com"));
+        assert!(super::no_proxy_matches_in(
+            "api.example.com",
+            ".example.com"
+        ));
         assert!(super::no_proxy_matches_in("anything", "*"));
         assert!(!super::no_proxy_matches_in("notexample.com", "example.com"));
-        assert!(!super::no_proxy_matches_in("example.com", "other.com, third.net"));
+        assert!(!super::no_proxy_matches_in(
+            "example.com",
+            "other.com, third.net"
+        ));
     }
 }
