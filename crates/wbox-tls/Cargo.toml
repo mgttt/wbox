@@ -1,0 +1,22 @@
+[package]
+name = "wbox-tls"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "wbox 自实现的 TLS 1.3 客户端（纯 Rust，零第三方依赖）"
+license = "MIT OR Apache-2.0"
+
+# 零第三方依赖——这是本 crate 存在的全部理由。密码学原语（SHA-2、AES-GCM、
+# X25519、RSA、ECDSA）、X.509 链校验、TLS 1.3 握手全部第一方实现。
+#
+# 只依赖同仓的 wbox-codec（复用它的 SHA-256 与 base64），以及各平台的
+# CSPRNG（Linux 走 getrandom syscall，Windows 走 BCryptGenRandom）——
+# 后者是 OS ABI，不是第三方实现。
+[dependencies]
+wbox-codec = { path = "../wbox-codec" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = ["Win32_Foundation", "Win32_Security_Cryptography"]

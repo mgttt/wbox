@@ -934,6 +934,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wbox-tls"
+version = "1.0.0-rc2"
+dependencies = [
+ "libc",
+ "wbox-codec",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "webpki-roots"
 version = "0.26.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

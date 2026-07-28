@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 # crates/wbox-linux 是 vendor/blink（C）的纯 Rust 重写，两者同一 workspace，
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
-members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux"]
+members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-tls"]
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
