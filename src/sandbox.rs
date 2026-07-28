@@ -36,6 +36,7 @@ use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
 /// - `job`：创建后立即把子进程分配进该 Job
 /// - `env`：子进程的**完整显式环境**（白名单，见 backend/env.rs）；
 ///   经 lpEnvironment 传递，不再继承 wbox 宿主环境（H6）
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_container(
     profile: &AppContainerProfile,
     capabilities: &[CapabilitySid],
@@ -51,6 +52,7 @@ pub fn run_container(
 ///
 /// 句柄会在 `CreateProcessW` 的短暂窗口内设置 `HANDLE_FLAG_INHERIT`，随后按原值
 /// 恢复；`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 保证父进程的其他可继承句柄不泄漏。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_container_with_handles(
     profile: &AppContainerProfile,
     capabilities: &[CapabilitySid],
@@ -75,6 +77,7 @@ pub fn run_container_with_handles(
 /// 与 [`run_container_with_handles`] 相同，并在子进程已加入 Job、但主线程仍挂起时
 /// 调用一次 `on_created`。回调失败会终止并等待尚未执行用户代码的子进程。
 #[allow(clippy::too_many_arguments)] // 与 run_container_with_handles 参数保持一致，另加一个 hook
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn run_container_with_handles_and_created_hook<F>(
     profile: &AppContainerProfile,
     capabilities: &[CapabilitySid],

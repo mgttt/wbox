@@ -39,7 +39,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W11、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W12、R8
 │       └── 4.9.2 [TODO-LINUX]    L1–L10、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -720,7 +720,7 @@ S4 在 Linux 上运行 Windows CLI
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
 | F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
 | F8.4 exec | `src/cli/exec.rs` | G4 Windows / G3 Linux | Linux P.19-P.22；Windows 原生目标 WP.13-WP.17；CI 30250676453 通过 |
-| F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21：create 不执行，start 原子领取配置，退出后可再次启动；提交 `1caada0`、CI 30271007552 |
+| F8.7 create/start | `src/cli/create.rs`、`start.rs`、`runstate.rs` | G3 Linux / G4 Windows | P.25/WP.21/WP.24：create 不执行，start 原子领取配置，rename 后按新名称启动，退出后可再次启动 |
 | F8.8 detached 管道 EOF | `src/cli/run.rs` | G4 Windows | WP.22：重定向输出及时 EOF且 workload 继续运行；提交 `55761da`、CI 30272887266 |
 | F9.1 bind volume | `linux_ns.rs`、guest VFS | G3 Linux | Linux V.1–V.4 + V.2b/V.2c（`:ro` 递归到子挂载）。**模拟器侧无证据**：`t_mount_ro` 在当前纯 Rust 引擎上是**已知失败**（`mount(2)` 未实现，`tests/known-failures.txt` E 组），此前"模拟器 `t_mount_ro` 覆盖 `MS_RDONLY`"是 Blink 时代的说法。Windows OCI 的 `-v` 仍未开放（`[TODO-WINDOW]`）|
 
@@ -752,6 +752,10 @@ S4 在 Linux 上运行 Windows CLI
   退出后再次 `start` 必须产生一代全新的 supervisor/guest/child 进程树。
 - `WP.22`：长命 workload 运行期间，`run -d`、`container start` 与顶层 `start`
   的重定向 stdout/stderr 必须及时 EOF，调用方不得等到容器退出。
+- `WP.23A/WP.23B`：detached 父进程必须等到真实 workload READY；缺失 Windows
+  程序与离线 pull 分别保留 spawn/registry 原始错误类别和非零退出码，且不留状态记录。
+- `WP.24`：`create old -> rename old new -> start new` 必须以新名称建立
+  supervisor、Job 与状态记录；保存配置中的旧 `--name` 不得复活。
 
 `WN.*` 是 `scripts/test-windows-native.ps1` 的 Windows 原生程序矩阵：
 
@@ -1271,7 +1275,8 @@ supervisor 登记前失败必须恢复 `created`，不得留下假 running。登
 并在随后确认 workload 仍存活，防止以“容器也提前退出”伪造通过。
 
 **F8 的覆盖现状（如实记录）**。Linux 由 P.1–P.25 覆盖完整生命周期；
-Windows 由 WP.6–WP.22 覆盖 detach、ps、logs、stop、rm、kill/top、create/start、管道 EOF 与原生 exec，其中
+Windows 由 WP.6–WP.24 覆盖 detach、ps、logs、stop、rm、kill/top、create/start、
+rename 后启动、READY/ERROR 握手、管道 EOF 与原生 exec，其中
 WP.17 直接证明 supervisor 崩溃时主 guest 和 exec guest 均被 Job 回收。Windows
 OCI/模拟器 exec 不在承诺范围，必须明确拒绝。
 
@@ -2409,18 +2414,28 @@ TODO-WINDOW
 ├── W6 Q1 临时目录私有化（TEMP/TMP）                      [active] 实机语义待收口
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [planned]
 ├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
-├── W9 create → rename → start 生命周期损坏               [active] Windows 已稳定复现
+├── W9 create → rename → start 生命周期损坏               [done] WP.24
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [active] Job 总内存语义已核验，超限 workload 待补
-├── W11 detached 启动 READY 握手                           [planned] workload 启动失败时父进程不得 rc0
+├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
 ├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
-`W11` 复现形状：`wbox run -d --name bad-start -- C:\definitely-missing-wbox.exe`
-当前父进程只确认 supervisor 已创建，可能先输出容器名并返回 0，随后后台才在 pull、
-rootfs/AppContainer/Job 或 workload 启动阶段失败。完成判据是父子控制通道在 workload
-成功恢复后发送 READY；READY 前任一步失败都向调用方返回原始错误和非零退出码，并由
-Windows 产品门禁覆盖本地缺失程序与失败 pull 两条离线路径。
+`W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
+Windows 后端在 `CreateProcessW -> AssignProcessToJobObject -> ResumeThread` 全部完成后，
+Linux 后端在 `Command::spawn`（含 exec）成功后，才原子发布 READY。READY 前失败由
+supervisor 发布 ERROR，父进程保留原始错误类别和退出码；父进程读完后再清理首次
+`run -d` 的失败记录，或把 `start/restart` 的保存配置恢复成 created。READY 等待有界，
+超时会终止 supervisor，不能出现调用方报失败、后台后来又自行跑起来的分叉。
+
+`WP.23A` 用不存在的 Windows EXE 断言 `CreateProcessW` 原错与 rc=4；`WP.23B`
+用本机拒绝连接的 registry 断言 pull 原错与 rc=5。两条都检查 `ps --all` 没有残留。
+
+`W9` 同批关闭。状态目录名是 rename 后的事实源；`activate_created` 每次领取
+`create.json`/`run-args.json` 时只在 `--` 之前把保存的 `--name` 归一成当前名称，
+不会误改 workload 自己的同名参数。`WP.24` 在 Windows 真机执行
+`create old -> rename old new -> start new`，并确认新名称获得非零 supervisor/guest
+进程、旧名称不再出现。
 
 ##### W1 Windows 侧 `stop` 的持续门禁 `[Windows agent]` `[done]`
 
@@ -3003,18 +3018,18 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 
 ## 6. 当前状态
 
-状态日期：2026-07-28，分支：`main`，版本：`1.0.0-rc2` 后续滚动开发。
+状态日期：2026-07-29，分支：`main`，版本：`1.0.0-rc2` 后续滚动开发。
 
 | 工作流 | 状态 | 最近可信信号 |
 |---|---|---|
-| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.22 进入门禁；Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
+| Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.24 进入门禁；Job 总内存参数已核验，资源超限仍缺 workload 行为门禁 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
 | Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
 | Rust 主机逻辑 | G0 complete | Windows workspace 单测与 Win32 实机模块持续进入 CI；实时数量以 runner 输出为准 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
 | Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
-| 后台生命周期管理 | complete | Linux P.6-P.25 与 Windows WP.6-WP.22（含 create/start、kill/top、管道 EOF）已进门禁；Windows OCI/模拟器 exec 明确不支持 |
+| 后台生命周期管理 | complete | Linux P.6-P.25 与 Windows WP.6-WP.24（含 create/start/rename、READY/ERROR、kill/top、管道 EOF）已进门禁；Windows OCI/模拟器 exec 明确不支持 |
 | Rust-only 依赖约束 | done | `Cargo.lock` 16 条 = 5 个第一方 crate + `libc`/`windows-sys` 及其 target 垫片；三条棘轮（`src/runtime/mod.rs`）盯住 C 源码、被换掉的 crate 与整棵依赖图 |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、

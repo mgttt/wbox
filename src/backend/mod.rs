@@ -181,6 +181,20 @@ pub struct RunSpec {
     /// `--env-pass-all`：继承完整宿主环境（默认仅白名单；
     /// 保留键 BLINK_*/WBOX_* 两路均不透传，见 env.rs）
     pub env_pass_all: bool,
+    /// detached supervisor 需要在 workload 真正启动后通知等待中的父进程。
+    ///
+    /// 不能在状态登记后就通知：CreateProcessW/exec 仍可能失败，父进程若已返回 0，
+    /// 用户会得到一个实际没启动的“成功”容器（PRD §4.9 W11）。
+    pub startup_notify: bool,
+}
+
+impl RunSpec {
+    pub(crate) fn notify_started(&self) -> Result<()> {
+        if self.startup_notify {
+            crate::runstate::record_startup_ready(&self.name)?;
+        }
+        Ok(())
+    }
 }
 
 /// 后端 prepare 的产出：可直接 spawn 的执行计划。

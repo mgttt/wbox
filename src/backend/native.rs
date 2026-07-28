@@ -173,8 +173,24 @@ pub fn spawn_native(spec: &RunSpec, prepared: &Prepared, target_desc: &str) -> R
 
     // ---- 5. 启动并等待 ----
     let cmdline = sandbox::build_cmdline(&prepared.cmd)?;
-    let code =
-        sandbox::run_container(&profile, &caps, &cmdline, &workdir, &mut job, &prepared.env)?;
+    let mut startup_error = None;
+    let code = sandbox::run_container_with_start_hook(
+        &profile,
+        &caps,
+        &cmdline,
+        &workdir,
+        &mut job,
+        &prepared.env,
+        |job| {
+            if let Err(e) = spec.notify_started() {
+                let _ = job.terminate(1);
+                startup_error = Some(e);
+            }
+        },
+    )?;
+    if let Some(error) = startup_error {
+        return Err(error);
+    }
     // 主进程退出即代表容器生命周期结束。先在状态锁下发布 stopping，阻止新的
     // exec 加入，再显式清空 Job 内已有的派生进程。
     let mut locked = crate::runstate::lock_existing(&spec.name)?;

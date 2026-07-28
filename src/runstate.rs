@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 const OPERATION_LOCK: &str = ".operations.lock";
 const DETACHED_RESERVATION: &str = ".detached-reservation";
+const STARTUP_READY: &str = ".startup-ready";
+const STARTUP_ERROR: &str = ".startup-error";
 const CREATED_MARKER: &str = ".created";
 const CREATE_CONFIG: &str = "create.json";
 /// `run -d` 记下的重启配置。
@@ -305,6 +307,7 @@ pub struct DetachedReservation {
     dir: PathBuf,
     token: String,
     armed: bool,
+    restore_on_failure: bool,
 }
 
 impl DetachedReservation {
@@ -319,6 +322,25 @@ impl DetachedReservation {
     pub fn disarm(&mut self) {
         self.armed = false;
     }
+
+    /// 等待 READY 的父进程已经确认 supervisor 退出。`start`/`restart` 要恢复
+    /// 可重用配置；首次 `run -d` 则清掉整条失败记录。
+    pub fn rollback_after_supervisor_exit(mut self) -> Result<()> {
+        let root = self
+            .dir
+            .parent()
+            .ok_or_else(|| WboxError::args("状态目录缺少根目录"))?;
+        let _operation_lock = lock_operations(root)?;
+        if self.dir.exists() {
+            if self.restore_on_failure {
+                restore_created_dir(&self.dir);
+            } else {
+                purge_dir(&self.dir);
+            }
+        }
+        self.armed = false;
+        Ok(())
+    }
 }
 
 impl Drop for DetachedReservation {
@@ -332,6 +354,11 @@ impl Drop for DetachedReservation {
         if let Ok(_operation_lock) = lock_operations(root) {
             let reservation = self.dir.join(DETACHED_RESERVATION);
             if std::fs::read_to_string(&reservation).ok().as_deref() == Some(&self.token) {
+                // supervisor 已把原始启动错误交给仍在等待的父进程。状态目录必须
+                // 暂留到父进程读完；随后由 rollback_after_supervisor_exit 收尾。
+                if self.dir.join(STARTUP_ERROR).is_file() {
+                    return;
+                }
                 if self.dir.join(CREATE_CONFIG).is_file() {
                     restore_created_dir(&self.dir);
                 } else {
@@ -381,6 +408,7 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
         dir,
         token,
         armed: true,
+        restore_on_failure: false,
     })
 }
 
@@ -541,7 +569,8 @@ pub fn activate_created(name: &str) -> Result<(Vec<String>, DetachedReservation)
     if liveness(&dir) == Liveness::Running {
         return Err(WboxError::args(format!("容器 '{}' 已在运行", name)));
     }
-    let args = read_create_args(&dir)?;
+    let mut args = read_create_args(&dir)?;
+    replace_saved_name(&mut args, name);
     restore_created_dir(&dir);
     let token = next_reservation_token();
     std::fs::write(dir.join(DETACHED_RESERVATION), &token)
@@ -552,8 +581,88 @@ pub fn activate_created(name: &str) -> Result<(Vec<String>, DetachedReservation)
             dir,
             token,
             armed: true,
+            restore_on_failure: true,
         },
     ))
+}
+
+/// 保存配置里的名字可能因 `wbox rename` 过期。状态目录名是当前事实源；每次
+/// start/restart 领取配置时都把 `--name` 归一到当前名字，避免 supervisor 去接管
+/// 旧名字的 reservation。只处理 `--` 之前的 CLI 选项，不碰 workload 参数。
+fn replace_saved_name(args: &mut Vec<String>, name: &str) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if args[i] == "--name" {
+            if let Some(value) = args.get_mut(i + 1) {
+                *value = name.to_string();
+                return;
+            }
+            break;
+        }
+        i += 1;
+    }
+    args.splice(0..0, ["--name".to_string(), name.to_string()]);
+}
+
+pub fn startup_ready_path(dir: &Path) -> PathBuf {
+    dir.join(STARTUP_READY)
+}
+
+pub fn clear_startup_ready(dir: &Path) {
+    let _ = std::fs::remove_file(startup_ready_path(dir));
+    let _ = std::fs::remove_file(dir.join(STARTUP_ERROR));
+}
+
+pub fn startup_is_ready(dir: &Path) -> bool {
+    std::fs::read_to_string(startup_ready_path(dir))
+        .map(|value| value == "READY\n")
+        .unwrap_or(false)
+}
+
+/// workload 已成功创建并恢复后发布 READY。先写同目录临时文件再 rename，父进程
+/// 不会观察到半条消息。
+pub fn record_startup_ready(name: &str) -> Result<()> {
+    let dir = dir_for(name)?;
+    let ready = startup_ready_path(&dir);
+    let temporary = dir.join(format!(".startup-ready-{}.tmp", std::process::id()));
+    std::fs::write(&temporary, b"READY\n")
+        .map_err(|e| WboxError::spawn(format!("写 detached READY 临时文件失败：{}", e)))?;
+    std::fs::rename(&temporary, &ready)
+        .map_err(|e| WboxError::spawn(format!("发布 detached READY 失败：{}", e)))
+}
+
+pub fn read_startup_error(dir: &Path) -> Option<String> {
+    if let Ok(text) = std::fs::read_to_string(dir.join(STARTUP_ERROR)) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let text = std::fs::read_to_string(dir.join(LOG_STDERR)).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        const MAX: usize = 16 * 1024;
+        let bytes = trimmed.as_bytes();
+        let start = bytes.len().saturating_sub(MAX);
+        Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
+    }
+}
+
+/// supervisor 在 READY 前失败时把原始分类与消息交给父进程。写入发生在 detached
+/// guard drop 之前；guard 看到该文件会把最终清理责任留给父进程。
+pub fn record_startup_error(name: &str, error: &WboxError) {
+    let Ok(dir) = dir_for(name) else {
+        return;
+    };
+    let temporary = dir.join(format!(".startup-error-{}.tmp", std::process::id()));
+    if std::fs::write(&temporary, format!("{}\n", error)).is_ok() {
+        let _ = std::fs::rename(temporary, dir.join(STARTUP_ERROR));
+    }
 }
 
 /// supervisor 在开始 pull/prepare 前接过清理责任；若尚未完成登记就报错退出，
@@ -573,6 +682,7 @@ pub fn adopt_detached(name: &str, token: &str) -> Result<DetachedReservation> {
         )));
     }
     Ok(DetachedReservation {
+        restore_on_failure: dir.join(CREATE_CONFIG).is_file(),
         dir,
         token: token.to_string(),
         armed: true,
@@ -1281,6 +1391,69 @@ mod tests {
         drop(reservation);
         assert_eq!(liveness(&dir), Liveness::Created);
         remove("saved").unwrap();
+    }
+
+    #[test]
+    fn renamed_created_config_starts_with_the_current_name() {
+        let _home = TempHome::new("created-rename");
+        let args = vec![
+            "--name".to_string(),
+            "old".to_string(),
+            "--".to_string(),
+            "echo".to_string(),
+            "--name".to_string(),
+            "workload-value".to_string(),
+        ];
+        create_pending("old", &args, &["echo".to_string()], "(native)", None).unwrap();
+        rename("old", "new").unwrap();
+
+        let (loaded, reservation) = activate_created("new").unwrap();
+        assert_eq!(&loaded[..2], &["--name", "new"]);
+        assert_eq!(
+            &loaded[2..],
+            &["--", "echo", "--name", "workload-value"],
+            "不能误改 -- 之后属于 workload 的同名参数"
+        );
+        reservation.rollback_after_supervisor_exit().unwrap();
+        assert_eq!(liveness(&dir_for("new").unwrap()), Liveness::Created);
+        remove("new").unwrap();
+    }
+
+    #[test]
+    fn startup_ready_marker_is_atomic_and_clearable() {
+        let _home = TempHome::new("startup-ready");
+        let mut reservation = reserve_detached("ready").unwrap();
+        let dir = reservation.dir().to_path_buf();
+        assert!(!startup_is_ready(&dir));
+        record_startup_ready("ready").unwrap();
+        assert!(startup_is_ready(&dir));
+        clear_startup_ready(&dir);
+        assert!(!startup_is_ready(&dir));
+        reservation.disarm();
+        purge_dir(&dir);
+    }
+
+    #[test]
+    fn startup_error_hands_cleanup_from_supervisor_to_parent() {
+        let _home = TempHome::new("startup-error-handoff");
+        let parent = reserve_detached("failed").unwrap();
+        let token = parent.token().to_string();
+        let dir = parent.dir().to_path_buf();
+
+        {
+            let _supervisor = adopt_detached("failed", &token).unwrap();
+            record_startup_error("failed", &WboxError::registry("offline"));
+        }
+        assert!(
+            dir.is_dir(),
+            "ERROR 尚未被父进程读取时 supervisor 不得先删状态目录"
+        );
+        assert!(read_startup_error(&dir)
+            .as_deref()
+            .is_some_and(|message| message.contains("offline")));
+
+        parent.rollback_after_supervisor_exit().unwrap();
+        assert!(!dir.exists(), "父进程读完错误后应清理首次 run -d 记录");
     }
 
     /// 已亡的残留可以被同名容器复用——否则崩过一次就再也用不了这个名字。

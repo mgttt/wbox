@@ -556,6 +556,14 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
             spawn_failure_hint(&e)
         ))
     })?;
+    if let Err(error) = spec.notify_started() {
+        let _ = child.kill();
+        let _ = child.wait();
+        for d in &cgroup_cleanup {
+            let _ = std::fs::remove_dir(d);
+        }
+        return Err(error);
+    }
     let status = child
         .wait()
         .map_err(|e| WboxError::spawn(format!("等待容器进程失败：{}", e)))?;

@@ -397,6 +397,7 @@ fn make_spec(
         overlay_layer_dir: None,
         verbose: opts.verbose,
         env_pass_all: opts.env_pass_all,
+        startup_notify: std::env::var_os(SUPERVISED_ENV).is_some(),
     }
 }
 
@@ -429,7 +430,7 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
     // `run -- PROGRAM` 或明确的路径/可执行文件名。
     let target = backend::classify_target(opts.positional.as_deref())?;
 
-    match target {
+    let result = match target {
         RunTarget::Native => {
             // 本地命令 = 位置参数（若有）+ `--` 后参数
             let mut cmd: Vec<String> = Vec::new();
@@ -443,7 +444,13 @@ pub fn cmd_run(args: &[String]) -> Result<u32> {
             run_native(&opts, cmd)
         }
         RunTarget::Image(iref) => run_image(&opts, iref),
+    };
+    if let (Some(_), Err(error)) = (_detached_guard.as_ref(), result.as_ref()) {
+        if let Some(name) = opts.name.as_deref() {
+            crate::runstate::record_startup_error(name, error);
+        }
     }
+    result
 }
 
 fn validate_options(opts: &RunOptions) -> Result<()> {
@@ -615,11 +622,12 @@ pub(crate) fn spawn_reserved(
 }
 
 pub(crate) fn spawn_reserved_quiet(
-    _name: String,
+    name: String,
     args: &[String],
     mut reservation: crate::runstate::DetachedReservation,
 ) -> Result<()> {
     let dir = reservation.dir();
+    crate::runstate::clear_startup_ready(dir);
     // 记下"怎么再启动一次"，好让 start/restart 对 `run -d` 起的容器同样可用
     // （补这个之前只有 create 的容器能再启动）。写失败不该拦住容器启动——
     // 容器照跑，代价只是这一个名字以后不能重启，所以出声而不中止。
@@ -649,12 +657,53 @@ pub(crate) fn spawn_reserved_quiet(
         .stderr(err);
     detach_from_terminal(&mut cmd);
 
-    let child = spawn_supervisor(&mut cmd)
+    let mut child = spawn_supervisor(&mut cmd)
         .map_err(|e| WboxError::spawn(format!("启动后台 wbox 失败：{}", e)))?;
+    if let Err(e) = wait_for_startup(&name, dir, &mut child) {
+        let _ = reservation.rollback_after_supervisor_exit();
+        return Err(e);
+    }
     reservation.disarm();
     // 不 wait：supervisor 要活得比我们久。它被 init 收养，不会成为僵尸。
     drop(child);
     Ok(())
+}
+
+fn wait_for_startup(
+    name: &str,
+    dir: &std::path::Path,
+    child: &mut std::process::Child,
+) -> Result<()> {
+    const STARTUP_TIMEOUT_SECS: u64 = 600;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(STARTUP_TIMEOUT_SECS);
+    loop {
+        if crate::runstate::startup_is_ready(dir) {
+            crate::runstate::clear_startup_ready(dir);
+            return Ok(());
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| WboxError::spawn(format!("等待后台 wbox 启动失败：{}", e)))?
+        {
+            let detail = crate::runstate::read_startup_error(dir).unwrap_or_else(|| {
+                format!("后台 supervisor 在发送 READY 前退出（状态 {}）", status)
+            });
+            let code = status.code().map(|value| value as u32).unwrap_or(4);
+            return Err(WboxError::from_exit_code(
+                code,
+                format!("容器 '{}' 启动失败：{}", name, detail),
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(WboxError::spawn(format!(
+                "容器 '{}' 启动超时：后台 supervisor 在 {} 秒内没有发送 READY",
+                name, STARTUP_TIMEOUT_SECS
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// 让 supervisor 脱离当前终端/会话，免得终端一关就被 SIGHUP 带走。
@@ -857,6 +906,7 @@ fn spawn_with_restart(
     prepared: &backend::Prepared,
 ) -> Result<u32> {
     let mut restarts = 0u32;
+    let mut generation_spec = spec.clone();
     loop {
         // 每次拉起都刷新：restart 后 namespace owner 的宿主 PID 会变化，
         // exec/top/端口转发不能继续使用上一代的 container.pid。
@@ -865,7 +915,10 @@ fn spawn_with_restart(
             crate::runstate::clear_container_pid(&spec.name);
             crate::runstate::spawn_container_pid_recorder(spec.name.clone());
         }
-        let rc = b.spawn(spec, prepared)?;
+        let rc = b.spawn(&generation_spec, prepared)?;
+        // READY 只描述第一次 workload 启动。后续由 supervisor 自己执行的重启
+        // 不再有等待中的父进程，也不能重新留下内部 marker。
+        generation_spec.startup_notify = false;
         if !spec.restart.should_restart(rc, restarts) {
             return Ok(rc);
         }

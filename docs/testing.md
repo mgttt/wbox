@@ -144,6 +144,10 @@ scripts/test-windows-product.ps1 `
 `wbox run <image>` 到 AppContainer、纯 Rust `wbox-linux` 和 Linux ELF 的完整路径。任何前置
 缺失或执行失败都直接 FAIL，不允许 SKIP。
 
+detached 生命周期门禁还覆盖 READY/ERROR：父进程只有在真实 workload 创建并恢复后
+才能返回容器名；缺失程序与失败 pull 必须返回原始错误和非零退出码。另有
+`create -> rename -> start` 真机路径，防止保存配置中的旧名称复活。
+
 ### 2.6 Windows 原生程序矩阵
 
 ```powershell

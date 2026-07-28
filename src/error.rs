@@ -119,6 +119,19 @@ impl WboxError {
         self.kind.exit_code()
     }
 
+    /// detached 父进程从 supervisor 的退出状态恢复原错误类别。未知/guest 风格
+    /// 的退出码按进程创建错误处理，不能把内部失败误报成成功。
+    pub fn from_exit_code(code: u32, msg: impl Into<String>) -> Self {
+        let kind = match code {
+            1 => ErrKind::Args,
+            2 => ErrKind::Profile,
+            3 => ErrKind::Job,
+            5 => ErrKind::Registry,
+            _ => ErrKind::Spawn,
+        };
+        Self::msg(kind, msg)
+    }
+
     /// 错误类别（测试与审计用；非 test 构建暂无调用方）。
     #[allow(dead_code)]
     pub fn kind(&self) -> ErrKind {
@@ -166,6 +179,15 @@ mod tests {
         assert_eq!(ErrKind::Job.exit_code(), 3);
         assert_eq!(ErrKind::Spawn.exit_code(), 4);
         assert_eq!(ErrKind::Registry.exit_code(), 5);
+    }
+
+    #[test]
+    fn detached_parent_restores_the_supervisor_error_kind() {
+        assert_eq!(WboxError::from_exit_code(1, "x").kind(), ErrKind::Args);
+        assert_eq!(WboxError::from_exit_code(2, "x").kind(), ErrKind::Profile);
+        assert_eq!(WboxError::from_exit_code(3, "x").kind(), ErrKind::Job);
+        assert_eq!(WboxError::from_exit_code(5, "x").kind(), ErrKind::Registry);
+        assert_eq!(WboxError::from_exit_code(127, "x").kind(), ErrKind::Spawn);
     }
 
     #[test]

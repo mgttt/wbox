@@ -115,13 +115,17 @@ $savedUserProfile = $env:USERPROFILE
 $savedHome = $env:HOME
 $savedWboxLinux = $env:WBOX_LINUX
 $savedMarker = $env:HOST_ONLY_MARKER
+$savedInsecureRegistry = $env:WBOX_INSECURE_REGISTRY
 $portableWbox = $null
 $stopName = "product-stop"
 $stopPids = @()
 $killName = "product-kill"
 $killPids = @()
 $createName = "product-create"
+$createOldName = "product-create-old"
 $createPids = @()
+$badReadyName = "product-bad-ready"
+$badPullName = "product-bad-pull"
 $execName = "product-exec"
 $crashName = "product-crash"
 $writeBgName = "product-write-bg"
@@ -716,11 +720,44 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     $killPids = @()
     Write-Host "PASS WP.20 kill immediately removes the complete Windows Job tree"
 
-    # WP.21 create must not execute anything. start then consumes the saved
-    # configuration, and an exited container must be startable again.
+    # WP.23 detached success is not "the supervisor process exists". The
+    # parent must wait until the actual workload has been created and resumed.
+    $missingProgram = Join-Path $sandbox "definitely-missing-wbox.exe"
+    $badReadyOutput = & $portableWbox run -d --name $badReadyName `
+        --workdir $env:SystemRoot\System32 -- $missingProgram 2>&1 | Out-String
+    $badReadyRc = $LASTEXITCODE
+    if ($badReadyRc -eq 0 -or $badReadyOutput -notmatch "CreateProcessW") {
+        throw "WP.23A missing detached workload was reported as success: rc=$badReadyRc output=$badReadyOutput"
+    }
+    $badReadyState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($badReadyState -match "(?m)^$([regex]::Escape($badReadyName))\s+") {
+        throw "WP.23A failed detached workload left a container record: $badReadyState"
+    }
+    Write-Host "PASS WP.23A detached parent returns the original missing-program error"
+
+    $env:WBOX_INSECURE_REGISTRY = "127.0.0.1:1"
+    $badPullOutput = & $portableWbox run -d --name $badPullName `
+        "127.0.0.1:1/wbox/definitely-missing:never" 2>&1 | Out-String
+    $badPullRc = $LASTEXITCODE
+    if ($null -eq $savedInsecureRegistry) {
+        Remove-Item Env:WBOX_INSECURE_REGISTRY -ErrorAction SilentlyContinue
+    } else {
+        $env:WBOX_INSECURE_REGISTRY = $savedInsecureRegistry
+    }
+    if ($badPullRc -eq 0 -or $badPullOutput -notmatch "127\.0\.0\.1:1") {
+        throw "WP.23B failed detached pull was reported as success: rc=$badPullRc output=$badPullOutput"
+    }
+    $badPullState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($badPullState -match "(?m)^$([regex]::Escape($badPullName))\s+") {
+        throw "WP.23B failed detached pull left a container record: $badPullState"
+    }
+    Write-Host "PASS WP.23B detached parent returns the original pull error"
+
+    # WP.21/WP.24 create must not execute anything. Rename then start consumes
+    # the saved configuration under the new name, and exited remains restartable.
     $createGuestPidFile = Join-Path $stopWork "create-guest.pid"
     $createChildPidFile = Join-Path $stopWork "create-child.pid"
-    $created = & $portableWbox container create --name $createName --workdir $stopWork -- `
+    $created = & $portableWbox container create --name $createOldName --workdir $stopWork -- `
         powershell.exe -NoLogo -NoProfile -NonInteractive -File $workloadScript `
         -GuestPidFile $createGuestPidFile -ChildPidFile $createChildPidFile 2>&1 | Out-String
     Assert-Exit 0 "WP.21 create native workload" $created
@@ -729,10 +766,19 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
         throw "WP.21 create executed the workload before start"
     }
     $createdState = & $portableWbox ps --all 2>&1 | Out-String
-    if ($createdState -notmatch "(?m)^$([regex]::Escape($createName))\s+created\s+0\s+") {
+    if ($createdState -notmatch "(?m)^$([regex]::Escape($createOldName))\s+created\s+0\s+") {
         throw "WP.21 created container state is wrong: $createdState"
     }
     Write-Host "PASS WP.21A create persists configuration without executing the workload"
+
+    $renamed = & $portableWbox rename $createOldName $createName 2>&1 | Out-String
+    Assert-Exit 0 "WP.24 rename created container" $renamed
+    $renamedState = & $portableWbox ps --all 2>&1 | Out-String
+    if ($renamedState -notmatch "(?m)^$([regex]::Escape($createName))\s+created\s+0\s+" -or
+        $renamedState -match "(?m)^$([regex]::Escape($createOldName))\s+") {
+        throw "WP.24 renamed created state is wrong: $renamedState"
+    }
+    Write-Host "PASS WP.24A created container is visible only under its new name"
 
     $firstStartOutput = Invoke-WboxCaptured -FilePath $portableWbox `
         -Arguments @("container", "start", $createName) `
@@ -787,6 +833,7 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     $createPids = @()
     Write-Host "PASS WP.21 create does not execute; start runs and reruns saved configuration"
     Write-Host "PASS WP.22 detached run/start close redirected pipelines while workloads remain alive"
+    Write-Host "PASS WP.24 create -> rename -> start uses the new lifecycle identity"
 
     if ($null -ne $guestFailure) {
         throw $guestFailure
@@ -808,6 +855,9 @@ finally {
         & $portableWbox rm $killName 2>&1 | Out-Null
         & $portableWbox kill $createName 2>&1 | Out-Null
         & $portableWbox rm $createName 2>&1 | Out-Null
+        & $portableWbox rm $createOldName 2>&1 | Out-Null
+        & $portableWbox rm $badReadyName 2>&1 | Out-Null
+        & $portableWbox rm $badPullName 2>&1 | Out-Null
     }
     foreach ($processId in $stopPids) {
         if (Test-ProcessAlive $processId) {
@@ -843,6 +893,11 @@ finally {
         Remove-Item Env:HOST_ONLY_MARKER -ErrorAction SilentlyContinue
     } else {
         $env:HOST_ONLY_MARKER = $savedMarker
+    }
+    if ($null -eq $savedInsecureRegistry) {
+        Remove-Item Env:WBOX_INSECURE_REGISTRY -ErrorAction SilentlyContinue
+    } else {
+        $env:WBOX_INSECURE_REGISTRY = $savedInsecureRegistry
     }
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
     # Cleanup intentionally probes names that may already have been removed.
