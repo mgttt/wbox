@@ -193,6 +193,14 @@ AppContainer 被拒绝、`--allow-network` 成功，并检查两次运行的状�
 数值 IP 用于隔离 capability 行为与系统 `curl.exe` 域名 resolver 辅助线程问题；
 DNS 放行已由 `nslookup` 实机验证，但尚未纳入此门禁。
 
+W8 的 private-network capability 不能用同机地址验证，因为 AppContainer
+loopback isolation 会额外阻断。需在另一台私网机器启动 HTTP 服务后运行：
+
+```powershell
+$env:WBOX_TEST_PRIVATE_ENDPOINT = "http://PRIVATE-PEER:PORT/"
+cargo test private_network_capability_controls_external_endpoint -- --ignored --nocapture
+```
+
 ## 3. 已知失败基线
 
 机器可读基线是 `tests/known-failures.txt`，说明与修复历史在

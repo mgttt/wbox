@@ -857,6 +857,71 @@ mod real_windows_tests {
         let _ = std::fs::remove_dir_all(base);
     }
 
+    #[test]
+    fn network_server_capability_child_probe() {
+        let Ok(expected) = std::env::var("WBOX_TEST_LISTEN_ALLOWED") else {
+            return;
+        };
+        let expected = expected == "1";
+        let result = std::net::TcpListener::bind(("0.0.0.0", 0));
+        assert_eq!(
+            result.is_ok(),
+            expected,
+            "TcpListener bind capability result differed: {:?}",
+            result.err()
+        );
+    }
+
+    /// Winsock bind 本身不是 server capability 判据：流量过滤发生在连接路径。
+    #[test]
+    fn tcp_listener_bind_succeeds_with_or_without_server_capabilities() {
+        let base = std::env::temp_dir().join(unique_name("server_caps"));
+        let exec_dir = base.join("exec");
+        std::fs::create_dir_all(&exec_dir).unwrap();
+        let child = exec_dir.join("wbox-server-capability-probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &child).unwrap();
+        crate::acl::grant_read_recursive(&exec_dir).unwrap();
+        let cmdline = build_cmdline(&[
+            child.to_string_lossy().into_owned(),
+            "--exact".to_string(),
+            "sandbox::real_windows_tests::network_server_capability_child_probe".to_string(),
+            "--nocapture".to_string(),
+        ])
+        .unwrap();
+        let workdir = exec_dir.to_string_lossy().into_owned();
+
+        let run_case = |label: &str, caps: Vec<CapabilitySid>, expected: bool| {
+            let profile = create_profile(&unique_name(label), &caps);
+            let mut job = Job::create(Limits::default()).unwrap();
+            let mut env = minimal_process_env();
+            env.push((
+                "WBOX_TEST_LISTEN_ALLOWED".to_string(),
+                if expected { "1" } else { "0" }.to_string(),
+            ));
+            let rc = run_container(&profile, &caps, &cmdline, &workdir, &mut job, &env).unwrap();
+            assert_eq!(rc, 0, "server capability case '{label}' failed");
+        };
+
+        run_case("server_none", Vec::new(), true);
+        run_case(
+            "server_client",
+            vec![CapabilitySid::internet_client().unwrap()],
+            true,
+        );
+        run_case(
+            "server_internet",
+            vec![CapabilitySid::internet_client_server().unwrap()],
+            true,
+        );
+        run_case(
+            "server_private",
+            vec![CapabilitySid::private_network_client_server().unwrap()],
+            true,
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[repr(C)]
     struct NtUnicodeString {
         length: u16,
@@ -1259,6 +1324,156 @@ mod real_windows_tests {
         assert_eq!(
             allowed, 0,
             "INTERNET_CLIENT 应允许访问宿主已证实可达的公网数值 IP；curl rc={allowed}"
+        );
+    }
+
+    /// A same-host private address still crosses AppContainer loopback
+    /// isolation, so it cannot validate PRIVATE_NETWORK_CLIENT_SERVER.
+    #[test]
+    #[ignore = "requires a Windows Private network adapter"]
+    fn private_network_capability_does_not_bypass_same_host_isolation() {
+        use std::io::{Read, Write};
+        use std::net::{IpAddr, TcpListener, UdpSocket};
+
+        let route = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
+        route.connect(("1.1.1.1", 80)).unwrap();
+        let private_ip = match route.local_addr().unwrap().ip() {
+            IpAddr::V4(ip) if !ip.is_loopback() => ip,
+            other => panic!("未找到可用的非 loopback IPv4 地址：{other}"),
+        };
+        let exe = curl_exe();
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+
+        let run_case = |label: &str, caps: Vec<CapabilitySid>| {
+            let listener = TcpListener::bind((private_ip, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            listener.set_nonblocking(true).unwrap();
+            let server = std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let mut request = [0u8; 1024];
+                            let _ = stream.read(&mut request);
+                            stream
+                                .write_all(
+                                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nPRIVATE_OK",
+                                )
+                                .unwrap();
+                            return true;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if std::time::Instant::now() >= deadline {
+                                return false;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(error) => panic!("private endpoint accept failed: {error}"),
+                    }
+                }
+            });
+
+            let url = format!("http://{private_ip}:{port}/");
+            let cmdline = build_cmdline(&[
+                exe.clone(),
+                "-sS".to_string(),
+                "--noproxy".to_string(),
+                "*".to_string(),
+                "--connect-timeout".to_string(),
+                "2".to_string(),
+                "--max-time".to_string(),
+                "3".to_string(),
+                url,
+            ])
+            .unwrap();
+            let profile = create_profile(&unique_name(label), &caps);
+            let mut job = Job::create(Limits::default()).unwrap();
+            let rc = run_container(&profile, &caps, &cmdline, &workdir, &mut job, &env).unwrap();
+            (rc, server.join().unwrap())
+        };
+
+        let (denied_rc, denied_reached) = run_case("private_none", Vec::new());
+        assert_ne!(denied_rc, 0);
+        assert!(!denied_reached);
+
+        let private_caps = vec![CapabilitySid::private_network_client_server().unwrap()];
+        let (allowed_rc, allowed_reached) = run_case("private_allowed", private_caps);
+        assert_ne!(allowed_rc, 0);
+        assert!(!allowed_reached);
+    }
+
+    /// External peer gate for PRIVATE_NETWORK_CLIENT_SERVER. Set the endpoint
+    /// to an HTTP service on a different machine in a Windows-Private network.
+    #[test]
+    #[ignore = "requires WBOX_TEST_PRIVATE_ENDPOINT on an external private-network peer"]
+    fn private_network_capability_controls_external_endpoint() {
+        let endpoint = std::env::var("WBOX_TEST_PRIVATE_ENDPOINT")
+            .expect("set WBOX_TEST_PRIVATE_ENDPOINT=http://PRIVATE-PEER:PORT/");
+        let exe = curl_exe();
+        let args = [
+            "-sS",
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            "3",
+            "--max-time",
+            "5",
+            endpoint.as_str(),
+        ];
+        let host = std::process::Command::new(&exe)
+            .args(args)
+            .status()
+            .expect("无法执行宿主 curl.exe");
+        assert!(
+            host.success(),
+            "宿主无法访问 private peer，不能裁决 capability"
+        );
+
+        let workdir = std::path::Path::new(&exe)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let env = minimal_process_env();
+        let command = std::iter::once(exe)
+            .chain(args.into_iter().map(str::to_string))
+            .collect::<Vec<_>>();
+        let cmdline = build_cmdline(&command).unwrap();
+
+        let denied_caps = Vec::new();
+        let denied_profile = create_profile(&unique_name("private_external_deny"), &denied_caps);
+        let mut denied_job = Job::create(Limits::default()).unwrap();
+        let denied = run_container(
+            &denied_profile,
+            &denied_caps,
+            &cmdline,
+            &workdir,
+            &mut denied_job,
+            &env,
+        )
+        .unwrap();
+        assert_ne!(denied, 0, "无 capability 不应访问 private peer");
+
+        let allowed_caps = vec![CapabilitySid::private_network_client_server().unwrap()];
+        let allowed_profile = create_profile(&unique_name("private_external_allow"), &allowed_caps);
+        let mut allowed_job = Job::create(Limits::default()).unwrap();
+        let allowed = run_container(
+            &allowed_profile,
+            &allowed_caps,
+            &cmdline,
+            &workdir,
+            &mut allowed_job,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            allowed, 0,
+            "PRIVATE_NETWORK_CLIENT_SERVER 应允许访问 private peer"
         );
     }
 

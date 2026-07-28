@@ -2,7 +2,7 @@
 //!
 //! 隔离模型（见 SPEC §0）：
 //! - AppContainer profile 提供独立的 AppContainer SID（令牌隔离边界）；
-//! - capability 白名单（v1 仅支持 INTERNET_CLIENT）以 SID_AND_ATTRIBUTES 形式下发；
+//! - capability 白名单以 SID_AND_ATTRIBUTES 形式下发；
 //! - 完整性级别：AppContainer 派生令牌天然为 Low IL（内核强制），无需也无法
 //!   在 attribute-list 启动路径上额外指定。
 
@@ -13,8 +13,9 @@ use windows_sys::Win32::Security::Isolation::{
 };
 use windows_sys::Win32::Security::PSID;
 use windows_sys::Win32::Security::{
-    CreateWellKnownSid, FreeSid, WinCapabilityInternetClientSid, SECURITY_MAX_SID_SIZE,
-    SID_AND_ATTRIBUTES,
+    CreateWellKnownSid, FreeSid, WinCapabilityInternetClientServerSid,
+    WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
+    SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
 };
 
 use crate::error::{ErrKind, KindExt, Result};
@@ -186,7 +187,7 @@ impl Drop for AppContainerProfile {
     }
 }
 
-/// 已知 capability 的 SID 包装（v1 仅 INTERNET_CLIENT）。
+/// 已知 AppContainer capability 的 SID 包装。
 pub struct CapabilitySid {
     pub sid: PSID,
     /// 持有 SID 底层内存，保证 `sid` 指针在本对象存活期间有效（仅所有权用途）。
@@ -197,13 +198,35 @@ pub struct CapabilitySid {
 impl CapabilitySid {
     /// INTERNET_CLIENT capability（S-1-15-3-1），授予后可访问网络。
     pub fn internet_client() -> Result<Self> {
+        Self::well_known(WinCapabilityInternetClientSid, "INTERNET_CLIENT")
+    }
+
+    /// INTERNET_CLIENT_SERVER capability（S-1-15-3-2）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn internet_client_server() -> Result<Self> {
+        Self::well_known(
+            WinCapabilityInternetClientServerSid,
+            "INTERNET_CLIENT_SERVER",
+        )
+    }
+
+    /// PRIVATE_NETWORK_CLIENT_SERVER capability（S-1-15-3-3）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn private_network_client_server() -> Result<Self> {
+        Self::well_known(
+            WinCapabilityPrivateNetworkClientServerSid,
+            "PRIVATE_NETWORK_CLIENT_SERVER",
+        )
+    }
+
+    fn well_known(kind: WELL_KNOWN_SID_TYPE, desc: &'static str) -> Result<Self> {
         // SECURITY_MAX_SID_SIZE = 68：任何合法 SID 的最大尺寸，直接按上限分配。
         let mut buffer = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
         let mut size = buffer.len() as u32;
         // # Safety: buffer/size 为有效的输入输出参数；失败后取 GetLastError。
         let ok = unsafe {
             CreateWellKnownSid(
-                WinCapabilityInternetClientSid,
+                kind,
                 std::ptr::null_mut(),
                 buffer.as_mut_ptr() as PSID,
                 &mut size,
@@ -212,8 +235,7 @@ impl CapabilitySid {
         if ok == 0 {
             let err = unsafe { GetLastError() };
             return Err(crate::error::WboxError::profile(format!(
-                "CreateWellKnownSid(InternetClient) 失败，GetLastError={}",
-                err
+                "CreateWellKnownSid({desc}) 失败，GetLastError={err}"
             )));
         }
         buffer.truncate(size as usize);
@@ -221,7 +243,7 @@ impl CapabilitySid {
         Ok(Self {
             sid,
             _buffer: buffer,
-            desc: "INTERNET_CLIENT",
+            desc,
         })
     }
 
@@ -381,6 +403,26 @@ mod real_windows_tests {
             SE_GROUP_ENABLED,
             "capability SID 必须启用后才参与访问检查"
         );
+    }
+
+    #[test]
+    fn server_capability_sids_match_windows_well_known_values() {
+        for (cap, expected, desc) in [
+            (
+                CapabilitySid::internet_client_server().unwrap(),
+                "S-1-15-3-2",
+                "INTERNET_CLIENT_SERVER",
+            ),
+            (
+                CapabilitySid::private_network_client_server().unwrap(),
+                "S-1-15-3-3",
+                "PRIVATE_NETWORK_CLIENT_SERVER",
+            ),
+        ] {
+            assert_eq!(sid_to_string(cap.sid).unwrap(), expected);
+            assert_eq!(cap.desc(), desc);
+            assert_eq!(cap.enabled_attributes().Attributes, SE_GROUP_ENABLED);
+        }
     }
 
     /// profile 名超长（>64 字符）应在 create 阶段报错（如果上游加了前置校验），

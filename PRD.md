@@ -556,7 +556,7 @@ F9.1–F9.39 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有�
 | Q1.2 | 基于取证结论的写重定向近似 | **边界已定** | 任意路径 copy-on-write 不做；保留默认拒绝和显式 ACL 授权，标准 `LOCALAPPDATA`/`TEMP`/`TMP` 使用 AppContainer package 私有存储（WP.25/WP.27） |
 | Q1.3 | 临时目录私有化（`TMPDIR`/`TEMP`/`TMP` 指向容器私有目录）| **已实现**（`--private-tmp`，门禁 PT.1–PT.5、WP.25）| Linux 三项均指向状态目录；Windows 的 `TMPDIR` 指向状态目录，AppContainer 将 `TEMP`/`TMP` 改到 package 专属 `AC\Temp`。两处均已实机验证可写，且显式 `-e TMPDIR=...` 优先。边界：只覆盖遵守该约定的程序 |
 | Q1.4 | 授权粒度：只读授予 | **已验证**（W7）| AppContainer 真机探针证明 RX ACE 下读取成功，覆盖与新建均返回 `PermissionDenied`；共享镜像缓存已使用该粒度。它不提供路径映射，不能据此宣称 Windows 原生 `-v :ro` 已实现 |
-| Q1.5 | capability 粒度 | **可做**（待 Windows 侧确认）| 现只有 `INTERNET_CLIENT` 一个开关；Windows 还有 `INTERNET_CLIENT_SERVER`、`PRIVATE_NETWORK_CLIENT_SERVER` 等 capability SID，可按需授予。判据：只授客户端能力时监听端口失败 |
+| Q1.5 | capability 粒度 | **取证中**（W8）| 三种 well-known SID 均可构造；实测 `bind` 在无 capability 时也成功，同机私网流量又受 loopback isolation 阻断，二者都不能证明 server/private 能力。外部 private peer 门禁已编码，流量证据前不开放 CLI |
 | — | 注册表虚拟化 | **不做** | 与写重定向同一介入点问题（§2.4.2 Q1） |
 | — | 强制入盒（Forced Programs）| **不做** | 需全局钩子或驱动（§2.5 天花板一） |
 | — | GUI 程序沙箱 | **不做** | §2.3 非目标 |
@@ -2421,7 +2421,7 @@ TODO-WINDOW
 ├── W4 build 在 Windows 宿主的可行性                      [done]
 ├── W6 Q1 临时目录私有化（TEMP/TMP）                      [done] WP.25
 ├── W7 Q1 只读授权粒度（ACL 只读 ACE）                   [done] Win32 真机门禁
-├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [planned]
+├── W8 Q1 capability 粒度（不止 INTERNET_CLIENT）        [active] 等外部 private peer
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
@@ -2620,13 +2620,32 @@ Job 启动：子进程能读取 canary，但覆盖已有文件和创建新文件
 介入点，因此 `-v host:guest:ro` 仍明确拒绝；未来 Q2 guest VFS volume 可以把
 只读 ACE 作为宿主侧最小授权，但还必须在每个 guest 写入口执行 `EROFS` 语义。
 
-**W8 capability 粒度**。现在只有 `INTERNET_CLIENT` 一个开关。
-- 为什么值得做：`--allow-network` 现在是「全有或全无」。Windows 的 capability SID
-  里还有 `INTERNET_CLIENT_SERVER`、`PRIVATE_NETWORK_CLIENT_SERVER` 等，
-  可以做到「能出网但不能监听」这类更细的授权。
-- 判据：只授客户端能力时，容器内监听端口失败、对外连接成功。
-- 边界：不要为了粒度而堆开关。先确认这几个 capability 在 AppContainer 下**确实
-  生效**（与 W3 同一类问题：Windows 上很多机制对非 UWP 进程的行为需要实测）。
+**W8 capability 粒度** `[active：等待外部 private peer]`。现在公开 CLI 只有
+`INTERNET_CLIENT` 对应的 `--allow-network`。代码已能构造并核对
+`INTERNET_CLIENT_SERVER`（`S-1-15-3-2`）和
+`PRIVATE_NETWORK_CLIENT_SERVER`（`S-1-15-3-3`），但 SID 正确不等于流量生效。
+
+Windows 真机已经排除两个错误判据：
+
+1. `TcpListener::bind(0.0.0.0:0)` 在空 capability、仅客户端、Internet server、
+   private server 四组下**全部成功**；过滤不发生在 bind 这一步。
+2. 宿主适配器标为 Private 时，用该适配器地址连接同机 listener，在空 capability
+   和 `PRIVATE_NETWORK_CLIENT_SERVER` 下都超时；同机路径另受 AppContainer
+   loopback isolation 控制，不能替代第二台设备。
+
+外部门禁 `private_network_capability_controls_external_endpoint` 已编码：用另一台
+Windows-Private 网络中的机器提供 HTTP endpoint，先证明宿主可达，再要求空
+capability 失败而 private capability 成功。运行方式：
+
+```powershell
+$env:WBOX_TEST_PRIVATE_ENDPOINT = "http://PRIVATE-PEER:PORT/"
+cargo test private_network_capability_controls_external_endpoint -- --ignored --nocapture
+```
+
+在这条流量证据通过前不新增 `--allow-private-network` /
+`--allow-network-server`，避免把无法验收的 SID 开关当成功能。若需要验证入站
+server capability，还必须由外部 peer 主动连接 Windows AppContainer listener；
+同机连接同样不能裁决。
 
 ##### R8 是否把模拟器合并进单一 `wbox.exe` `[Windows agent]` `[待决]`
 

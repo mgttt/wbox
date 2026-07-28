@@ -41,7 +41,9 @@ CLI 只负责解析和分派；`RunSpec` 表达后端无关意图；后端负责
 
 attribute-list 路径避免普通用户通常没有的
 `SeAssignPrimaryTokenPrivilege`。AppContainer 派生 token 的完整性级别为 Low。
-默认不授予 capability；`--allow-network` 添加 `INTERNET_CLIENT`。
+默认不授予 capability；`--allow-network` 添加 `INTERNET_CLIENT`。Windows 也能
+构造 Internet/private server capability SID，但 W8 尚缺外部 peer 流量门禁，
+因此未暴露对应 CLI。
 
 Job Object 提供：
 
