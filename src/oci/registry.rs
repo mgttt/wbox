@@ -14,8 +14,16 @@
 use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
 
-/// 单个 HTTP 响应体的上限。镜像层可以很大，但也不该无上限地吃内存。
-const MAX_RESPONSE_BYTES: u64 = 8 << 30; // 8 GiB
+/// 单个 HTTP 响应体的上限（**压缩后**的层字节）。
+///
+/// 之前是 8 GiB，与解压侧的 8 GiB 上限叠加，最坏情况下同时持有约 16 GiB。
+/// 收到 2 GiB：真实镜像层压缩后极少超过几百 MB（Ubuntu 完整 rootfs 约
+/// 30 MB，带 CUDA 的大镜像单层也在 2 GiB 以内），2 GiB 已经宽松到不会
+/// 误伤，同时把最坏内存占用从 16 GiB 压到 10 GiB。
+///
+/// **这仍然不是流式下载**——整层要先进内存才能算 digest。真正的解法是
+/// 边下载边做 digest、解压、解包，那是一次单独的改造，见 PRD §4.9 L11。
+const MAX_RESPONSE_BYTES: u64 = 2 << 30; // 2 GiB
 
 /// manifest / manifest list 的 Accept 集合（OCI + Docker 两种 media type）。
 const ACCEPT_MANIFEST: &str = concat!(

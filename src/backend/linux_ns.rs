@@ -331,7 +331,13 @@ pub(super) fn spawn_isolated(
                     Some(d) => d.clone(),
                     None => crate::runstate::dir_for(&spec.name)?.join("layer"),
                 };
-                build_overlay(&prepared.workdir.to_string_lossy(), &layer_dir, spec.verbose)
+                // 失败即报错：overlay 建不起来时**不再**悄悄回退成共享写入
+                // （那会污染镜像缓存，且违反 §2.2 "限制无法生效必须明确报错"）。
+                Some(build_overlay(
+                    &prepared.workdir.to_string_lossy(),
+                    &layer_dir,
+                    spec.verbose,
+                )?)
             };
             Some(build_new_root(prepared, overlay)?)
         }
@@ -708,29 +714,47 @@ fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
     ok
 }
 
-/// 备好 overlay 可写层计划。返回 `None` 表示走共享写入回退（原因已打印）。
-fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Option<OverlayPlan> {
+/// 备好 overlay 可写层计划。
+///
+/// # 失败关闭，不回退共享写入
+///
+/// 早先的实现在 overlay 不可用时打一句警告、然后**照常启动**，容器对 `/`
+/// 的写入直接落进**共享镜像缓存**。后果是跨容器污染：A 容器改了 `/etc/x`，
+/// B 容器起来就看见改过的版本；`wbox rmi` 之前一直留着。
+///
+/// 这既是隔离缺口，也直接违反 `PRD.md` §2.2 的核心约束——**"限制无法生效时
+/// 必须明确报错，不允许静默裸跑"**。一句 stderr 警告不算"明确报错"：
+/// 它不改变退出码，脚本里根本看不见。
+///
+/// 所以这里改成返回 `Err`。确实接受共享写入语义的，用 `WBOX_NO_OVERLAY=1`
+/// 显式声明——**逃生口要用户自己按，不能由程序替他按**。
+fn build_overlay(
+    rootfs: &str,
+    layer_dir: &std::path::Path,
+    verbose: bool,
+) -> Result<OverlayPlan> {
     // overlayfs 的选项串用 ',' 分隔、':' 分隔多个 lower，路径里含这两个字符
     // 就没法表达。宁可回退也不要错挂——挂错 lower 的表现是"容器看到错的根"。
     let layer = layer_dir.to_string_lossy().into_owned();
+    let fallback_hint =
+        "如果确实接受容器写入落进共享镜像缓存，用 WBOX_NO_OVERLAY=1 显式声明后重试";
     if rootfs.contains([',', ':']) || layer.contains([',', ':']) {
-        eprintln!(
-            "wbox: 路径含 ',' 或 ':'，overlayfs 选项无法表达，回退共享写入（容器写入会落在镜像缓存里）"
-        );
-        return None;
+        return Err(WboxError::spawn(format!(
+            "路径含 ',' 或 ':'，overlayfs 选项无法表达，无法建立容器可写层；{fallback_hint}"
+        )));
     }
     for d in ["upper", "work"] {
-        if std::fs::create_dir_all(layer_dir.join(d)).is_err() {
-            eprintln!("wbox: 无法创建 overlay 层目录，回退共享写入");
-            return None;
+        if let Err(e) = std::fs::create_dir_all(layer_dir.join(d)) {
+            return Err(WboxError::spawn(format!(
+                "无法创建 overlay 层目录 '{}/{d}'：{e}；{fallback_hint}",
+                layer
+            )));
         }
     }
     if !probe_rootless_overlay(layer_dir) {
-        // 回退必须**出声**：静默降级会让用户以为镜像缓存是只读的。
-        eprintln!(
-            "wbox: 本内核不支持 rootless overlay（需 5.11+），回退共享写入：容器对 / 的写入会留在镜像缓存中"
-        );
-        return None;
+        return Err(WboxError::spawn(format!(
+            "本内核不支持 rootless overlay（需 5.11+），无法建立容器可写层；{fallback_hint}"
+        )));
     }
     // `userxattr` 是 rootless overlay 的必需项（内核 5.11+）：不加的话
     // overlay 要写 `trusted.overlay.*` xattr 来标记 opaque 目录，而那需要
@@ -740,13 +764,12 @@ fn build_overlay(rootfs: &str, layer_dir: &std::path::Path, verbose: bool) -> Op
     let opts = cstr(&format!(
         "userxattr,lowerdir={},upperdir={}/upper,workdir={}/work",
         rootfs, layer, layer
-    ))
-    .ok()?;
+    ))?;
     if verbose {
         super::super::verbose_kv("rootfs 写入层", format!("overlay（upper 在 {}/upper）", layer));
     }
-    Some(OverlayPlan {
-        c_overlay: cstr("overlay").ok()?,
+    Ok(OverlayPlan {
+        c_overlay: cstr("overlay")?,
         opts,
     })
 }

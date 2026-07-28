@@ -27,6 +27,35 @@ use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
 use std::path::PathBuf;
 
+/// 默认拉取的 OCI 架构。
+///
+/// 规则**按宿主与执行方式分开**，不是简单地"跟着编译目标走"：
+///
+/// - **Windows 宿主**恒为 `amd64`。那里 Linux 镜像跑在 `wbox-linux` 上，
+///   而它是个 **x86-64** 模拟器——拉 arm64 镜像进去一条指令都执行不了。
+///   即便将来 wbox 自身编成 arm64 Windows，这一条也不变。
+/// - **Linux 宿主**跟随本机架构。那里走的是原生 namespace 容器，镜像里的
+///   二进制由**真 CPU** 执行，架构不符就是 `Exec format error`。
+///
+/// 之前两处都硬编码 `amd64`，在 arm64 Linux 上会拉下一个根本跑不起来的
+/// 镜像，而且报错发生在容器内部，很难联想到是架构选错了。
+pub fn default_arch() -> &'static str {
+    if cfg!(windows) {
+        return "amd64";
+    }
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        "powerpc64" => "ppc64le",
+        "s390x" => "s390x",
+        "riscv64" => "riscv64",
+        // 认不出来就退回 amd64：OCI 的架构名与 Rust 的不是一一对应，
+        // 猜一个错的不如退回最普遍的那个，让用户用 --arch 显式指定。
+        _ => "amd64",
+    }
+}
+
 /// Docker Hub 默认 registry 主机。
 pub const DEFAULT_REGISTRY: &str = "registry-1.docker.io";
 
@@ -360,6 +389,26 @@ pub fn list() -> crate::error::Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    /// 架构默认值的两条规则各自成立。
+    #[test]
+    fn default_arch_follows_host_except_on_windows() {
+        let a = default_arch();
+        if cfg!(windows) {
+            // 模拟器只做 x86-64，拉 arm64 进去一条指令都跑不了。
+            assert_eq!(a, "amd64", "Windows 宿主必须恒为 amd64");
+        } else {
+            // Linux 用真 CPU 跑镜像里的二进制，必须跟随本机。
+            let want = match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                _ => a, // 其余架构只要求不 panic
+            };
+            assert_eq!(a, want, "Linux 宿主应跟随本机架构");
+        }
+        // 无论哪条路，都必须给出一个非空的 OCI 架构名。
+        assert!(!a.is_empty());
+    }
+
     use super::*;
 
     #[test]

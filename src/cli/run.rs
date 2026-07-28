@@ -984,7 +984,9 @@ fn ensure_image_cached(opts: &RunOptions, iref: &oci::ImageRef) -> Result<std::p
         oci::pull(
             &iref.repo_tag(),
             "linux",
-            "amd64",
+            // 跟随宿主架构：Linux 原生后端用真 CPU 执行镜像里的二进制，
+            // 架构选错的表现是容器内 "Exec format error"，很难联想到根因。
+            oci::default_arch(),
             Some(&iref.registry),
             opts.verbose,
         )?;

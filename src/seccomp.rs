@@ -241,40 +241,55 @@ fn jump(code: u32, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 /// 构造过滤器程序。纯函数，可单测——seccomp 一旦装上就不可撤销，
 /// 靠"跑一遍看看"来调试的代价太高，指令序列必须能离线断言。
 ///
-/// 程序形状：
+/// 程序形状：**每条拒绝项后面紧跟一个 `ret ERRNO`**，所以跳转距离恒为 0/1。
+///
 /// ```text
 ///   0: ld  [arch]
 ///   1: jeq AUDIT_ARCH ? +1 : fallthrough
 ///   2: ret KILL_PROCESS          // 架构不符
 ///   3: ld  [nr]
-///   4..4+n-1: jeq <denied_i> ? -> ret ERRNO : fallthrough
-///   4+n: ret ALLOW
-///   5+n: ret ERRNO(EPERM)
+///   4: jeq <denied_0> ? fallthrough : +1
+///   5: ret ERRNO(EPERM)
+///   6: jeq <denied_1> ? fallthrough : +1
+///   7: ret ERRNO(EPERM)
+///   ...
+///   4+2n: ret ALLOW
 /// ```
+///
+/// # 为什么不用"命中就跳到末尾那一个 ERRNO"
+///
+/// 那种形状每条拒绝项只要一条指令，看着更省。但 BPF 的跳转偏移是 **`u8`**，
+/// 而偏移随拒绝项数量线性增长：第 256 项时 `n - i` 算出 256，转成 `u8`
+/// 溢出成 **0**——"跳 0 条"就是**继续往下走**，一路落到 `ret ALLOW`。
+/// 也就是说**拒绝项一多，过滤器会静默地放行**（fail-open）。
+///
+/// 这一类错误最坏的地方是它不报错：策略照常装上，`wbox` 照常启动，
+/// 只是安全边界没了。所以这里换成恒定 0/1 偏移的形状——**结构上不可能溢出**，
+/// 而不是"加一条上限检查然后祈祷没人超"。代价是每条拒绝项多一条指令。
 #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub fn build_filter(policy: &SeccompPolicy) -> Vec<libc::sock_filter> {
     let n = policy.denied.len();
-    let mut prog = Vec::with_capacity(n + 6);
+    let mut prog = Vec::with_capacity(2 * n + 5);
     prog.push(stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, OFF_ARCH));
     prog.push(jump(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, AUDIT_ARCH, 1, 0));
     prog.push(stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_KILL_PROCESS));
     prog.push(stmt(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, OFF_NR));
-    for (i, nr) in policy.denied.iter().enumerate() {
-        // 命中则跳到末尾的 ERRNO 返回。该返回在索引 5+n，本条在 4+i，
-        // 故偏移 = (5+n) - (4+i) - 1 = n - i。
-        let jt = (n - i) as u8;
+    let deny = stmt(
+        libc::BPF_RET | libc::BPF_K,
+        libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32 & 0x0000_ffff),
+    );
+    for nr in policy.denied.iter() {
+        // 相等则落到下一条（jt=0），即紧跟其后的 ret ERRNO；
+        // 不等则跳过那一条（jf=1），继续比下一个。两个偏移都是常量。
         prog.push(jump(
             libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
             *nr as u32,
-            jt,
             0,
+            1,
         ));
+        prog.push(deny);
     }
     prog.push(stmt(libc::BPF_RET | libc::BPF_K, libc::SECCOMP_RET_ALLOW));
-    prog.push(stmt(
-        libc::BPF_RET | libc::BPF_K,
-        libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32 & 0x0000_ffff),
-    ));
     prog
 }
 
@@ -400,30 +415,66 @@ mod tests {
         let prog = build_filter(&p);
         let n = p.denied().len();
         assert_eq!(n, 3);
-        assert_eq!(prog.len(), n + 6);
+        assert_eq!(prog.len(), 2 * n + 5);
 
         // 头部：先比对 arch，不符则 kill（不是放行）
         assert_eq!(prog[1].k, AUDIT_ARCH);
         assert_eq!(prog[2].k, libc::SECCOMP_RET_KILL_PROCESS);
 
-        // 每条 jeq 的 jt 都必须正好落在末尾的 ERRNO 返回上
-        let errno_idx = prog.len() - 1;
+        // 每条 jeq 命中就落到紧跟其后的 ERRNO；不命中跳过它。
         for i in 0..n {
-            let at = 4 + i;
-            let target = at + 1 + prog[at].jt as usize;
+            let at = 4 + 2 * i;
+            assert_eq!(prog[at].jt, 0, "命中必须落到下一条（ret ERRNO）");
+            assert_eq!(prog[at].jf, 1, "不命中必须跳过那一条 ret");
             assert_eq!(
-                target, errno_idx,
-                "第 {} 条拒绝项的跳转落到了 {}，而 ERRNO 在 {}",
-                i, target, errno_idx
+                prog[at + 1].k,
+                libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+                "第 {i} 条拒绝项后面必须紧跟 ret ERRNO"
             );
-            assert_eq!(prog[at].jf, 0, "不命中必须落到下一条");
         }
 
-        // 尾部：先 ALLOW 后 ERRNO，顺序反了会把所有 syscall 都拒掉
-        assert_eq!(prog[prog.len() - 2].k, libc::SECCOMP_RET_ALLOW);
-        assert_eq!(
-            prog[errno_idx].k,
-            libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32)
+        // 尾部：比完所有拒绝项才 ALLOW
+        assert_eq!(prog[prog.len() - 1].k, libc::SECCOMP_RET_ALLOW);
+    }
+
+    /// **fail-open 回归**：BPF 的跳转偏移是 `u8`。旧实现让"命中就跳到末尾
+    /// 那一个 ERRNO"，偏移随拒绝项数量线性增长，第 256 项时溢出成 0——
+    /// "跳 0 条"就是继续往下走，一路落到 `ret ALLOW`，**过滤器静默放行**。
+    ///
+    /// 这条用 300 条拒绝项走一遍，断言每条命中路径都真的到达 ERRNO、
+    /// 且没有任何一条能走到 ALLOW。
+    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn large_policy_does_not_fail_open() {
+        let mut pol = SeccompPolicy::default();
+        // 用裸号构造，避开"名字表里没这么多"的问题。
+        for nr in 1000..1300i64 {
+            pol.denied.push(nr);
+        }
+        let n = pol.denied.len();
+        assert_eq!(n, 300, "夹具本身要真的超过 255");
+        let prog = build_filter(&pol);
+
+        let allow_idx = prog.len() - 1;
+        assert_eq!(prog[allow_idx].k, libc::SECCOMP_RET_ALLOW);
+
+        for i in 0..n {
+            let at = 4 + 2 * i;
+            // 命中：落到 at+1，必须是 ERRNO，绝不能是 ALLOW。
+            let hit = at + 1 + prog[at].jt as usize;
+            assert_ne!(hit, allow_idx, "第 {i} 条拒绝项命中后走到了 ALLOW —— fail-open");
+            assert_eq!(
+                prog[hit].k,
+                libc::SECCOMP_RET_ERRNO | (libc::EPERM as u32),
+                "第 {i} 条拒绝项命中后没有落在 ERRNO 上"
+            );
+        }
+
+        // 指令数不得超过内核上限，否则 seccomp(2) 直接 EINVAL。
+        assert!(
+            prog.len() <= 4096,
+            "程序 {} 条，超过 BPF_MAXINSNS",
+            prog.len()
         );
     }
 
@@ -432,7 +483,7 @@ mod tests {
     #[test]
     fn empty_policy_still_builds_a_valid_allow_all_program() {
         let prog = build_filter(&SeccompPolicy::default());
-        assert_eq!(prog.len(), 6);
-        assert_eq!(prog[prog.len() - 2].k, libc::SECCOMP_RET_ALLOW);
+        assert_eq!(prog.len(), 5);
+        assert_eq!(prog[prog.len() - 1].k, libc::SECCOMP_RET_ALLOW);
     }
 }

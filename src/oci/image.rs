@@ -402,7 +402,10 @@ fn is_zstd(data: &[u8]) -> bool {
 
 /// 按 layer mediaType（辅以小端 magic 嗅探）把 blob 解成 tar 字节。
 /// 显式拒绝不支持的压缩格式（zstd 等），而不是误当 tar 解出垃圾。
-fn decompress_layer(blob: &[u8], media_type: &str) -> crate::fault::Result<Vec<u8>> {
+fn decompress_layer<'a>(
+    blob: &'a [u8],
+    media_type: &str,
+) -> crate::fault::Result<std::borrow::Cow<'a, [u8]>> {
     let mt = media_type.to_ascii_lowercase();
     if mt.contains("zstd") || (mt.is_empty() && is_zstd(blob)) {
         crate::bail!(
@@ -414,11 +417,14 @@ fn decompress_layer(blob: &[u8], media_type: &str) -> crate::fault::Result<Vec<u
     if want_gzip {
         let mut out = Vec::new();
         wbox_codec::deflate::GzDecoder::new(blob).read_to_end(&mut out)?;
-        Ok(out)
+        Ok(std::borrow::Cow::Owned(out))
     } else if mt.is_empty() || mt.ends_with("+tar") || mt.contains("tar") || mt.contains("layer") {
         // 未压缩 tar：application/vnd.oci.image.layer.v1.tar、
         // application/vnd.docker.image.rootfs.diff.tar 等。
-        Ok(blob.to_vec())
+        //
+        // **借用而不是 `to_vec()`**：未压缩层本来就已经完整在内存里，
+        // 再拷一份等于把这一层的内存占用翻倍，白白多出几百 MB。
+        Ok(std::borrow::Cow::Borrowed(blob))
     } else {
         crate::bail!("不支持的 layer 压缩/格式：mediaType={}", media_type)
     }

@@ -160,10 +160,10 @@ pub(crate) fn cmd_image_show(args: &[String]) -> Result<u32> {
 /// 解析并执行 `image pull <ref> [--os ..] [--arch ..] [--registry ..] [-V]`。
 pub(super) fn cmd_image_pull(args: &[String]) -> Result<u32> {
     let mut image_ref: Option<String> = None;
-    // 默认拉 linux/amd64：Windows 进程容器无法运行 Linux 二进制，
-    // rootfs 主要用于工具链/资源文件提取与调试，故默认与宿主解耦。
+    // 默认 os 恒为 linux；arch 见 `oci::default_arch()`——Windows 宿主恒
+    // amd64（模拟器只做 x86-64），Linux 宿主跟随本机架构。
     let mut os = "linux".to_string();
-    let mut arch = "amd64".to_string();
+    let mut arch = oci::default_arch().to_string();
     let mut registry: Option<String> = None;
     let mut verbose = false;
 

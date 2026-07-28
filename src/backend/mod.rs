@@ -690,6 +690,23 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
     if guest == "/" {
         return Err(bad("不允许挂载到容器根 '/'——那会让隔离失效"));
     }
+    // 安全断言二：容器路径里不许有 `..`。
+    //
+    // 落地时目标是 `rootfs.join(guest.trim_start_matches('/'))`，
+    // 所以 `-v /tmp/x:/../../etc` 会 join 成 `<rootfs>/../../etc`——
+    // **指到 rootfs 外面的宿主目录**，而且随后的 `create_dir_all` 会真的
+    // 在宿主上把它建出来，bind mount 也照挂。只查前导 '/' 挡不住这个。
+    //
+    // 这里选择**直接拒绝**而不是规范化后接受：`-v` 的目标是用户显式写的，
+    // 带 `..` 一定是笔误或攻击，静默改写成别的路径只会让人更迷惑。
+    if std::path::Path::new(guest)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(bad(
+            "容器路径不允许包含 '..'——它会让挂载点落到容器根之外",
+        ));
+    }
     // 不含路径分隔符 = **命名卷**（F9.35），与 docker 同一条规则。
     // 这条规则要简单且可预测，它决定了"数据写到哪"；任何"先当路径试试、
     // 不存在就当名字"的聪明做法，都会把一次手滑变成一个新建的空卷。
@@ -743,6 +760,34 @@ mod volume_tests {
         let t = std::env::temp_dir();
         let e = parse_volume(&format!("{}:/", t.to_str().unwrap())).unwrap_err();
         assert!(format!("{}", e).contains("隔离失效"), "{}", e);
+    }
+
+    /// **容器路径里的 `..` 会让挂载点落到 rootfs 之外。**
+    ///
+    /// 落地时是 `rootfs.join(guest.trim_start_matches('/'))`，所以
+    /// `/../../etc` 会 join 成 `<rootfs>/../../etc`——指到宿主目录，
+    /// 而且随后的 `create_dir_all` 会真的在宿主上建出来。只查前导 '/'
+    /// 挡不住它。
+    #[test]
+    fn rejects_parent_dir_traversal_in_container_path() {
+        let t = std::env::temp_dir();
+        let t = t.to_str().unwrap();
+        for guest in ["/../escape", "/a/../../escape", "/data/..", "/../"] {
+            let e = match parse_volume(&format!("{t}:{guest}")) {
+                Err(e) => e,
+                Ok(v) => panic!("'{guest}' 应被拒绝，却解析成了 {:?}", v.guest),
+            };
+            assert!(
+                format!("{e}").contains(".."),
+                "{guest} 的报错没点明 '..'：{e}"
+            );
+        }
+        // 正常路径仍要通过——只测"挡得住"会让恒失败的实现也变绿。
+        assert_eq!(parse_volume(&format!("{t}:/data")).unwrap().guest, "/data");
+        assert_eq!(
+            parse_volume(&format!("{t}:/a/b/c")).unwrap().guest,
+            "/a/b/c"
+        );
     }
 
     #[test]
