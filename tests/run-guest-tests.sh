@@ -216,9 +216,9 @@ fi
 #    却结果不同。实测差异有两处，都是宿主能力差异而非引擎回归：
 #      - t_path   @windows：Windows 侧 stat 的 st_nlink 是合成值（拿不到真实
 #                 硬链接数），且建 symlink 需要特权，symlink 环路测不起来；
-#      - t_sec_linkabs @linux：Linux 上宿主 symlink 不防护（已知缺口）；
-#                 Windows 上因为建不了 symlink，该用例反而通过。
-#    没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧
+#    （`t_sec_linkabs` 曾因"宿主 symlink 不防护"列在这里，VFS 换成受限解析
+#    后已全通并移出基线。）
+#    没有 OS 标注时这类条目无解：写进基线则另一侧报"基线过期"，不写则这一侧
 #    报"回归"。
 host_os=linux
 case "$(uname -s 2>/dev/null || echo unknown)" in

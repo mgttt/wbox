@@ -44,13 +44,12 @@
 #      另含管道容量与非阻塞写的边界。
 #   G. mmap 的部分精度（私有文件映射的 mremap 增长回读）
 #      t_mmap
-#   H. 宿主 symlink 不防护（rootfs 内指向外部的符号链接可被顺出去）
-#      t_sec_path t_sec_linkabs
 #
-# H 组是唯一带安全含义的一组，**范围已收窄**：越根路径（`/..`、`../../..`、
-# 绝对宿主路径）现在一律拒绝，`t_sec_path_abshost` 与 `t_sec_path_relesc`
-# 已全通并留在基线之外（回归会立刻变红）。剩下的是 symlink 链，与旧引擎
-# 同样的限制。
+# **H 组（宿主 symlink 不防护）已整组清空**：VFS 换成用户态的
+# `RESOLVE_IN_ROOT`（逐段解析，符号链接目标重新从 rootfs 根展开），
+# `t_sec_path` 与 `t_sec_linkabs` 现已全通并移出基线。
+# 四条安全用例（`t_sec_path`、`t_sec_linkabs`、`t_sec_path_abshost`、
+# `t_sec_path_relesc`）**全部在基线之外**，任何回归会立刻变红。
 # ============================================================================
 
 # A. MAP_SHARED
@@ -82,12 +81,6 @@ t_mmap
 
 # B'（同 socket 组）：rlimit/socket 边界校验
 t_negative
-
-# H. 宿主 symlink 不防护（越根路径已修，见上）
-t_sec_path
-# 只在 Linux 宿主失败：Windows 上建 symlink 需要特权，逃逸链根本搭不起来，
-# 该用例反而通过。标注 @linux 才能让同一份基线在两个宿主上都成立。
-t_sec_linkabs @linux
 
 # I. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
 # st_nlink 在 Windows 侧是合成值（拿不到真实硬链接数），且建 symlink 需要

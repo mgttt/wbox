@@ -34,7 +34,7 @@
 | E | `mount(2)` 未实现 | `t_mount_ro` |
 | F | file description 级共享状态未建模 | `t_fd_open` `t_fd_rw` |
 | G | mmap 精度（私有文件映射的 mremap 增长回读） | `t_mmap` |
-| H | 宿主 symlink 不防护 | `t_sec_path` `t_sec_linkabs` |
+| ~~H~~ | ~~宿主 symlink 不防护~~ —— **已修并移出基线**（VFS 受限解析）| — |
 
 ### 进程族已补齐（原 A 组的主体）
 
@@ -80,7 +80,7 @@ guest-tests job 在 Windows 上跑 native，本地 Linux 开发也常用 native�
 | 用例 | 标注 | 原因 |
 |---|---|---|
 | `t_path` | `@windows` | Windows 侧 `stat` 的 `st_nlink` 是合成值（拿不到真实硬链接数）；建 symlink 需要特权，symlink 环路（ELOOP）搭不起来。Linux 宿主上通过。 |
-| `t_sec_linkabs` | `@linux` | Linux 上宿主 symlink 不防护（G 组缺口）。Windows 上因为建不了 symlink，逃逸链搭不起来，该用例反而通过。 |
+
 
 没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧报"回归"。
 
