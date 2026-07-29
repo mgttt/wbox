@@ -377,7 +377,7 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         42 => sys_connect(m, a[0] as i32, a[1], a[2] as u32),
         43 => sys_accept4(m, a[0] as i32, a[1], a[2], 0),
         288 => sys_accept4(m, a[0] as i32, a[1], a[2], a[3] as i32),
-        44 => sys_sendto(m, a[0] as i32, a[1], a[2], a[3] as i32),
+        44 => sys_sendto(m, a[0] as i32, a[1], a[2], a[3] as i32, a[4], a[5] as u32),
         45 => sys_recvfrom(m, a[0] as i32, a[1], a[2], a[3] as i32, a[4], a[5]),
         48 => sys_shutdown(m, a[0] as i32, a[1] as i32),
         49 => sys_bind(m, a[0] as i32, a[1], a[2] as u32),
@@ -544,9 +544,21 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
             };
             if s.is_inet() {
                 let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
-                match net::inet_io(&s, nb) {
-                    Ok(mut t) => t.read(&mut tmp),
-                    Err(e) => return e,
+                if matches!(&*s.inet.borrow(), net::Inet::Udp(_)) {
+                    let st = s.inet.borrow();
+                    let net::Inet::Udp(u) = &*st else {
+                        return -ENOTCONN;
+                    };
+                    let _ = u.set_nonblocking(nb);
+                    match u.recv(&mut tmp) {
+                        Ok(k) => Ok(k),
+                        Err(e) => return host_err(&e),
+                    }
+                } else {
+                    match net::inet_io(&s, nb) {
+                        Ok(mut t) => t.read(&mut tmp),
+                        Err(e) => return e,
+                    }
                 }
             } else {
                 match net::recv(&s, &mut tmp, false) {
@@ -714,6 +726,11 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
                 Err(e) => return e,
             };
             if s.is_inet() {
+                if matches!(&*s.inet.borrow(), net::Inet::Udp(_)) {
+                    // 未 connect 的数据报 socket 上直接 write：没有目标地址，
+                    // Linux 报 EDESTADDRREQ。用 sendto 才对。
+                    return -EDESTADDRREQ;
+                }
                 match net::inet_io(&s, nonblock) {
                     Ok(mut t) => t.write(data),
                     Err(e) => return e,
@@ -2621,12 +2638,19 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, timeout: i32) -> i64 {
     // 撒谎（`t_net_sockopt` 的 poll/timeout-precision 直接量了这段墙钟）。
     if ready == 0 && timeout != 0 {
         // 等待期间可能有 fd 自己变就绪（timerfd），所以要重新扫一遍并回写。
+        // **唤醒条件要带上 events 掩码**。不带的话，一个只订阅了 POLLIN 的
+        // socketpair 读端会因为"可写"而立刻唤醒——`poll(fd, POLLIN, 200)`
+        // 于是几毫秒就返回 0，而 guest 正拿它当精确睡眠
+        // （`t_net_sockopt` 的 poll/timeout-precision 量的就是这段墙钟）。
         let woke = wait_until_ready(timeout, || {
             (0..nfds).any(|i| {
-                m.mem
-                    .read_u32(fds_ptr + i * 8)
-                    .map(|fd| readiness(m, fd as i32) != 0)
-                    .unwrap_or(false)
+                let Ok(fd) = m.mem.read_u32(fds_ptr + i * 8) else {
+                    return false;
+                };
+                let Ok(ev) = m.mem.read_u16(fds_ptr + i * 8 + 4) else {
+                    return false;
+                };
+                readiness(m, fd as i32) as u16 & (ev | POLLERR | POLLHUP) != 0
             })
         });
         if woke {
@@ -3226,15 +3250,36 @@ fn sys_accept4(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64, flags: i32) ->
     };
     if s.is_inet() {
         let nonblock = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
-        let got = {
-            let st = s.inet.borrow();
-            let net::Inet::Listener(l) = &*st else {
-                return -EINVAL;
-            };
-            if l.set_nonblocking(nonblock).is_err() {
-                return -EINVAL;
+        // 就绪判定可能已经先取走一条（见 `Inet::ListenerPending`），先用它。
+        let staged = {
+            let mut st = s.inet.borrow_mut();
+            if matches!(&*st, net::Inet::ListenerPending(..)) {
+                match std::mem::replace(&mut *st, net::Inet::Idle) {
+                    net::Inet::ListenerPending(l, c, a) => {
+                        *st = net::Inet::Listener(l);
+                        Some((c, a))
+                    }
+                    other => {
+                        *st = other;
+                        None
+                    }
+                }
+            } else {
+                None
             }
-            l.accept()
+        };
+        let got = match staged {
+            Some(v) => Ok(v),
+            None => {
+                let st = s.inet.borrow();
+                let net::Inet::Listener(l) = &*st else {
+                    return -EINVAL;
+                };
+                if l.set_nonblocking(nonblock).is_err() {
+                    return -EINVAL;
+                }
+                l.accept()
+            }
         };
         return match got {
             Ok((stream, peer)) => {
@@ -3287,14 +3332,22 @@ fn sys_getsockname(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
     };
     if s.is_inet() {
         let a = match &*s.inet.borrow() {
-            net::Inet::Listener(l) => l.local_addr().ok(),
+            net::Inet::Listener(l) | net::Inet::ListenerPending(l, _, _) => l.local_addr().ok(),
             net::Inet::Stream(st) => st.local_addr().ok(),
             net::Inet::Udp(u) => u.local_addr().ok(),
             _ => None,
         };
         return match a {
             Some(a) => write_sockaddr_in(m, addr, len_ptr, a),
-            // 还没绑定：Linux 回 0.0.0.0:0 而不是报错。
+            // 还没绑定：Linux 回本族的通配地址（`0.0.0.0:0` / `[::]:0`）
+            // 而不是报错。**族别要跟 socket 走**——AF_INET6 上回一个 IPv4
+            // 地址，调用方按 `ss_family` 分支就会走错。
+            None if s.domain == net::AF_INET6 => write_sockaddr_in(
+                m,
+                addr,
+                len_ptr,
+                std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+            ),
             None => write_sockaddr_in(
                 m,
                 addr,
@@ -3325,10 +3378,30 @@ fn sys_getpeername(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
 }
 
 fn sys_shutdown(m: &mut Machine, fd: i32, how: i32) -> i64 {
-    match sock_of(m, fd) {
-        Ok(s) => net::shutdown(&s, how),
-        Err(e) => e,
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if s.is_inet() {
+        // 早先这里只看 AF_UNIX 的 `Socket::state`，于是**已连接的 TCP 一律
+        // 被报成 ENOTCONN**——连接状态存在 `Socket::inet` 里，那边压根没查。
+        s.poll_connect();
+        let st = s.inet.borrow();
+        let Some(t) = st.stream() else {
+            return -ENOTCONN;
+        };
+        let how = match how {
+            net::SHUT_RD => std::net::Shutdown::Read,
+            net::SHUT_WR => std::net::Shutdown::Write,
+            net::SHUT_RDWR => std::net::Shutdown::Both,
+            _ => return -EINVAL,
+        };
+        return match t.shutdown(how) {
+            Ok(()) => 0,
+            Err(e) => host_err(&e),
+        };
     }
+    net::shutdown(&s, how)
 }
 
 fn sys_setsockopt(m: &mut Machine, fd: i32, level: i32, name: i32, val: u64, len: u32) -> i64 {
@@ -3383,15 +3456,49 @@ fn sys_getsockopt(m: &mut Machine, fd: i32, level: i32, name: i32, val: u64, len
     0
 }
 
-fn sys_sendto(m: &mut Machine, fd: i32, buf: u64, len: u64, _flags: i32) -> i64 {
-    write_bytes(m, fd, &{
-        let n = len.min(1 << 20) as usize;
-        let mut tmp = vec![0u8; n];
-        if m.mem.read(buf, &mut tmp).is_err() {
-            return -EFAULT;
+fn sys_sendto(
+    m: &mut Machine,
+    fd: i32,
+    buf: u64,
+    len: u64,
+    _flags: i32,
+    dest: u64,
+    dest_len: u32,
+) -> i64 {
+    let n = len.min(1 << 20) as usize;
+    let mut tmp = vec![0u8; n];
+    if m.mem.read(buf, &mut tmp).is_err() {
+        return -EFAULT;
+    }
+    // **带目标地址的数据报要真的发到那个地址**。早先这里把 `dest` 整个丢掉
+    // 直接走 `write_bytes`，于是 AF_INET 的 UDP 完全不可用：目标地址被吞了，
+    // 底层又只有 TcpStream 那条路。
+    if dest != 0 {
+        if let Ok(s) = sock_of(m, fd) {
+            if s.domain != net::AF_UNIX {
+                let a = match read_sockaddr_in(m, dest, dest_len) {
+                    Ok(a) => a,
+                    Err(e) => return e,
+                };
+                let st = s.inet.borrow();
+                let net::Inet::Udp(u) = &*st else {
+                    // 面向连接的 socket 上给了目标地址：Linux 报 EISCONN。
+                    return if st.stream().is_some() {
+                        -EISCONN
+                    } else {
+                        -EDESTADDRREQ
+                    };
+                };
+                let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+                let _ = u.set_nonblocking(nb);
+                return match u.send_to(&tmp, a) {
+                    Ok(k) => k as i64,
+                    Err(e) => host_err(&e),
+                };
+            }
         }
-        tmp
-    })
+    }
+    write_bytes(m, fd, &tmp)
 }
 
 fn sys_recvfrom(
@@ -3410,11 +3517,37 @@ fn sys_recvfrom(
     };
     let n = len.min(1 << 20) as usize;
     let mut tmp = vec![0u8; n];
+    let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+    // 来源地址：**族别必须跟 socket 走**。早先 INET 也回 `sockaddr_un`，
+    // 调用方按 `ss_family` 分支就会走错。
+    let mut peer: Option<std::net::SocketAddr> = None;
     let got = if s.is_inet() {
-        let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
-        match net::inet_io(&s, nb).and_then(|mut t| t.read(&mut tmp).map_err(|e| host_err(&e))) {
-            Ok(k) => k,
-            Err(e) => return e,
+        let is_udp = matches!(&*s.inet.borrow(), net::Inet::Udp(_));
+        if is_udp {
+            let st = s.inet.borrow();
+            let net::Inet::Udp(u) = &*st else {
+                return -ENOTCONN;
+            };
+            let _ = u.set_nonblocking(nb);
+            let r = if flags & MSG_PEEK != 0 {
+                u.peek_from(&mut tmp)
+            } else {
+                u.recv_from(&mut tmp)
+            };
+            match r {
+                Ok((k, a)) => {
+                    peer = Some(a);
+                    k
+                }
+                Err(e) => return host_err(&e),
+            }
+        } else {
+            peer = s.inet.borrow().stream().and_then(|t| t.peer_addr().ok());
+            match net::inet_io(&s, nb).and_then(|mut t| t.read(&mut tmp).map_err(|e| host_err(&e)))
+            {
+                Ok(k) => k,
+                Err(e) => return e,
+            }
         }
     } else {
         match net::recv(&s, &mut tmp, flags & MSG_PEEK != 0) {
@@ -3426,7 +3559,11 @@ fn sys_recvfrom(
         return -EFAULT;
     }
     if addr != 0 {
-        let r = write_sockaddr_un(m, addr, len_ptr);
+        let r = match peer {
+            Some(a) => write_sockaddr_in(m, addr, len_ptr, a),
+            None if s.is_inet() => 0, // 连不上就不回地址，别硬编一个假的
+            None => write_sockaddr_un(m, addr, len_ptr),
+        };
         if r != 0 {
             return r;
         }

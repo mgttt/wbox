@@ -2720,7 +2720,7 @@ TODO-LINUX
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
 ├── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
-├── L15 socket 族与 epoll                                 [active] guest 基线收紧，但 INET 语义仍有缺口
+├── L15 socket 族与 epoll                                 [done] 跨宿主复核的四条 INET 缺口已补；见下方 L15
 ├── L16 eventfd                                           [done] t_eventfd 80/0 已移出基线
 ├── L17 timerfd                                           [done] t_timerfd 67/0 已移出基线（惰性到期，无后台线程）
 └── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
@@ -2792,13 +2792,13 @@ description），只有 `FD_CLOEXEC` 属于描述符本身。原实现给每个 
 - 最小可用 fd 的下界写死成 3。Linux 给的是**最小空号**：`close(0); pipe(p);`
   之后 `p[0]` 必须是 0——那正是把 stdin 重定向成管道读端的惯用法。
 
-##### L15 socket 族与 epoll `[Linux agent]` `[active]`
+##### L15 socket 族与 epoll `[Linux agent]` `[done]`
 
 socket 族从**整族 `ENOSYS`** 做到：`t_negative` **40/0 已移出基线**，
 `t_net_epoll` **111 通过 / 1 失败**，`t_net_sockopt` **145 通过 / 1 失败**。
-后两条在**当前 guest 套件覆盖范围内**各自只剩 D 组那条快照 fork 语义差异；
-这不等于 socket/epoll 已完整。2026-07-30 跨宿主静态复核发现以下未进现有
-guest 断言的产品语义缺口，因此本项保持 `[active]`：
+后两条在**当前 guest 套件覆盖范围内**各自只剩 D 组那条快照 fork 语义差异。
+2026-07-30 的跨宿主静态复核另外指出四条**没有被现有 guest 断言覆盖**的产品
+语义缺口——每一条都属实，现已全部补上（复核提出的原文保留在下面，便于对照）：
 
 - `Inet::Listener` 无条件报告 `EPOLLIN`，即使没有待 accept 连接；
   `Inet::Stream` 也无条件报告 `EPOLLIN|EPOLLOUT`，没有查询宿主 socket 的真实
@@ -2811,6 +2811,28 @@ guest 断言的产品语义缺口，因此本项保持 `[active]`：
 - INET `recvfrom` 在请求来源地址时调用 `write_sockaddr_un`，会回写 `AF_UNIX`
   而不是真实 IPv4/IPv6 peer；未绑定的 AF_INET6 `getsockname` 也合成 IPv4
   unspecified 地址。
+
+**四条的修法**：
+
+1. **就绪判定真去问宿主 socket**。监听者：做一次非阻塞 `accept`，取到的连接
+   先存进 `Inet::ListenerPending`，`accept` 系统调用优先从那里拿——这样
+   "报了可读"和"accept 不会阻塞"是同一件事，而不是两件。已连接流：用
+   `peek` 探一个字节（不消费数据），`Ok(0)` 即对端已关，报 `EPOLLIN|EPOLLHUP`。
+   无条件报就绪的老写法会让调用方在随后的阻塞 read/accept 里挂住，
+   那正好抵消了 epoll 存在的意义。
+2. **UDP 打通**：`sendto` 带目标地址时走 `UdpSocket::send_to`（面向连接的
+   socket 上给地址报 `EISCONN`），`recvfrom` 走 `recv_from` 并回真实 peer，
+   `read`/`write` 走 `recv`/未连接则 `EDESTADDRREQ`。
+3. **`shutdown` 查对地方**：INET 的连接状态在 `Socket::inet` 里，老代码只看
+   AF_UNIX 的 `Socket::state`，于是已连接的 TCP 一律被报成 `ENOTCONN`。
+4. **地址族跟着 socket 走**：INET 的 `recvfrom`/`getsockname` 回 `sockaddr_in`
+   /`sockaddr_in6`；未绑定的 AF_INET6 回 `[::]:0` 而不是 IPv4 通配地址——
+   调用方按 `ss_family` 分支，回错族就会走错分支。
+
+**顺带修一处自己引入的回归**：timerfd 那次把 `poll` 的等待改成"边等边复查"，
+但唤醒条件漏了 `events` 掩码。于是只订阅 `POLLIN` 的 socketpair 读端会因为
+"可写"立刻醒来，`poll(fd, POLLIN, 200)` 几毫秒就返回 0——而 guest 正拿它当
+精确睡眠。`t_net_sockopt` 从 145 掉到 144，被这次复核连带发现。
 - 阻塞式 INET `connect` 直接调用无期限的 `TcpStream::connect`；需要由 guest
   可中断/有界等待或明确记录其阻塞契约。
 

@@ -253,18 +253,58 @@ impl Socket {
     }
 
     /// AF_INET 的就绪位。
+    ///
+    /// **真去问宿主 socket**，不是无条件报就绪。无条件报"可读"会让调用方
+    /// 在随后的阻塞 `read`/`accept` 里挂住——那正是 epoll 存在的意义被抵消
+    /// 的地方，也是这段最早的写法犯的错。
     pub fn inet_readiness(&self) -> u32 {
         self.poll_connect();
+        // 监听者：试一次非阻塞 accept，取到就先存着（见 `ListenerPending`）。
+        let taken = {
+            let st = self.inet.borrow();
+            if let Inet::Listener(l) = &*st {
+                let _ = l.set_nonblocking(true);
+                l.accept().ok()
+            } else {
+                None
+            }
+        };
+        if let Some((c, a)) = taken {
+            let mut st = self.inet.borrow_mut();
+            if let Inet::Listener(l) = std::mem::replace(&mut *st, Inet::Idle) {
+                *st = Inet::ListenerPending(l, c, a);
+            }
+        }
         let st = self.inet.borrow();
         match &*st {
-            // 监听中：`accept` 会不会阻塞，只能真去试一次才知道，而试一次
-            // 就把连接取走了。这里保守报可读——调用方随后的 `accept` 拿到
-            // EAGAIN 是合法的（POSIX 明确允许 poll 报就绪后 accept 仍 EAGAIN）。
-            Inet::Listener(_) => EPOLLIN,
-            Inet::Stream(_) => EPOLLIN | EPOLLOUT,
+            Inet::Listener(_) => 0,
+            Inet::ListenerPending(..) => EPOLLIN,
+            Inet::Stream(t) => {
+                // `peek` 不消费数据，正好用来判"读会不会阻塞"。
+                // 阻塞模式会在这里挂住，所以先切非阻塞——`inet_io` 每次
+                // 读写前都按 guest 的 O_NONBLOCK 重设一遍，不会被这里带偏。
+                let _ = t.set_nonblocking(true);
+                let mut b = [0u8; 1];
+                let mut v = EPOLLOUT;
+                match t.peek(&mut b) {
+                    Ok(0) => v |= EPOLLIN | EPOLLHUP, // 对端已关：读会立刻返回 0
+                    Ok(_) => v |= EPOLLIN,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => v |= EPOLLERR,
+                }
+                v
+            }
             // connect 还没完成：既不可读也不可写，正是 POLLOUT 要等的那个状态。
             Inet::Connecting(_) => 0,
-            Inet::Udp(_) => EPOLLIN | EPOLLOUT,
+            Inet::Udp(u) => {
+                let _ = u.set_nonblocking(true);
+                let mut b = [0u8; 1];
+                let mut v = EPOLLOUT;
+                if u.peek_from(&mut b).is_ok() {
+                    v |= EPOLLIN;
+                }
+                v
+            }
             Inet::Idle => EPOLLOUT,
         }
     }
@@ -733,6 +773,18 @@ pub enum Inet {
     /// 刚 `socket()`，还没 bind/connect。
     Idle,
     Listener(std::net::TcpListener),
+    /// 已经从监听队列里取出来、但 guest 还没 `accept` 走的连接。
+    ///
+    /// 存在的理由是**就绪判定**：`poll`/`epoll` 要回答"现在 accept 会不会
+    /// 阻塞"，而 `TcpListener` 上没有"看一眼有没有人排队"的可移植接口。
+    /// 于是就绪判定时做一次非阻塞 `accept`，取到就先存这里，`accept`
+    /// 系统调用优先从这里拿。对 guest 不可分辨，且避免了"报了可读、
+    /// 随后 accept 却阻塞"这种最坑的假就绪。
+    ListenerPending(
+        std::net::TcpListener,
+        std::net::TcpStream,
+        std::net::SocketAddr,
+    ),
     Stream(std::net::TcpStream),
     /// 非阻塞 `connect` 正在后台进行。
     ///
