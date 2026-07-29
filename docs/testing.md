@@ -31,12 +31,25 @@ OCI 解包或后端行为改动应运行完整相关层，并依赖 CI 补齐其
 ### 2.1 Rust
 
 ```powershell
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
-cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
+# 日常反馈：静态语法、格式、host clippy、库测试
+scripts/check.ps1 -Quick
+
+# 提交前：再执行 workspace 全部 Rust tests
+scripts/check.ps1
+
+# Linux 宿主审查 Windows 专属代码时显式加入交叉目标
+scripts/check.ps1 -Quick -WindowsTarget
 ```
 
-双目标 clippy 都是门槛；Linux host 不会编译 `cfg(windows)` 模块。
+`scripts/lint.ps1 -Mode Static` 只检查工作树空白、PowerShell AST 和 JSON 语法，
+不获取 Cargo 构建锁，适合后台只读观察者调用。`-Mode Rust` 运行 rustfmt 与 host
+Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
+不会编译 `cfg(windows)` 模块，所以跨宿主修改共享/Windows 代码时双目标都是门槛。
+
+验证按成本递增：先 `lint.ps1 -Mode Static`，再 `check.ps1 -Quick`，然后运行改动
+所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
+门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
+证据仍由下述唯一 owning gate 产出。
 
 日常构建使用仓库 wrapper，而不是长期直接调用 `cargo build`：
 
@@ -216,6 +229,17 @@ $env:WBOX_TEST_PRIVATE_ENDPOINT = "http://PRIVATE-PEER:PORT/"
 cargo test private_network_capability_controls_external_endpoint -- --ignored --nocapture
 ```
 
+### 2.8 后台观察
+
+后台 subagent 只做增量、只读观察：检查新提交、CI 阶段变化、测试日志新增失败和
+`target` 体积趋势；不得改共享热文件、启动第二个 Cargo 构建、启动 GUI/公网产品
+测试或周期性重读整份日志。报告至少包含观察到的 HEAD、失败 gate、最小错误片段
+和建议的 owning gate。主 agent 负责跨模块决策、最终串行验证以及小而完整的提交。
+
+同一 `HEAD + 命令` 已在运行时只观察现有运行，不重复启动。GitHub Actions 使用
+同 workflow/ref 的 concurrency group，后续 push 会取消过时运行，避免并发烧掉
+runner 时间并让旧结果干扰判断。
+
 ## 3. 已知失败基线
 
 机器可读基线是 `tests/known-failures.txt`，说明与修复历史在
@@ -272,5 +296,5 @@ Tag 发布前确认：
    `wbox-portable-windows-x64.zip` 和 `SHA256SUMS.txt`。
 5. 用户可见变更已写入 `CHANGELOG.md`。
 
-`cargo fmt --check` 当前可能显示 vendor/历史文件的大量既有格式差异。除非任务
-明确要求格式化，不做跨仓库批量改写；只检查本次修改没有引入无关代码变化。
+rustfmt 已纳入 `scripts/lint.ps1`；格式失败时只格式化本次涉及的 Rust 代码，不借机
+做无关的大范围重排。
