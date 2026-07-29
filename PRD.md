@@ -39,8 +39,8 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W12、R8
-│       └── 4.9.2 [TODO-LINUX]    L1–L10、W5（历史编号）
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W13、R8
+│       └── 4.9.2 [TODO-LINUX]    L1–L13、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -3064,7 +3064,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 |---|---|---|
 | Windows 原生容器 | active | WN.1-WN.8、WNET.1-WNET.4、WP.1-WP.27 进入门禁；私有临时目录、package LOCALAPPDATA 与 Job 总内存超限行为均已实机核验 |
 | OCI pull/cache/config | active | BusyBox 1.36 与 Debian bookworm-slim 实机运行 rc0；失败 pull 后旧 BusyBox 缓存继续运行 rc0，原子交换与回滚另有 G0 失败注入 |
-| Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Alpine 可用，Ubuntu 24.04 的完整 glibc CLI 仍未达门禁 |
+| Windows Linux guest | active | `crates/wbox-linux` 纯 Rust runtime 已接管 WP.3/WP.3E/WP.3W；Ubuntu 24.04 的 Bash/APT/dpkg/getconf/uname 已进入固定摘要 WU.1/WU.2 产品门禁，完整 guest ABI 缺口仍以 guest C 套件为准 |
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
 | Rust 主机逻辑 | G0 complete | Windows workspace 单测与 Win32 实机模块持续进入 CI；实时数量以 runner 输出为准 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
