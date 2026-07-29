@@ -1179,12 +1179,46 @@ impl Machine {
                 self.next(d)
             }
 
-            // Group 15：LFENCE/MFENCE/SFENCE 与 FXSAVE 族。
-            // 单线程模拟器里屏障是空操作；FXSAVE 族没实现，照实报错。
+            // Group 15：FXSAVE/FXRSTOR、MXCSR 与 fence。
             0xae => {
                 let (reg, rm) = self.modrm(d)?;
-                match (reg as u8 & 7, rm) {
-                    (5..=7, Rm::Reg(_)) => self.next(d), // fence
+                let sub = reg as u8 & 7;
+                match (sub, self.fixup(d, rm)) {
+                    // FXSAVE legacy area。x87 尚未建模，保留默认 control word，
+                    // 但 XMM/MXCSR 必须真实 round-trip，不能把上下文保存当 NOP。
+                    (0, Rm::Mem(addr)) => {
+                        let mut state = [0u8; 512];
+                        state[0..2].copy_from_slice(&0x037fu16.to_le_bytes());
+                        state[24..28].copy_from_slice(&self.cpu.mxcsr.to_le_bytes());
+                        state[28..32].copy_from_slice(&0xffffu32.to_le_bytes());
+                        for (i, xmm) in self.cpu.xmm.iter().enumerate() {
+                            let off = 160 + i * 16;
+                            state[off..off + 16].copy_from_slice(xmm);
+                        }
+                        self.mem.write(addr, &state)?;
+                        self.next(d)
+                    }
+                    (1, Rm::Mem(addr)) => {
+                        let mut state = [0u8; 512];
+                        self.mem.read(addr, &mut state)?;
+                        self.cpu.mxcsr =
+                            u32::from_le_bytes(state[24..28].try_into().unwrap()) & 0xffff;
+                        for (i, xmm) in self.cpu.xmm.iter_mut().enumerate() {
+                            let off = 160 + i * 16;
+                            xmm.copy_from_slice(&state[off..off + 16]);
+                        }
+                        self.next(d)
+                    }
+                    (2, Rm::Mem(addr)) => {
+                        self.cpu.mxcsr = self.mem.read_u32(addr)? & 0xffff;
+                        self.next(d)
+                    }
+                    (3, Rm::Mem(addr)) => {
+                        self.mem.write_u32(addr, self.cpu.mxcsr)?;
+                        self.next(d)
+                    }
+                    (5..=7, Rm::Reg(_)) => self.next(d), // LFENCE/MFENCE/SFENCE
+                    (7, Rm::Mem(_)) => self.next(d),     // CLFLUSH
                     _ => Err(self.undef(d)),
                 }
             }

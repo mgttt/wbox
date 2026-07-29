@@ -1127,6 +1127,15 @@ fn sys_getdents64(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
 
 /// 按 x86-64 的 `struct stat`（144 字节）布局填缓冲区。
 fn write_stat(m: &mut Machine, out: u64, md: &std::fs::Metadata) -> i64 {
+    write_stat_with_identity(m, out, md, None)
+}
+
+fn write_stat_with_identity(
+    m: &mut Machine,
+    out: u64,
+    md: &std::fs::Metadata,
+    identity: Option<(u64, u64, u64)>,
+) -> i64 {
     let mut b = [0u8; 144];
 
     // 平台无关部分
@@ -1157,9 +1166,9 @@ fn write_stat(m: &mut Machine, out: u64, md: &std::fs::Metadata) -> i64 {
     // "是不是同一个文件"会失效，这是已知缺口。
     #[cfg(not(unix))]
     let (dev, ino, nlink, mode, uid, gid, blksize, blocks) = (
-        1u64,
-        1u64,
-        1u64,
+        identity.map_or(1, |v| v.0),
+        identity.map_or(1, |v| v.1),
+        identity.map_or(1, |v| v.2),
         // 从文件类型合成 mode：Windows 没有 Unix 权限位。
         if md.is_dir() {
             0o040755u32
@@ -1195,10 +1204,44 @@ fn write_stat(m: &mut Machine, out: u64, md: &std::fs::Metadata) -> i64 {
     0
 }
 
+#[cfg(windows)]
+fn windows_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64, u64)> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: the raw handle remains owned by `file` for the duration of the
+    // call, and Windows initializes the complete output structure on success.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a successful GetFileInformationByHandle call initialized `info`.
+    let info = unsafe { info.assume_init() };
+    let ino = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Ok((
+        info.dwVolumeSerialNumber as u64,
+        ino,
+        info.nNumberOfLinks as u64,
+    ))
+}
+
 fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
-    let md = match m.os.fds.get(fd).map(|f| &f.kind) {
-        Some(FdKind::File(f)) => f.metadata(),
-        Some(FdKind::Dir { path, .. }) => std::fs::metadata(path),
+    let (md, identity) = match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::File(f)) => {
+            #[cfg(windows)]
+            let identity = match windows_file_identity(f) {
+                Ok(identity) => Some(identity),
+                Err(e) => return host_err(&e),
+            };
+            #[cfg(not(windows))]
+            let identity = None;
+            (f.metadata(), identity)
+        }
+        Some(FdKind::Dir { path, .. }) => (std::fs::metadata(path), None),
         // 标准流：合成一个字符设备的 stat。guest 的 isatty/缓冲判断会读它。
         Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr)
         | Some(FdKind::Dev(_)) => {
@@ -1215,7 +1258,7 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
         _ => return -EBADF,
     };
     match md {
-        Ok(md) => write_stat(m, out, &md),
+        Ok(md) => write_stat_with_identity(m, out, &md, identity),
         Err(e) => host_err(&e),
     }
 }

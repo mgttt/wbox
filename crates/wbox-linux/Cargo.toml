@@ -16,7 +16,11 @@ libc = "0.2"
 # FFI 声明，不编译任何 C 代码，与根包用的是同一个版本。
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
-features = ["Win32_Foundation", "Win32_Security_Cryptography"]
+features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+]
 
 [[bin]]
 name = "wbox-linux"

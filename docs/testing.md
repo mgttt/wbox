@@ -163,6 +163,21 @@ VirtualStore 边界可用纯 Rust i686 探针复核：
 scripts/probe-windows-virtualstore.ps1 -Wbox target/release/wbox.exe
 ```
 
+Ubuntu 24.04 使用独立门禁。Linux CI 先从固定 linux/amd64 manifest digest
+生成最小运行 fixture；Windows job 下载后离线执行 glibc、Bash、APT、dpkg、
+getconf 和退出码透传：
+
+```powershell
+scripts/test-windows-ubuntu.ps1 `
+  -Wbox target/release/wbox.exe `
+  -WboxLinux target/release/wbox-linux.exe `
+  -UbuntuImage <fixture-image-directory>
+```
+
+`WU.1/WU.2` 都是 required 产品门禁：fixture 来源、AppContainer、动态链接或
+guest ABI 任一失败都直接 FAIL，不允许 SKIP。`wbox pull` 的 registry/TLS
+门禁与该离线 ABI 门禁分开，避免公网故障掩盖 Windows guest 回归。
+
 ### 2.6 Windows 原生程序矩阵
 
 ```powershell

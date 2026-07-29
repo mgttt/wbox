@@ -588,7 +588,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R3 `[部分]` | 有 syscall/fd/进程模型，静态程序可跑通；**信号投递与线程未做** |
 | R4 `[部分]` | 有 rootfs 与 `/dev`；`-v` 只读卷仍是「计划重做」 |
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
-| R6 `[未达成]` | Alpine / Ubuntu 24.04 作为**产品门禁**通过——这一格才算兑现。当前只是手工跑通，未接门禁 |
+| R6 `[部分]` | Ubuntu 24.04 已进入 Windows 产品门禁（WU.1/WU.2）；Alpine 仍只有手工跑通证据 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
 | R9 `[done]` | §2.2.1 **第二档**：承载产品语义的第三方 crate 全部换成第一方，含 TLS。构建图只剩五个 wbox 包 + 平台 ABI |
 
@@ -923,7 +923,7 @@ F4
 │                   random,tty} 与 /proc/self/exe 已合成，procfs 其余未做
 ├── F4.R5 `[active]` 动态 glibc、shell 的 fork/exec 与管道已跑通；
 │                   线程、epoll、socket、MAP_SHARED 跨进程共享未做
-├── F4.R6 `[active]` Alpine 已手工跑通；Ubuntu 与产品门禁未接
+├── F4.R6 `[active]` Ubuntu 24.04 已接 WU.1/WU.2；Alpine 仍缺正式产品门禁
 └── F4.R7 `[done]` vendor/blink 已从仓库、CI、文档和发布物删除
 ```
 
@@ -933,7 +933,7 @@ F4
 syscall、带逃逸防护的 VFS。
 实测跑通静态与动态 glibc 程序、仓库内静态 busybox 多个 applet、真实动态
 coreutils，以及 `wbox image pull alpine:3.20` 后其中的动态 musl PIE busybox。
-门禁 `cargo test -p wbox-linux` 现为 173 项（90 单测 + 61 指令语义 + 22 端到端）；
+门禁 `cargo test -p wbox-linux` 现为 173 项（88 单测 + 63 指令语义 + 22 端到端）；
 `src/runtime` 现在是同一引擎的**进程内入口**，不再是第二份实现。
 指令解码是自己写的（`crates/wbox-linux/src/exec.rs`），不依赖外部 decoder crate，
 因此 `iced-x86` 依赖已移除。
@@ -2426,8 +2426,17 @@ TODO-WINDOW
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
 ├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
+├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+`W13` 固定 Ubuntu 24.04 linux/amd64 manifest digest，由 Linux CI 生成最小
+runtime fixture；`WU.1` 在 Windows 校验来源并授予 AppContainer 只读 ACL，
+`WU.2` 在 Windows AppContainer 内经纯 Rust
+`wbox-linux` 启动 glibc/Bash，核验 `os-release`、`uname`、APT 2.8.3、dpkg
+amd64、getconf 64 bit、rc=37 透传及前台状态清理。接门禁时修复了 Windows
+`fstat` 把所有文件合成为同一 `(st_dev, st_ino)`、导致 glibc 把 libc 误判成
+已加载 libtinfo 的问题，并补齐 FXSAVE/FXRSTOR 与 MXCSR 指令族。
 
 `W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
 Windows 后端在 `CreateProcessW -> AssignProcessToJobObject -> ResumeThread` 全部完成后，
@@ -2697,8 +2706,16 @@ TODO-LINUX
 ├── L9 Linux native / Wine 共用后端验收当前失败            [done] 见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
-└── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
+├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
+└── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [active] Windows 实测会无限等待
 ```
+
+`L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
+`ubuntu@sha256:52df9b1e...cf3faf` 执行 `image pull`，超过 10 分钟仍无输出且
+进程不退出；直接 `-V` 重跑也超过 3 分钟。当前 Windows Ubuntu ABI 门禁改由
+Linux CI 从同一固定 digest 生成 fixture，不能因此把 pull 判为通过。Linux 侧需
+给 registry/TLS 各阶段加入有界超时和阶段诊断，并建立成功 pull 门禁；修复后再
+补 Windows `wbox pull` required job。
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

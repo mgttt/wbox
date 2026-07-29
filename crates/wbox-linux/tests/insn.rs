@@ -664,6 +664,53 @@ fn fs_segment_prefix_adds_tls_base() {
     assert_eq!(m.cpu.regs[RAX], 0xabcd, "fs: 前缀要加上 TLS 基址");
 }
 
+#[test]
+fn fxsave_fxrstor_round_trip_xmm_and_mxcsr() {
+    // rax=DATA; fxsave64 [rax]; 清状态；fxrstor64 [rax]
+    let mut code = vec![0x48, 0xb8];
+    code.extend_from_slice(&DATA.to_le_bytes());
+    code.extend_from_slice(&[
+        0x48, 0x0f, 0xae, 0x00, // fxsave64 (%rax)
+        0x48, 0x0f, 0xae, 0x08, // fxrstor64 (%rax)
+    ]);
+    let mut m = mach(&code);
+    let saved = *b"0123456789abcdef";
+    m.cpu.xmm[0] = saved;
+    m.cpu.mxcsr = 0x1fa0;
+
+    steps(&mut m, 2);
+    assert_eq!(
+        m.mem.read_u32(DATA + 24).unwrap(),
+        0x1fa0,
+        "FXSAVE must write MXCSR at the architectural offset"
+    );
+    let mut saved_xmm = [0u8; 16];
+    m.mem.read(DATA + 160, &mut saved_xmm).unwrap();
+    assert_eq!(saved_xmm, saved);
+    m.cpu.xmm[0] = [0; 16];
+    m.cpu.mxcsr = 0;
+    steps(&mut m, 1);
+    assert_eq!(m.cpu.xmm[0], saved);
+    assert_eq!(m.cpu.mxcsr, 0x1fa0);
+}
+
+#[test]
+fn stmxcsr_and_ldmxcsr_round_trip() {
+    // rax=DATA; stmxcsr [rax]; ldmxcsr 4[rax]
+    let mut code = vec![0x48, 0xb8];
+    code.extend_from_slice(&DATA.to_le_bytes());
+    code.extend_from_slice(&[
+        0x0f, 0xae, 0x18, // stmxcsr (%rax)
+        0x0f, 0xae, 0x50, 0x04, // ldmxcsr 4(%rax)
+    ]);
+    let mut m = mach(&code);
+    m.cpu.mxcsr = 0x1f80;
+    m.mem.write_u32(DATA + 4, 0x1fa0).unwrap();
+    steps(&mut m, 3);
+    assert_eq!(m.mem.read_u32(DATA).unwrap(), 0x1f80);
+    assert_eq!(m.cpu.mxcsr, 0x1fa0);
+}
+
 // ------------------------------------------------------- SSE 浮点
 
 /// 把一个 f64 放进 DATA，再用 movsd 装进 xmm。

@@ -272,13 +272,27 @@ jobs:
           zig version
           WBOX_LINUX=$exe bash tests/run.sh
 
+  prepare-ubuntu-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build pinned Ubuntu 24.04 runtime fixture
+        run: bash scripts/build-ubuntu-fixture.sh target/ubuntu-fixture
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-24.04-amd64-fixture
+          path: target/ubuntu-fixture
+          if-no-files-found: error
+          retention-days: 1
+
   # Product-path gate: exercise the public wbox CLI with the same two-file
   # bundle that release publishes. The fixture is assembled from the tracked
   # static Linux busybox, so registry and public-network failures cannot SKIP it.
   test-windows-product:
     runs-on: windows-latest
     timeout-minutes: 25
-    needs: build-wbox-linux
+    needs: [build-wbox-linux, prepare-ubuntu-fixture]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -288,6 +302,10 @@ jobs:
         with:
           name: wbox-linux.exe
           path: target/product
+      - uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-24.04-amd64-fixture
+          path: target/product/ubuntu-fixture
       - name: Windows product path (native + cached OCI Linux guest)
         shell: pwsh
         run: |
@@ -295,6 +313,13 @@ jobs:
             -Wbox target/release/wbox.exe `
             -WboxLinux target/product/wbox-linux.exe `
             -Busybox busybox
+      - name: Windows Ubuntu 24.04 product path (pinned OCI digest)
+        shell: pwsh
+        run: |
+          scripts/test-windows-ubuntu.ps1 `
+            -Wbox target/release/wbox.exe `
+            -WboxLinux target/product/wbox-linux.exe `
+            -UbuntuImage target/product/ubuntu-fixture
 
   # ⑦ Linux 原生后端（多宿主 §10）：rootless namespace + cgroup v2 限额。
   #    ubuntu runner 满足两个本地开发容器满足不了的前置——

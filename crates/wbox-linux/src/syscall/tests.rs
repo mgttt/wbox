@@ -18,6 +18,52 @@ fn scratch(m: &mut Machine) -> u64 {
     at
 }
 
+#[cfg(windows)]
+#[test]
+fn fstat_distinguishes_different_windows_files() {
+    let dir = std::env::temp_dir().join(format!(
+        "wbox-linux-fstat-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let first = dir.join("first");
+    let second = dir.join("second");
+    std::fs::write(&first, b"a").unwrap();
+    std::fs::write(&second, b"b").unwrap();
+
+    let mut m = mach();
+    let at = scratch(&mut m);
+    let first_fd = m.os.fds.alloc(fs::Fd {
+        kind: FdKind::File(std::fs::File::open(&first).unwrap()),
+        cloexec: false,
+        flags: 0,
+    });
+    let second_fd = m.os.fds.alloc(fs::Fd {
+        kind: FdKind::File(std::fs::File::open(&second).unwrap()),
+        cloexec: false,
+        flags: 0,
+    });
+
+    assert_eq!(sys_fstat(&mut m, first_fd, at), 0);
+    assert_eq!(sys_fstat(&mut m, second_fd, at + 144), 0);
+    let first_identity = (m.mem.read_u64(at).unwrap(), m.mem.read_u64(at + 8).unwrap());
+    let second_identity = (
+        m.mem.read_u64(at + 144).unwrap(),
+        m.mem.read_u64(at + 152).unwrap(),
+    );
+    assert_ne!(
+        first_identity, second_identity,
+        "glibc uses (st_dev, st_ino) to deduplicate loaded shared objects"
+    );
+
+    drop(m);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn brk_grows_and_maps_new_pages() {
     let mut m = mach();

@@ -105,6 +105,9 @@ pub struct Cpu {
     pub flags: Flags,
     /// XMM0-15，按字节存。SSE 的整数/浮点语义各自解释这 16 字节。
     pub xmm: [[u8; 16]; 16],
+    /// SSE 控制/状态寄存器。当前浮点运算由宿主完成，但 guest 仍会通过
+    /// FXSAVE/LDMXCSR 保存恢复这个可见状态。
+    pub mxcsr: u32,
     /// `arch_prctl(ARCH_SET_FS)` 设的 TLS 基址；`fs:` 前缀访存加它。
     pub fs_base: u64,
     pub gs_base: u64,
@@ -125,6 +128,7 @@ impl Cpu {
             rip: 0,
             flags: Flags::default(),
             xmm: [[0; 16]; 16],
+            mxcsr: 0x1f80,
             fs_base: 0,
             gs_base: 0,
             icount: 0,
