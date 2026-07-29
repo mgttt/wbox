@@ -1211,8 +1211,8 @@ mod tests {
         let keep = t.alloc(Fd::new(FdKind::Closed, false, 0)).unwrap();
         let drop = t.alloc(Fd::new(FdKind::Closed, true, 0)).unwrap();
         t.close_on_exec();
-        assert!(t.contains(keep));
-        assert!(!t.contains(drop));
+        assert!(t.contains(keep.unwrap()));
+        assert!(!t.contains(drop.unwrap()));
         assert!(t.contains(0), "标准流不带 CLOEXEC");
     }
 }
