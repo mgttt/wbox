@@ -2104,6 +2104,35 @@ else
   report FAIL "CP.5 目录拷贝" "rc=$crc 容器内读到: $(printf '%s' "$seen" | tr '\n' ' ' | head -c 120)"
 fi
 
+# CP.7 **L8**：容器里放的符号链接不得把 `cp` 的目标带出 rootfs。
+# 旧实现是纯词法的——只逐段消解 `..`，从不看符号链接。容器里
+# `ln -s <宿主目录> /cpevil` 之后，`cp x ctr:/cpevil/x` 词法上老老实实待在
+# upper 里，落盘时宿主却跟着链接走出去，在**宿主**上写了文件。
+CPESC=$WORK/cpescape
+CPUP=$WORK/home/.wbox/run/cpc/layer/upper
+rm -rf "$CPESC" && mkdir -p "$CPESC"
+printf 'pwned\n' > "$WORK/payload.txt"
+# 直接在 upper 里种链接，而不是 `exec` 进容器去建：容器的 workload 是
+# `sleep 30`，跑到这里可能已经退出，`exec` 会失败，用例就变成**空跑**——
+# 判据只看"宿主没被写"，链接压根没建也照样 PASS。落点是同一个目录，
+# 谁建的不影响被测行为。
+ln -sfn "$CPESC" "$CPUP/cpevil"
+ln -sfn ../../.. "$CPUP/cpup"
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/payload.txt" cpc:/cpevil/x 2>&1); crc=$?
+if [ -L "$CPUP/cpevil" ] && [ ! -e "$CPESC/x" ]; then
+  report PASS "CP.7 cp 不被容器内的符号链接带出 rootfs（L8）"
+else
+  report FAIL "CP.7 cp 越界写宿主" "rc=$crc 链接在位=$([ -L "$CPUP/cpevil" ] && echo 是 || echo 否) 宿主 $CPESC/x 内容=$(cat "$CPESC/x" 2>&1 | head -c 40) 输出:$(printf '%s' "$cout" | head -c 100)"
+fi
+
+# CP.8 相对链接爬到根之上要**明确报错**，不能夹在根上悄悄写别处。
+cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/payload.txt" cpc:/cpup/y 2>&1); crc=$?
+if [ -L "$CPUP/cpup" ] && [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q '逃出'; then
+  report PASS "CP.8 经由相对链接爬出 rootfs 时明确报错"
+else
+  report FAIL "CP.8 相对链接逃逸" "rc=$crc 输出: $(printf '%s' "$cout" | head -c 140)"
+fi
+
 # CP.6 两端都不是容器路径时要报错。含冒号的宿主文件名（./a:b）不能被误判成容器。
 cout=$(HOME=$WORK/home "$WBOX_ABS" cp "$WORK/in.txt" "$WORK/plain.txt" 2>&1); crc=$?
 if [ "$crc" -ne 0 ] && printf '%s' "$cout" | grep -q '容器'; then
@@ -2357,6 +2386,23 @@ if [ "$arc" -ne 0 ] && printf '%s' "$aout" | grep -q '必须是该阶段内的�
 else
   report FAIL "AF.3 COPY --from 相对路径" "rc=$arc 输出: $(printf '%s' "$aout" | head -c 150)"
 fi
+
+# AF.8 **L8**：镜像里的符号链接不得把 COPY/ADD 的目标带出 rootfs。
+# 基础镜像是外部输入，塞一个 `/afevil -> <宿主目录>` 就够了——旧的纯词法解析
+# 只消解 `..`，`/afevil/x` 词法上待在 rootfs 里，落盘时宿主跟着链接走出去。
+AFESC=$WORK/afescape
+rm -rf "$AFESC" && mkdir -p "$AFESC"
+ln -sfn "$AFESC" "$AFD/rootfs/afevil"
+printf 'FROM aftest\nCOPY plain.txt /afevil/x\nADD plain.txt /afevil/y\n' > "$WORK/afctx/D4"
+aout=$(HOME=$AFH "$WBOX_ABS" build -t afesc:1 -f "$WORK/afctx/D4" "$WORK/afctx" 2>&1); arc=$?
+# 判据里带上 `arc -eq 0` 与"链接确实在位"：少了这两条，构建因任何别的原因
+# 失败、或链接压根没建成，用例都会空跑着变绿。
+if [ "$arc" -eq 0 ] && [ -L "$AFD/rootfs/afevil" ] && [ ! -e "$AFESC/x" ] && [ ! -e "$AFESC/y" ]; then
+  report PASS "AF.8 COPY/ADD 不被镜像里的符号链接带出 rootfs（L8）"
+else
+  report FAIL "AF.8 COPY/ADD 越界" "rc=$arc 链接在位=$([ -L "$AFD/rootfs/afevil" ] && echo 是 || echo 否) 宿主目录出现: $(ls "$AFESC" 2>&1 | tr '\n' ' ' | head -c 80) 输出:$(printf '%s' "$aout" | head -c 100)"
+fi
+rm -f "$AFD/rootfs/afevil"
 
 # ADD 的源内容变了，缓存必须失效——只哈希指令文本的话会把旧内容烤进镜像
 echo CHANGED > "$WORK/afctx/plain.txt"

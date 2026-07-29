@@ -384,9 +384,22 @@ pub fn resolve_context_path(context: &Path, src: &str) -> Result<PathBuf> {
 
 /// 把一个容器内绝对路径解析到宿主上的某棵 rootfs 里，并**拒绝逃出 rootfs**。
 ///
-/// 两处在用：build 的 `COPY` 目标，以及 `wbox cp` 的容器端路径。两边面对的
-/// 是同一类输入（用户给的容器内路径），所以共用同一份逃逸校验——分头写两份
-/// 迟早会有一份漏掉 `..`。
+/// 三处在用：build 的 `COPY`/`ADD` 目标与 `COPY --from` 源、`wbox cp` 的容器端
+/// 路径、以及 `layers.rs` 的分层查找。都是同一类输入（用户或镜像给的容器内
+/// 路径），所以共用同一份校验——分头写迟早有一份漏掉。
+///
+/// # 只消解 `..` 是不够的（PRD L8）
+///
+/// 早先这里是**纯词法**的：逐段消解 `..`，从不看符号链接。可镜像是外部输入，
+/// 里面放一个 `/evil -> /home/someone`（宿主绝对路径）就够了——`COPY x /evil/y`
+/// 词法上老老实实待在 rootfs 里，落盘时宿主却跟着 `evil` 走出去，在**宿主**
+/// 上写了文件。`..` 只是逃逸的一种写法，符号链接是另一种，挡一半等于没挡。
+///
+/// 现在委托给 [`wbox_codec::path::resolve_in_root`]：逐段展开，链接目标重新
+/// 以 rootfs 为根解析。这与 guest 运行期 VFS（L12）是同一套策略，跟归档解包
+/// （L7，[`wbox_codec::tar::safe_join`]）的"见链接即拒"是有意的不同——归档
+/// 完全不可信，"跟着链接走"没有合理语义；而镜像里的 `/etc -> /usr/etc` 是
+/// 正常内容，该在容器内照常生效。
 pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
     if !dst.starts_with('/') {
         return Err(WboxError::args(format!(
@@ -394,29 +407,18 @@ pub fn resolve_rootfs_path(rootfs: &Path, dst: &str) -> Result<PathBuf> {
             dst
         )));
     }
-    // 逐段消解 `..`，不依赖 canonicalize——目标通常还不存在
-    let mut out = PathBuf::from(rootfs);
-    let mut depth = 0usize;
-    for comp in Path::new(dst).components() {
-        match comp {
-            std::path::Component::Normal(c) => {
-                out.push(c);
-                depth += 1;
-            }
-            std::path::Component::ParentDir => {
-                if depth == 0 {
-                    return Err(WboxError::args(format!(
-                        "容器内路径 '{}' 用 '..' 逃出了 rootfs",
-                        dst
-                    )));
-                }
-                out.pop();
-                depth -= 1;
-            }
-            _ => {}
+    // 末段跟随：底层的 `File::create` / 读取本来就会跟随，这里跟随只是把它
+    // 提前到**受限**的解析里做，免得宿主替我们跟出 rootfs 去。
+    wbox_codec::path::resolve_in_root(rootfs, Path::new(dst), true).map_err(|e| match e {
+        wbox_codec::path::ResolveError::Escaped => {
+            WboxError::args(format!("容器内路径 '{}' 用 '..' 逃出了 rootfs", dst))
         }
-    }
-    Ok(out)
+        wbox_codec::path::ResolveError::Loop => WboxError::args(format!(
+            "容器内路径 '{}' 的符号链接成环（或嵌套超过 {} 层）",
+            dst,
+            wbox_codec::path::MAX_SYMLINK_DEPTH
+        )),
+    })
 }
 
 #[cfg(test)]

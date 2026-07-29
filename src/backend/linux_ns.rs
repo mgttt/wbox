@@ -1201,6 +1201,33 @@ unsafe fn enter_namespaces(p: &NsPlan) -> std::io::Result<()> {
     crate::seccomp::apply(&p.seccomp)
 }
 
+/// 关掉 fd 3 以上的全部描述符。
+///
+/// # Safety
+/// 只在 fork 之后的子进程里调用；只做裸 syscall，不分配内存。
+unsafe fn close_inherited_fds() {
+    // close_range(2)：Linux 5.9+。一次调用搞定，也不必猜上界。
+    const SYS_CLOSE_RANGE: libc::c_long = 436;
+    if libc::syscall(SYS_CLOSE_RANGE, 3u32, u32::MAX, 0u32) == 0 {
+        return;
+    }
+    // 老内核退化成逐个关。上界取 RLIMIT_NOFILE（getrlimit 是裸 syscall，
+    // 不像 sysconf 那样可能去读 /proc）。
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let max = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 && lim.rlim_cur > 3 {
+        // 上限夹一下：某些环境把 NOFILE 设成 2^20 以上，逐个关会明显拖慢启动。
+        lim.rlim_cur.min(65536) as libc::c_int
+    } else {
+        4096
+    };
+    for fd in 3..max {
+        libc::close(fd);
+    }
+}
+
 /// [`enter_namespaces`] 的主体：建立命名空间并切根（不含 capability 裁剪）。
 ///
 /// # Safety
@@ -1261,6 +1288,21 @@ unsafe fn setup_namespaces(p: &NsPlan) -> std::io::Result<()> {
         return Err(err());
     }
     if pid > 0 {
+        // **先丢掉继承来的所有非 stdio fd**，再进入等待。
+        //
+        // 其中一个是 `Command` 自己的 exec 状态管道写端：`spawn()` 要等它被
+        // 关掉才返回（关掉 = 孙进程 exec 成功；带内容 = exec 失败的 errno）。
+        // 孙进程 exec 时会自动关掉它那一份（CLOEXEC），可**中间进程永远不
+        // exec**，于是它手里那份一直开着——`spawn()` 就得一直等到整个容器
+        // 结束才返回。
+        //
+        // 只用 `spawn() + wait()` 时这看不出来（无非是把等待挪了个地方），
+        // 但 detached 的 READY 握手（§4.9 W11）要在 workload 起来的当下发布，
+        // 而发布点在 `spawn()` 之后——于是 `wbox run -d -- sleep 9` 要整整
+        // 9 秒才返回，`--detach` 名存实亡（门禁 P.9 判的就是这个 ≤3s）。
+        //
+        // 中间进程只 `waitpid` + `_exit`，一个 fd 都不需要，全关掉最省事。
+        close_inherited_fds();
         // 中间进程：等孙进程结束，用同样的码退出。这里不能 return Ok——
         // 否则它会继续 exec，变成两份 guest 程序。
         let mut st: libc::c_int = 0;

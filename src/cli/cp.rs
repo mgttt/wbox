@@ -123,9 +123,13 @@ fn copy_in(container: &str, host: &Path, guest: &str) -> Result<u32> {
     let layers = ContainerLayers::resolve(container, "cp 无法取得它的文件系统视图")?;
     // 写只写 upper：镜像下层是共享只读的，往那里写会污染别的容器（F9.12）
     let mut dst = crate::build::resolve_rootfs_path(&layers.upper, guest)?;
-    // 目标以 `/` 结尾、或容器内已是目录时，拷进去而不是覆盖
+    // 目标以 `/` 结尾、或容器内已是目录时，拷进去而不是覆盖。
+    // **要重新解析**而不是直接 join：追加的这一段本身可能是容器里放的符号
+    // 链接（`/dir/x -> /home/someone`），直接 join 出来的路径落盘时会穿出去。
     if guest.ends_with('/') || dst.is_dir() {
-        dst = dst.join(host.file_name().unwrap_or_default());
+        let name = host.file_name().unwrap_or_default().to_string_lossy();
+        let joined = format!("{}/{}", guest.trim_end_matches('/'), name);
+        dst = crate::build::resolve_rootfs_path(&layers.upper, &joined)?;
     }
     if let Some(p) = dst.parent() {
         std::fs::create_dir_all(p)
@@ -142,6 +146,15 @@ fn copy_any(src: &Path, dst: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(src)
         .map_err(|e| WboxError::args(format!("读取 '{}' 失败：{}", src.display(), e)))?;
     if meta.is_dir() {
+        // 目标已是符号链接时先摘掉再建目录。不摘的话 `create_dir_all` 认的是
+        // 链接指向的那个目录，接下来整棵子树都从链接**穿出去**写——容器里
+        // 放一个 `/dir/evil -> /home/someone`，`wbox cp ./tree ctr:/dir` 就能
+        // 借它往宿主落文件。这与下面文件分支的 `remove_file` 是同一条纪律。
+        if let Ok(m) = std::fs::symlink_metadata(dst) {
+            if m.file_type().is_symlink() {
+                let _ = std::fs::remove_file(dst);
+            }
+        }
         std::fs::create_dir_all(dst)
             .map_err(|e| WboxError::args(format!("创建 '{}' 失败：{}", dst.display(), e)))?;
         let rd = std::fs::read_dir(src)

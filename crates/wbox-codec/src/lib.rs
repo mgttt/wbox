@@ -30,6 +30,7 @@
 pub mod base64;
 pub mod deflate;
 pub mod json;
+pub mod path;
 pub mod sha256;
 pub mod tar;
 

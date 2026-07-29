@@ -2439,6 +2439,16 @@ supervisor 发布 ERROR，父进程保留原始错误类别和退出码；父进
 `WP.23A` 用不存在的 Windows EXE 断言 `CreateProcessW` 原错与 rc=4；`WP.23B`
 用本机拒绝连接的 registry 断言 pull 原错与 rc=5。两条都检查 `ps --all` 没有残留。
 
+**Linux 侧补了一处**：`Command::spawn()` 在这里**不是**"exec 完就返回"。
+PID namespace 要求 guest 是新 ns 的 PID 1，所以 `pre_exec` 里还会再 fork 一次
+（见 `linux_ns.rs` 顶部"PID namespace 的双 fork"），而中间进程**永不 exec**——
+它手里那份 `Command` 的 exec 状态管道写端就一直开着，`spawn()` 于是要等到整个
+容器结束才返回。只用 `spawn() + wait()` 时这只是把等待挪了个地方，看不出来；
+可 READY 一旦发布在 `spawn()` 之后，`wbox run -d -- sleep 9` 就要整整 9 秒才
+返回，`--detach` 名存实亡（实测；门禁 P.9 判的正是"≤3s 返回"）。修法是让中间
+进程 fork 完就 `close_range(3, ~0)` 把继承来的非 stdio fd 全丢掉——它只需
+`waitpid` + `_exit`，一个 fd 都不要。exec 失败照旧立刻报原错，W11 的语义不变。
+
 `W9` 同批关闭。状态目录名是 rename 后的事实源；`activate_created` 每次领取
 `create.json`/`run-args.json` 时只在 `--` 之前把保存的 `--name` 归一成当前名称，
 不会误改 workload 自己的同名参数。`WP.24` 在 Windows 真机执行
@@ -2683,7 +2693,7 @@ TODO-LINUX
 ├── L6 pod 抽象是否值得做                                 [done] 结论是不做
 ├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
 ├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
-├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [active] 待修复与门禁；见下方 L8
+├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [done] 门禁 CP.7/CP.8/AF.8；见下方 L8
 ├── L9 Linux native / Wine 共用后端验收当前失败            [done] 见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
@@ -2869,24 +2879,29 @@ Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不�
 失败的实现也变绿）、`lying_size_header_does_not_allocate`、
 `absurd_size_header_is_rejected_outright`。
 
-##### L8 `cp` 穿过 upper/rootfs 中间符号链接 `[Linux agent]` `[active]`
+##### L8 `cp` 穿过 upper/rootfs 中间符号链接 `[Linux agent]` `[done]`
 
-**仍未修，已核对代码确认。** `wbox cp`、`build` 的 `COPY`/`ADD` 目标、以及
-F9.39 的 `COPY --from` 共用 `build::resolve_rootfs_path`，而那个函数是
-**纯词法**的：逐段消解 `..`、拒绝逃出 rootfs，但**完全不看符号链接**。
-这与 L7 修掉的是同一形态的洞（"路径词法合法但经由链接指到别处"），只是
-入口不同——L7 修的是归档解包，本条是 `cp`/`COPY` 的目标路径解析。
+**已修**（门禁 CP.7、CP.8、AF.8）。`wbox cp`、`build` 的 `COPY`/`ADD` 目标、
+`COPY --from` 的阶段内源、以及 `layers.rs` 的分层查找共用
+`build::resolve_rootfs_path`，而那个函数原先是**纯词法**的：逐段消解 `..`、
+拒绝逃出 rootfs，但**完全不看符号链接**。镜像/容器是外部输入，放一个
+`/evil -> /home/someone`（宿主绝对路径）就够——`cp x <容器>:/evil/y` 词法上
+老老实实待在 rootfs 里，落盘时宿主跟着链接走出去，在**宿主**上写了文件。
 
-**已有的两处正确做法可直接复用**，不必新设计：`wbox_codec::tar::safe_join`
-（逐段确认中间路径不是符号链接，缺失的段按目录创建；L7 与卷挂载点都用它），
-以及 `crates/wbox-linux` VFS 的用户态 `RESOLVE_IN_ROOT`（逐段解析、链接目标
-重新从根展开）。
+**做法**：新增 `wbox_codec::path::resolve_in_root`（`openat2(RESOLVE_IN_ROOT)`
+的用户态版），逐段展开、链接目标重新以 rootfs 为根解析；`resolve_rootfs_path`
+改为委托它。策略与 L12 的 guest VFS 一致（**跟随并重新展开**），与 L7 的
+`tar::safe_join`（**见链接即拒**）有意不同——归档完全不可信，"跟着链接走"
+没有合理语义；而镜像里的 `/etc -> /usr/etc` 是正常内容，该在容器内照常生效。
 
-**判据**（缺一不可）：容器 rootfs 里放一个 `/evil -> /tmp`（或指向宿主的
-绝对链接），`wbox cp <文件> <容器>:/evil/pwned` 必须失败且宿主 `/tmp` 下
-**没有**出现该文件；反向用例要证明正常的嵌套路径仍然拷得进去——只测"挡得住"
-的话，一个恒失败的实现也能变绿（这条判据形状与 L7 的
-`unpack_in_still_allows_normal_nested_paths` 一致）。
+两处配套：`cp` 在"目标是目录、把源拷进去"时**重新解析**追加的那一段，而不是
+直接 `join`（追加段本身可能是链接）；`copy_any` 递归拷目录前先摘掉已是链接的
+目标，否则 `create_dir_all` 认的是链接指向的目录，整棵子树都从链接穿出去写。
+
+**判据非空已验证**：同一套探针跑旧二进制（词法版），宿主目录里当场出现
+`pwned` 文件；跑新二进制，宿主目录为空、相对链接爬根的那条明确报
+「用 '..' 逃出了 rootfs」。反向用例 CP.5（正常嵌套路径照常拷得进去）与
+`in_image_symlink_still_follows` 保证挡得住的同时没把功能一起挡掉。
 
 ##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[done]`
 
@@ -2954,8 +2969,10 @@ manifest digest 与换之前**逐字节一致**；随后 `wbox run` 起容器执
 判据非空已验证——临时退回旧实现，新增用例当场读到宿主文件内容而变红。
 
 **与 L7 的分工**：L7 修的是**归档解包**（`load`/`import`/`ADD`）的同形态洞，
-本条修的是 **guest 运行期**的路径解析。剩下未修的同形态入口是 L8
-（`cp`/`COPY` 的目标路径）。
+本条修的是 **guest 运行期**的路径解析，第三个入口 L8（`cp`/`COPY` 的目标
+路径）也已修完。三处的策略分两档，是有意的：归档完全不可信，见链接即拒
+（L7）；镜像与容器内容里的链接是正常内容，跟随但重新以 rootfs 为根展开
+（L12、L8）。
 
 ##### W5 Q2 的端口映射 `-p` 取证 `[Linux agent]` `[done：结论是语义不适用]`
 
