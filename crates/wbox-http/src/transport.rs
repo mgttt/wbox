@@ -27,19 +27,18 @@ pub struct DeadlineStream {
 }
 
 impl DeadlineStream {
+    fn timeout_error() -> io::Error {
+        io::Error::new(io::ErrorKind::TimedOut, "整体超时：连接在预算内没有完成")
+    }
+
     fn budget(&self) -> io::Result<Duration> {
         let now = Instant::now();
         if now >= self.deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "整体超时：连接在预算内没有完成",
-            ));
+            return Err(Self::timeout_error());
         }
         Ok((self.deadline - now).min(self.io_timeout))
     }
-}
 
-impl DeadlineStream {
     /// 把"因为预算见底而超时"归一成整体超时错误。
     ///
     /// socket 超时在 Unix 上是 `WouldBlock`、Windows 上是 `TimedOut`，而剩余
@@ -51,7 +50,7 @@ impl DeadlineStream {
             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
         );
         if timeoutish && Instant::now() >= self.deadline {
-            return io::Error::new(io::ErrorKind::TimedOut, "整体超时：连接在预算内没有完成");
+            return Self::timeout_error();
         }
         e
     }
@@ -125,7 +124,7 @@ pub fn connect(
         Some(p) => (p.host.as_str(), p.port),
         None => (host, port),
     };
-    let tcp = dial(dial_host, dial_port, connect_timeout)?;
+    let tcp = dial(dial_host, dial_port, connect_timeout, deadline)?;
     tcp.set_nodelay(true).ok();
     let mut tcp = DeadlineStream {
         inner: tcp,
@@ -171,8 +170,21 @@ fn resolve(host: &str, port: u16, timeout: Duration) -> io::Result<Vec<std::net:
     }
 }
 
-fn dial(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
-    let addrs = resolve(host, port, timeout)?;
+fn remaining_budget(deadline: Instant, cap: Duration) -> io::Result<Duration> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(DeadlineStream::timeout_error());
+    }
+    Ok((deadline - now).min(cap))
+}
+
+fn dial(
+    host: &str,
+    port: u16,
+    connect_timeout: Duration,
+    deadline: Instant,
+) -> io::Result<TcpStream> {
+    let addrs = resolve(host, port, remaining_budget(deadline, connect_timeout)?)?;
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -182,6 +194,7 @@ fn dial(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     let mut last = None;
     // 逐个地址试：主机常常同时有 IPv6 与 IPv4，只试第一个会在单栈网络里失败。
     for a in addrs {
+        let timeout = remaining_budget(deadline, connect_timeout)?;
         match TcpStream::connect_timeout(&a, timeout) {
             Ok(s) => return Ok(s),
             Err(e) => last = Some(e),
@@ -348,7 +361,8 @@ mod tests {
         let mut sink = [0u8; 64];
         let err = loop {
             match s.read(&mut sink) {
-                Ok(_) => {
+                Ok(n) => {
+                    assert_ne!(n, 0, "slow-drip peer closed before the deadline");
                     assert!(
                         started.elapsed() < Duration::from_secs(20),
                         "整体预算没有生效，读了 20 秒还在继续"
@@ -357,6 +371,19 @@ mod tests {
                 Err(e) => break e,
             }
         };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(err.to_string().contains("整体超时"), "{err}");
+    }
+
+    #[test]
+    fn dial_does_not_outlive_an_expired_total_budget() {
+        let err = dial(
+            "localhost",
+            9,
+            Duration::from_secs(30),
+            Instant::now() - Duration::from_millis(1),
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
         assert!(err.to_string().contains("整体超时"), "{err}");
     }

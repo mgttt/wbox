@@ -516,7 +516,9 @@ mod tests {
     #[test]
     fn integration_pull_hello_world_or_skip_when_network_unreachable() {
         // 真实网络拉取：registry 不可达时 SKIP（不 fail）；可达时校验全链落盘。
-        let _home = TempHome::new("realpull"); // HOME 指向临时目录，Drop 时恢复
+        let mut home = TempHome::new("realpull"); // HOME 指向临时目录，Drop 时恢复
+                                                  // 真实网络只提供机会性覆盖，不能让开发/CI 门禁继承产品的 30 分钟预算。
+        home.env().set("WBOX_HTTP_TOTAL_TIMEOUT", "5");
         let r = oci::ImageRef::parse("hello-world", None).unwrap();
         match oci::pull("hello-world", "linux", "amd64", None, false) {
             Ok(()) => {

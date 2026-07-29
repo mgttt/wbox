@@ -37,16 +37,22 @@ fn fstat_distinguishes_different_windows_files() {
 
     let mut m = mach();
     let at = scratch(&mut m);
-    let first_fd = m.os.fds.alloc(fs::Fd {
-        kind: FdKind::File(std::fs::File::open(&first).unwrap()),
-        cloexec: false,
-        flags: 0,
-    });
-    let second_fd = m.os.fds.alloc(fs::Fd {
-        kind: FdKind::File(std::fs::File::open(&second).unwrap()),
-        cloexec: false,
-        flags: 0,
-    });
+    let first_fd =
+        m.os.fds
+            .alloc(fs::Fd::new(
+                FdKind::File(std::fs::File::open(&first).unwrap()),
+                false,
+                0,
+            ))
+            .unwrap();
+    let second_fd =
+        m.os.fds
+            .alloc(fs::Fd::new(
+                FdKind::File(std::fs::File::open(&second).unwrap()),
+                false,
+                0,
+            ))
+            .unwrap();
 
     assert_eq!(sys_fstat(&mut m, first_fd, at), 0);
     assert_eq!(sys_fstat(&mut m, second_fd, at + 144), 0);

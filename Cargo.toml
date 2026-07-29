@@ -80,3 +80,8 @@ strip = true
 [profile.release.package.wbox-linux]
 opt-level = 3
 codegen-units = 1
+
+# 证书根门禁会对整包根证书执行第一方 RSA/ECDSA 验签；debug 大整数运算在
+# Windows 上单测一项就超过数分钟。保留全量覆盖，仅优化密码学 crate 的测试。
+[profile.test.package.wbox-tls]
+opt-level = 2

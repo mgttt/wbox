@@ -39,7 +39,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W13、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W14、R8
 │       └── 4.9.2 [TODO-LINUX]    L1–L18、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -2427,6 +2427,7 @@ TODO-WINDOW
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
 ├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
+├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2437,6 +2438,16 @@ runtime fixture；`WU.1` 在 Windows 校验来源并授予 AppContainer 只读 A
 amd64、getconf 64 bit、rc=37 透传及前台状态清理。接门禁时修复了 Windows
 `fstat` 把所有文件合成为同一 `(st_dev, st_ino)`、导致 glibc 把 libc 误判成
 已加载 libtinfo 的问题，并补齐 FXSAVE/FXRSTOR 与 MXCSR 指令族。
+
+`W14` 来自 2026-07-30 对 Linux agent 四个提交的 Windows 复核。`FdTable::alloc`
+改为返回 `Option<i32>`、`Fd` 状态字段重构、syscall helper 改名后，共享及
+Windows 专属测试没有同步，导致 Windows test target 编译失败；HTTP 总期限测试
+另触发 `clippy::unused_io_amount`，并在 Windows 上暴露原生 WSA 超时文案未归一化。
+现已同步测试 API、把 DNS 与逐地址 connect 纳入同一请求期限、统一整体超时错误，
+并让机会性真实 pull 测试使用 5 秒预算，不能继承产品的 30 分钟预算。
+`wbox-tls` 的全量根证书自签验签仍全部保留，但 test profile 对该第一方密码学
+crate 启用优化，避免 Windows debug 大整数运算让单测一项超过数分钟。Windows
+workspace、Clippy、WP 全套及 WU.1/WU.2 均已复核通过。
 
 `W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
 Windows 后端在 `CreateProcessW -> AssignProcessToJobObject -> ResumeThread` 全部完成后，
@@ -2709,7 +2720,7 @@ TODO-LINUX
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
 ├── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
-├── L15 socket 族与 epoll                                 [done] t_negative 已移出基线；见下方 L15
+├── L15 socket 族与 epoll                                 [active] guest 基线收紧，但 INET 语义仍有缺口
 ├── L16 eventfd                                           [done] t_eventfd 80/0 已移出基线
 ├── L17 timerfd                                           [done] t_timerfd 67/0 已移出基线（惰性到期，无后台线程）
 └── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
@@ -2781,13 +2792,30 @@ description），只有 `FD_CLOEXEC` 属于描述符本身。原实现给每个 
 - 最小可用 fd 的下界写死成 3。Linux 给的是**最小空号**：`close(0); pipe(p);`
   之后 `p[0]` 必须是 0——那正是把 stdin 重定向成管道读端的惯用法。
 
-##### L15 socket 族与 epoll `[Linux agent]` `[done]`
+##### L15 socket 族与 epoll `[Linux agent]` `[active]`
 
 socket 族从**整族 `ENOSYS`** 做到：`t_negative` **40/0 已移出基线**，
 `t_net_epoll` **111 通过 / 1 失败**，`t_net_sockopt` **145 通过 / 1 失败**。
-后两条各自剩下的**唯一**失败都是 D 组那条快照 fork 语义差异（子进程在 fork
-返回前就跑完，父进程之后写的数据它看不到），不是 socket/epoll 的缺口——
-真要修得先有并发式 fork（L17）。guest 套件 9 通过 → **10 通过 / 11 失败**。
+后两条在**当前 guest 套件覆盖范围内**各自只剩 D 组那条快照 fork 语义差异；
+这不等于 socket/epoll 已完整。2026-07-30 跨宿主静态复核发现以下未进现有
+guest 断言的产品语义缺口，因此本项保持 `[active]`：
+
+- `Inet::Listener` 无条件报告 `EPOLLIN`，即使没有待 accept 连接；
+  `Inet::Stream` 也无条件报告 `EPOLLIN|EPOLLOUT`，没有查询宿主 socket 的真实
+  readiness。调用方可能被告知“可读”后在阻塞 read/accept 中挂住。
+- `AF_INET/AF_INET6 + SOCK_DGRAM` 虽能在 `bind` 时创建 `UdpSocket`，但
+  `read`/`write`/`sendto`/`recvfrom` 仍只走 `TcpStream` helper，目标地址参数也
+  被 `sendto` 丢弃，UDP 实际不可用。
+- INET socket 的连接状态存在 `Socket::inet`，但 `shutdown` 仍检查 AF_UNIX 的
+  `Socket::state`，已连接 TCP 会被错误报成 `ENOTCONN`。
+- INET `recvfrom` 在请求来源地址时调用 `write_sockaddr_un`，会回写 `AF_UNIX`
+  而不是真实 IPv4/IPv6 peer；未绑定的 AF_INET6 `getsockname` 也合成 IPv4
+  unspecified 地址。
+- 阻塞式 INET `connect` 直接调用无期限的 `TcpStream::connect`；需要由 guest
+  可中断/有界等待或明确记录其阻塞契约。
+
+guest 套件 9 通过 → **10 通过 / 11 失败**，说明既有基线确实收紧，但在上述
+反例补成自动测试并通过前不得把 L15 标成 `[done]`。
 
 **AF_UNIX 由引擎自己实现，不转给宿主。** 两条理由，第二条更根本：
 
