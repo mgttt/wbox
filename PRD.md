@@ -2456,7 +2456,11 @@ workspace、Clippy、WP 全套及 WU.1/WU.2 均已复核通过。
 产品脚本负责，不复制判据。后台 subagent 只能增量观察 HEAD、CI、失败摘要与磁盘
 趋势，不争抢 Cargo 构建锁或改共享热文件；最终集成与串行门禁由前台 agent 负责。
 CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` 也统一使用
-locked 依赖和 Rust cache，减少过时构建与重复编译。
+locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核又补齐：CI Rust
+固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
+昂贵 job 只在它通过后启动；Quick 默认保留 incremental 热缓存，需要回收空间时
+显式 `-CleanIncremental`，构建 wrapper 仍按 W12/L11 默认清理。本地精确 channel
+pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
 
 `W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
 Windows 后端在 `CreateProcessW -> AssignProcessToJobObject -> ResumeThread` 全部完成后，

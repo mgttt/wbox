@@ -45,11 +45,19 @@ scripts/check.ps1 -Quick -WindowsTarget
 不获取 Cargo 构建锁，适合后台只读观察者调用。`-Mode Rust` 运行 rustfmt 与 host
 Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 不会编译 `cfg(windows)` 模块，所以跨宿主修改共享/Windows 代码时双目标都是门槛。
+工作树空白检查同时覆盖未暂存与已暂存 diff，避免 `git add` 后反而漏过错误。
 
 验证按成本递增：先 `lint.ps1 -Mode Static`，再 `check.ps1 -Quick`，然后运行改动
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
-证据仍由下述唯一 owning gate 产出。
+证据仍由下述唯一 owning gate 产出。`check.ps1` 默认保留 incremental 热缓存并只
+清理测试临时目录；需要主动回收空间时传 `-CleanIncremental`。构建 wrapper 仍默认
+清 incremental，满足阶段性交付后的磁盘清理要求。
+
+CI 固定 Rust 1.97.1。升级编译器是独立变更：先跑 Quick 和双目标 Clippy，再观察
+完整 CI，不能让浮动 `stable` 在普通功能提交中突然改变 lint 规则。本地暂不放
+精确 channel 的 `rust-toolchain.toml`：只有 `stable` 别名的离线机器会为同版本
+再次联网安装并卡住；提供离线工具链镜像后再统一本地 pin。
 
 日常构建使用仓库 wrapper，而不是长期直接调用 `cargo build`：
 
@@ -272,6 +280,7 @@ runner 规则：
 
 | Job | 覆盖 |
 |---|---|
+| `preflight` | PowerShell/JSON/空白、rustfmt、host all-targets check（Rust 1.97.1） |
 | `test-linux` | Linux Rust tests |
 | `test-windows` | Windows Rust tests，包括 Win32 专属模块 |
 | `check-windows-msvc` | host 与 Windows target lint/check |
@@ -284,6 +293,8 @@ runner 规则：
 | `release` | tag 全绿后打包与发布 |
 
 PR 可以只跑快速核心组；`main` push、tag、nightly 和手动触发运行完整矩阵。
+昂贵的 Cargo/产品 job 先依赖 `preflight`，确定性静态失败不会继续占用 Wine、
+Windows release 和 backend runner。
 
 ## 6. 发布
 

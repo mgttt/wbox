@@ -2,7 +2,7 @@
 param(
     [switch]$Quick,
     [switch]$WindowsTarget,
-    [switch]$KeepIncremental
+    [switch]$CleanIncremental
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,7 +32,7 @@ try {
     $exitCode = 1
 } finally {
     try {
-        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:$KeepIncremental
+        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:(-not $CleanIncremental)
     } catch {
         Write-Error "post-check cleanup failed: $_"
         $exitCode = 1

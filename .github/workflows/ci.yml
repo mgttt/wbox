@@ -29,13 +29,33 @@ env:
 #   任一 FAIL 即不创建 GitHub Release。Release 资产必附 SHA256SUMS.txt。
 
 jobs:
+  # 先跑不依赖目标宿主能力的短门禁。确定性的语法、格式或 host 编译错误
+  # 不应等 Wine、Windows release 和完整 backend 矩阵烧完才暴露。
+  preflight:
+    timeout-minutes: 8
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: tracked PowerShell / JSON / whitespace
+        shell: pwsh
+        run: scripts/lint.ps1 -Mode Static
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: host all-targets check
+        run: cargo check --locked --workspace --all-targets
+
   # ① Linux 单测：oci/config/backend 纯逻辑在 Linux 即可跑（当前测试主体）
   test-linux:
+    needs: preflight
     timeout-minutes: 15  # 纯 Rust 单测，正常 <2 分钟
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 
@@ -44,22 +64,24 @@ jobs:
   #     补这个 job 是因为 image_dir_layout_segments 这种 Windows-only bug
   #     长期被 Linux CI 掩盖（Path::components 在 Linux 无盘符前缀）。
   test-windows:
+    needs: preflight
     timeout-minutes: 25  # windows runner 上编译较慢，正常 <8 分钟
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 
   # ② Windows 目标编译检查：Win32 专属代码（job/token/sandbox/acl/backend native）
   #    只能在 windows target 下编译，作为 Windows 代码的编译期门禁
   check-windows-msvc:
+    needs: preflight
     timeout-minutes: 20  # 编译检查 + 双目标 clippy，正常 <5 分钟
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
           components: clippy
@@ -83,11 +105,12 @@ jobs:
 
   # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
   smoke-windows:
+    needs: preflight
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: 冒烟 —— --help / --version / image list
@@ -120,13 +143,14 @@ jobs:
   #    任何 C 工具链**，也不再有 MSVC 编不了 GNU 扩展这个约束。
   #    构建后在**真 Windows** 上跑完整验收矩阵（scripts/test-matrix.sh）。
   build-wbox-linux:
+    needs: preflight
     runs-on: windows-latest
     # 上界：构建约 2 分钟，矩阵含网络用例与 guest 套件。没有上界时，
     # guest 侧一旦挂死会一直烧到 GitHub 默认的 6 小时才被杀。
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: 构建 wbox-linux.exe
         run: cargo build --locked --release -p wbox-linux
@@ -301,7 +325,7 @@ jobs:
     needs: [build-wbox-linux, prepare-ubuntu-fixture]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release
       - uses: actions/download-artifact@v4
@@ -335,11 +359,12 @@ jobs:
   #       首选路径在这里才有覆盖（本地容器是 cgroup v1）。
   #    宿主能力缺失时脚本记 SKIP 而非 FAIL（同 test-matrix.sh 的既有惯例）。
   test-linux-backend:
+    needs: preflight
     timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       # L1 端到端与本脚本都要一个**静态** Linux ELF 当 guest（动态链接的
@@ -424,11 +449,12 @@ jobs:
   #    test-linux-backend——wine64 + mingw 装下来体量不小，塞进主门禁会拖慢
   #    每次 push；单独 job 并行跑，不占用主链路时间。
   test-wine-backend:
+    needs: preflight
     timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked
       - name: 装 wine64 与 mingw（PE 夹具现场编译）
@@ -474,7 +500,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release
       - name: 下载 wbox-linux.exe 产物（与 wbox.exe 同目录，portable 分发形态）

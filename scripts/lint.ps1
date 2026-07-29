@@ -51,8 +51,9 @@ function Invoke-LintPhase {
 Push-Location $repoRoot
 try {
     if ($Mode -in @("All", "Static")) {
-        Invoke-LintPhase "working-tree whitespace" {
+        Invoke-LintPhase "diff whitespace" {
             Invoke-External git @("diff", "--check")
+            Invoke-External git @("diff", "--cached", "--check")
         }
 
         Invoke-LintPhase "PowerShell syntax" {
