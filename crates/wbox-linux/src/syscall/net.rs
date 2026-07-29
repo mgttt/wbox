@@ -595,6 +595,7 @@ pub enum Target {
     PipeRead(std::rc::Weak<crate::syscall::fs::PipeInner>),
     PipeWrite(std::rc::Weak<crate::syscall::fs::PipeInner>),
     Event(std::rc::Weak<crate::syscall::fs::EventFd>),
+    Timer(std::rc::Weak<crate::syscall::fs::TimerFd>),
     /// 普通文件、目录、标准流、合成设备：Linux 上恒可读可写。
     AlwaysReady,
 }
@@ -607,6 +608,7 @@ impl Target {
             Target::PipeRead(w) => w.upgrade().is_some_and(|i| !i.readers_closed()),
             Target::PipeWrite(w) => w.upgrade().is_some_and(|i| !i.writers_closed()),
             Target::Event(w) => w.strong_count() > 0,
+            Target::Timer(w) => w.strong_count() > 0,
             Target::AlwaysReady => true,
         }
     }
@@ -620,6 +622,7 @@ impl Target {
                 w.upgrade().map(|i| i.epoch()).unwrap_or(0)
             }
             Target::Event(w) => w.upgrade().map(|e| e.epoch.get()).unwrap_or(0),
+            Target::Timer(w) => w.upgrade().map(|t| t.epoch.get()).unwrap_or(0),
             Target::AlwaysReady => 0,
         }
     }
@@ -634,6 +637,7 @@ impl Target {
             (Target::PipeRead(a), Target::PipeRead(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::PipeWrite(a), Target::PipeWrite(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::Event(a), Target::Event(b)) => std::rc::Weak::ptr_eq(a, b),
+            (Target::Timer(a), Target::Timer(b)) => std::rc::Weak::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -673,6 +677,16 @@ impl Target {
                     v |= EPOLLOUT;
                 }
                 v
+            }
+            Target::Timer(w) => {
+                let Some(t) = w.upgrade() else { return 0 };
+                // 惰性结算：问到就算一次账，见 `TimerFd` 的说明。
+                t.settle(crate::syscall::now_ns());
+                if t.expirations.get() > 0 {
+                    EPOLLIN
+                } else {
+                    0
+                }
             }
             Target::AlwaysReady => EPOLLIN | EPOLLOUT,
         }

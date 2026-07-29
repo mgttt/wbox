@@ -360,6 +360,10 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         292 => sys_dup3(m, a[0] as i32, a[1] as i32, a[2] as i32),
         // ---- socket 族（AF_UNIX 走引擎内实现，见 syscall::net）----
         // eventfd(init) / eventfd2(init, flags)
+        // timerfd_create / timerfd_settime / timerfd_gettime
+        283 => sys_timerfd_create(m, a[0] as i32, a[1] as i32),
+        286 => sys_timerfd_settime(m, a[0] as i32, a[1] as i32, a[2], a[3]),
+        287 => sys_timerfd_gettime(m, a[0] as i32, a[1]),
         284 => sys_eventfd(m, a[0], 0),
         290 => sys_eventfd(m, a[0], a[1] as i32),
         41 => sys_socket(m, a[0] as i32, a[1] as i32, a[2] as i32),
@@ -511,6 +515,20 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
             tmp[..8].copy_from_slice(&v.to_le_bytes());
             Ok(8)
         }
+        // timerfd 与 eventfd 同形：一次正好 8 字节，读走到期次数并清零。
+        Some(FdKind::Timer(t)) => {
+            if n < 8 {
+                return -EINVAL;
+            }
+            let t = Rc::clone(t);
+            let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+            let v = timer_read(&t, nb);
+            if v == 0 {
+                return -EAGAIN;
+            }
+            tmp[..8].copy_from_slice(&v.to_le_bytes());
+            Ok(8)
+        }
         Some(FdKind::Socket(_)) => {
             // 借用冲突：`fds.get_mut` 的可变借用还在，先把 Rc 取出来。
             let s = match sock_of(m, fd) {
@@ -567,7 +585,10 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
 fn sys_pread(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
     // eventfd 是**可寻址**的（Linux 上 lseek 返回 0、pread/pwrite 照常工作），
     // 只是偏移被忽略。所以不能和管道一起归到 ESPIPE 那一档。
-    if matches!(m.os.fds.get(fd).map(|f| &f.kind), Some(FdKind::Event(_))) {
+    if matches!(
+        m.os.fds.get(fd).map(|f| &f.kind),
+        Some(FdKind::Event(_)) | Some(FdKind::Timer(_))
+    ) {
         return sys_read(m, fd, buf, count);
     }
     let n = count.min(1 << 20) as usize;
@@ -663,6 +684,8 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
         Some(FdKind::Epoll(_)) => return -EINVAL,
+        // timerfd 不可写：Linux 报 EINVAL。
+        Some(FdKind::Timer(_)) => return -EINVAL,
         Some(FdKind::Event(e)) => {
             if data.len() < 8 {
                 return -EINVAL;
@@ -744,15 +767,28 @@ fn read_iovec(m: &Machine, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64> {
 
 /// eventfd 的 `readv`：按总长度读一次再散布。非 eventfd 返回 `None`。
 fn eventfd_scatter_read(m: &mut Machine, fd: i32, iov: &[(u64, u64)]) -> Option<i64> {
-    let e = match m.os.fds.get(fd).map(|f| &f.kind) {
-        Some(FdKind::Event(e)) => Rc::clone(e),
+    enum Src {
+        Event(Rc<fs::EventFd>),
+        Timer(Rc<fs::TimerFd>),
+    }
+    let src = match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::Event(e)) => Src::Event(Rc::clone(e)),
+        Some(FdKind::Timer(t)) => Src::Timer(Rc::clone(t)),
         _ => return None,
     };
     let total: u64 = iov.iter().map(|(_, l)| *l).sum();
     if total < 8 {
         return Some(-EINVAL);
     }
-    let Some(v) = e.take() else {
+    let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+    let got: Option<u64> = match &src {
+        Src::Event(e) => e.take(),
+        Src::Timer(t) => match timer_read(t, nb) {
+            0 => None,
+            v => Some(v),
+        },
+    };
+    let Some(v) = got else {
         return Some(-EAGAIN);
     };
     let bytes = v.to_le_bytes();
@@ -910,7 +946,7 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
         // 字符设备可以 seek，但位置恒为 0（Linux 对 /dev/null 就是这样）。
         Some(FdKind::Dev(_)) => 0,
         // eventfd 可以 seek，但位置恒为 0（与 /dev/null 同理）。
-        Some(FdKind::Event(_)) => 0,
+        Some(FdKind::Event(_)) | Some(FdKind::Timer(_)) => 0,
         // socket 与管道同档：不可 seek，报 ESPIPE 而不是 EBADF——
         // 后者会让 guest 以为 fd 本身有问题，与真实原因差得很远。
         Some(FdKind::Socket(_)) => -ESPIPE,
@@ -968,6 +1004,7 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         Some(FdKind::PipeWrite(w)) => FdKind::PipeWrite(w.clone()),
         Some(FdKind::Socket(s)) => FdKind::Socket(Rc::clone(s)),
         Some(FdKind::Event(e)) => FdKind::Event(Rc::clone(e)),
+        Some(FdKind::Timer(t)) => FdKind::Timer(Rc::clone(t)),
         Some(FdKind::Epoll(e)) => FdKind::Epoll(Rc::clone(e)),
         _ => return -EBADF,
     };
@@ -1964,6 +2001,38 @@ fn sys_uname(m: &mut Machine, out: u64) -> i64 {
     }
 }
 
+/// 读一次 timerfd：返回到期次数，0 = 还没到期。
+///
+/// **阻塞模式下要真的等到到期**。单线程里没有别的执行体能推进时间，但时间
+/// 本身会走——所以这里睡到 deadline 再结算是正确的，也是 guest 唯一能拿到
+/// "等定时器"语义的地方（`timerfd/fork-shares-description` 的子进程就是
+/// fork 完直接阻塞读）。
+fn timer_read(t: &Rc<fs::TimerFd>, nonblock: bool) -> u64 {
+    let n = t.take(now_ns());
+    if n > 0 || nonblock {
+        return n;
+    }
+    let dl = t.deadline_ns.get();
+    if dl == 0 {
+        return 0; // 未武装：永远不会到期，阻塞等于挂死，直接报 EAGAIN
+    }
+    let wait = dl.saturating_sub(now_ns());
+    // 上限兜底：不让一个远期定时器把整个 guest 挂住。
+    let wait = wait.min(5_000_000_000);
+    std::thread::sleep(std::time::Duration::from_nanos(wait));
+    t.take(now_ns())
+}
+
+/// 当前时刻的纳秒数。
+///
+/// **所有时钟走同一个源**：`clock_gettime` 本来就忽略 `clockid`，timerfd 的
+/// 绝对超时（`TFD_TIMER_ABSTIME`）要和 guest 自己读到的时钟对得上，两边用
+/// 不同的源就会算错到期时刻。
+pub fn now_ns() -> u64 {
+    let (s, ns) = now();
+    s.saturating_mul(1_000_000_000).saturating_add(ns as u64)
+}
+
 fn now() -> (u64, u32) {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2460,8 +2529,19 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, timeout: i32) -> i64 {
     // 状态，所以睡完结果一样——但 guest 会用 `poll(NULL, 0, ms)` 当精确
     // 睡眠、也会按"poll 返回得太快"判断自己算错了超时。立刻返回 0 是在
     // 撒谎（`t_net_sockopt` 的 poll/timeout-precision 直接量了这段墙钟）。
-    if ready == 0 {
-        sleep_for_poll(timeout);
+    if ready == 0 && timeout != 0 {
+        // 等待期间可能有 fd 自己变就绪（timerfd），所以要重新扫一遍并回写。
+        let woke = wait_until_ready(timeout, || {
+            (0..nfds).any(|i| {
+                m.mem
+                    .read_u32(fds_ptr + i * 8)
+                    .map(|fd| readiness(m, fd as i32) != 0)
+                    .unwrap_or(false)
+            })
+        });
+        if woke {
+            return sys_poll(m, fds_ptr, nfds, 0);
+        }
     }
     ready
 }
@@ -2615,6 +2695,131 @@ fn alloc_socket(m: &mut Machine, s: Rc<net::Socket>, nonblock: bool, cloexec: bo
         Some(n) => n as i64,
         None => -EMFILE,
     }
+}
+
+fn timer_of(m: &Machine, fd: i32) -> Result<Rc<fs::TimerFd>, i64> {
+    match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::Timer(t)) => Ok(Rc::clone(t)),
+        // **不是 timerfd 要报 EINVAL 而不是 EBADF**：fd 本身是好的，
+        // 错的是类型。用例专门用一个 eventfd 来钉这条。
+        Some(_) => Err(-EINVAL),
+        None => Err(-EBADF),
+    }
+}
+
+/// 读 `struct timespec { i64 tv_sec; i64 tv_nsec; }`，转成纳秒。
+fn read_timespec(m: &Machine, ptr: u64) -> Result<u64, i64> {
+    let sec = m.mem.read_u64(ptr).map_err(|_| -EFAULT)? as i64;
+    let nsec = m.mem.read_u64(ptr + 8).map_err(|_| -EFAULT)? as i64;
+    if !(0..1_000_000_000).contains(&nsec) || sec < 0 {
+        return Err(-EINVAL);
+    }
+    Ok((sec as u64).saturating_mul(1_000_000_000) + nsec as u64)
+}
+
+fn write_timespec(m: &mut Machine, ptr: u64, ns: u64) -> i64 {
+    if m.mem.write_u64(ptr, ns / 1_000_000_000).is_err()
+        || m.mem.write_u64(ptr + 8, ns % 1_000_000_000).is_err()
+    {
+        return -EFAULT;
+    }
+    0
+}
+
+fn sys_timerfd_create(m: &mut Machine, clockid: i32, flags: i32) -> i64 {
+    const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_MONOTONIC: i32 = 1;
+    const CLOCK_BOOTTIME: i32 = 7;
+    const CLOCK_REALTIME_ALARM: i32 = 8;
+    const CLOCK_BOOTTIME_ALARM: i32 = 9;
+    if !matches!(
+        clockid,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_BOOTTIME
+            | CLOCK_REALTIME_ALARM
+            | CLOCK_BOOTTIME_ALARM
+    ) {
+        return -EINVAL;
+    }
+    // TFD_NONBLOCK / TFD_CLOEXEC 与 O_* 同值；其余位必须拒绝。
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return -EINVAL;
+    }
+    match m.os.fds.alloc(Fd::new(
+        FdKind::Timer(fs::TimerFd::new()),
+        flags & O_CLOEXEC != 0,
+        flags & O_NONBLOCK,
+    )) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
+}
+
+fn sys_timerfd_settime(m: &mut Machine, fd: i32, flags: i32, new: u64, old: u64) -> i64 {
+    const TFD_TIMER_ABSTIME: i32 = 1;
+    const TFD_TIMER_CANCEL_ON_SET: i32 = 2;
+    let t = match timer_of(m, fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0 {
+        return -EINVAL;
+    }
+    if new == 0 {
+        return -EFAULT;
+    }
+    let interval = match read_timespec(m, new) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let value = match read_timespec(m, new + 16) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let nownow = now_ns();
+    // **旧值要在改之前取**，而且 `it_value` 报的是"还剩多久"，不是原始设定值。
+    if old != 0 {
+        t.settle(nownow);
+        let r = write_timespec(m, old, t.interval_ns.get());
+        if r != 0 {
+            return r;
+        }
+        let r = write_timespec(m, old + 16, t.remaining(nownow));
+        if r != 0 {
+            return r;
+        }
+    }
+    if value == 0 {
+        // it_value 全零 = 解除定时器（周期字段被忽略）。
+        t.deadline_ns.set(0);
+        t.interval_ns.set(0);
+        return 0;
+    }
+    t.interval_ns.set(interval);
+    t.deadline_ns.set(if flags & TFD_TIMER_ABSTIME != 0 {
+        value
+    } else {
+        nownow.saturating_add(value)
+    });
+    0
+}
+
+fn sys_timerfd_gettime(m: &mut Machine, fd: i32, out: u64) -> i64 {
+    let t = match timer_of(m, fd) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if out == 0 {
+        return -EFAULT;
+    }
+    let nownow = now_ns();
+    t.settle(nownow);
+    let r = write_timespec(m, out, t.interval_ns.get());
+    if r != 0 {
+        return r;
+    }
+    write_timespec(m, out + 16, t.remaining(nownow))
 }
 
 /// `eventfd` / `eventfd2`。
@@ -3164,6 +3369,7 @@ fn epoll_target(m: &Machine, fd: i32) -> Option<net::Target> {
         FdKind::PipeRead(r) => net::Target::PipeRead(Rc::downgrade(&r.share())),
         FdKind::PipeWrite(w) => net::Target::PipeWrite(Rc::downgrade(&w.share())),
         FdKind::Event(e) => net::Target::Event(Rc::downgrade(e)),
+        FdKind::Timer(t) => net::Target::Timer(Rc::downgrade(t)),
         _ => net::Target::AlwaysReady,
     })
 }
@@ -3260,16 +3466,30 @@ fn sys_epoll_ctl(m: &mut Machine, epfd: i32, op: i32, fd: i32, ev_ptr: u64) -> i
     }
 }
 
-/// `poll`／`epoll_wait` 的超时等待。
+/// `poll`／`epoll_wait` 的超时等待：**边等边复查**。
 ///
-/// `timeout < 0` 是"永远等"——单线程下那等于死锁，所以夹到一个有限值：
-/// 挂死比返回 0 更糟，也更难查。
-fn sleep_for_poll(timeout: i32) {
+/// 早先是"没就绪就把超时一次睡满再返回 0"。那对管道/socket 是对的——单线程
+/// 里没人能在我们睡觉时写进来。但 **timerfd 会自己到期**：时间在走，等着等着
+/// 就该就绪了。一次睡满就会把 `poll(fd, 100ms 的定时器, 1000)` 判成超时，
+/// 而正确答案是约 100ms 后返回 1。
+///
+/// 所以切成小片轮询：每片之后重新问一次就绪。片长 2ms 是折中——再小就是白白
+/// 烧 CPU，再大则让定时器的返回时刻明显偏晚。
+///
+/// `timeout < 0` 是"永远等"，单线程下那等于死锁，夹到一个有限值：挂死比
+/// 返回 0 更糟，也更难查。
+fn wait_until_ready(timeout: i32, mut ready: impl FnMut() -> bool) -> bool {
     const FOREVER_CAP_MS: i32 = 1000;
-    let ms = if timeout < 0 { FOREVER_CAP_MS } else { timeout };
-    if ms > 0 {
-        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    const SLICE_MS: u64 = 2;
+    let ms = if timeout < 0 { FOREVER_CAP_MS } else { timeout } as u64;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(SLICE_MS));
+        if ready() {
+            return true;
+        }
     }
+    false
 }
 
 fn sys_epoll_wait(m: &mut Machine, epfd: i32, out: u64, maxevents: i32, timeout: i32) -> i64 {
@@ -3327,9 +3547,18 @@ fn sys_epoll_wait(m: &mut Machine, epfd: i32, out: u64, maxevents: i32, timeout:
         }
         n += 1;
     }
-    if n == 0 {
+    if n == 0 && timeout != 0 {
+        let ep2 = Rc::clone(&ep);
         drop(list);
-        sleep_for_poll(timeout);
+        let woke = wait_until_ready(timeout, || {
+            ep2.interests
+                .borrow()
+                .iter()
+                .any(|i| !i.disarmed.get() && i.target.readiness() != 0)
+        });
+        if woke {
+            return sys_epoll_wait(m, epfd, out, maxevents, 0);
+        }
     }
     n
 }

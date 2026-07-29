@@ -47,6 +47,8 @@ pub enum FdKind {
     Socket(Rc<crate::syscall::net::Socket>),
     /// `eventfd`：一个 64 位计数器。见 [`EventFd`]。
     Event(Rc<EventFd>),
+    /// `timerfd`：到期计数器。见 [`TimerFd`]。
+    Timer(Rc<TimerFd>),
     /// epoll 实例。
     Epoll(Rc<crate::syscall::net::Epoll>),
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
@@ -267,6 +269,78 @@ impl EventFd {
     }
 }
 
+/// `timerfd(2)`：一个按时钟到期的计数器。
+///
+/// # 到期是**惰性算出来的**，没有后台线程
+///
+/// 单线程模拟器里没有定时器中断可用，也不该为每个 timerfd 起一个线程。
+/// 所以只记下"下一次到期的绝对时刻"和周期，在 `read`/`poll`/`epoll_wait`
+/// 真正问起来的时候，拿当前时间回算这中间跨过了几个周期。
+///
+/// 这与内核的可观测行为一致：guest 只能通过读或轮询看到到期，看不到"内核
+/// 在哪一刻记的账"。周期定时器连续跨过多个周期时一次性返回累计次数，也正是
+/// Linux 的语义。
+pub struct TimerFd {
+    /// 下一次到期的绝对纳秒时刻；0 = 未武装。
+    pub deadline_ns: Cell<u64>,
+    /// 周期；0 = 一次性。
+    pub interval_ns: Cell<u64>,
+    /// 已到期但还没被读走的次数。
+    pub expirations: Cell<u64>,
+    /// 写入代次，供 epoll 边沿触发（语义同 `PipeInner::epoch`）。
+    pub epoch: Cell<u64>,
+}
+
+impl TimerFd {
+    pub fn new() -> Rc<TimerFd> {
+        Rc::new(TimerFd {
+            deadline_ns: Cell::new(0),
+            interval_ns: Cell::new(0),
+            expirations: Cell::new(0),
+            epoch: Cell::new(0),
+        })
+    }
+
+    /// 把到当前时刻为止的到期次数结算进 `expirations`。
+    pub fn settle(&self, now_ns: u64) {
+        let dl = self.deadline_ns.get();
+        if dl == 0 || now_ns < dl {
+            return;
+        }
+        let iv = self.interval_ns.get();
+        let n = if iv == 0 {
+            self.deadline_ns.set(0); // 一次性：打完收工
+            1
+        } else {
+            // 跨过了几个周期就记几次，并把下一次到期推到当前时刻之后。
+            let elapsed = now_ns - dl;
+            let extra = elapsed / iv;
+            self.deadline_ns.set(dl + (extra + 1) * iv);
+            extra + 1
+        };
+        self.expirations
+            .set(self.expirations.get().saturating_add(n));
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+    }
+
+    /// 取走并清零。0 表示还没到期。
+    pub fn take(&self, now_ns: u64) -> u64 {
+        self.settle(now_ns);
+        let n = self.expirations.get();
+        self.expirations.set(0);
+        n
+    }
+
+    /// 距下次到期还有多久（`timerfd_gettime` 的 `it_value`）。
+    pub fn remaining(&self, now_ns: u64) -> u64 {
+        let dl = self.deadline_ns.get();
+        if dl == 0 {
+            return 0;
+        }
+        dl.saturating_sub(now_ns)
+    }
+}
+
 /// 读端的持有凭证：构造 +1、`Drop` -1。理由同 [`PipeWriter`]——
 /// 写端要靠"还有没有读端"来决定 `EPIPE`／`POLLERR`，手工记账必漏。
 pub struct PipeReader(Rc<PipeInner>);
@@ -472,6 +546,7 @@ impl FdTable {
                 // 共享同一个对象，这正是 Linux 的语义（描述被继承而不是复制）。
                 FdKind::Socket(s) => FdKind::Socket(Rc::clone(s)),
                 FdKind::Event(e) => FdKind::Event(Rc::clone(e)),
+                FdKind::Timer(t) => FdKind::Timer(Rc::clone(t)),
                 FdKind::Epoll(e) => FdKind::Epoll(Rc::clone(e)),
                 FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
                 FdKind::Closed => FdKind::Closed,
