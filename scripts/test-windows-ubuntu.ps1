@@ -93,6 +93,7 @@ printf 'OS=%s:%s\n' "$ID" "$VERSION_ID"
 /usr/bin/getconf LONG_BIT
 exit 37
 '@
+    $probe = $probe.Replace("`r`n", "`n")
     $output = & $portableWbox run --name product-ubuntu `
         local.test/ubuntu-24.04:latest /bin/bash -c $probe 2>&1 | Out-String
     $runRc = $LASTEXITCODE
