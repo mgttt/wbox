@@ -308,15 +308,14 @@ impl TimerFd {
             return;
         }
         let iv = self.interval_ns.get();
-        let n = if iv == 0 {
-            self.deadline_ns.set(0); // 一次性：打完收工
-            1
-        } else {
+        let elapsed = now_ns - dl;
+        let n = if let Some(extra) = elapsed.checked_div(iv) {
             // 跨过了几个周期就记几次，并把下一次到期推到当前时刻之后。
-            let elapsed = now_ns - dl;
-            let extra = elapsed / iv;
             self.deadline_ns.set(dl + (extra + 1) * iv);
             extra + 1
+        } else {
+            self.deadline_ns.set(0); // 一次性：打完收工
+            1
         };
         self.expirations
             .set(self.expirations.get().saturating_add(n));
@@ -1211,8 +1210,8 @@ mod tests {
         let keep = t.alloc(Fd::new(FdKind::Closed, false, 0)).unwrap();
         let drop = t.alloc(Fd::new(FdKind::Closed, true, 0)).unwrap();
         t.close_on_exec();
-        assert!(t.contains(keep.unwrap()));
-        assert!(!t.contains(drop.unwrap()));
+        assert!(t.contains(keep));
+        assert!(!t.contains(drop));
         assert!(t.contains(0), "标准流不带 CLOEXEC");
     }
 }
