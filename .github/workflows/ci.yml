@@ -10,6 +10,10 @@ on:
     - cron: "17 2 * * *" # 每日 02:17 UTC
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -122,12 +126,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: 构建 wbox-linux.exe
-        run: cargo build --release -p wbox-linux
+        run: cargo build --locked --release -p wbox-linux
       # 模拟器自己的门禁：指令语义 + syscall + 真 ELF 端到端。
       # 在 Windows 上跑这套很关键——它是 wbox-linux 的实际部署平台。
       - name: 模拟器单测与端到端用例
-        run: cargo test --release -p wbox-linux
+        run: cargo test --locked --release -p wbox-linux
       - name: 冒烟 —— wbox-linux.exe 能启动并报版本
         shell: cmd
         run: .\target\release\wbox-linux.exe --version

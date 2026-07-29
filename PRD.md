@@ -2428,6 +2428,7 @@ TODO-WINDOW
 ├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 ├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
+├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2448,6 +2449,14 @@ Windows 专属测试没有同步，导致 Windows test target 编译失败；HTT
 `wbox-tls` 的全量根证书自签验签仍全部保留，但 test profile 对该第一方密码学
 crate 启用优化，避免 Windows debug 大整数运算让单测一项超过数分钟。Windows
 workspace、Clippy、WP 全套及 WU.1/WU.2 均已复核通过。
+
+`W15` 把 PRD → 实现 → owning gate 的日常反馈收敛成两条命令：
+`scripts/check.ps1 -Quick` 先跑静态语法、rustfmt、host Clippy 与库测试，
+`scripts/check.ps1` 再跑完整 workspace Rust tests；目标专属 G2/G3 仍由既有
+产品脚本负责，不复制判据。后台 subagent 只能增量观察 HEAD、CI、失败摘要与磁盘
+趋势，不争抢 Cargo 构建锁或改共享热文件；最终集成与串行门禁由前台 agent 负责。
+CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` 也统一使用
+locked 依赖和 Rust cache，减少过时构建与重复编译。
 
 `W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
 Windows 后端在 `CreateProcessW -> AssignProcessToJobObject -> ResumeThread` 全部完成后，
