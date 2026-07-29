@@ -32,7 +32,7 @@ pub enum FdKind {
         pos: usize,
     },
     /// 匿名管道的读端。
-    PipeRead(Rc<PipeInner>),
+    PipeRead(PipeReader),
     /// 匿名管道的写端。持有 `PipeWriter` 而不是裸 `Rc`，这样"还有几个写端
     /// 开着"是自动记账的，见 `PipeWriter`。
     PipeWrite(PipeWriter),
@@ -89,19 +89,61 @@ pub struct PipeInner {
     /// 还有人可能写（`EAGAIN`）vs. 写端全关了（返回 0，也就是 EOF）。
     /// 没有这个计数，`$(cmd)` 会在读端上无限 `EAGAIN` 自旋。
     writers: Cell<usize>,
+    /// 还开着的**读端**个数。写端据此报 `EPIPE` / `POLLERR`。
+    readers: Cell<usize>,
+    /// 缓冲区容量（`F_GETPIPE_SZ` / `F_SETPIPE_SZ`）。
+    ///
+    /// # 只对非阻塞写强制
+    ///
+    /// 真内核里写满就阻塞，等读端取走。可这个模拟器是**单线程 + 快照式
+    /// fork**：`a | b` 里的 a 必须先跑完，b 才开始读。真按容量卡住阻塞写，
+    /// 一条输出超过 64 KiB 的管道会当场死锁——而那是极常见的用法。
+    ///
+    /// 所以容量只在 `O_NONBLOCK` 写上生效（那时正确答案是 `EAGAIN`，不是
+    /// 阻塞），阻塞写允许超出容量。这是被执行模型逼出来的偏差，如实记在
+    /// 这里，不假装是完整语义。
+    capacity: Cell<usize>,
 }
+
+/// 管道默认容量。与 Linux 一致（`/proc/sys/fs/pipe-max-size` 的默认页数）。
+pub const PIPE_DEFAULT_CAPACITY: usize = 64 * 1024;
+/// `F_SETPIPE_SZ` 的下界：内核会把小于一页的请求抬到一页。
+pub const PIPE_MIN_CAPACITY: usize = 4096;
 
 impl PipeInner {
     fn new() -> Rc<Self> {
         Rc::new(PipeInner {
             data: RefCell::new(VecDeque::new()),
             writers: Cell::new(0),
+            readers: Cell::new(0),
+            capacity: Cell::new(PIPE_DEFAULT_CAPACITY),
         })
     }
 
     /// 写端是否已全部关闭（读端据此报 EOF）。
     pub fn writers_closed(&self) -> bool {
         self.writers.get() == 0
+    }
+
+    /// 读端是否已全部关闭（写端据此报 `EPIPE`／`POLLERR`）。
+    pub fn readers_closed(&self) -> bool {
+        self.readers.get() == 0
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity.get()
+    }
+
+    /// 设置容量，返回内核实际采用的值（不小于一页）。
+    pub fn set_capacity(&self, want: usize) -> usize {
+        let v = want.max(PIPE_MIN_CAPACITY);
+        self.capacity.set(v);
+        v
+    }
+
+    /// 还能无阻塞地写进去多少字节。
+    pub fn space(&self) -> usize {
+        self.capacity.get().saturating_sub(self.data.borrow().len())
     }
 }
 
@@ -135,11 +177,38 @@ impl Drop for PipeWriter {
     }
 }
 
+/// 读端的持有凭证：构造 +1、`Drop` -1。理由同 [`PipeWriter`]——
+/// 写端要靠"还有没有读端"来决定 `EPIPE`／`POLLERR`，手工记账必漏。
+pub struct PipeReader(Rc<PipeInner>);
+
+impl PipeReader {
+    fn new(inner: Rc<PipeInner>) -> Self {
+        inner.readers.set(inner.readers.get() + 1);
+        PipeReader(inner)
+    }
+
+    pub fn inner(&self) -> &PipeInner {
+        &self.0
+    }
+}
+
+impl Clone for PipeReader {
+    fn clone(&self) -> Self {
+        PipeReader::new(Rc::clone(&self.0))
+    }
+}
+
+impl Drop for PipeReader {
+    fn drop(&mut self) {
+        self.0.readers.set(self.0.readers.get().saturating_sub(1));
+    }
+}
+
 /// 新建一对管道端点，返回 (读端, 写端)。
 pub fn new_pipe() -> (FdKind, FdKind) {
     let inner = PipeInner::new();
     (
-        FdKind::PipeRead(Rc::clone(&inner)),
+        FdKind::PipeRead(PipeReader::new(Rc::clone(&inner))),
         FdKind::PipeWrite(PipeWriter::new(inner)),
     )
 }
@@ -147,9 +216,46 @@ pub fn new_pipe() -> (FdKind, FdKind) {
 pub struct Fd {
     pub kind: FdKind,
     /// `O_CLOEXEC`：`execve` 时要关掉。
+    ///
+    /// **这一项是"文件描述符"自己的**，不随 `dup` 传递——POSIX 明确规定
+    /// `dup` 出来的新 fd 不继承 `FD_CLOEXEC`。
     pub cloexec: bool,
-    /// 打开时的 flags，`fcntl(F_GETFL)` 要回它。
-    pub flags: i32,
+    /// 状态标志（`O_APPEND`／`O_NONBLOCK` 等），`fcntl(F_GETFL)` 要回它。
+    ///
+    /// **这一项属于"打开文件描述"（open file description），不属于 fd。**
+    /// `dup`、`dup2`、`F_DUPFD`、`fork` 产生的别名共享同一份：在任意一个
+    /// 别名上 `F_SETFL O_NONBLOCK`，其余别名 `F_GETFL` 必须立刻看得到。
+    /// 早先每个 `Fd` 各存一份 `i32`，于是 `dup` 之后两边的标志各走各的——
+    /// `t_fd_open` 的 dup/shared-append-status 与 `t_fd_rw` 的
+    /// pipe/dup-shares-nonblock 抓的就是这个。
+    status: Rc<Cell<i32>>,
+}
+
+impl Fd {
+    pub fn new(kind: FdKind, cloexec: bool, flags: i32) -> Self {
+        Fd {
+            kind,
+            cloexec,
+            status: Rc::new(Cell::new(flags)),
+        }
+    }
+
+    pub fn flags(&self) -> i32 {
+        self.status.get()
+    }
+
+    pub fn set_flags(&self, v: i32) {
+        self.status.set(v);
+    }
+
+    /// 复制出一个**共享同一份状态标志**的句柄（`dup` 家族与 `fork` 用）。
+    pub fn alias(&self, kind: FdKind, cloexec: bool) -> Self {
+        Fd {
+            kind,
+            cloexec,
+            status: Rc::clone(&self.status),
+        }
+    }
 }
 
 pub struct FdTable {
@@ -167,21 +273,19 @@ impl FdTable {
     pub fn new() -> Self {
         let mut map = HashMap::new();
         for (n, k) in [(0, FdKind::Stdin), (1, FdKind::Stdout), (2, FdKind::Stderr)] {
-            map.insert(
-                n,
-                Fd {
-                    kind: k,
-                    cloexec: false,
-                    flags: 0,
-                },
-            );
+            map.insert(n, Fd::new(k, false, 0));
         }
         FdTable { map, next: 3 }
     }
 
     /// 分配最小可用 fd（Linux 保证的语义：总是最小的空号）。
+    ///
+    /// 下界是 **0 而不是 3**。平时 0/1/2 都占着，自然从 3 起分；但 guest
+    /// 主动 `close(0)` 之后，下一个 `open`/`pipe` 就该拿到 0——把 stdin
+    /// 重定向成管道读端正是这么写的（`close(0); pipe(p);`）。早先写死 3，
+    /// 那个惯用法就静默失效（`t_fd_open` 的 pipe/fork-child-lowest-fds）。
     pub fn alloc(&mut self, fd: Fd) -> i32 {
-        self.alloc_min(fd, 3)
+        self.alloc_min(fd, 0)
     }
 
     /// 分配**不小于 `min`** 的最小可用 fd。`F_DUPFD` 要的正是这个语义。
@@ -242,18 +346,14 @@ impl FdTable {
                     pos: 0,
                 },
                 FdKind::Dev(d) => FdKind::Dev(*d),
-                FdKind::PipeRead(inner) => FdKind::PipeRead(Rc::clone(inner)),
+                FdKind::PipeRead(r) => FdKind::PipeRead(r.clone()),
                 FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
                 FdKind::Closed => FdKind::Closed,
             };
-            map.insert(
-                n,
-                Fd {
-                    kind,
-                    cloexec: f.cloexec,
-                    flags: f.flags,
-                },
-            );
+            // fork 出来的 fd 与父进程**共享同一个打开文件描述**：偏移、
+            // O_APPEND、O_NONBLOCK 都是共享的（`File::try_clone` 走宿主
+            // `dup`，偏移天然共享；状态标志靠这里共享同一个 `Rc`）。
+            map.insert(n, f.alias(kind, f.cloexec));
         }
         Ok(FdTable {
             map,
@@ -894,40 +994,20 @@ mod tests {
     #[test]
     fn alloc_reuses_lowest_free_fd() {
         let mut t = FdTable::new();
-        let a = t.alloc(Fd {
-            kind: FdKind::Closed,
-            cloexec: false,
-            flags: 0,
-        });
-        let b = t.alloc(Fd {
-            kind: FdKind::Closed,
-            cloexec: false,
-            flags: 0,
-        });
+        let a = t.alloc(Fd::new(FdKind::Closed, false, 0));
+        let b = t.alloc(Fd::new(FdKind::Closed, false, 0));
         assert_eq!((a, b), (3, 4));
         t.remove(3);
         // Linux 保证下一个 open 拿到最小空号
-        let c = t.alloc(Fd {
-            kind: FdKind::Closed,
-            cloexec: false,
-            flags: 0,
-        });
+        let c = t.alloc(Fd::new(FdKind::Closed, false, 0));
         assert_eq!(c, 3);
     }
 
     #[test]
     fn close_on_exec_drops_only_cloexec_fds() {
         let mut t = FdTable::new();
-        let keep = t.alloc(Fd {
-            kind: FdKind::Closed,
-            cloexec: false,
-            flags: 0,
-        });
-        let drop = t.alloc(Fd {
-            kind: FdKind::Closed,
-            cloexec: true,
-            flags: 0,
-        });
+        let keep = t.alloc(Fd::new(FdKind::Closed, false, 0));
+        let drop = t.alloc(Fd::new(FdKind::Closed, true, 0));
         t.close_on_exec();
         assert!(t.contains(keep));
         assert!(!t.contains(drop));

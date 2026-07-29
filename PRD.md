@@ -40,7 +40,7 @@ PRD
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
 │       ├── 4.9.1 [TODO-WINDOW]   W1–W13、R8
-│       └── 4.9.2 [TODO-LINUX]    L1–L13、W5（历史编号）
+│       └── 4.9.2 [TODO-LINUX]    L1–L14、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -264,7 +264,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 7 通过 / 14 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
+| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 9 通过 / 12 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
 | 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 运行前把只读镜像缓存复制成容器私有 rootfs，只向该 profile 的确定性 AppContainer SID 授修改权（F4.8 / `acl.rs`）；与 Q3 的 overlay upper 不是同一机制 |
@@ -2707,7 +2707,8 @@ TODO-LINUX
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
-└── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
+├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
+└── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
 ```
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
@@ -2738,6 +2739,43 @@ continue"的循环——对端一直发 CCS 就一直转。
 继续"上变红。反向判据 `generous_budget_does_not_cut_a_healthy_read` 挡住
 "永远立刻超时"那种假实现。真实 `wbox pull busybox:latest`（走自研 TLS 到
 Docker Hub）已实机跑通。
+
+##### L14 file description 级共享状态 `[Linux agent]` `[done]`
+
+**已修**，`tests/known-failures.txt` 的 **F 组整组清空**（`t_fd_open` 86/0、
+`t_fd_rw` 126/0），guest 套件 7 通过 → **9 通过 / 12 失败**。
+
+**根因是把"文件描述符"和"打开文件描述"当成了一个东西。** POSIX 里
+`O_APPEND`／`O_NONBLOCK` 这类状态标志属于**打开文件描述**（open file
+description），只有 `FD_CLOEXEC` 属于描述符本身。原实现给每个 `Fd` 存了一份
+`flags: i32`，于是 `dup` 之后两个别名的标志各走各的——在 `d2` 上
+`F_SETFL O_APPEND`，`fd` 上 `F_GETFL` 看不到，写入也不追加。
+
+改成 `Rc<Cell<i32>>`，`dup`/`dup2`/`F_DUPFD`/`fork` 共享同一份
+（`Fd::alias`）。偏移本来就是共享的——`File::try_clone` 走宿主 `dup`。
+
+顺带补齐同一簇的缺口，每一条都由用例逐条钉住：
+
+- `O_APPEND` 的**写语义**：写前 `seek(End(0))`。此前只存了标志、从不生效。
+- `ioctl(FIONBIO)`：它就是 `F_SETFL O_NONBLOCK` 的另一种写法，作用在描述上；
+  原先一律报 `ENOTTY`。
+- **管道容量**（`F_GET/SETPIPE_SZ`，默认 64 KiB，下界一页）与非阻塞写边界：
+  写满报 `EAGAIN`、部分写只写得下的那些。容量**只对非阻塞写强制**——单线程
+  快照式 fork 下 `a | b` 的 a 必须先跑完，真按容量阻塞会当场死锁；这条偏差
+  记在 `PipeInner::capacity` 的文档里，不假装是完整语义。
+- 管道的 `POLLHUP`／`POLLERR`／`EPIPE`：新增读端计数（`PipeReader` RAII，
+  与写端对称）。另外 `POLLHUP`/`POLLERR`/`POLLNVAL` **不受 `events` 掩码
+  约束**，原先整条按 `& events` 过滤，于是"写端已关"对只订阅 `POLLIN` 的
+  调用方永远不可见。
+- 管道 `fsync`/`fdatasync` 报 `EINVAL`（Linux 如此），此前一律报成功。
+
+还有三个**同形态但不同入口**的分发错误，是顺着这两个用例挖出来的：
+
+- `faccessat` 与 `linkat` 的 `dirfd` 在分发表里被整个丢掉，直接接到只认 cwd
+  的 `sys_access`／`sys_link` 上。表现是 `openat(dirfd,…)` 读得到的文件，
+  `faccessat(同一个 dirfd,…)` 却 `ENOENT`。顺手补了 `faccessat2`。
+- 最小可用 fd 的下界写死成 3。Linux 给的是**最小空号**：`close(0); pipe(p);`
+  之后 `p[0]` 必须是 0——那正是把 stdin 重定向成管道读端的惯用法。
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

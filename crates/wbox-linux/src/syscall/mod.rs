@@ -250,7 +250,7 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         296 | 328 => sys_pwritev(m, a[0] as i32, a[1], a[2], a[3] as i64),
         19 => sys_readv(m, a[0] as i32, a[1], a[2]),
         20 => sys_writev(m, a[0] as i32, a[1], a[2]),
-        21 => sys_access(m, a[0], a[1] as i32),
+        21 => sys_faccessat(m, AT_FDCWD, a[0], a[1] as i32),
         24 => 0, // sched_yield：单线程下无事可做
         25 => sys_mremap(m, a[0], a[1], a[2], a[3] as i32, a[4]),
         28 => 0, // madvise：建议性，忽略即为正确实现
@@ -325,8 +325,8 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         258 => sys_mkdir(m, a[0] as i32, a[1]),
         84 => sys_unlinkat(m, AT_FDCWD, a[0], AT_REMOVEDIR),
         85 => sys_openat(m, AT_FDCWD, a[0], O_WRONLY | O_CREAT | O_TRUNC, a[1] as u32),
-        86 => sys_link(m, a[0], a[1]),
-        265 => sys_link(m, a[1], a[3]),
+        86 => sys_linkat(m, AT_FDCWD, a[0], AT_FDCWD, a[1], 0),
+        265 => sys_linkat(m, a[0] as i32, a[1], a[2] as i32, a[3], a[4] as i32),
         88 => sys_symlink(m, a[0], a[1]),
         266 => sys_symlink(m, a[0], a[2]),
         // chmod/chown 族：容器内一律 root，且 Windows 没有对应语义。
@@ -341,7 +341,9 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
             m.os.umask = a[0] as u32 & 0o777;
             old as i64
         }
-        269 => sys_access(m, a[1], a[2] as i32),
+        269 => sys_faccessat(m, a[0] as i32, a[1], a[2] as i32),
+        // faccessat2 只是多了一个 flags 参数，可用性判断本身不变。
+        439 => sys_faccessat(m, a[0] as i32, a[1], a[2] as i32),
         292 => sys_dup3(m, a[0] as i32, a[1] as i32, a[2] as i32),
         332 => sys_statx(m, a[0] as i32, a[1], a[2] as i32, a[4]),
         _ => {
@@ -461,7 +463,8 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
             fs::DevKind::Tty => std::io::stdin().read(&mut tmp),
         },
         Some(FdKind::PipeWrite(_)) => return -EBADF, // 写端不可读
-        Some(FdKind::PipeRead(inner)) => {
+        Some(FdKind::PipeRead(r)) => {
+            let inner = r.inner();
             let mut q = inner.data.borrow_mut();
             if q.is_empty() {
                 if inner.writers_closed() {
@@ -541,6 +544,14 @@ fn sys_write(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
 }
 
 fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
+    // 状态标志属于**打开文件描述**，先取出来再借 kind——两者都从同一个 `Fd`
+    // 上拿，借用期会打架。
+    let status = match m.os.fds.get(fd) {
+        Some(f) => f.flags(),
+        None => return -EBADF,
+    };
+    let nonblock = status & O_NONBLOCK != 0;
+    let append = status & O_APPEND != 0;
     let r = match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
         Some(FdKind::Stdout) => {
             let mut o = std::io::stdout();
@@ -554,7 +565,18 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
                 .and_then(|_| o.flush())
                 .map(|_| data.len())
         }
-        Some(FdKind::File(f)) => f.write(data),
+        Some(FdKind::File(f)) => {
+            // O_APPEND：每次写之前原子地移到文件末尾。它是**描述**上的标志，
+            // 所以 `dup` 出来的别名上 `F_SETFL O_APPEND` 之后，这条 fd 的写
+            // 也必须变成追加——`t_fd_open` 的 dup/shared-append-status 正是
+            // 先 lseek 回 0 再写，然后断言内容被追加在了尾巴上。
+            if append {
+                if let Err(e) = f.seek(SeekFrom::End(0)) {
+                    return host_err(&e);
+                }
+            }
+            f.write(data)
+        }
         Some(FdKind::Dir { .. }) => return -EBADF,
         Some(FdKind::Dev(d)) => match d {
             // /dev/full 的存在意义就是"写入必失败"，别给它成功。
@@ -569,8 +591,27 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
         Some(FdKind::PipeWrite(w)) => {
-            w.inner().data.borrow_mut().extend(data.iter().copied());
-            Ok(data.len())
+            let inner = w.inner();
+            // 读端全关：真内核会同时发 SIGPIPE 并返回 EPIPE。信号投递本引擎
+            // 还没有（C 组），但 errno 这一半是能给对的，先给对。
+            if inner.readers_closed() {
+                return -EPIPE;
+            }
+            if nonblock {
+                // 非阻塞写：容量是硬边界，写不下就 EAGAIN、写得下多少写多少。
+                // 见 `PipeInner::capacity` 的说明——容量**只**在这条路上强制，
+                // 阻塞写允许超出，否则单线程下的 `a | b` 会死锁。
+                let space = inner.space();
+                if space == 0 {
+                    return -EAGAIN;
+                }
+                let k = space.min(data.len());
+                inner.data.borrow_mut().extend(data[..k].iter().copied());
+                Ok(k)
+            } else {
+                inner.data.borrow_mut().extend(data.iter().copied());
+                Ok(data.len())
+            }
         }
         _ => return -EBADF,
     };
@@ -776,16 +817,15 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         // 管道也必须能 dup：shell 做重定向就是 `dup2(pipe_fd, 1)`，
         // 这里漏掉会让 `$(cmd)`、`a | b` 直接拿到 EBADF。
         Some(FdKind::Dev(d)) => FdKind::Dev(*d),
-        Some(FdKind::PipeRead(inner)) => FdKind::PipeRead(std::rc::Rc::clone(inner)),
+        Some(FdKind::PipeRead(r)) => FdKind::PipeRead(r.clone()),
         Some(FdKind::PipeWrite(w)) => FdKind::PipeWrite(w.clone()),
         _ => return -EBADF,
     };
-    let flags = m.os.fds.get(fd).map(|f| f.flags).unwrap_or(0);
-    // dup/dup2 产生的新 fd **不继承** O_CLOEXEC，这是 POSIX 明确规定的。
-    let nf = Fd {
-        kind,
-        cloexec: false,
-        flags,
+    // dup/dup2 产生的新 fd **不继承** O_CLOEXEC（POSIX 明确规定），但**共享
+    // 同一个打开文件描述**——偏移与状态标志（O_APPEND/O_NONBLOCK）都是描述
+    // 上的属性，不是描述符上的。`alias` 就是这个区分的落点。
+    let Some(nf) = m.os.fds.get(fd).map(|f| f.alias(kind, false)) else {
+        return -EBADF;
     };
     match at {
         None => m.os.fds.alloc_min(nf, min) as i64,
@@ -809,6 +849,8 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
     const F_SETLK: i32 = 6;
     const F_SETLKW: i32 = 7;
     const F_DUPFD_CLOEXEC: i32 = 1030;
+    const F_SETPIPE_SZ: i32 = 1031;
+    const F_GETPIPE_SZ: i32 = 1032;
     if !m.os.fds.contains(fd) {
         return -EBADF;
     }
@@ -836,14 +878,36 @@ fn sys_fcntl(m: &mut Machine, fd: i32, cmd: i32, arg: u64) -> i64 {
             }
             0
         }
-        F_GETFL => m.os.fds.get(fd).map(|f| f.flags as i64).unwrap_or(-EBADF),
+        F_GETFL => m.os.fds.get(fd).map(|f| f.flags() as i64).unwrap_or(-EBADF),
         F_SETFL => {
-            if let Some(f) = m.os.fds.get_mut(fd) {
-                // 只有这几位是 SETFL 可改的
-                let keep = f.flags & !(O_APPEND | O_NONBLOCK);
-                f.flags = keep | (arg as i32 & (O_APPEND | O_NONBLOCK));
-            }
+            let Some(f) = m.os.fds.get(fd) else {
+                return -EBADF;
+            };
+            // 只有这几位是 SETFL 可改的
+            let keep = f.flags() & !(O_APPEND | O_NONBLOCK);
+            f.set_flags(keep | (arg as i32 & (O_APPEND | O_NONBLOCK)));
             0
+        }
+        // 管道容量。**只对管道有意义**：对别的 fd Linux 返回 EBADF（不是
+        // EINVAL），`t_fd_rw` 的 pipe/capacity-fcntl 专门断言了这一点。
+        F_GETPIPE_SZ => match m.os.fds.get(fd).map(|f| &f.kind) {
+            Some(FdKind::PipeRead(r)) => r.inner().capacity() as i64,
+            Some(FdKind::PipeWrite(w)) => w.inner().capacity() as i64,
+            Some(_) => -EBADF,
+            None => -EBADF,
+        },
+        F_SETPIPE_SZ => {
+            // 0 不是"用默认值"，是非法请求。
+            if arg == 0 {
+                return -EINVAL;
+            }
+            match m.os.fds.get(fd).map(|f| &f.kind) {
+                // 内核会把小于一页的请求抬到一页，并返回实际采用的值。
+                Some(FdKind::PipeRead(r)) => r.inner().set_capacity(arg as usize) as i64,
+                Some(FdKind::PipeWrite(w)) => w.inner().set_capacity(arg as usize) as i64,
+                Some(_) => -EBADF,
+                None => -EBADF,
+            }
         }
         // 咨询锁（advisory lock）。模拟器里只有一个 guest 进程在参与锁协议，
         // 所以"能不能拿到锁"的答案恒为能——这不是假装成功，是真的没有竞争者。
@@ -872,6 +936,7 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
     const TIOCGWINSZ: u64 = 0x5413;
     const FIONCLEX: u64 = 0x5450;
     const FIOCLEX: u64 = 0x5451;
+    const FIONBIO: u64 = 0x5421;
     if !m.os.fds.contains(fd) {
         return -EBADF;
     }
@@ -886,6 +951,24 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
             if let Some(f) = m.os.fds.get_mut(fd) {
                 f.cloexec = req == FIOCLEX;
             }
+            0
+        }
+        // FIONBIO 是 `F_SETFL O_NONBLOCK` 的另一种写法，作用在**打开文件
+        // 描述**上，因此对所有别名同时生效。同样与 tty 无关，报 ENOTTY 是错的。
+        FIONBIO => {
+            let on = match m.mem.read_u32(_arg) {
+                Ok(v) => v != 0,
+                Err(_) => return -EFAULT,
+            };
+            let Some(f) = m.os.fds.get(fd) else {
+                return -EBADF;
+            };
+            let cur = f.flags();
+            f.set_flags(if on {
+                cur | O_NONBLOCK
+            } else {
+                cur & !O_NONBLOCK
+            });
             0
         }
         _ => -ENOTTY,
@@ -948,12 +1031,12 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
         let _ = std::fs::remove_file(&path);
         return host_err(&e);
     }
-    m.os.fds.alloc(Fd {
-        kind: FdKind::File(f),
-        cloexec: flags & O_CLOEXEC != 0,
-        // O_TMPFILE 之外的 O_DIRECTORY 位不该回给 F_GETFL，摘掉。
-        flags: flags & !(O_TMPFILE | O_DIRECTORY),
-    }) as i64
+    // O_TMPFILE 之外的 O_DIRECTORY 位不该回给 F_GETFL，摘掉。
+    m.os.fds.alloc(Fd::new(
+        FdKind::File(f),
+        flags & O_CLOEXEC != 0,
+        flags & !(O_TMPFILE | O_DIRECTORY),
+    )) as i64
 }
 
 fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32) -> i64 {
@@ -976,11 +1059,11 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
     // 合成的 /dev/*：必须在碰宿主文件系统之前拦下来，容器 rootfs 里通常
     // 没有 /dev，Windows 宿主上更是根本没有这些路径。
     if let Some(d) = fs::DevKind::from_guest_path(&path) {
-        return m.os.fds.alloc(Fd {
-            kind: FdKind::Dev(d),
-            cloexec: flags & O_CLOEXEC != 0,
-            flags: flags & !O_CLOEXEC,
-        }) as i64;
+        return m.os.fds.alloc(Fd::new(
+            FdKind::Dev(d),
+            flags & O_CLOEXEC != 0,
+            flags & !O_CLOEXEC,
+        )) as i64;
     }
 
     // O_TMPFILE 要在"目录"分支之前判：它的路径**就是**一个目录，但要的
@@ -999,15 +1082,15 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
             Ok(e) => e,
             Err(e) => return host_err(&e),
         };
-        let fd = Fd {
-            kind: FdKind::Dir {
+        let fd = Fd::new(
+            FdKind::Dir {
                 path: host,
                 entries,
                 pos: 0,
             },
-            cloexec: flags & O_CLOEXEC != 0,
+            flags & O_CLOEXEC != 0,
             flags,
-        };
+        );
         return m.os.fds.alloc(fd) as i64;
     }
     if flags & O_DIRECTORY != 0 {
@@ -1052,11 +1135,7 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
     }
     match opt.open(&host) {
         Ok(f) => {
-            let fd = Fd {
-                kind: FdKind::File(f),
-                cloexec: flags & O_CLOEXEC != 0,
-                flags,
-            };
+            let fd = Fd::new(FdKind::File(f), flags & O_CLOEXEC != 0, flags);
             m.os.fds.alloc(fd) as i64
         }
         Err(e) => host_err(&e),
@@ -1311,7 +1390,13 @@ fn sys_newfstatat(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, flags: i
     sys_stat_path(m, dirfd, path_ptr, out, flags & AT_SYMLINK_NOFOLLOW == 0)
 }
 
-fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
+/// `access` / `faccessat` / `faccessat2`。
+///
+/// **`dirfd` 必须真的用上**：早先分发表把 `faccessat` 直接接到只认 cwd 的
+/// `sys_access` 上，`a[0]` 被整个丢掉。表现是相对路径全按当前目录解析——
+/// `openat(dirfd, ...)` 读得到的文件，`faccessat(同一个 dirfd, ...)` 却报
+/// ENOENT（`t_fd_open` 的 openat/fork-child-reused-dirfd 以 exit 5 抓到）。
+fn sys_faccessat(m: &mut Machine, dirfd: i32, path_ptr: u64, _mode: i32) -> i64 {
     let path = match guest_path(m, path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
@@ -1319,9 +1404,9 @@ fn sys_access(m: &mut Machine, path_ptr: u64, _mode: i32) -> i64 {
     if fs::DevKind::from_guest_path(&path).is_some() {
         return 0;
     }
-    let host = match m.os.vfs.host_path_confined(&path) {
+    let host = match resolve_at(m, dirfd, &path, true) {
         Ok(p) => p,
-        Err(e) => return e.errno(),
+        Err(e) => return e,
     };
     // 只做存在性判断。真实的 X_OK/W_OK 要看宿主权限位，Windows 上没有
     // 对应语义；容器内一律 root，存在即可访问是可接受的近似。
@@ -1834,17 +1919,34 @@ fn sys_rename(m: &mut Machine, odirfd: i32, old_ptr: u64, ndirfd: i32, new_ptr: 
     }
 }
 
-fn sys_link(m: &mut Machine, old_ptr: u64, new_ptr: u64) -> i64 {
+/// `link` / `linkat`。
+///
+/// **两个 `dirfd` 都要用上**：早先分发表把 `linkat` 接到只认 cwd 的
+/// `sys_link` 上，`a[0]`/`a[2]` 被丢掉，相对路径全按当前目录解析
+/// （`t_fd_open` 的 openat/fork-child-reused-dirfd 以 exit 7 抓到）。
+fn sys_linkat(
+    m: &mut Machine,
+    odirfd: i32,
+    old_ptr: u64,
+    ndirfd: i32,
+    new_ptr: u64,
+    flags: i32,
+) -> i64 {
+    const AT_SYMLINK_FOLLOW: i32 = 0x400;
     let (old, new) = match (guest_path(m, old_ptr), guest_path(m, new_ptr)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    // link(2) 不跟随末段：老路径是链接就硬链到链接本身，新路径更不能跟随
-    // （跟随会跑去目标位置建链接）。
-    let (oh, nh) = (
-        m.os.vfs.host_path_nofollow(&old),
-        m.os.vfs.host_path_nofollow(&new),
-    );
+    // link(2) 默认不跟随末段：老路径是链接就硬链到链接本身，除非显式给了
+    // `AT_SYMLINK_FOLLOW`。新路径**永远**不跟随——跟随会跑去目标位置建链接。
+    let oh = match resolve_at(m, odirfd, &old, flags & AT_SYMLINK_FOLLOW != 0) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let nh = match resolve_at(m, ndirfd, &new, false) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     match std::fs::hard_link(&oh, &nh) {
         Ok(()) => 0,
         Err(e) => host_err(&e),
@@ -1924,7 +2026,11 @@ fn sys_fsync(m: &mut Machine, fd: i32) -> i64 {
             Ok(()) => 0,
             Err(e) => host_err(&e),
         },
-        // 标准流与管道没有"落盘"这回事，报成功
+        // **管道没有 fsync 语义**：Linux 对管道/FIFO/socket 返回 EINVAL，
+        // 不是成功。报成功会让"把数据刷到持久存储"这类判断悄悄走偏，
+        // 而调用方拿不到任何提示（`t_fd_rw` 的 pread/negative 判的就是这条）。
+        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) => -EINVAL,
+        // 标准流与合成设备没有"落盘"这回事，报成功。
         Some(_) => 0,
         None => -EBADF,
     }
@@ -2035,16 +2141,8 @@ fn sys_dup3(m: &mut Machine, old: i32, new: i32, flags: i32) -> i64 {
 fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
     let (rk, wk) = fs::new_pipe();
     let cloexec = flags & O_CLOEXEC != 0;
-    let rd = m.os.fds.alloc(Fd {
-        kind: rk,
-        cloexec,
-        flags: flags & !O_CLOEXEC,
-    });
-    let wr = m.os.fds.alloc(Fd {
-        kind: wk,
-        cloexec,
-        flags: flags & !O_CLOEXEC,
-    });
+    let rd = m.os.fds.alloc(Fd::new(rk, cloexec, flags & !O_CLOEXEC));
+    let wr = m.os.fds.alloc(Fd::new(wk, cloexec, flags & !O_CLOEXEC));
     if m.mem.write_u32(fds_ptr, rd as u32).is_err()
         || m.mem.write_u32(fds_ptr + 4, wr as u32).is_err()
     {
@@ -2060,6 +2158,8 @@ fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
 fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
     const POLLIN: u16 = 0x001;
     const POLLOUT: u16 = 0x004;
+    const POLLERR: u16 = 0x008;
+    const POLLHUP: u16 = 0x010;
     const POLLNVAL: u16 = 0x020;
     if nfds > 1024 {
         return -EINVAL;
@@ -2075,18 +2175,37 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
             Ok(v) => v,
             Err(_) => return -EFAULT,
         };
+        // POLLHUP / POLLERR / POLLNVAL **不受 events 掩码约束**：POSIX 规定
+        // 它们无论请求与否都会被报出来。早先整条都按 `& events` 过滤，于是
+        // "写端已关"这件事对只订阅了 POLLIN 的调用方永远不可见。
         let revents = match m.os.fds.get(fd).map(|f| &f.kind) {
             None => POLLNVAL,
             Some(FdKind::Dev(_)) => (POLLIN | POLLOUT) & events,
-            Some(FdKind::PipeWrite(_)) => POLLOUT & events,
-            // 读端：有数据就绪，写端全关也算"就绪"（读到 EOF 而不是挂住），
-            // 这正是 POSIX 对已关闭管道的 POLLIN 语义。
-            Some(FdKind::PipeRead(inner)) => {
-                if !inner.data.borrow().is_empty() || inner.writers_closed() {
-                    POLLIN & events
-                } else {
-                    0
+            // 写端：读端全关 = POLLERR；缓冲区还有空位才算可写。
+            Some(FdKind::PipeWrite(w)) => {
+                let inner = w.inner();
+                let mut r = 0;
+                if inner.readers_closed() {
+                    r |= POLLERR;
+                } else if inner.space() > 0 {
+                    r |= POLLOUT & events;
                 }
+                r
+            }
+            // 读端：有数据就绪；写端全关 = POLLHUP，且此时也算 POLLIN 就绪
+            // （读到 EOF 而不是挂住），这正是 POSIX 对已关闭管道的语义。
+            Some(FdKind::PipeRead(r)) => {
+                let inner = r.inner();
+                let mut rv = 0;
+                let has_data = !inner.data.borrow().is_empty();
+                let hup = inner.writers_closed();
+                if has_data || hup {
+                    rv |= POLLIN & events;
+                }
+                if hup {
+                    rv |= POLLHUP;
+                }
+                rv
             }
             Some(_) => (POLLIN | POLLOUT) & events,
         };

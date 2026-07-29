@@ -32,7 +32,7 @@
 | C | eventfd/timerfd/signalfd 未实现；信号不投递 | `t_eventfd` `t_timerfd` `t_signalfd` `t_signal_timer` |
 | D | 快照式 fork 的并发语义差异 | `t_proc` |
 | E | `mount(2)` 未实现 | `t_mount_ro` |
-| F | file description 级共享状态未建模 | `t_fd_open` `t_fd_rw` |
+| ~~F~~ | ~~file description 级共享状态未建模~~ —— **已修，整组清空**（状态标志改为按「打开文件描述」共享） | — |
 | G | mmap 精度（私有文件映射的 mremap 增长回读） | `t_mmap` |
 | ~~H~~ | ~~宿主 symlink 不防护~~ —— **已修并移出基线**（VFS 受限解析）| — |
 

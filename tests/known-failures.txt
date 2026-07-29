@@ -38,10 +38,13 @@
 #      syscall/process.rs 顶部的说明。
 #   E. mount(2) 未实现（hostfs / MS_RDONLY 挂载）
 #      t_mount_ro
-#   F. 文件描述（file description）级共享状态未建模
-#      t_fd_open t_fd_rw —— dup 出来的 fd 应共享 O_APPEND/O_NONBLOCK 等
-#      状态标志与文件偏移；当前 dup 走宿主 try_clone，状态标志各自一份。
-#      另含管道容量与非阻塞写的边界。
+#   F. 文件描述（file description）级共享状态未建模 —— **已修，整组清空**
+#      状态标志从"每个 Fd 各存一份 i32"改成一份共享的
+#      `Rc<Cell<i32>>`（dup/dup2/F_DUPFD/fork 共享同一个"打开文件描述"），
+#      补齐 O_APPEND 写语义、FIONBIO、管道容量与 F_GET/SETPIPE_SZ、
+#      管道的 POLLHUP/POLLERR/EPIPE、管道 fsync 报 EINVAL；
+#      顺带修掉两个 dirfd 被丢弃的分发错误（faccessat、linkat）与
+#      "最小可用 fd 下界写死 3"。t_fd_open 与 t_fd_rw 现已全通并移出基线。
 #   G. mmap 的部分精度（私有文件映射的 mremap 增长回读）
 #      t_mmap
 #
@@ -71,10 +74,6 @@ t_proc
 
 # E. mount(2)
 t_mount_ro
-
-# F. file description 级共享状态
-t_fd_open
-t_fd_rw
 
 # G. mmap 精度
 t_mmap
