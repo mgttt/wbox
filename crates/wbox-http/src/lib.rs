@@ -33,7 +33,7 @@ pub mod url;
 pub mod wire;
 
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use url::Url;
 pub use wire::Response;
@@ -43,6 +43,7 @@ pub struct Client {
     user_agent: String,
     connect_timeout: Duration,
     io_timeout: Duration,
+    total_timeout: Duration,
     max_body: u64,
     max_redirects: usize,
 }
@@ -52,7 +53,8 @@ impl Client {
         Self {
             user_agent: user_agent.into(),
             connect_timeout: Duration::from_secs(15),
-            io_timeout: Duration::from_secs(300),
+            io_timeout: Duration::from_secs(60),
+            total_timeout: Duration::from_secs(1800),
             max_body: 8 << 30,
             max_redirects: 10,
         }
@@ -63,9 +65,19 @@ impl Client {
         self
     }
 
-    /// 单次读写的超时。层可能很大，所以这是**每次 I/O**的超时而不是整体超时。
+    /// 单次读写的超时——也就是"对端多久不说话算卡死"。
     pub fn io_timeout(mut self, d: Duration) -> Self {
         self.io_timeout = d;
+        self
+    }
+
+    /// **单次请求的整体预算**（含 DNS、连接、TLS 握手、收完响应体）。
+    ///
+    /// 光有 `io_timeout` 挡不住"每 59 秒吐一个字节"这种拖法：每次 I/O 都在
+    /// 超时之内，整体却可以无限久。registry 的每个 blob 是一次独立请求，
+    /// 所以这里的预算是"单个 blob"的上界，不是整次 pull 的。
+    pub fn total_timeout(mut self, d: Duration) -> Self {
+        self.total_timeout = d;
         self
     }
 
@@ -98,9 +110,12 @@ impl Client {
         // 明文发出去；重定向到同主机的另一个端口也一样（那可能是完全不同
         // 的服务）。
         let origin = (target.https, target.host.clone(), target.port);
+        // 预算按**整次 request 调用**算，重定向共享同一份——否则 10 跳
+        // 重定向就能把上界放大 10 倍，"有界"也就名存实亡。
+        let deadline = Instant::now() + self.total_timeout;
 
         for _ in 0..=self.max_redirects {
-            let resp = self.send_once(&method, &target, &headers, body)?;
+            let resp = self.send_once(&method, &target, &headers, body, deadline)?;
             let is_redirect = matches!(resp.status, 301 | 302 | 303 | 307 | 308);
             let Some(location) = resp.header("location").filter(|_| is_redirect) else {
                 return Ok(resp);
@@ -134,6 +149,7 @@ impl Client {
         target: &Url,
         headers: &[(String, String)],
         body: Option<&[u8]>,
+        deadline: Instant,
     ) -> io::Result<Response> {
         let proxy = proxy_for(target);
         let mut stream = transport::connect(
@@ -141,8 +157,10 @@ impl Client {
             target.port,
             target.https,
             proxy.as_ref(),
-            self.connect_timeout,
+            self.connect_timeout
+                .min(deadline.saturating_duration_since(Instant::now())),
             self.io_timeout,
+            deadline,
         )?;
 
         let mut all = Vec::with_capacity(headers.len() + 1);

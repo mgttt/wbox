@@ -6,12 +6,63 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// 带**整体期限**的 TCP 流。
+///
+/// # 为什么单靠 `set_read_timeout` 不够
+///
+/// 每次 read/write 的超时只能挡住"对端彻底不说话"。对端每隔 299 秒吐一个
+/// 字节，每次 I/O 都在超时之内，**整体却可以拖到无限久**——一次 pull 就这么
+/// 永远回不来（Windows 实机遇到过）。所以每次 I/O 之前先看总预算，把 socket
+/// 超时压到 `min(单次超时, 剩余预算)`，预算用完直接报 `TimedOut`。
+///
+/// 期限放在 TCP 这一层而不是 HTTP 层，是因为 TLS 握手也在这条流上跑：
+/// 握手里那几个"收到 CCS 就 continue"的循环同样需要一个兜底的上界，而它们
+/// 在 `wbox-tls` 内部，HTTP 层够不着。
+pub struct DeadlineStream {
+    inner: TcpStream,
+    deadline: Instant,
+    io_timeout: Duration,
+}
+
+impl DeadlineStream {
+    fn budget(&self) -> io::Result<Duration> {
+        let now = Instant::now();
+        if now >= self.deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "整体超时：连接在预算内没有完成",
+            ));
+        }
+        Ok((self.deadline - now).min(self.io_timeout))
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let d = self.budget()?;
+        self.inner.set_read_timeout(Some(d))?;
+        self.inner.read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let d = self.budget()?;
+        self.inner.set_write_timeout(Some(d))?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 /// 已连上的传输通道。
 pub enum Stream {
-    Plain(TcpStream),
-    Tls(Box<wbox_tls::TlsStream<TcpStream>>),
+    Plain(DeadlineStream),
+    Tls(Box<wbox_tls::TlsStream<DeadlineStream>>),
 }
 
 impl Read for Stream {
@@ -50,17 +101,20 @@ pub fn connect(
     proxy: Option<&crate::url::Url>,
     connect_timeout: Duration,
     io_timeout: Duration,
+    deadline: Instant,
 ) -> io::Result<Stream> {
     let (dial_host, dial_port) = match proxy {
         Some(p) => (p.host.as_str(), p.port),
         None => (host, port),
     };
     let tcp = dial(dial_host, dial_port, connect_timeout)?;
-    tcp.set_read_timeout(Some(io_timeout))?;
-    tcp.set_write_timeout(Some(io_timeout))?;
     tcp.set_nodelay(true).ok();
+    let mut tcp = DeadlineStream {
+        inner: tcp,
+        deadline,
+        io_timeout,
+    };
 
-    let mut tcp = tcp;
     if proxy.is_some() && tls {
         // 明文代理 + https 目标：先用 CONNECT 打隧道，再在隧道里握手。
         // TLS 是端到端的，代理看不到隧道内容。
@@ -73,9 +127,34 @@ pub fn connect(
     }
 }
 
-fn dial(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+/// 解析 `host:port`。
+///
+/// **解析要另起线程**：`to_socket_addrs` 走的是系统 resolver，本身没有超时，
+/// 而 resolver 卡住是真实存在的（DNS 服务器不回、Windows 上 NRPT/VPN 规则
+/// 抖动）。卡住时这条 `connect` 就永远不返回，上层的任何"超时"都无从谈起。
+/// 超时后那个线程会被留下自己了结——它只持有一份 `String`，且系统调用最终
+/// 会自己返回，比强行中断安全。
+fn resolve(host: &str, port: u16, timeout: Duration) -> io::Result<Vec<std::net::SocketAddr>> {
     use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = (host, port).to_socket_addrs()?.collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = host.to_string();
+    std::thread::spawn(move || {
+        let r = (owned.as_str(), port)
+            .to_socket_addrs()
+            .map(|it| it.collect::<Vec<_>>());
+        let _ = tx.send(r);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(r) => r,
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("解析 {host}:{port} 超时（{}s）", timeout.as_secs()),
+        )),
+    }
+}
+
+fn dial(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
+    let addrs = resolve(host, port, timeout)?;
     if addrs.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -93,7 +172,7 @@ fn dial(host: &str, port: u16, timeout: Duration) -> io::Result<TcpStream> {
     Err(last.unwrap_or_else(|| io::Error::other("连接失败")))
 }
 
-fn connect_tunnel(tcp: &mut TcpStream, host: &str, port: u16) -> io::Result<()> {
+fn connect_tunnel(tcp: &mut DeadlineStream, host: &str, port: u16) -> io::Result<()> {
     let target = if host.contains(':') {
         format!("[{host}]:{port}") // IPv6 字面量
     } else {
@@ -139,7 +218,7 @@ fn connect_tunnel(tcp: &mut TcpStream, host: &str, port: u16) -> io::Result<()> 
 }
 
 /// TLS 握手。
-fn connect_tls(tcp: TcpStream, host: &str) -> io::Result<Stream> {
+fn connect_tls(tcp: DeadlineStream, host: &str) -> io::Result<Stream> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -199,10 +278,20 @@ mod tests {
         (addr.ip().to_string(), addr.port())
     }
 
+    /// 测试用：给一条已连上的 TCP 套上宽松的期限。
+    fn wrap(tcp: TcpStream, budget: Duration) -> DeadlineStream {
+        DeadlineStream {
+            inner: tcp,
+            deadline: Instant::now() + budget,
+            io_timeout: Duration::from_secs(5),
+        }
+    }
+
     #[test]
     fn tunnel_reports_proxy_refusal() {
         let (h, p) = fake_proxy("HTTP/1.1 403 Forbidden\r\n\r\n");
-        let mut tcp = TcpStream::connect((h.as_str(), p)).unwrap();
+        let tcp = TcpStream::connect((h.as_str(), p)).unwrap();
+        let mut tcp = wrap(tcp, Duration::from_secs(10));
         let e = connect_tunnel(&mut tcp, "example.com", 443).unwrap_err();
         assert!(e.to_string().contains("拒绝 CONNECT"), "{e}");
     }
@@ -210,8 +299,74 @@ mod tests {
     #[test]
     fn tunnel_accepts_2xx() {
         let (h, p) = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n");
-        let mut tcp = TcpStream::connect((h.as_str(), p)).unwrap();
+        let tcp = TcpStream::connect((h.as_str(), p)).unwrap();
+        let mut tcp = wrap(tcp, Duration::from_secs(10));
         connect_tunnel(&mut tcp, "example.com", 443).unwrap();
+    }
+
+    /// **L13 的核心判据**：对端一直在说话、每次读都不超时，整体仍必须有上界。
+    ///
+    /// 这条正是 `io_timeout` 单独存在时挡不住的形状——服务器每 50 ms 吐一个
+    /// 字节、永不结束，每次 read 都成功返回，旧实现会永远读下去。
+    #[test]
+    fn slow_drip_peer_still_hits_the_total_budget() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                loop {
+                    if s.write_all(b"x").is_err() {
+                        return;
+                    }
+                    let _ = s.flush();
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        });
+        let tcp = TcpStream::connect(addr).unwrap();
+        // 预算 1 秒，单次 I/O 超时 5 秒：单次永远不会触发，只有总预算能收场。
+        let mut s = wrap(tcp, Duration::from_secs(1));
+        let started = Instant::now();
+        let mut sink = [0u8; 64];
+        let err = loop {
+            match s.read(&mut sink) {
+                Ok(_) => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(20),
+                        "整体预算没有生效，读了 20 秒还在继续"
+                    );
+                }
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "{err}");
+        assert!(err.to_string().contains("整体超时"), "{err}");
+    }
+
+    /// 反向判据：预算充裕时不能误伤——否则一个"永远立刻超时"的实现也能
+    /// 让上面那条变绿。
+    #[test]
+    fn generous_budget_does_not_cut_a_healthy_read() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = l.accept() {
+                std::thread::sleep(Duration::from_millis(200));
+                let _ = s.write_all(b"hello");
+            }
+        });
+        let tcp = TcpStream::connect(addr).unwrap();
+        let mut s = wrap(tcp, Duration::from_secs(10));
+        let mut buf = [0u8; 5];
+        s.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"hello");
+    }
+
+    /// DNS 解析必须走得通（有界不等于把正常解析也挡了）。
+    #[test]
+    fn resolve_returns_loopback_within_budget() {
+        let addrs = resolve("127.0.0.1", 80, Duration::from_secs(5)).unwrap();
+        assert!(!addrs.is_empty());
     }
 
     #[test]

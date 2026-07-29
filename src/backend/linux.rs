@@ -259,9 +259,17 @@ mod tests {
     }
 
     /// 命令不存在时应给出可读错误（而非 panic 或静默 rc）。
+    ///
+    /// `WBOX_NO_OVERLAY=1` 不是可有可无的：镜像模式默认要先建 overlay 可写层，
+    /// 而那要求内核 ≥5.11 **且**当前环境允许 unprivileged userns。CI 的容器里
+    /// 两者都不保证，于是 spawn 在还没碰到命令解析时就先报「本内核不支持
+    /// rootless overlay」——用例断言的那句话根本走不到。这条用例要测的是
+    /// **启动失败的报错可读**，不是 overlay 能不能建，所以显式关掉可写层。
     #[cfg(target_os = "linux")]
     #[test]
     fn spawn_reports_missing_command() {
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("WBOX_NO_OVERLAY", "1");
         let rootfs = temp_rootfs("nocmd");
         let s = spec(&rootfs, &["/bin/definitely-not-here"], vec![]);
         let p = LinuxNativeBackend(LinuxMode::Image).prepare(&s).unwrap();

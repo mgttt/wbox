@@ -51,8 +51,23 @@ impl RegistryClient {
     pub fn new(registry: &str) -> Self {
         let http = wbox_http::Client::new(concat!("wbox/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
-            // 大层下载放宽；这是**每次读写**的超时而不是整体超时。
-            .io_timeout(std::time::Duration::from_secs(300))
+            // 「对端多久不说话算卡死」。60 秒对 registry 足够宽松——
+            // 正常传输不会有这么长的静默间隔。
+            .io_timeout(std::time::Duration::from_secs(60))
+            // **单次请求的整体上界**。只有 io_timeout 挡不住"每 59 秒吐一个
+            // 字节"，那样每次读都不超时、整体却能拖到无限久——Windows 实机
+            // 上的 pull 卡死就是这个形状（§4.9 L13）。
+            //
+            // 每个 blob 是一次独立请求，所以 30 分钟是"单个层"的预算：
+            // 按最慢 1 MB/s 算也够拉 1.8 GB，而真卡住时半小时必然报错返回。
+            // 需要更长的可以调；关键是**有一个上界**。
+            .total_timeout(
+                std::env::var("WBOX_HTTP_TOTAL_TIMEOUT")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(std::time::Duration::from_secs(1800)),
+            )
             .max_body(MAX_RESPONSE_BYTES);
         Self {
             registry: registry.to_string(),

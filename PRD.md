@@ -2707,26 +2707,52 @@ TODO-LINUX
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
-└── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [active] Windows 实测会无限等待
+└── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
 ```
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
 `ubuntu@sha256:52df9b1e...cf3faf` 执行 `image pull`，超过 10 分钟仍无输出且
-进程不退出；直接 `-V` 重跑也超过 3 分钟。当前 Windows Ubuntu ABI 门禁改由
-Linux CI 从同一固定 digest 生成 fixture，不能因此把 pull 判为通过。Linux 侧需
-给 registry/TLS 各阶段加入有界超时和阶段诊断，并建立成功 pull 门禁；修复后再
-补 Windows `wbox pull` required job。
+进程不退出；直接 `-V` 重跑也超过 3 分钟。
+
+**根因是"每次 I/O 都有超时"并不等于"整体有上界"。** `wbox-http` 原先只在
+socket 上设 `set_read_timeout(300s)`，那只挡得住"对端彻底不说话"；对端每隔
+299 秒吐一个字节，每次 read 都在超时之内，**整体就能拖到无限久**。同一形状的
+无界等待还有两处：`to_socket_addrs` 走系统 resolver、本身没有超时（DNS 卡住
+时连接函数永远不返回）；以及 `wbox-tls` 握手里"收到 ChangeCipherSpec 就
+continue"的循环——对端一直发 CCS 就一直转。
+
+**修法是把期限下沉到 TCP 这一层**（`transport::DeadlineStream`）：每次 I/O
+之前先看总预算，把 socket 超时压到 `min(单次超时, 剩余预算)`，预算用完直接
+报 `TimedOut`。放在这一层而不是 HTTP 层，是因为 TLS 握手也跑在这条流上，
+那几个循环在 `wbox-tls` 内部、HTTP 层够不着——把上界放在字节管道上，谁在
+上面跑都被兜住。DNS 另起线程 + `recv_timeout`。
+
+预算按**一次 `request()` 调用**算并由重定向共享（否则 10 跳重定向就把上界
+放大 10 倍）。registry 客户端取 `io_timeout=60s` / `total_timeout=1800s`：
+每个 blob 是一次独立请求，按最慢 1 MB/s 算 30 分钟够拉 1.8 GB，而真卡住时
+半小时必然报错返回。需要更长可用 `WBOX_HTTP_TOTAL_TIMEOUT`（秒）。
+
+**判据非空已验证**：`slow_drip_peer_still_hits_the_total_budget` 用一个每
+50 ms 吐一个字节、永不结束的假服务器——单次超时永远触发不了，只有总预算能
+收场；把 `budget()` 短路成"永远返回单次超时"后，它当场在"读了 20 秒还在
+继续"上变红。反向判据 `generous_budget_does_not_cut_a_healthy_read` 挡住
+"永远立刻超时"那种假实现。真实 `wbox pull busybox:latest`（走自研 TLS 到
+Docker Hub）已实机跑通。
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 
 **已实现**（`wbox exec <NAME> -- <CMD>`），门禁 P.19–P.22。两个坑都是实测才
 暴露的，写下来省得再踩：
 
-**坑一：取不到容器内 pid。** 自然想法是用 `cmd.spawn()` 的返回值，但
+**坑一：取不到容器内 pid。** 自然想法是用 `cmd.spawn()` 的返回值，但当时
 **`cmd.spawn()` 在容器退出之前根本不返回**——PID namespace 的双 fork 里，中间
 进程负责转发退出码、**永不 exec**，而 Rust 的 `Command::spawn()` 要等 CLOEXEC
 错误管道读到 EOF 才返回，写端正握在它手里。这个坑很会骗人：短命容器上一切
 "看起来正常"，因为你总是在它结束之后才去看文件。
+
+（该阻塞本身后来在 W11 那条里修掉了：中间进程 fork 完就把继承来的非 stdio
+fd 全关掉，`spawn()` 于是在孙进程 exec 时就返回。这里的"从宿主侧观察"做法
+仍然成立且更稳，没有跟着改回去。）
 
 改为从宿主侧观察：中间进程就是 `Command::spawn` fork 出的**直接子进程**，
 起一个线程读 `/proc/<self>/task/<self>/children` 即可，不必等 spawn 返回。
