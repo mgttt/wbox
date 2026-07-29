@@ -44,6 +44,8 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const ELOOP: i64 = 40;
+pub const EROFS: i64 = 30;
+pub const ENODEV: i64 = 19;
 pub const EPROTONOSUPPORT: i64 = 93;
 pub const ESOCKTNOSUPPORT: i64 = 94;
 pub const EOPNOTSUPP: i64 = 95;
@@ -330,6 +332,7 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         40 => sys_sendfile(m, a[0] as i32, a[1] as i32, a[2], a[3]),
         74 | 75 => sys_fsync(m, a[0] as i32),
         76 => sys_truncate(m, a[0], a[1] as i64),
+        165 => sys_mount(m, a[0], a[1], a[2], a[3], a[4]),
         77 => sys_ftruncate(m, a[0] as i32, a[1] as i64),
         81 => sys_fchdir(m, a[0] as i32),
         82 => sys_rename(m, AT_FDCWD, a[0], AT_FDCWD, a[1]),
@@ -345,7 +348,11 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // chmod/chown 族：容器内一律 root，且 Windows 没有对应语义。
         // 报成功而不是 ENOSYS——guest 的 install/cp 会因为 chmod 失败而整体失败，
         // 而这里的"失败"并不代表任何真实的权限问题。
-        90 | 91 | 92 | 93 | 260 | 268 => 0,
+        // chmod/fchmod/chown/... 本引擎不落实权限位（容器内一律 root），
+        // **但只读挂载下必须报 EROFS**——否则 guest 会以为改成功了。
+        90 => sys_readonly_guard(m, a[0]),
+        268 => sys_readonly_guard_at(m, a[0] as i32, a[1]),
+        91 | 92 | 93 | 260 => 0,
         // utimensat 族：时间戳设置暂不落到宿主，报成功。
         132 | 235 | 280 => 0,
         95 => {
@@ -1259,6 +1266,15 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         Err(e) => return e,
     };
 
+    // 只读挂载：带写意图（含 O_CREAT/O_TRUNC）的打开一律 EROFS。
+    // 这一条要在碰宿主文件系统**之前**判——落到宿主上再失败，errno 会变成
+    // EACCES/EPERM 之类，与真实内核对不上。
+    if (flags & O_ACCMODE != O_RDONLY || flags & (O_CREAT | O_TRUNC) != 0)
+        && m.os.vfs.is_readonly(&path)
+    {
+        return -EROFS;
+    }
+
     // 空路径永远是 ENOENT。不显式判的话它会被当成"当前目录"，
     // `open("", O_RDONLY)` 就会成功返回一个目录 fd。
     if path.is_empty() {
@@ -1663,6 +1679,9 @@ fn sys_unlinkat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if m.os.vfs.is_readonly(&path) {
+        return -EROFS;
+    }
     // unlink/rmdir 删的是**链接本身**，绝不能跟随末段。
     let host = match resolve_at(m, dirfd, &path, false) {
         Ok(p) => p,
@@ -2201,6 +2220,9 @@ fn sys_mkdir(m: &mut Machine, dirfd: i32, path_ptr: u64) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if m.os.vfs.is_readonly(&path) {
+        return -EROFS;
+    }
     // mkdir 的末段还不存在；若已存在（哪怕是符号链接）应报 EEXIST，
     // 跟随会跑去目标位置建目录——那是错的。
     let host = match resolve_at(m, dirfd, &path, false) {
@@ -2220,6 +2242,10 @@ fn sys_rename(m: &mut Machine, odirfd: i32, old_ptr: u64, ndirfd: i32, new_ptr: 
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
+    // 两端**任意一端**在只读挂载下都不行：搬出去要删源，搬进来要建目标。
+    if m.os.vfs.is_readonly(&old) || m.os.vfs.is_readonly(&new) {
+        return -EROFS;
+    }
     // rename 搬的是**链接本身**，两端都不跟随末段。
     let (oh, nh) = match (
         resolve_at(m, odirfd, &old, false),
@@ -2252,6 +2278,10 @@ fn sys_linkat(
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => return e,
     };
+    // 新名字要建在只读挂载里：EROFS。
+    if m.os.vfs.is_readonly(&new) {
+        return -EROFS;
+    }
     // link(2) 默认不跟随末段：老路径是链接就硬链到链接本身，除非显式给了
     // `AT_SYMLINK_FOLLOW`。新路径**永远**不跟随——跟随会跑去目标位置建链接。
     let oh = match resolve_at(m, odirfd, &old, flags & AT_SYMLINK_FOLLOW != 0) {
@@ -2303,11 +2333,71 @@ fn sys_symlink(m: &mut Machine, target_ptr: u64, link_ptr: u64) -> i64 {
     }
 }
 
+/// `mount(source, target, fstype, flags, data)`。
+///
+/// 只支持 `hostfs`——引擎里"文件系统"只有一种：宿主目录。别的类型如实报
+/// `ENODEV` 而不是假装挂上了。
+fn sys_mount(m: &mut Machine, src: u64, tgt: u64, fstype: u64, flags: u64, _data: u64) -> i64 {
+    const MS_RDONLY: u64 = 1;
+    let (src, tgt, fst) = match (
+        guest_path(m, src),
+        guest_path(m, tgt),
+        guest_path(m, fstype),
+    ) {
+        (Ok(a), Ok(b), Ok(c)) => (a, b, c),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return e,
+    };
+    if fst != "hostfs" && fst != "bind" && fst != "none" {
+        return -ENODEV;
+    }
+    let source = match m.os.vfs.host_path_confined(&src) {
+        Ok(p) => p,
+        Err(e) => return e.errno(),
+    };
+    if !source.is_dir() {
+        return -ENOTDIR;
+    }
+    // 挂载点必须已存在（Linux 如此）。
+    let tgt_host = match m.os.vfs.host_path_confined(&tgt) {
+        Ok(p) => p,
+        Err(e) => return e.errno(),
+    };
+    if !tgt_host.is_dir() {
+        return -ENOTDIR;
+    }
+    let target = m.os.vfs.guest_segments(&tgt);
+    if target.is_empty() {
+        return -EINVAL; // 不允许挂到 guest 根上：那会把 rootfs 整个换掉
+    }
+    m.os.vfs.mounts.push(fs::Mount {
+        target,
+        source,
+        readonly: flags & MS_RDONLY != 0,
+    });
+    0
+}
+
+/// 路径落在只读挂载下就报 `EROFS`，否则成功。
+fn sys_readonly_guard(m: &mut Machine, path_ptr: u64) -> i64 {
+    match guest_path(m, path_ptr) {
+        Ok(p) if m.os.vfs.is_readonly(&p) => -EROFS,
+        Ok(_) => 0,
+        Err(e) => e,
+    }
+}
+
+fn sys_readonly_guard_at(m: &mut Machine, _dirfd: i32, path_ptr: u64) -> i64 {
+    sys_readonly_guard(m, path_ptr)
+}
+
 fn sys_truncate(m: &mut Machine, path_ptr: u64, len: i64) -> i64 {
     let path = match guest_path(m, path_ptr) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if m.os.vfs.is_readonly(&path) {
+        return -EROFS;
+    }
     if len < 0 {
         return -EINVAL;
     }

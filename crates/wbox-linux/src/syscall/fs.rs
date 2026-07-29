@@ -564,6 +564,25 @@ impl FdTable {
     }
 }
 
+/// 一条 `mount(2)` 记录。
+///
+/// # 为什么是"路径改写"而不是真挂载
+///
+/// 引擎跑在用户态，没有挂载命名空间可用（Windows 宿主上更没有）。所以
+/// `mount` 落成一条**路径改写规则**：guest 访问挂载点之下的路径时，前缀被
+/// 换成源目录。这对 guest 是不可分辨的——它只能通过路径看到结果。
+///
+/// 换来的好处是 `MS_RDONLY` 可以真的生效：只读标记跟着这条规则走，写类
+/// 系统调用查一次就知道该不该报 `EROFS`。
+#[derive(Clone)]
+pub struct Mount {
+    /// guest 侧挂载点，已拆成规范化的段。
+    pub target: Vec<std::ffi::OsString>,
+    /// 宿主侧的源目录。
+    pub source: PathBuf,
+    pub readonly: bool,
+}
+
 /// VFS：guest 路径 <-> 宿主路径。
 #[derive(Clone)]
 pub struct Vfs {
@@ -571,6 +590,8 @@ pub struct Vfs {
     pub prefix: Option<PathBuf>,
     /// guest 的当前工作目录（**guest 视角**的绝对路径）。
     pub cwd: PathBuf,
+    /// 已建立的挂载，后加的优先（最长前缀匹配）。
+    pub mounts: Vec<Mount>,
 }
 
 /// 受限路径解析的失败原因。
@@ -649,7 +670,11 @@ impl Vfs {
             Some(_) => PathBuf::from("/"),
             None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
         };
-        Vfs { prefix, cwd }
+        Vfs {
+            prefix,
+            cwd,
+            mounts: Vec::new(),
+        }
     }
 
     /// 把 guest 路径规范化成 **guest 视角**的绝对路径。
@@ -738,6 +763,50 @@ impl Vfs {
         self.translate(guest, true).0
     }
 
+    /// 该 guest 路径是否落在**只读挂载**之下（写类系统调用据此报 `EROFS`）。
+    pub fn is_readonly(&self, guest: &str) -> bool {
+        self.translate(guest, true).2
+    }
+
+    /// 把已解析的 guest 段栈映射到宿主路径，按**最长前缀**匹配挂载表。
+    ///
+    /// 后加的挂载覆盖先加的同前缀者（Linux 的挂载栈语义），所以相同长度时
+    /// 取靠后的那条。
+    fn map_mount(&self, pre: &Path, stack: &[std::ffi::OsString]) -> (PathBuf, bool) {
+        let mut best: Option<&Mount> = None;
+        for mnt in &self.mounts {
+            if stack.len() < mnt.target.len() || stack[..mnt.target.len()] != mnt.target[..] {
+                continue;
+            }
+            if best.is_none_or(|b| mnt.target.len() >= b.target.len()) {
+                best = Some(mnt);
+            }
+        }
+        match best {
+            Some(mn) => (
+                join_under(&mn.source, &stack[mn.target.len()..]),
+                mn.readonly,
+            ),
+            None => (join_under(pre, stack), false),
+        }
+    }
+
+    /// 把 guest 绝对路径拆成规范化的段（`mount` 记挂载点时用）。
+    pub fn guest_segments(&self, guest: &str) -> Vec<std::ffi::OsString> {
+        let abs = self.normalize(guest);
+        let mut q = std::collections::VecDeque::new();
+        push_segments(&abs, &mut q);
+        let mut stack: Vec<std::ffi::OsString> = Vec::new();
+        for seg in q {
+            if seg == ".." {
+                stack.pop();
+            } else {
+                stack.push(seg);
+            }
+        }
+        stack
+    }
+
     /// 同 [`Vfs::host_path`]，但**不跟随末段**符号链接。
     ///
     /// 中间各段照样受限解析——`/link/to/outside/x` 里的 `link` 仍会被夹在
@@ -773,7 +842,7 @@ impl Vfs {
     /// 运算慢；以及 check-then-use 的 TOCTOU 窗口——`openat2` 是原子的，
     /// 这里不是。当前进程模型下窗口很小（快照式 fork，父子不并发跑），
     /// 但它确实存在，见 crate 文档。
-    fn translate(&self, guest: &str, follow_final: bool) -> (PathBuf, Option<ResolveErr>) {
+    fn translate(&self, guest: &str, follow_final: bool) -> (PathBuf, Option<ResolveErr>, bool) {
         let Some(pre) = self.prefix.as_ref() else {
             // 直通模式：guest / 就是宿主 /，没有"根"可越，路径原样交给宿主
             // 解析。这里绝不能走组件分解——Windows 上盘符会被丢掉。
@@ -783,7 +852,7 @@ impl Vfs {
             } else {
                 self.cwd.join(p)
             };
-            return (host, None);
+            return (host, None, false);
         };
 
         let mut escaped = None;
@@ -831,7 +900,8 @@ impl Vfs {
                 // 程序按 POSIX 语义分辨这两者，`t_path` 的 symlink/loop-ELOOP
                 // 就直接断言了这一点。早先图省事把它并进"越根"一档，
                 // 表现是 `open` 返回 13 而不是 40，测试当场抓到。
-                return (join_under(pre, &stack), Some(ResolveErr::Loop));
+                let (p, ro) = self.map_mount(pre, &stack);
+                return (p, Some(ResolveErr::Loop), ro);
             }
             let Ok(target) = std::fs::read_link(&here) else {
                 continue;
@@ -849,7 +919,8 @@ impl Vfs {
             }
         }
 
-        (join_under(pre, &stack), escaped)
+        let (p, ro) = self.map_mount(pre, &stack);
+        (p, escaped, ro)
     }
 
     /// 带越根检查的 guest -> 宿主翻译。
@@ -858,16 +929,16 @@ impl Vfs {
     /// 直通模式没有"根"可越，一律放行。
     pub fn host_path_confined(&self, guest: &str) -> Result<PathBuf, ResolveErr> {
         match self.translate(guest, true) {
-            (host, None) => Ok(host),
-            (_, Some(e)) => Err(e),
+            (host, None, _) => Ok(host),
+            (_, Some(e), _) => Err(e),
         }
     }
 
     /// 同 [`Vfs::host_path_confined`]，但不跟随末段符号链接。
     pub fn host_path_confined_nofollow(&self, guest: &str) -> Result<PathBuf, ResolveErr> {
         match self.translate(guest, false) {
-            (host, None) => Ok(host),
-            (_, Some(e)) => Err(e),
+            (host, None, _) => Ok(host),
+            (_, Some(e), _) => Err(e),
         }
     }
 
@@ -889,6 +960,7 @@ mod tests {
         Vfs {
             prefix: prefix.map(PathBuf::from),
             cwd: PathBuf::from("/"),
+            mounts: Vec::new(),
         }
     }
 

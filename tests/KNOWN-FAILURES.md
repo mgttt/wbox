@@ -31,7 +31,7 @@
 | B | socket 族与 epoll —— AF_UNIX/AF_INET/epoll 与 rlimit 校验均已实现；`t_negative` 已移出基线，另两条各只剩 1 条快照 fork 语义差异（D 组同因） | `t_net_epoll` `t_net_sockopt` |
 | C | signalfd 未实现；信号不投递（**eventfd 80/0、timerfd 67/0 已实现并移出基线**） | `t_signalfd` `t_signal_timer` |
 | D | 快照式 fork 的并发语义差异 | `t_proc` |
-| E | `mount(2)` 未实现 | `t_mount_ro` |
+| ~~E~~ | ~~`mount(2)` 未实现~~ —— **已实现，整组清空**（路径改写式挂载 + 真的生效的 `MS_RDONLY`） | — |
 | ~~F~~ | ~~file description 级共享状态未建模~~ —— **已修，整组清空**（状态标志改为按「打开文件描述」共享） | — |
 | G | mmap 精度（私有文件映射的 mremap 增长回读） | `t_mmap` |
 | ~~H~~ | ~~宿主 symlink 不防护~~ —— **已修并移出基线**（VFS 受限解析）| — |

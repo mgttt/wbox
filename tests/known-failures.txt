@@ -57,8 +57,12 @@
 #      t_proc —— 子进程在 fork 返回前就跑完了，所以 waitpid(WNOHANG) 不可能
 #      看到"还在运行"，父子也无法互相发信号。这是取舍而不是 bug，见
 #      syscall/process.rs 顶部的说明。
-#   E. mount(2) 未实现（hostfs / MS_RDONLY 挂载）
-#      t_mount_ro
+#   E. mount(2) —— **已实现并整组清空**（t_mount_ro 13/0）。
+#      引擎跑在用户态、没有挂载命名空间可用（Windows 宿主上更没有），所以
+#      `mount` 落成一条**路径改写规则**：挂载点之下的路径前缀换成源目录。
+#      对 guest 不可分辨（它只能通过路径看到结果），而换来的好处是
+#      `MS_RDONLY` 能真的生效——只读标记跟着规则走，写类系统调用查一次就
+#      知道该不该报 EROFS。
 #   F. 文件描述（file description）级共享状态未建模 —— **已修，整组清空**
 #      状态标志从"每个 Fd 各存一份 i32"改成一份共享的
 #      `Rc<Cell<i32>>`（dup/dup2/F_DUPFD/fork 共享同一个"打开文件描述"），
@@ -91,8 +95,6 @@ t_signal_timer
 # D. 快照式 fork 的并发语义差异
 t_proc
 
-# E. mount(2)
-t_mount_ro
 
 # G. mmap 精度
 t_mmap
