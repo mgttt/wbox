@@ -201,7 +201,7 @@ fn getrlimit_stack_matches_the_stack_we_actually_build() {
     let at = scratch(&mut m);
     // getrlimit(RLIMIT_STACK=3, out)
     let a = [3u64, at, 0, 0, 0, 0];
-    assert_eq!(sys_getrlimit(&mut m, 97, &a), 0);
+    assert_eq!(sys_rlimit(&mut m, 97, &a), 0);
     // 报的值必须和 stack::setup 真实建的栈一致，否则 guest 会算错栈边界
     assert_eq!(m.mem.read_u64(at).unwrap(), crate::stack::STACK_SIZE);
 }
@@ -390,7 +390,7 @@ fn dev_nodes_stat_as_character_devices() {
     const S_IFCHR: u32 = 0o020000;
     assert_eq!(mode & S_IFMT, S_IFCHR, "test -c /dev/null 靠这一位");
     // access 也必须说"存在"
-    assert_eq!(sys_access(&mut m, at, 0), 0);
+    assert_eq!(sys_faccessat(&mut m, AT_FDCWD, at, 0), 0);
 }
 
 #[test]

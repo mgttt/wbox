@@ -359,6 +359,9 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         439 => sys_faccessat(m, a[0] as i32, a[1], a[2] as i32),
         292 => sys_dup3(m, a[0] as i32, a[1] as i32, a[2] as i32),
         // ---- socket 族（AF_UNIX 走引擎内实现，见 syscall::net）----
+        // eventfd(init) / eventfd2(init, flags)
+        284 => sys_eventfd(m, a[0], 0),
+        290 => sys_eventfd(m, a[0], a[1] as i32),
         41 => sys_socket(m, a[0] as i32, a[1] as i32, a[2] as i32),
         42 => sys_connect(m, a[0] as i32, a[1], a[2] as u32),
         43 => sys_accept4(m, a[0] as i32, a[1], a[2], 0),
@@ -497,6 +500,17 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
         },
         Some(FdKind::PipeWrite(_)) => return -EBADF, // 写端不可读
         Some(FdKind::Epoll(_)) => return -EINVAL,
+        // eventfd：一次必须正好 8 字节，见 `EventFd` 的说明。
+        Some(FdKind::Event(e)) => {
+            if n < 8 {
+                return -EINVAL;
+            }
+            let Some(v) = e.take() else {
+                return -EAGAIN;
+            };
+            tmp[..8].copy_from_slice(&v.to_le_bytes());
+            Ok(8)
+        }
         Some(FdKind::Socket(_)) => {
             // 借用冲突：`fds.get_mut` 的可变借用还在，先把 Rc 取出来。
             let s = match sock_of(m, fd) {
@@ -551,6 +565,11 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
 }
 
 fn sys_pread(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
+    // eventfd 是**可寻址**的（Linux 上 lseek 返回 0、pread/pwrite 照常工作），
+    // 只是偏移被忽略。所以不能和管道一起归到 ESPIPE 那一档。
+    if matches!(m.os.fds.get(fd).map(|f| &f.kind), Some(FdKind::Event(_))) {
+        return sys_read(m, fd, buf, count);
+    }
     let n = count.min(1 << 20) as usize;
     let mut tmp = vec![0u8; n];
     let got = match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
@@ -644,6 +663,21 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
         Some(FdKind::Epoll(_)) => return -EINVAL,
+        Some(FdKind::Event(e)) => {
+            if data.len() < 8 {
+                return -EINVAL;
+            }
+            let v = u64::from_le_bytes(data[..8].try_into().unwrap());
+            // 0xffff_ffff_ffff_ffff 是保留值，Linux 报 EINVAL 而不是溢出。
+            if v == u64::MAX {
+                return -EINVAL;
+            }
+            if e.add(v) {
+                Ok(8)
+            } else {
+                return -EAGAIN;
+            }
+        }
         Some(FdKind::Socket(_)) => {
             let s = match sock_of(m, fd) {
                 Ok(s) => s,
@@ -708,6 +742,34 @@ fn read_iovec(m: &Machine, ptr: u64, cnt: u64) -> Result<Vec<(u64, u64)>, i64> {
     Ok(v)
 }
 
+/// eventfd 的 `readv`：按总长度读一次再散布。非 eventfd 返回 `None`。
+fn eventfd_scatter_read(m: &mut Machine, fd: i32, iov: &[(u64, u64)]) -> Option<i64> {
+    let e = match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::Event(e)) => Rc::clone(e),
+        _ => return None,
+    };
+    let total: u64 = iov.iter().map(|(_, l)| *l).sum();
+    if total < 8 {
+        return Some(-EINVAL);
+    }
+    let Some(v) = e.take() else {
+        return Some(-EAGAIN);
+    };
+    let bytes = v.to_le_bytes();
+    let mut off = 0usize;
+    for (base, len) in iov {
+        if off >= 8 {
+            break;
+        }
+        let k = (*len as usize).min(8 - off);
+        if m.mem.write(*base, &bytes[off..off + k]).is_err() {
+            return Some(-EFAULT);
+        }
+        off += k;
+    }
+    Some(8)
+}
+
 fn sys_writev(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
     if !m.os.fds.contains(fd) {
         return -EBADF;
@@ -739,6 +801,12 @@ fn sys_readv(m: &mut Machine, fd: i32, ptr: u64, cnt: u64) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
+    // eventfd 没有缓冲区，一次操作就是**整整 8 字节**——逐个 iovec 调用会
+    // 让 4+4 这种拆法每段都短于 8 而报 EINVAL。所以先按总长度读一次，
+    // 再散布到各段。writev 同理。
+    if let Some(r) = eventfd_scatter_read(m, fd, &iov) {
+        return r;
+    }
     let mut total = 0i64;
     for (base, len) in iov {
         if len == 0 {
@@ -841,6 +909,8 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
         },
         // 字符设备可以 seek，但位置恒为 0（Linux 对 /dev/null 就是这样）。
         Some(FdKind::Dev(_)) => 0,
+        // eventfd 可以 seek，但位置恒为 0（与 /dev/null 同理）。
+        Some(FdKind::Event(_)) => 0,
         // socket 与管道同档：不可 seek，报 ESPIPE 而不是 EBADF——
         // 后者会让 guest 以为 fd 本身有问题，与真实原因差得很远。
         Some(FdKind::Socket(_)) => -ESPIPE,
@@ -897,6 +967,7 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         Some(FdKind::PipeRead(r)) => FdKind::PipeRead(r.clone()),
         Some(FdKind::PipeWrite(w)) => FdKind::PipeWrite(w.clone()),
         Some(FdKind::Socket(s)) => FdKind::Socket(Rc::clone(s)),
+        Some(FdKind::Event(e)) => FdKind::Event(Rc::clone(e)),
         Some(FdKind::Epoll(e)) => FdKind::Epoll(Rc::clone(e)),
         _ => return -EBADF,
     };
@@ -2224,6 +2295,9 @@ fn sys_fchdir(m: &mut Machine, fd: i32) -> i64 {
 }
 
 fn sys_pwrite(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
+    if matches!(m.os.fds.get(fd).map(|f| &f.kind), Some(FdKind::Event(_))) {
+        return sys_write(m, fd, buf, count);
+    }
     let n = count.min(1 << 20) as usize;
     let mut tmp = vec![0u8; n];
     if m.mem.read(buf, &mut tmp).is_err() {
@@ -2538,6 +2612,25 @@ fn split_sock_flags(sotype: i32) -> (i32, bool, bool) {
 fn alloc_socket(m: &mut Machine, s: Rc<net::Socket>, nonblock: bool, cloexec: bool) -> i64 {
     let flags = if nonblock { O_NONBLOCK } else { 0 };
     match m.os.fds.alloc(Fd::new(FdKind::Socket(s), cloexec, flags)) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
+}
+
+/// `eventfd` / `eventfd2`。
+fn sys_eventfd(m: &mut Machine, init: u64, flags: i32) -> i64 {
+    const EFD_SEMAPHORE: i32 = 1;
+    // 未知标志位必须 EINVAL。放行的话 guest 会以为自己要的语义拿到了
+    // （例如 EFD_SEMAPHORE 的变体），而实际行为完全不同。
+    if flags & !(EFD_SEMAPHORE | O_CLOEXEC | O_NONBLOCK) != 0 {
+        return -EINVAL;
+    }
+    let e = fs::EventFd::new(init, flags & EFD_SEMAPHORE != 0);
+    match m.os.fds.alloc(Fd::new(
+        FdKind::Event(e),
+        flags & O_CLOEXEC != 0,
+        flags & O_NONBLOCK,
+    )) {
         Some(n) => n as i64,
         None => -EMFILE,
     }
@@ -3070,6 +3163,7 @@ fn epoll_target(m: &Machine, fd: i32) -> Option<net::Target> {
         FdKind::Socket(s) => net::Target::Socket(Rc::downgrade(s)),
         FdKind::PipeRead(r) => net::Target::PipeRead(Rc::downgrade(&r.share())),
         FdKind::PipeWrite(w) => net::Target::PipeWrite(Rc::downgrade(&w.share())),
+        FdKind::Event(e) => net::Target::Event(Rc::downgrade(e)),
         _ => net::Target::AlwaysReady,
     })
 }

@@ -45,6 +45,8 @@ pub enum FdKind {
     Dev(DevKind),
     /// 套接字。见 `syscall::net`。
     Socket(Rc<crate::syscall::net::Socket>),
+    /// `eventfd`：一个 64 位计数器。见 [`EventFd`]。
+    Event(Rc<EventFd>),
     /// epoll 实例。
     Epoll(Rc<crate::syscall::net::Epoll>),
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
@@ -206,6 +208,62 @@ impl Clone for PipeWriter {
 impl Drop for PipeWriter {
     fn drop(&mut self) {
         self.0.writers.set(self.0.writers.get().saturating_sub(1));
+    }
+}
+
+/// `eventfd(2)`：一个 64 位计数器，读取即清零（或信号量模式下减一）。
+///
+/// 与管道不同，它**没有缓冲区**——所以 `read`/`write` 一次必须正好 8 字节，
+/// 少一个字节都是 `EINVAL`。这条看着琐碎，却是 guest 侧库判断"这是不是真的
+/// eventfd"的常用手段。
+pub struct EventFd {
+    pub counter: Cell<u64>,
+    /// `EFD_SEMAPHORE`：每次读只取走 1，而不是取走全部。
+    pub semaphore: bool,
+    /// 写入代次，供 epoll 的边沿触发判断（语义同 `PipeInner::epoch`）。
+    pub epoch: Cell<u64>,
+}
+
+/// 计数器上界：`write` 使计数达到它就是溢出（Linux 用 `0xffff_ffff_ffff_ffff`
+/// 作为非法写入值，计数最大值是它减一）。
+pub const EVENTFD_MAX: u64 = u64::MAX - 1;
+
+impl EventFd {
+    pub fn new(init: u64, semaphore: bool) -> Rc<EventFd> {
+        Rc::new(EventFd {
+            counter: Cell::new(init),
+            semaphore,
+            epoch: Cell::new(0),
+        })
+    }
+
+    /// 读一次。`None` 表示计数为 0（调用方按阻塞与否报 `EAGAIN`）。
+    pub fn take(&self) -> Option<u64> {
+        let c = self.counter.get();
+        if c == 0 {
+            return None;
+        }
+        if self.semaphore {
+            self.counter.set(c - 1);
+            Some(1)
+        } else {
+            self.counter.set(0);
+            Some(c)
+        }
+    }
+
+    /// 写一次。返回 `false` = 会溢出（调用方报 `EAGAIN`）。
+    pub fn add(&self, v: u64) -> bool {
+        let c = self.counter.get();
+        let Some(n) = c.checked_add(v) else {
+            return false;
+        };
+        if n > EVENTFD_MAX {
+            return false;
+        }
+        self.counter.set(n);
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        true
     }
 }
 
@@ -413,6 +471,7 @@ impl FdTable {
                 // 套接字与 epoll 实例按引用复制：fork 出来的子进程与父进程
                 // 共享同一个对象，这正是 Linux 的语义（描述被继承而不是复制）。
                 FdKind::Socket(s) => FdKind::Socket(Rc::clone(s)),
+                FdKind::Event(e) => FdKind::Event(Rc::clone(e)),
                 FdKind::Epoll(e) => FdKind::Epoll(Rc::clone(e)),
                 FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
                 FdKind::Closed => FdKind::Closed,
@@ -1064,18 +1123,18 @@ mod tests {
         let mut t = FdTable::new();
         let a = t.alloc(Fd::new(FdKind::Closed, false, 0));
         let b = t.alloc(Fd::new(FdKind::Closed, false, 0));
-        assert_eq!((a, b), (3, 4));
+        assert_eq!((a, b), (Some(3), Some(4)));
         t.remove(3);
         // Linux 保证下一个 open 拿到最小空号
         let c = t.alloc(Fd::new(FdKind::Closed, false, 0));
-        assert_eq!(c, 3);
+        assert_eq!(c, Some(3));
     }
 
     #[test]
     fn close_on_exec_drops_only_cloexec_fds() {
         let mut t = FdTable::new();
-        let keep = t.alloc(Fd::new(FdKind::Closed, false, 0));
-        let drop = t.alloc(Fd::new(FdKind::Closed, true, 0));
+        let keep = t.alloc(Fd::new(FdKind::Closed, false, 0)).unwrap();
+        let drop = t.alloc(Fd::new(FdKind::Closed, true, 0)).unwrap();
         t.close_on_exec();
         assert!(t.contains(keep));
         assert!(!t.contains(drop));

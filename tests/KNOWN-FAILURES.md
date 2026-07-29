@@ -29,7 +29,7 @@
 |---|---|---|
 | A | `MAP_SHARED` 不跨进程共享、文件映射不写回 | `t_exec` `t_fork_mem` |
 | B | socket 族与 epoll —— AF_UNIX/AF_INET/epoll 与 rlimit 校验均已实现；`t_negative` 已移出基线，另两条各只剩 1 条快照 fork 语义差异（D 组同因） | `t_net_epoll` `t_net_sockopt` |
-| C | eventfd/timerfd/signalfd 未实现；信号不投递 | `t_eventfd` `t_timerfd` `t_signalfd` `t_signal_timer` |
+| C | timerfd/signalfd 未实现；信号不投递（**eventfd 已实现并移出基线**，80/0） | `t_timerfd` `t_signalfd` `t_signal_timer` |
 | D | 快照式 fork 的并发语义差异 | `t_proc` |
 | E | `mount(2)` 未实现 | `t_mount_ro` |
 | ~~F~~ | ~~file description 级共享状态未建模~~ —— **已修，整组清空**（状态标志改为按「打开文件描述」共享） | — |

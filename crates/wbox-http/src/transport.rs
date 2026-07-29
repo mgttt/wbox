@@ -39,11 +39,29 @@ impl DeadlineStream {
     }
 }
 
+impl DeadlineStream {
+    /// 把"因为预算见底而超时"归一成整体超时错误。
+    ///
+    /// socket 超时在 Unix 上是 `WouldBlock`、Windows 上是 `TimedOut`，而剩余
+    /// 预算被压到几毫秒时，触发的正是它——调用方看到的却是"对端暂时没数据"，
+    /// 与真实原因（这次请求的总预算用完了）对不上。
+    fn map_timeout(&self, e: io::Error) -> io::Error {
+        let timeoutish = matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        );
+        if timeoutish && Instant::now() >= self.deadline {
+            return io::Error::new(io::ErrorKind::TimedOut, "整体超时：连接在预算内没有完成");
+        }
+        e
+    }
+}
+
 impl Read for DeadlineStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let d = self.budget()?;
         self.inner.set_read_timeout(Some(d))?;
-        self.inner.read(buf)
+        self.inner.read(buf).map_err(|e| self.map_timeout(e))
     }
 }
 
@@ -51,7 +69,7 @@ impl Write for DeadlineStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let d = self.budget()?;
         self.inner.set_write_timeout(Some(d))?;
-        self.inner.write(buf)
+        self.inner.write(buf).map_err(|e| self.map_timeout(e))
     }
 
     fn flush(&mut self) -> io::Result<()> {

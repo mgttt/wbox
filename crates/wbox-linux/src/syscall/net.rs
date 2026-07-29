@@ -594,6 +594,7 @@ pub enum Target {
     Socket(std::rc::Weak<Socket>),
     PipeRead(std::rc::Weak<crate::syscall::fs::PipeInner>),
     PipeWrite(std::rc::Weak<crate::syscall::fs::PipeInner>),
+    Event(std::rc::Weak<crate::syscall::fs::EventFd>),
     /// 普通文件、目录、标准流、合成设备：Linux 上恒可读可写。
     AlwaysReady,
 }
@@ -605,6 +606,7 @@ impl Target {
             Target::Socket(w) => w.strong_count() > 0,
             Target::PipeRead(w) => w.upgrade().is_some_and(|i| !i.readers_closed()),
             Target::PipeWrite(w) => w.upgrade().is_some_and(|i| !i.writers_closed()),
+            Target::Event(w) => w.strong_count() > 0,
             Target::AlwaysReady => true,
         }
     }
@@ -617,6 +619,7 @@ impl Target {
             Target::PipeRead(w) | Target::PipeWrite(w) => {
                 w.upgrade().map(|i| i.epoch()).unwrap_or(0)
             }
+            Target::Event(w) => w.upgrade().map(|e| e.epoch.get()).unwrap_or(0),
             Target::AlwaysReady => 0,
         }
     }
@@ -630,6 +633,7 @@ impl Target {
             (Target::Socket(a), Target::Socket(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::PipeRead(a), Target::PipeRead(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::PipeWrite(a), Target::PipeWrite(b)) => std::rc::Weak::ptr_eq(a, b),
+            (Target::Event(a), Target::Event(b)) => std::rc::Weak::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -658,6 +662,17 @@ impl Target {
                 } else {
                     0
                 }
+            }
+            Target::Event(w) => {
+                let Some(e) = w.upgrade() else { return 0 };
+                let mut v = 0;
+                if e.counter.get() > 0 {
+                    v |= EPOLLIN;
+                }
+                if e.counter.get() < crate::syscall::fs::EVENTFD_MAX {
+                    v |= EPOLLOUT;
+                }
+                v
             }
             Target::AlwaysReady => EPOLLIN | EPOLLOUT,
         }

@@ -43,8 +43,11 @@
 #      再校验 res，`old` 指针坏掉时新限额**仍然生效**）、以及 RLIMIT_NOFILE
 #      软上限真的卡住 fd 分配，且 `pipe`/`socketpair` 失败时要么两个都拿到、
 #      要么一个都不留。
-#   C. eventfd / timerfd / signalfd 未实现；信号不投递
-#      t_eventfd t_timerfd t_signalfd t_signal_timer
+#   C. timerfd / signalfd 未实现；信号不投递
+#      t_timerfd t_signalfd t_signal_timer
+#      **eventfd 已实现并移出基线**（80/0）：64 位计数器、EFD_SEMAPHORE、
+#      一次必须整 8 字节、readv 按总长度散布、pread/pwrite 忽略偏移，
+#      以及 poll/epoll（含 EPOLLET 重新武装）与 dup/fork 的计数器共享。
 #   D. 快照式 fork 的并发语义差异
 #      t_proc —— 子进程在 fork 返回前就跑完了，所以 waitpid(WNOHANG) 不可能
 #      看到"还在运行"，父子也无法互相发信号。这是取舍而不是 bug，见
@@ -76,8 +79,7 @@ t_fork_mem
 t_net_epoll
 t_net_sockopt
 
-# C. eventfd / timerfd / signalfd / 信号投递
-t_eventfd
+# C. timerfd / signalfd / 信号投递
 t_timerfd
 t_signalfd
 t_signal_timer

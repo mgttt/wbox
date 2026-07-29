@@ -157,7 +157,7 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 `tests/run-guest-tests.sh` 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）
 ——这套用例本就是这么设计的，见 `tests/KNOWN-FAILURES.md` 的说明。
 
-21 个用例，当前在 Linux 宿主上 **10 通过 / 11 失败**（旧引擎除
+21 个用例，当前在 Linux 宿主上 **11 通过 / 10 失败**（旧引擎除
 `t_net_sockopt@wine` 外全通）。此前是 5 通过 / 16 失败，收紧来自宿主 symlink
 防护落地：`t_sec_path` 与 `t_sec_linkabs` 转绿并移出基线（H 组整组清空）。
 更早：`t_stress` 已随 `O_TMPFILE` 的实现转绿并从基线移出；`t_exec` 从 7 个失败
