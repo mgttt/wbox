@@ -47,6 +47,8 @@ copy_path /etc/ld.so.cache
 mkdir -p "$DEST/rootfs/etc/apt/apt.conf.d" "$DEST/rootfs/etc/dpkg/dpkg.cfg.d"
 touch "$DEST/rootfs/etc/apt/apt.conf.d/00wbox-fixture"
 touch "$DEST/rootfs/etc/dpkg/dpkg.cfg.d/wbox-fixture"
+mkdir -p "$DEST/rootfs/usr/share"
+cp -aL "$SOURCE/usr/share/dpkg" "$DEST/rootfs/usr/share/dpkg"
 
 while IFS= read -r library; do
     [[ -n "$library" ]] && copy_path "$library"
