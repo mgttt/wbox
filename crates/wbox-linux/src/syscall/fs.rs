@@ -16,6 +16,11 @@ use std::rc::Rc;
 pub const PREFIX_ENV: &str = "WBOX_PREFIX";
 pub const PREFIX_ENV_COMPAT: &str = "BLINK_PREFIX";
 
+/// `RLIMIT_NOFILE` 的默认软上限（与 `getrlimit` 报的一致）。
+pub const DEFAULT_NOFILE: u64 = 1024;
+/// 硬上限。
+pub const MAX_NOFILE: u64 = 4096;
+
 /// 一个打开的 guest 文件描述符背后的东西。
 pub enum FdKind {
     /// 继承自宿主的标准流。
@@ -296,6 +301,12 @@ impl Fd {
 pub struct FdTable {
     map: HashMap<i32, Fd>,
     next: i32,
+    /// `RLIMIT_NOFILE` 的**软**上限：可分配的 fd 号必须严格小于它。
+    ///
+    /// 放在 fd 表里而不是别处，是因为"分配 fd"这件事只有这里做得到原子拒绝。
+    /// 分配点散着好几处，若让每个调用方自己先查一遍上限，漏掉的那处就是
+    /// "限额说了不算"——`t_negative` 的 rlimit-nofile-* 专盯这个。
+    nofile: u64,
 }
 
 impl Default for FdTable {
@@ -310,7 +321,11 @@ impl FdTable {
         for (n, k) in [(0, FdKind::Stdin), (1, FdKind::Stdout), (2, FdKind::Stderr)] {
             map.insert(n, Fd::new(k, false, 0));
         }
-        FdTable { map, next: 3 }
+        FdTable {
+            map,
+            next: 3,
+            nofile: DEFAULT_NOFILE,
+        }
     }
 
     /// 分配最小可用 fd（Linux 保证的语义：总是最小的空号）。
@@ -319,19 +334,32 @@ impl FdTable {
     /// 主动 `close(0)` 之后，下一个 `open`/`pipe` 就该拿到 0——把 stdin
     /// 重定向成管道读端正是这么写的（`close(0); pipe(p);`）。早先写死 3，
     /// 那个惯用法就静默失效（`t_fd_open` 的 pipe/fork-child-lowest-fds）。
-    pub fn alloc(&mut self, fd: Fd) -> i32 {
+    pub fn alloc(&mut self, fd: Fd) -> Option<i32> {
         self.alloc_min(fd, 0)
     }
 
     /// 分配**不小于 `min`** 的最小可用 fd。`F_DUPFD` 要的正是这个语义。
-    pub fn alloc_min(&mut self, fd: Fd, min: i32) -> i32 {
+    ///
+    /// 超过 `RLIMIT_NOFILE` 软上限时返回 `None`（调用方报 `EMFILE`）。
+    pub fn alloc_min(&mut self, fd: Fd, min: i32) -> Option<i32> {
         let mut n = min.max(0);
         while self.map.contains_key(&n) {
             n += 1;
         }
+        if (n as u64) >= self.nofile {
+            return None;
+        }
         self.map.insert(n, fd);
         self.next = n + 1;
-        n
+        Some(n)
+    }
+
+    pub fn nofile(&self) -> u64 {
+        self.nofile
+    }
+
+    pub fn set_nofile(&mut self, v: u64) {
+        self.nofile = v;
     }
 
     /// 指定号插入（`dup2`）。
@@ -396,6 +424,7 @@ impl FdTable {
         }
         Ok(FdTable {
             map,
+            nofile: self.nofile,
             next: self.next,
         })
     }

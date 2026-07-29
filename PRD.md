@@ -264,7 +264,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 9 通过 / 12 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
+| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 10 通过 / 11 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
 | 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 运行前把只读镜像缓存复制成容器私有 rootfs，只向该 profile 的确定性 AppContainer SID 授修改权（F4.8 / `acl.rs`）；与 Q3 的 overlay upper 不是同一机制 |
@@ -2709,7 +2709,7 @@ TODO-LINUX
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
 ├── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
-└── L15 socket 族与 epoll                                 [partial] AF_UNIX+epoll 已做，AF_INET 待接；见下方 L15
+└── L15 socket 族与 epoll                                 [done] t_negative 已移出基线；见下方 L15
 ```
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
@@ -2778,11 +2778,13 @@ description），只有 `FD_CLOEXEC` 属于描述符本身。原实现给每个 
 - 最小可用 fd 的下界写死成 3。Linux 给的是**最小空号**：`close(0); pipe(p);`
   之后 `p[0]` 必须是 0——那正是把 stdin 重定向成管道读端的惯用法。
 
-##### L15 socket 族与 epoll `[Linux agent]` `[partial]`
+##### L15 socket 族与 epoll `[Linux agent]` `[done]`
 
-**第一阶段完成**：AF_UNIX 与 epoll。`t_net_epoll` 从整份失败变成
-**111 通过 / 1 失败**，`t_net_sockopt` **126 通过 / 19 失败**。两条仍在基线内，
-但缺口从"整族 `ENOSYS`"收敛成两件很具体的事，见下。
+socket 族从**整族 `ENOSYS`** 做到：`t_negative` **40/0 已移出基线**，
+`t_net_epoll` **111 通过 / 1 失败**，`t_net_sockopt` **145 通过 / 1 失败**。
+后两条各自剩下的**唯一**失败都是 D 组那条快照 fork 语义差异（子进程在 fork
+返回前就跑完，父进程之后写的数据它看不到），不是 socket/epoll 的缺口——
+真要修得先有并发式 fork（L17）。guest 套件 9 通过 → **10 通过 / 11 失败**。
 
 **AF_UNIX 由引擎自己实现，不转给宿主。** 两条理由，第二条更根本：
 
@@ -2818,14 +2820,36 @@ epoll：`epoll_create1`/`epoll_ctl`/`epoll_wait`，LT／ET／ONESHOT／MOD／DEL
   超时也真的睡满：单线程下没人能在这期间改变状态，但 guest 会拿
   `poll(NULL, 0, ms)` 当精确睡眠，立刻返回 0 是在撒谎。
 
-**剩下的两件事**（下一阶段）：
+**AF_INET/AF_INET6 走宿主套接字**（`std::net`），与 AF_UNIX 的取舍正好相反：
+那边要的是"两个宿主行为一致"，这边要的是"真能连上外面"，而后者宿主已经给了
+跨平台实现，自己再实现一遍 TCP 既不可能也没意义。三处值得记：
 
-1. **AF_INET/AF_INET6 要真通网**，得接宿主套接字。目前 `socket()` 成功、
-   `bind`/`connect` 如实报 `EOPNOTSUPP`／`ECONNREFUSED`——**不假装能通**。
-   `t_net_sockopt` 剩下的 19 条全在这里。
-2. `epoll/fork-inherits-instance` 与 `socket/fork-inherits-alias` 失败的是
-   **D 组那条快照 fork 语义差异**（子进程在 fork 返回前就跑完，父进程之后写的
-   数据它看不到），不是 socket/epoll 的缺口。真要修得先有并发式 fork。
+- **`bind` 时就建 `TcpListener`**（它同时完成 bind+listen）。因为 `getsockname`
+  必须在 `bind` 之后立刻能回真实端口——绑 0 号端口让内核选一个再问回来，是
+  "起一个临时监听者"最标准的写法。代价：给**客户端** socket 绑本地地址
+  （少见用法）会被当成监听者。
+- **非阻塞 `connect` 用后台线程**。`std` 没有非阻塞 connect，而 `EINPROGRESS`
+  是这条路径上唯一正确的答案（libc 与几乎所有网络库靠它决定要不要去 poll
+  可写）。与其为它写两套平台原生代码，不如把阻塞 connect 丢进一个线程：
+  调用方立刻拿到 `EINPROGRESS`，之后 `poll(POLLOUT)`／`SO_ERROR` 取结果。
+  `SO_ERROR` **取一次就清**，这是 Linux 语义——不清的话调用方会反复看到同一个
+  旧错误。
+- **每次读写前都按 guest 的 `O_NONBLOCK` 设一遍宿主 socket 的模式**，而不是
+  建连接时设一次：那一位属于打开文件描述，guest 随时能用 `fcntl`/`ioctl`
+  翻转它，而那两条路径改的是引擎自己的状态位，宿主 socket 并不知道。
+
+**顺带把 `t_negative` 收干净了**：socket 的 errno 面补齐后，剩下的全是 rlimit。
+
+- `setrlimit`/`prlimit64` 的**参数校验顺序**：先读 `new`（读不动就 `EFAULT`，
+  且 `old` 一个字节都不写），再校验资源号，再校验 `cur <= max`，应用之后**才**
+  写 `old`——所以"`old` 指针坏掉"返回 `EFAULT` 但**新限额已经生效**。这不是
+  随手定的顺序，用例两头都钉死了。
+- **`RLIMIT_NOFILE` 软上限真的卡住 fd 分配**。判断放在 `FdTable::alloc_min`
+  里而不是各个调用方：分配点散着好几处，让每处自己先查一遍，漏掉的那处就是
+  "限额说了不算"。
+- **`pipe`/`socketpair` 要原子**：半途 `EMFILE` 却已占掉一个 fd 是最难查的那类
+  泄漏——调用方看到失败、以为什么都没发生，fd 却少了一个。失败时输出缓冲也
+  一个字节都不写。
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

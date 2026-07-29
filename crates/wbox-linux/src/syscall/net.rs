@@ -198,6 +198,10 @@ pub struct Socket {
     pub opts: RefCell<Vec<((i32, i32), i32)>>,
     pub shut_rd: Cell<bool>,
     pub shut_wr: Cell<bool>,
+    /// AF_INET/AF_INET6 的宿主侧状态；AF_UNIX 恒为 `Inet::Idle`。
+    pub inet: RefCell<Inet>,
+    /// 上一次后台 connect 的结果（`SO_ERROR` 取一次就清）。
+    pub so_error: Cell<i32>,
 }
 
 impl Socket {
@@ -209,11 +213,60 @@ impl Socket {
             opts: RefCell::new(Vec::new()),
             shut_rd: Cell::new(false),
             shut_wr: Cell::new(false),
+            inet: RefCell::new(Inet::Idle),
+            so_error: Cell::new(0),
         })
     }
 
     pub fn is_stream(&self) -> bool {
         self.sotype == SOCK_STREAM
+    }
+
+    pub fn is_inet(&self) -> bool {
+        self.domain == AF_INET || self.domain == AF_INET6
+    }
+
+    /// 把后台 connect 的结果收进来（非阻塞）。返回是否刚刚完成。
+    pub fn poll_connect(&self) -> bool {
+        let done = {
+            let st = self.inet.borrow();
+            let Inet::Connecting(rx) = &*st else {
+                return false;
+            };
+            rx.try_recv().ok()
+        };
+        match done {
+            Some(Ok(s)) => {
+                *self.inet.borrow_mut() = Inet::Stream(s);
+                true
+            }
+            Some(Err(e)) => {
+                self.so_error.set(
+                    e.raw_os_error()
+                        .unwrap_or(crate::syscall::ECONNREFUSED as i32),
+                );
+                *self.inet.borrow_mut() = Inet::Idle;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// AF_INET 的就绪位。
+    pub fn inet_readiness(&self) -> u32 {
+        self.poll_connect();
+        let st = self.inet.borrow();
+        match &*st {
+            // 监听中：`accept` 会不会阻塞，只能真去试一次才知道，而试一次
+            // 就把连接取走了。这里保守报可读——调用方随后的 `accept` 拿到
+            // EAGAIN 是合法的（POSIX 明确允许 poll 报就绪后 accept 仍 EAGAIN）。
+            Inet::Listener(_) => EPOLLIN,
+            Inet::Stream(_) => EPOLLIN | EPOLLOUT,
+            // connect 还没完成：既不可读也不可写，正是 POLLOUT 要等的那个状态。
+            Inet::Connecting(_) => 0,
+            Inet::Udp(_) => EPOLLIN | EPOLLOUT,
+            Inet::Idle => EPOLLOUT,
+        }
     }
 
     /// 接收方向的写入代次（对端每写一次就变）。
@@ -228,6 +281,9 @@ impl Socket {
 
     /// 就绪位（epoll 口径；`poll` 侧再映射一次）。
     pub fn readiness(&self) -> u32 {
+        if self.is_inet() {
+            return self.inet_readiness();
+        }
         let st = self.state.borrow();
         match &*st {
             SockState::Listening(l) => {
@@ -355,6 +411,24 @@ pub fn connect_to(l: &Rc<Listener>, stream: bool) -> Result<Conn, i64> {
 /// 从监听队列里取一条已排好的连接。
 pub fn accept_from(l: &Rc<Listener>) -> Option<Conn> {
     l.pending.borrow_mut().pop_front()
+}
+
+/// AF_INET 的读写：直接转给宿主套接字，按 guest 的 `O_NONBLOCK` 设置模式。
+///
+/// 每次操作前都设一遍而不是建连接时设一次：`O_NONBLOCK` 属于打开文件描述，
+/// guest 随时可以用 `fcntl`/`ioctl` 翻转它，而那两条路径改的是我们自己的
+/// 状态位，宿主 socket 并不知道。
+pub fn inet_io(s: &Socket, nonblock: bool) -> Result<std::net::TcpStream, i64> {
+    s.poll_connect();
+    let st = s.inet.borrow();
+    match &*st {
+        Inet::Stream(t) => {
+            let _ = t.set_nonblocking(nonblock);
+            t.try_clone().map_err(|_| -crate::syscall::EIO)
+        }
+        Inet::Connecting(_) => Err(-crate::syscall::EAGAIN),
+        _ => Err(-crate::syscall::ENOTCONN),
+    }
 }
 
 /// 读。返回 `Err(errno)` 表示要报错（含 `EAGAIN`）。
@@ -617,4 +691,46 @@ impl Epoll {
             interests: RefCell::new(Vec::new()),
         })
     }
+}
+
+// ------------------------------------------------------- AF_INET / AF_INET6
+//
+// 这一族**必须真的走网络**，所以只能落到宿主套接字上。与 AF_UNIX 相反：
+// 那边要的是"两个宿主行为一致"，这边要的是"真能连上外面"，而后者宿主已经
+// 提供了跨平台实现（`std::net`），自己再实现一遍 TCP 既不可能也没意义。
+
+/// AF_INET 套接字的宿主侧状态。
+pub enum Inet {
+    /// 刚 `socket()`，还没 bind/connect。
+    Idle,
+    Listener(std::net::TcpListener),
+    Stream(std::net::TcpStream),
+    /// 非阻塞 `connect` 正在后台进行。
+    ///
+    /// `std` 没有非阻塞 connect，而 `EINPROGRESS` 是这条路径上唯一正确的
+    /// 答案——libc 与几乎所有网络库都靠它来判断"要不要去 poll 可写"。
+    /// 与其为它写两套平台原生代码，不如把阻塞 connect 丢到一个线程里：
+    /// 调用方立刻拿到 `EINPROGRESS`，之后 `poll(POLLOUT)`／`SO_ERROR`
+    /// 再来取结果。行为对得上，且两个宿主同一份实现。
+    Connecting(std::sync::mpsc::Receiver<std::io::Result<std::net::TcpStream>>),
+    Udp(std::net::UdpSocket),
+}
+
+impl Inet {
+    /// 已连上的流（含刚刚完成的后台 connect）。
+    pub fn stream(&self) -> Option<&std::net::TcpStream> {
+        match self {
+            Inet::Stream(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+/// 后台 connect：一次性通道，线程做完就送结果。
+pub fn spawn_connect(addr: std::net::SocketAddr) -> Inet {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::net::TcpStream::connect(addr));
+    });
+    Inet::Connecting(rx)
 }

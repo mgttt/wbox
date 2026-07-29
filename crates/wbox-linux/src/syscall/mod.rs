@@ -302,7 +302,7 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         87 => sys_unlinkat(m, AT_FDCWD, a[0], 0),
         89 => sys_readlinkat(m, AT_FDCWD, a[0], a[1], a[2]),
         96 => sys_gettimeofday(m, a[0], a[1]),
-        97 | 302 => sys_getrlimit(m, nr, &a),
+        97 | 160 | 302 => sys_rlimit(m, nr, &a),
         // futex：单线程模拟器里 WAIT 不可能被唤醒，WAKE 没有等待者。
         // 直接成功比 ENOSYS 好——glibc/musl 的锁在无竞争路径上根本不会走到这里。
         202 => 0,
@@ -503,9 +503,17 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
                 Ok(s) => s,
                 Err(e) => return e,
             };
-            match net::recv(&s, &mut tmp, false) {
-                Ok(k) => Ok(k),
-                Err(e) => return e,
+            if s.is_inet() {
+                let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+                match net::inet_io(&s, nb) {
+                    Ok(mut t) => t.read(&mut tmp),
+                    Err(e) => return e,
+                }
+            } else {
+                match net::recv(&s, &mut tmp, false) {
+                    Ok(k) => Ok(k),
+                    Err(e) => return e,
+                }
             }
         }
         Some(FdKind::PipeRead(r)) => {
@@ -641,9 +649,16 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
                 Ok(s) => s,
                 Err(e) => return e,
             };
-            match net::send(&s, data, nonblock) {
-                Ok(k) => Ok(k),
-                Err(e) => return e,
+            if s.is_inet() {
+                match net::inet_io(&s, nonblock) {
+                    Ok(mut t) => t.write(data),
+                    Err(e) => return e,
+                }
+            } else {
+                match net::send(&s, data, nonblock) {
+                    Ok(k) => Ok(k),
+                    Err(e) => return e,
+                }
             }
         }
         Some(FdKind::PipeWrite(w)) => {
@@ -892,7 +907,10 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         return -EBADF;
     };
     match at {
-        None => m.os.fds.alloc_min(nf, min) as i64,
+        None => match m.os.fds.alloc_min(nf, min) {
+            Some(n) => n as i64,
+            None => -EMFILE,
+        },
         Some(n) => {
             if n < 0 {
                 return -EBADF;
@@ -1112,11 +1130,14 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
         return host_err(&e);
     }
     // O_TMPFILE 之外的 O_DIRECTORY 位不该回给 F_GETFL，摘掉。
-    m.os.fds.alloc(Fd::new(
+    match m.os.fds.alloc(Fd::new(
         FdKind::File(f),
         flags & O_CLOEXEC != 0,
         flags & !(O_TMPFILE | O_DIRECTORY),
-    )) as i64
+    )) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
 }
 
 fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32) -> i64 {
@@ -1139,11 +1160,14 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
     // 合成的 /dev/*：必须在碰宿主文件系统之前拦下来，容器 rootfs 里通常
     // 没有 /dev，Windows 宿主上更是根本没有这些路径。
     if let Some(d) = fs::DevKind::from_guest_path(&path) {
-        return m.os.fds.alloc(Fd::new(
+        return match m.os.fds.alloc(Fd::new(
             FdKind::Dev(d),
             flags & O_CLOEXEC != 0,
             flags & !O_CLOEXEC,
-        )) as i64;
+        )) {
+            Some(n) => n as i64,
+            None => -EMFILE,
+        };
     }
 
     // O_TMPFILE 要在"目录"分支之前判：它的路径**就是**一个目录，但要的
@@ -1171,7 +1195,10 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
             flags & O_CLOEXEC != 0,
             flags,
         );
-        return m.os.fds.alloc(fd) as i64;
+        return match m.os.fds.alloc(fd) {
+            Some(n) => n as i64,
+            None => -EMFILE,
+        };
     }
     if flags & O_DIRECTORY != 0 {
         return -ENOTDIR;
@@ -1216,7 +1243,10 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
     match opt.open(&host) {
         Ok(f) => {
             let fd = Fd::new(FdKind::File(f), flags & O_CLOEXEC != 0, flags);
-            m.os.fds.alloc(fd) as i64
+            match m.os.fds.alloc(fd) {
+                Some(n) => n as i64,
+                None => -EMFILE,
+            }
         }
         Err(e) => host_err(&e),
     }
@@ -1900,21 +1930,63 @@ fn sys_clock_gettime(m: &mut Machine, _clk: i32, ts: u64) -> i64 {
     0
 }
 
-/// `getrlimit`/`prlimit64`。报的值要和 `stack.rs` 里真实建的栈大小一致。
-fn sys_getrlimit(m: &mut Machine, nr: u64, a: &[u64; 6]) -> i64 {
-    const RLIMIT_STACK: u64 = 3;
-    const RLIMIT_NOFILE: u64 = 7;
-    const RLIM_INFINITY: u64 = u64::MAX;
-    // getrlimit(res, out) / prlimit64(pid, res, new, out)
-    let (res, out) = if nr == 97 { (a[0], a[1]) } else { (a[1], a[3]) };
-    if out == 0 {
-        return 0; // prlimit64 只设不取
-    }
-    let (cur, max) = match res {
+const RLIMIT_STACK: u64 = 3;
+const RLIMIT_NOFILE: u64 = 7;
+/// Linux 的 `RLIM_NLIMITS`。超出即 `EINVAL`。
+const RLIM_NLIMITS: u64 = 16;
+const RLIM_INFINITY: u64 = u64::MAX;
+
+fn current_rlimit(m: &Machine, res: u64) -> (u64, u64) {
+    match res {
         RLIMIT_STACK => (crate::stack::STACK_SIZE, crate::stack::STACK_SIZE),
-        RLIMIT_NOFILE => (1024, 4096),
+        RLIMIT_NOFILE => (m.os.fds.nofile(), fs::MAX_NOFILE),
         _ => (RLIM_INFINITY, RLIM_INFINITY),
+    }
+}
+
+/// `getrlimit` / `setrlimit` / `prlimit64`。
+///
+/// # 参数校验的顺序是有讲究的
+///
+/// `prlimit64(pid, res, new, old)` 在 Linux 上：**先读 `new`**（读不动就
+/// `EFAULT`，且 `old` 一个字节都不写），再校验 `res`，再校验 `cur <= max`，
+/// 应用之后**才**写 `old`——所以"`old` 指针是坏的"这一条会返回 `EFAULT`
+/// 但**新限额已经生效**。这不是随手定的顺序，`t_negative` 的
+/// prlimit-bad-new-preserves-old 与 prlimit-bad-old-applies-new 分别钉死了
+/// 两头，任何一头搞反都会被抓到。
+fn sys_rlimit(m: &mut Machine, nr: u64, a: &[u64; 6]) -> i64 {
+    // getrlimit(res, out) / setrlimit(res, new) / prlimit64(pid, res, new, out)
+    let (res, new, out) = match nr {
+        97 => (a[0], 0, a[1]),
+        160 => (a[0], a[1], 0),
+        _ => (a[1], a[2], a[3]),
     };
+
+    if new != 0 {
+        let (cur, max) = match (m.mem.read_u64(new), m.mem.read_u64(new + 8)) {
+            (Ok(c), Ok(x)) => (c, x),
+            _ => return -EFAULT,
+        };
+        if res >= RLIM_NLIMITS {
+            return -EINVAL;
+        }
+        // 软限额不得高于硬限额；也不得抬高硬限额（非特权进程的规矩）。
+        let (_, hard) = current_rlimit(m, res);
+        if cur > max || max > hard {
+            return -EINVAL;
+        }
+        if res == RLIMIT_NOFILE {
+            m.os.fds.set_nofile(cur);
+        }
+        // 其余资源只做校验、不真的生效——如实说明好过假装。
+    } else if res >= RLIM_NLIMITS {
+        return -EINVAL;
+    }
+
+    if out == 0 {
+        return 0;
+    }
+    let (cur, max) = current_rlimit(m, res);
     if m.mem.write_u64(out, cur).is_err() || m.mem.write_u64(out + 8, max).is_err() {
         return -EFAULT;
     }
@@ -2245,11 +2317,22 @@ fn sys_dup3(m: &mut Machine, old: i32, new: i32, flags: i32) -> i64 {
 fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
     let (rk, wk) = fs::new_pipe();
     let cloexec = flags & O_CLOEXEC != 0;
-    let rd = m.os.fds.alloc(Fd::new(rk, cloexec, flags & !O_CLOEXEC));
-    let wr = m.os.fds.alloc(Fd::new(wk, cloexec, flags & !O_CLOEXEC));
+    // **要么两个都拿到，要么一个都不留**。半途 EMFILE 却已经占掉一个 fd，
+    // 是最难查的那类泄漏：调用方看到失败、以为什么都没发生，fd 却少了一个。
+    // 输出缓冲同理，失败时一个字节都不写（`t_negative` 的 pair-atomic 断言的
+    // 正是"失败后 pp[0]/pp[1] 保持原值"）。
+    let Some(rd) = m.os.fds.alloc(Fd::new(rk, cloexec, flags & !O_CLOEXEC)) else {
+        return -EMFILE;
+    };
+    let Some(wr) = m.os.fds.alloc(Fd::new(wk, cloexec, flags & !O_CLOEXEC)) else {
+        m.os.fds.remove(rd);
+        return -EMFILE;
+    };
     if m.mem.write_u32(fds_ptr, rd as u32).is_err()
         || m.mem.write_u32(fds_ptr + 4, wr as u32).is_err()
     {
+        m.os.fds.remove(rd);
+        m.os.fds.remove(wr);
         return -EFAULT;
     }
     0
@@ -2454,7 +2537,10 @@ fn split_sock_flags(sotype: i32) -> (i32, bool, bool) {
 
 fn alloc_socket(m: &mut Machine, s: Rc<net::Socket>, nonblock: bool, cloexec: bool) -> i64 {
     let flags = if nonblock { O_NONBLOCK } else { 0 };
-    m.os.fds.alloc(Fd::new(FdKind::Socket(s), cloexec, flags)) as i64
+    match m.os.fds.alloc(Fd::new(FdKind::Socket(s), cloexec, flags)) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
 }
 
 fn sys_socket(m: &mut Machine, domain: i32, sotype: i32, _proto: i32) -> i64 {
@@ -2479,9 +2565,19 @@ fn sys_socketpair(m: &mut Machine, domain: i32, sotype: i32, _proto: i32, out: u
         return -ESOCKTNOSUPPORT;
     }
     let (a, b) = net::socketpair(base);
+    // 与 `pipe` 同样的原子性要求，理由见那边。
     let fa = alloc_socket(m, a, nonblock, cloexec);
+    if fa < 0 {
+        return fa;
+    }
     let fb = alloc_socket(m, b, nonblock, cloexec);
+    if fb < 0 {
+        m.os.fds.remove(fa as i32);
+        return fb;
+    }
     if m.mem.write_u32(out, fa as u32).is_err() || m.mem.write_u32(out + 4, fb as u32).is_err() {
+        m.os.fds.remove(fa as i32);
+        m.os.fds.remove(fb as i32);
         return -EFAULT;
     }
     0
@@ -2534,15 +2630,106 @@ fn write_sockaddr_un(m: &mut Machine, ptr: u64, len_ptr: u64) -> i64 {
     0
 }
 
+/// 读 `sockaddr_in` / `sockaddr_in6`。
+///
+/// `sockaddr_in { u16 family; u16 port(网络序); u32 addr(网络序); u8 pad[8] }`
+fn read_sockaddr_in(m: &Machine, ptr: u64, len: u32) -> Result<std::net::SocketAddr, i64> {
+    if len < 8 {
+        return Err(-EINVAL);
+    }
+    let fam = m.mem.read_u16(ptr).map_err(|_| -EFAULT)? as i32;
+    let port = m.mem.read_u16(ptr + 2).map_err(|_| -EFAULT)?.to_be();
+    if fam == net::AF_INET {
+        let raw = m.mem.read_u32(ptr + 4).map_err(|_| -EFAULT)?;
+        let o = raw.to_le_bytes(); // 网络序在内存里就是 a.b.c.d 的顺序
+        return Ok(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::new(o[0], o[1], o[2], o[3]),
+            port,
+        )));
+    }
+    if fam == net::AF_INET6 {
+        if len < 24 {
+            return Err(-EINVAL);
+        }
+        let mut b = [0u8; 16];
+        m.mem.read(ptr + 8, &mut b).map_err(|_| -EFAULT)?;
+        return Ok(std::net::SocketAddr::from((
+            std::net::Ipv6Addr::from(b),
+            port,
+        )));
+    }
+    Err(-EAFNOSUPPORT)
+}
+
+fn write_sockaddr_in(m: &mut Machine, ptr: u64, len_ptr: u64, a: std::net::SocketAddr) -> i64 {
+    if ptr == 0 {
+        return 0;
+    }
+    let (fam, size) = match a {
+        std::net::SocketAddr::V4(_) => (net::AF_INET as u16, 16u32),
+        std::net::SocketAddr::V6(_) => (net::AF_INET6 as u16, 28u32),
+    };
+    if m.mem.write_u16(ptr, fam).is_err() || m.mem.write_u16(ptr + 2, a.port().to_be()).is_err() {
+        return -EFAULT;
+    }
+    match a {
+        std::net::SocketAddr::V4(v4) => {
+            if m.mem
+                .write_u32(ptr + 4, u32::from_le_bytes(v4.ip().octets()))
+                .is_err()
+            {
+                return -EFAULT;
+            }
+        }
+        std::net::SocketAddr::V6(v6) => {
+            if m.mem.write_u32(ptr + 4, 0).is_err()
+                || m.mem.write(ptr + 8, &v6.ip().octets()).is_err()
+            {
+                return -EFAULT;
+            }
+        }
+    }
+    if len_ptr != 0 && m.mem.write_u32(len_ptr, size).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+/// AF_INET 的 `bind`。
+///
+/// **在 `bind` 就建好 `TcpListener`**（它同时完成 bind+listen）。理由是
+/// `getsockname` 必须在 `bind` 之后立刻能回真实端口——绑 0 号端口让内核选一个
+/// 再问回来，是"起一个临时监听者"最标准的写法，本仓的 `tcp_pair` 与用例都这么用。
+/// 代价：AF_INET 上给**客户端** socket 绑定本地地址（少见用法）会被当成监听者。
+fn inet_bind(s: &Rc<net::Socket>, addr: std::net::SocketAddr) -> i64 {
+    if s.sotype == net::SOCK_DGRAM {
+        return match std::net::UdpSocket::bind(addr) {
+            Ok(u) => {
+                *s.inet.borrow_mut() = net::Inet::Udp(u);
+                0
+            }
+            Err(e) => host_err(&e),
+        };
+    }
+    match std::net::TcpListener::bind(addr) {
+        Ok(l) => {
+            *s.inet.borrow_mut() = net::Inet::Listener(l);
+            0
+        }
+        Err(e) => host_err(&e),
+    }
+}
+
 fn sys_bind(m: &mut Machine, fd: i32, addr: u64, len: u32) -> i64 {
     let s = match sock_of(m, fd) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    if s.domain != net::AF_UNIX {
-        // AF_INET 尚未接宿主套接字，如实说不支持而不是假装 bind 成功——
-        // 假装成功的表现是随后 listen/accept 全都莫名其妙。
-        return -EOPNOTSUPP;
+    if s.is_inet() {
+        return match read_sockaddr_in(m, addr, len) {
+            Ok(a) => inet_bind(&s, a),
+            Err(e) => e,
+        };
     }
     let path = match read_sockaddr_un(m, addr, len) {
         Ok(p) => p,
@@ -2570,6 +2757,13 @@ fn sys_listen(m: &mut Machine, fd: i32, backlog: i32) -> i64 {
         Ok(s) => s,
         Err(e) => return e,
     };
+    if s.is_inet() {
+        // `TcpListener::bind` 已经把 listen 一起做了；这里只校验状态。
+        return match &*s.inet.borrow() {
+            net::Inet::Listener(_) => 0,
+            _ => -EINVAL,
+        };
+    }
     let path = match &*s.state.borrow() {
         net::SockState::Bound(p) => p.clone(),
         net::SockState::Listening(_) => return 0,
@@ -2594,11 +2788,32 @@ fn sys_connect(m: &mut Machine, fd: i32, addr: u64, len: u32) -> i64 {
     if matches!(&*s.state.borrow(), net::SockState::Connected(_)) {
         return -EISCONN;
     }
-    if s.domain != net::AF_UNIX {
-        // 还没接宿主套接字。非阻塞 connect 的正确答案是 EINPROGRESS，
-        // 阻塞的则是"连不上"——两者都不该是 ENOSYS（那会让 libc 以为
-        // 内核根本没有 connect）。
-        return -ECONNREFUSED;
+    if s.is_inet() {
+        let a = match read_sockaddr_in(m, addr, len) {
+            Ok(a) => a,
+            Err(e) => return e,
+        };
+        // 已经在连了：第二次调用是 EALREADY，这是 libc 判断"还在进行中"的
+        // 依据（EINPROGRESS 只在第一次给）。
+        if matches!(&*s.inet.borrow(), net::Inet::Connecting(_)) {
+            if s.poll_connect() {
+                let e = s.so_error.get();
+                return if e == 0 { 0 } else { -(e as i64) };
+            }
+            return -EALREADY;
+        }
+        let nonblock = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+        if nonblock {
+            *s.inet.borrow_mut() = net::spawn_connect(a);
+            return -EINPROGRESS;
+        }
+        return match std::net::TcpStream::connect(a) {
+            Ok(st) => {
+                *s.inet.borrow_mut() = net::Inet::Stream(st);
+                0
+            }
+            Err(e) => host_err(&e),
+        };
     }
     let path = match read_sockaddr_un(m, addr, len) {
         Ok(p) => p,
@@ -2621,6 +2836,39 @@ fn sys_accept4(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64, flags: i32) ->
         Ok(s) => s,
         Err(e) => return e,
     };
+    if s.is_inet() {
+        let nonblock = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+        let got = {
+            let st = s.inet.borrow();
+            let net::Inet::Listener(l) = &*st else {
+                return -EINVAL;
+            };
+            if l.set_nonblocking(nonblock).is_err() {
+                return -EINVAL;
+            }
+            l.accept()
+        };
+        return match got {
+            Ok((stream, peer)) => {
+                if addr != 0 {
+                    let r = write_sockaddr_in(m, addr, len_ptr, peer);
+                    if r != 0 {
+                        return r;
+                    }
+                }
+                let ns = net::Socket::new(s.domain, net::SOCK_STREAM);
+                *ns.inet.borrow_mut() = net::Inet::Stream(stream);
+                alloc_socket(
+                    m,
+                    ns,
+                    flags & net::SOCK_NONBLOCK != 0,
+                    flags & net::SOCK_CLOEXEC != 0,
+                )
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => -EAGAIN,
+            Err(e) => host_err(&e),
+        };
+    }
     let l = match &*s.state.borrow() {
         net::SockState::Listening(l) => Rc::clone(l),
         _ => return -EINVAL,
@@ -2645,10 +2893,29 @@ fn sys_accept4(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64, flags: i32) ->
 }
 
 fn sys_getsockname(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
-    match sock_of(m, fd) {
-        Ok(_) => write_sockaddr_un(m, addr, len_ptr),
-        Err(e) => e,
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if s.is_inet() {
+        let a = match &*s.inet.borrow() {
+            net::Inet::Listener(l) => l.local_addr().ok(),
+            net::Inet::Stream(st) => st.local_addr().ok(),
+            net::Inet::Udp(u) => u.local_addr().ok(),
+            _ => None,
+        };
+        return match a {
+            Some(a) => write_sockaddr_in(m, addr, len_ptr, a),
+            // 还没绑定：Linux 回 0.0.0.0:0 而不是报错。
+            None => write_sockaddr_in(
+                m,
+                addr,
+                len_ptr,
+                std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+            ),
+        };
     }
+    write_sockaddr_un(m, addr, len_ptr)
 }
 
 fn sys_getpeername(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
@@ -2656,6 +2923,13 @@ fn sys_getpeername(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
         Ok(s) => s,
         Err(e) => return e,
     };
+    if s.is_inet() {
+        let a = s.inet.borrow().stream().and_then(|st| st.peer_addr().ok());
+        return match a {
+            Some(a) => write_sockaddr_in(m, addr, len_ptr, a),
+            None => -ENOTCONN,
+        };
+    }
     if !matches!(&*s.state.borrow(), net::SockState::Connected(_)) {
         return -ENOTCONN;
     }
@@ -2696,8 +2970,12 @@ fn sys_getsockopt(m: &mut Machine, fd: i32, level: i32, name: i32, val: u64, len
         Err(e) => return e,
     };
     let v = if level == SOL_SOCKET && name == SO_ERROR {
-        // 没有异步连接过程，也就没有待取的错误：恒 0。
-        0
+        // 后台 connect 的结果就在这里取。**取一次就清**，这是 Linux 的语义：
+        // 待取错误是一次性的，不清的话调用方会反复看到同一个旧错误。
+        s.poll_connect();
+        let e = s.so_error.get();
+        s.so_error.set(0);
+        e
     } else if level == SOL_SOCKET && name == SO_TYPE {
         s.sotype
     } else {
@@ -2744,9 +3022,17 @@ fn sys_recvfrom(
     };
     let n = len.min(1 << 20) as usize;
     let mut tmp = vec![0u8; n];
-    let got = match net::recv(&s, &mut tmp, flags & MSG_PEEK != 0) {
-        Ok(k) => k,
-        Err(e) => return e,
+    let got = if s.is_inet() {
+        let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+        match net::inet_io(&s, nb).and_then(|mut t| t.read(&mut tmp).map_err(|e| host_err(&e))) {
+            Ok(k) => k,
+            Err(e) => return e,
+        }
+    } else {
+        match net::recv(&s, &mut tmp, flags & MSG_PEEK != 0) {
+            Ok(k) => k,
+            Err(e) => return e,
+        }
     };
     if m.mem.write(buf, &tmp[..got]).is_err() {
         return -EFAULT;
@@ -2764,11 +3050,14 @@ fn sys_recvfrom(
 
 fn sys_epoll_create1(m: &mut Machine, flags: i32) -> i64 {
     const EPOLL_CLOEXEC: i32 = O_CLOEXEC;
-    m.os.fds.alloc(Fd::new(
+    match m.os.fds.alloc(Fd::new(
         FdKind::Epoll(net::Epoll::new()),
         flags & EPOLL_CLOEXEC != 0,
         0,
-    )) as i64
+    )) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
 }
 
 /// 计算一个 fd 的就绪位（epoll 口径）。`poll` 也复用它。

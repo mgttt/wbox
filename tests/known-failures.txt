@@ -38,7 +38,11 @@
 #                      数据它看不到），不是 epoll 本身的缺口。
 #        t_net_sockopt 126 通过 / 19 失败 —— 剩下的全是 AF_INET：要真通网就
 #                      得接宿主套接字，那是独立的一步（PRD §4.9 L15 第二阶段）。
-#      （t_negative 剩下的失败是 rlimit 边界校验与 AF_INET）
+#      **t_negative 已整条通过并移出基线**（40/0）：socket 的 errno 面补齐后，
+#      剩下的全是 rlimit——`setrlimit`/`prlimit64` 的参数校验顺序（先读 new
+#      再校验 res，`old` 指针坏掉时新限额**仍然生效**）、以及 RLIMIT_NOFILE
+#      软上限真的卡住 fd 分配，且 `pipe`/`socketpair` 失败时要么两个都拿到、
+#      要么一个都不留。
 #   C. eventfd / timerfd / signalfd 未实现；信号不投递
 #      t_eventfd t_timerfd t_signalfd t_signal_timer
 #   D. 快照式 fork 的并发语义差异
@@ -87,8 +91,6 @@ t_mount_ro
 # G. mmap 精度
 t_mmap
 
-# B'（同 socket 组）：rlimit/socket 边界校验
-t_negative
 
 # I. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
 # st_nlink 在 Windows 侧是合成值（拿不到真实硬链接数），且建 symlink 需要
