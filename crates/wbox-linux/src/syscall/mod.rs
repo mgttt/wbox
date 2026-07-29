@@ -1134,7 +1134,7 @@ fn write_stat_with_identity(
     m: &mut Machine,
     out: u64,
     md: &std::fs::Metadata,
-    identity: Option<(u64, u64, u64)>,
+    _identity: Option<(u64, u64, u64)>,
 ) -> i64 {
     let mut b = [0u8; 144];
 
@@ -1166,9 +1166,9 @@ fn write_stat_with_identity(
     // "是不是同一个文件"会失效，这是已知缺口。
     #[cfg(not(unix))]
     let (dev, ino, nlink, mode, uid, gid, blksize, blocks) = (
-        identity.map_or(1, |v| v.0),
-        identity.map_or(1, |v| v.1),
-        identity.map_or(1, |v| v.2),
+        _identity.map_or(1, |v| v.0),
+        _identity.map_or(1, |v| v.1),
+        _identity.map_or(1, |v| v.2),
         // 从文件类型合成 mode：Windows 没有 Unix 权限位。
         if md.is_dir() {
             0o040755u32
