@@ -38,6 +38,10 @@ pub enum FdKind {
     PipeWrite(PipeWriter),
     /// 合成的字符设备（`/dev/null` 等），见 `DevKind`。
     Dev(DevKind),
+    /// 套接字。见 `syscall::net`。
+    Socket(Rc<crate::syscall::net::Socket>),
+    /// epoll 实例。
+    Epoll(Rc<crate::syscall::net::Epoll>),
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
     Closed,
 }
@@ -103,6 +107,14 @@ pub struct PipeInner {
     /// 阻塞），阻塞写允许超出容量。这是被执行模型逼出来的偏差，如实记在
     /// 这里，不假装是完整语义。
     capacity: Cell<usize>,
+    /// 写入代次：每成功写一次 +1。
+    ///
+    /// 边沿触发（`EPOLLET`）要报的是**"又来新数据了"这个瞬间**，而不是
+    /// "现在有数据"。单线程模拟器没有内核那样的写入钩子，只能在 `epoll_wait`
+    /// 时回看，所以需要一个"自上次上报以来有没有新写入"的证据——就是它。
+    /// 少了这一位，"读空 → 再写入"这条最常见的 ET 序列会被当成同一次就绪
+    /// 而漏报（`t_net_epoll` 的 epoll/et-pipe 正是这么抓到的）。
+    epoch: Cell<u64>,
 }
 
 /// 管道默认容量。与 Linux 一致（`/proc/sys/fs/pipe-max-size` 的默认页数）。
@@ -117,6 +129,7 @@ impl PipeInner {
             writers: Cell::new(0),
             readers: Cell::new(0),
             capacity: Cell::new(PIPE_DEFAULT_CAPACITY),
+            epoch: Cell::new(0),
         })
     }
 
@@ -141,6 +154,15 @@ impl PipeInner {
         v
     }
 
+    pub fn epoch(&self) -> u64 {
+        self.epoch.get()
+    }
+
+    /// 记一次写入（见 `epoch` 字段的说明）。
+    pub fn bump_epoch(&self) {
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+    }
+
     /// 还能无阻塞地写进去多少字节。
     pub fn space(&self) -> usize {
         self.capacity.get().saturating_sub(self.data.borrow().len())
@@ -162,6 +184,11 @@ impl PipeWriter {
 
     pub fn inner(&self) -> &PipeInner {
         &self.0
+    }
+
+    /// 同 [`PipeReader::share`]：不计入写端计数的共享句柄。
+    pub fn share(&self) -> Rc<PipeInner> {
+        Rc::clone(&self.0)
     }
 }
 
@@ -189,6 +216,14 @@ impl PipeReader {
 
     pub fn inner(&self) -> &PipeInner {
         &self.0
+    }
+
+    /// 拿一份**不计入读端计数**的共享句柄。
+    ///
+    /// epoll 要长期持有被监视对象，但它不是"一个读端"——若走 `clone()`，
+    /// 读端计数会一直不归零，写端就永远等不到 `EPIPE`/`POLLERR`。
+    pub fn share(&self) -> Rc<PipeInner> {
+        Rc::clone(&self.0)
     }
 }
 
@@ -347,6 +382,10 @@ impl FdTable {
                 },
                 FdKind::Dev(d) => FdKind::Dev(*d),
                 FdKind::PipeRead(r) => FdKind::PipeRead(r.clone()),
+                // 套接字与 epoll 实例按引用复制：fork 出来的子进程与父进程
+                // 共享同一个对象，这正是 Linux 的语义（描述被继承而不是复制）。
+                FdKind::Socket(s) => FdKind::Socket(Rc::clone(s)),
+                FdKind::Epoll(e) => FdKind::Epoll(Rc::clone(e)),
                 FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
                 FdKind::Closed => FdKind::Closed,
             };

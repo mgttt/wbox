@@ -27,9 +27,18 @@
 #      fork/execve/wait4 本身已实现（快照式，见 syscall/process.rs），
 #      这两个用例剩下的失败全部集中在共享映射：稀疏页表在 fork 时按值
 #      深拷贝，MAP_SHARED 区域因此在父子之间断开。
-#   B. socket 族与 epoll 未实现
+#   B. socket 族与 epoll —— **已实现一半**，两条仍在基线内
 #      t_net_epoll t_net_sockopt t_negative
-#      （t_negative 剩下的失败是 socket 与 rlimit 边界校验）
+#      AF_UNIX（socketpair / 路径式 bind-listen-connect-accept，含 SOCK_DGRAM）
+#      与 epoll（LT/ET/ONESHOT/MOD/DEL/RDHUP/HUP、dup 别名生命周期）已做，
+#      由引擎自己实现而不是转给宿主——Windows 上没有 AF_UNIX 的等价物，
+#      而 PRD F5 要求两个宿主行为一致。现状：
+#        t_net_epoll   111 通过 / 1 失败  —— 唯一剩下的是 D 组那条快照 fork
+#                      语义差异（子进程在 fork 返回前就跑完，父进程之后写的
+#                      数据它看不到），不是 epoll 本身的缺口。
+#        t_net_sockopt 126 通过 / 19 失败 —— 剩下的全是 AF_INET：要真通网就
+#                      得接宿主套接字，那是独立的一步（PRD §4.9 L15 第二阶段）。
+#      （t_negative 剩下的失败是 rlimit 边界校验与 AF_INET）
 #   C. eventfd / timerfd / signalfd 未实现；信号不投递
 #      t_eventfd t_timerfd t_signalfd t_signal_timer
 #   D. 快照式 fork 的并发语义差异

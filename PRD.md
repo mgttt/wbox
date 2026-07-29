@@ -40,7 +40,7 @@ PRD
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
 │       ├── 4.9.1 [TODO-WINDOW]   W1–W13、R8
-│       └── 4.9.2 [TODO-LINUX]    L1–L14、W5（历史编号）
+│       └── 4.9.2 [TODO-LINUX]    L1–L15、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2708,7 +2708,8 @@ TODO-LINUX
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
-└── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
+├── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
+└── L15 socket 族与 epoll                                 [partial] AF_UNIX+epoll 已做，AF_INET 待接；见下方 L15
 ```
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
@@ -2776,6 +2777,55 @@ description），只有 `FD_CLOEXEC` 属于描述符本身。原实现给每个 
   `faccessat(同一个 dirfd,…)` 却 `ENOENT`。顺手补了 `faccessat2`。
 - 最小可用 fd 的下界写死成 3。Linux 给的是**最小空号**：`close(0); pipe(p);`
   之后 `p[0]` 必须是 0——那正是把 stdin 重定向成管道读端的惯用法。
+
+##### L15 socket 族与 epoll `[Linux agent]` `[partial]`
+
+**第一阶段完成**：AF_UNIX 与 epoll。`t_net_epoll` 从整份失败变成
+**111 通过 / 1 失败**，`t_net_sockopt` **126 通过 / 19 失败**。两条仍在基线内，
+但缺口从"整族 `ENOSYS`"收敛成两件很具体的事，见下。
+
+**AF_UNIX 由引擎自己实现，不转给宿主。** 两条理由，第二条更根本：
+
+1. 宿主可能是 Windows，那里没有 `socketpair` 的等价物（Win10 1803 起的
+   `AF_UNIX` 只支持路径式）。而 `socketpair` 恰恰是 guest 侧最常用的一种。
+2. **语义要在两个宿主上一致**（F5）。做成引擎内的对象，两边就是同一份代码、
+   同一套行为，不必去追平两个操作系统的差异。
+
+代价如实记：这样的 AF_UNIX **只在同一个 wbox-linux 进程内连得通**，guest 连
+不上宿主上别的程序的 unix socket。快照式 fork 的父子在同一个宿主进程里，
+所以 fork 之后照样通。
+
+覆盖面：`socket`/`socketpair`/`bind`/`listen`/`connect`/`accept4`/
+`getsockname`/`getpeername`/`shutdown`/`get,setsockopt`/`sendto`/`recvfrom`，
+流式与数据报两种（数据报保留消息边界），`SOCK_NONBLOCK`/`SOCK_CLOEXEC`，
+`FIONREAD`，以及 socket 的 `lseek`→`ESPIPE`、`fsync`→`EINVAL`、
+`fstat`→`S_ISSOCK`。
+
+epoll：`epoll_create1`/`epoll_ctl`/`epoll_wait`，LT／ET／ONESHOT／MOD／DEL、
+`RDHUP`／`HUP`／`ERR`、多 fd、以及 dup 别名的生命周期。三处值得记：
+
+- **关注项指向"打开文件描述"而不是 fd 号，且必须用 `Weak`。** 持强引用会让
+  被监视对象永远不死、永远"就绪"，于是前一组用例关掉的 socket 会在后一组的
+  `epoll_wait` 里继续冒事件（实测就是这么撞上的）。`Weak` upgrade 失败 =
+  "该描述已经没人引用"，正是内核那条自动摘除规则。`EPOLL_CTL_ADD` 判 `EEXIST`
+  同理要比对象而不是 fd 号——号会被回收再分配。
+- **边沿触发报的是"又有新东西了"这个瞬间**，不是"现在有东西"。单线程模拟器
+  没有内核那样的写入钩子，只能在 `epoll_wait` 时回看，所以给管道与 socket 的
+  缓冲各加了一个"写入代次"计数：代次变了就是一次新边沿。少了它，"读空 → 再
+  写入"这条最常见的 ET 序列会被当成同一次就绪而漏报。
+- **`poll`／`epoll_wait` 的就绪判定走同一个函数**。两处分叉的表现是同一个 fd
+  在 `poll` 里可读、在 `epoll` 里不可读，那种不一致极难从现象追回根因。
+  超时也真的睡满：单线程下没人能在这期间改变状态，但 guest 会拿
+  `poll(NULL, 0, ms)` 当精确睡眠，立刻返回 0 是在撒谎。
+
+**剩下的两件事**（下一阶段）：
+
+1. **AF_INET/AF_INET6 要真通网**，得接宿主套接字。目前 `socket()` 成功、
+   `bind`/`connect` 如实报 `EOPNOTSUPP`／`ECONNREFUSED`——**不假装能通**。
+   `t_net_sockopt` 剩下的 19 条全在这里。
+2. `epoll/fork-inherits-instance` 与 `socket/fork-inherits-alias` 失败的是
+   **D 组那条快照 fork 语义差异**（子进程在 fork 返回前就跑完，父进程之后写的
+   数据它看不到），不是 socket/epoll 的缺口。真要修得先有并发式 fork。
 
 ##### L1 F8.4 `exec` 的 Linux 侧实现 `[Linux agent]` `[done]`
 

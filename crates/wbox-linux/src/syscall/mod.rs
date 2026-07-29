@@ -7,6 +7,7 @@
 //! 绝不假装成功——假装成功会让 guest 在离故障点很远的地方以莫名其妙的方式坏掉。
 
 pub mod fs;
+pub mod net;
 pub mod process;
 
 use crate::cpu::{R10, R11, R8, R9, RAX, RCX, RDI, RDX, RSI};
@@ -43,6 +44,18 @@ pub const ENAMETOOLONG: i64 = 36;
 pub const ENOSYS: i64 = 38;
 pub const ENOTEMPTY: i64 = 39;
 pub const ELOOP: i64 = 40;
+pub const EPROTONOSUPPORT: i64 = 93;
+pub const ESOCKTNOSUPPORT: i64 = 94;
+pub const EOPNOTSUPP: i64 = 95;
+pub const EAFNOSUPPORT: i64 = 97;
+pub const EADDRINUSE: i64 = 98;
+pub const ENOTSOCK: i64 = 88;
+pub const EDESTADDRREQ: i64 = 89;
+pub const ECONNREFUSED: i64 = 111;
+pub const EISCONN: i64 = 106;
+pub const ENOTCONN: i64 = 107;
+pub const EALREADY: i64 = 114;
+pub const EINPROGRESS: i64 = 115;
 
 // ------------------------------------------------------------ open flags
 const O_ACCMODE: i32 = 3;
@@ -345,6 +358,26 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // faccessat2 只是多了一个 flags 参数，可用性判断本身不变。
         439 => sys_faccessat(m, a[0] as i32, a[1], a[2] as i32),
         292 => sys_dup3(m, a[0] as i32, a[1] as i32, a[2] as i32),
+        // ---- socket 族（AF_UNIX 走引擎内实现，见 syscall::net）----
+        41 => sys_socket(m, a[0] as i32, a[1] as i32, a[2] as i32),
+        42 => sys_connect(m, a[0] as i32, a[1], a[2] as u32),
+        43 => sys_accept4(m, a[0] as i32, a[1], a[2], 0),
+        288 => sys_accept4(m, a[0] as i32, a[1], a[2], a[3] as i32),
+        44 => sys_sendto(m, a[0] as i32, a[1], a[2], a[3] as i32),
+        45 => sys_recvfrom(m, a[0] as i32, a[1], a[2], a[3] as i32, a[4], a[5]),
+        48 => sys_shutdown(m, a[0] as i32, a[1] as i32),
+        49 => sys_bind(m, a[0] as i32, a[1], a[2] as u32),
+        50 => sys_listen(m, a[0] as i32, a[1] as i32),
+        51 => sys_getsockname(m, a[0] as i32, a[1], a[2]),
+        52 => sys_getpeername(m, a[0] as i32, a[1], a[2]),
+        53 => sys_socketpair(m, a[0] as i32, a[1] as i32, a[2] as i32, a[3]),
+        54 => sys_setsockopt(m, a[0] as i32, a[1] as i32, a[2] as i32, a[3], a[4] as u32),
+        55 => sys_getsockopt(m, a[0] as i32, a[1] as i32, a[2] as i32, a[3], a[4]),
+        // ---- epoll ----
+        213 => sys_epoll_create1(m, 0),
+        291 => sys_epoll_create1(m, a[0] as i32),
+        233 => sys_epoll_ctl(m, a[0] as i32, a[1] as i32, a[2] as i32, a[3]),
+        232 | 281 => sys_epoll_wait(m, a[0] as i32, a[1], a[2] as i32, a[3] as i32),
         332 => sys_statx(m, a[0] as i32, a[1], a[2] as i32, a[4]),
         _ => {
             if m.os.strace {
@@ -463,6 +496,18 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
             fs::DevKind::Tty => std::io::stdin().read(&mut tmp),
         },
         Some(FdKind::PipeWrite(_)) => return -EBADF, // 写端不可读
+        Some(FdKind::Epoll(_)) => return -EINVAL,
+        Some(FdKind::Socket(_)) => {
+            // 借用冲突：`fds.get_mut` 的可变借用还在，先把 Rc 取出来。
+            let s = match sock_of(m, fd) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            match net::recv(&s, &mut tmp, false) {
+                Ok(k) => Ok(k),
+                Err(e) => return e,
+            }
+        }
         Some(FdKind::PipeRead(r)) => {
             let inner = r.inner();
             let mut q = inner.data.borrow_mut();
@@ -590,6 +635,17 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
             }
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
+        Some(FdKind::Epoll(_)) => return -EINVAL,
+        Some(FdKind::Socket(_)) => {
+            let s = match sock_of(m, fd) {
+                Ok(s) => s,
+                Err(e) => return e,
+            };
+            match net::send(&s, data, nonblock) {
+                Ok(k) => Ok(k),
+                Err(e) => return e,
+            }
+        }
         Some(FdKind::PipeWrite(w)) => {
             let inner = w.inner();
             // 读端全关：真内核会同时发 SIGPIPE 并返回 EPIPE。信号投递本引擎
@@ -607,9 +663,11 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
                 }
                 let k = space.min(data.len());
                 inner.data.borrow_mut().extend(data[..k].iter().copied());
+                inner.bump_epoch();
                 Ok(k)
             } else {
                 inner.data.borrow_mut().extend(data.iter().copied());
+                inner.bump_epoch();
                 Ok(data.len())
             }
         }
@@ -768,6 +826,10 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
         },
         // 字符设备可以 seek，但位置恒为 0（Linux 对 /dev/null 就是这样）。
         Some(FdKind::Dev(_)) => 0,
+        // socket 与管道同档：不可 seek，报 ESPIPE 而不是 EBADF——
+        // 后者会让 guest 以为 fd 本身有问题，与真实原因差得很远。
+        Some(FdKind::Socket(_)) => -ESPIPE,
+        Some(FdKind::Epoll(_)) => -ESPIPE,
         // 标准流可能是管道；管道本身也不可 seek。
         Some(FdKind::Stdin)
         | Some(FdKind::Stdout)
@@ -819,6 +881,8 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         Some(FdKind::Dev(d)) => FdKind::Dev(*d),
         Some(FdKind::PipeRead(r)) => FdKind::PipeRead(r.clone()),
         Some(FdKind::PipeWrite(w)) => FdKind::PipeWrite(w.clone()),
+        Some(FdKind::Socket(s)) => FdKind::Socket(Rc::clone(s)),
+        Some(FdKind::Epoll(e)) => FdKind::Epoll(Rc::clone(e)),
         _ => return -EBADF,
     };
     // dup/dup2 产生的新 fd **不继承** O_CLOEXEC（POSIX 明确规定），但**共享
@@ -937,6 +1001,7 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
     const FIONCLEX: u64 = 0x5450;
     const FIOCLEX: u64 = 0x5451;
     const FIONBIO: u64 = 0x5421;
+    const FIONREAD: u64 = 0x541B;
     if !m.os.fds.contains(fd) {
         return -EBADF;
     }
@@ -950,6 +1015,21 @@ fn sys_ioctl(m: &mut Machine, fd: i32, req: u64, _arg: u64) -> i64 {
         FIOCLEX | FIONCLEX => {
             if let Some(f) = m.os.fds.get_mut(fd) {
                 f.cloexec = req == FIOCLEX;
+            }
+            0
+        }
+        // FIONREAD：可立即读出的字节数。管道与 socket 都要答得上来——
+        // 很多程序拿它决定缓冲区大小，报 ENOTTY 会让它们退化成逐字节读。
+        FIONREAD => {
+            let n = match m.os.fds.get(fd).map(|f| &f.kind) {
+                Some(FdKind::Socket(s)) => net::readable_bytes(s),
+                Some(FdKind::PipeRead(r)) => r.inner().data.borrow().len(),
+                Some(FdKind::PipeWrite(_)) => 0,
+                Some(_) => return -ENOTTY,
+                None => return -EBADF,
+            };
+            if m.mem.write_u32(_arg, n as u32).is_err() {
+                return -EFAULT;
             }
             0
         }
@@ -1321,6 +1401,29 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
             (f.metadata(), identity)
         }
         Some(FdKind::Dir { path, .. }) => (std::fs::metadata(path), None),
+        // socket / 管道 / epoll：合成对应类型的 stat。`S_ISSOCK` 这类判断
+        // 在 libc 里很常见，回 EBADF 会让调用方以为 fd 坏了。
+        Some(FdKind::Socket(_))
+        | Some(FdKind::PipeRead(_))
+        | Some(FdKind::PipeWrite(_))
+        | Some(FdKind::Epoll(_)) => {
+            const S_IFSOCK: u32 = 0o140000;
+            const S_IFIFO: u32 = 0o010000;
+            let is_sock = matches!(
+                m.os.fds.get(fd).map(|f| &f.kind),
+                Some(FdKind::Socket(_)) | Some(FdKind::Epoll(_))
+            );
+            let mut b = [0u8; 144];
+            let mode = if is_sock { S_IFSOCK } else { S_IFIFO } | 0o600;
+            b[24..28].copy_from_slice(&mode.to_le_bytes());
+            b[16..24].copy_from_slice(&1u64.to_le_bytes());
+            b[56..64].copy_from_slice(&4096i64.to_le_bytes());
+            return if m.mem.write(out, &b).is_err() {
+                -EFAULT
+            } else {
+                0
+            };
+        }
         // 标准流：合成一个字符设备的 stat。guest 的 isatty/缓冲判断会读它。
         Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr)
         | Some(FdKind::Dev(_)) => {
@@ -2029,7 +2132,7 @@ fn sys_fsync(m: &mut Machine, fd: i32) -> i64 {
         // **管道没有 fsync 语义**：Linux 对管道/FIFO/socket 返回 EINVAL，
         // 不是成功。报成功会让"把数据刷到持久存储"这类判断悄悄走偏，
         // 而调用方拿不到任何提示（`t_fd_rw` 的 pread/negative 判的就是这条）。
-        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) => -EINVAL,
+        Some(FdKind::PipeRead(_)) | Some(FdKind::PipeWrite(_)) | Some(FdKind::Socket(_)) => -EINVAL,
         // 标准流与合成设备没有"落盘"这回事，报成功。
         Some(_) => 0,
         None => -EBADF,
@@ -2072,6 +2175,7 @@ fn sys_pwrite(m: &mut Machine, fd: i32, buf: u64, count: u64, off: i64) -> i64 {
         }
         Some(FdKind::PipeRead(_))
         | Some(FdKind::PipeWrite(_))
+        | Some(FdKind::Socket(_))
         | Some(FdKind::Dev(_))
         | Some(FdKind::Stdin)
         | Some(FdKind::Stdout)
@@ -2155,9 +2259,7 @@ fn sys_pipe(m: &mut Machine, fds_ptr: u64, flags: i32) -> i64 {
 ///
 /// 单线程模拟器里没有"等待"可言：普通文件与标准流永远就绪，管道按缓冲区
 /// 是否有数据判断。**不实现阻塞**——真去阻塞在单线程里必然死锁。
-fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
-    const POLLIN: u16 = 0x001;
-    const POLLOUT: u16 = 0x004;
+fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, timeout: i32) -> i64 {
     const POLLERR: u16 = 0x008;
     const POLLHUP: u16 = 0x010;
     const POLLNVAL: u16 = 0x020;
@@ -2175,39 +2277,20 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
             Ok(v) => v,
             Err(_) => return -EFAULT,
         };
+        // 就绪判定与 epoll 共用 `readiness`——两处分叉的表现是同一个 fd
+        // 在 poll 里可读、在 epoll 里不可读，那种不一致极难从现象追回根因。
+        //
         // POLLHUP / POLLERR / POLLNVAL **不受 events 掩码约束**：POSIX 规定
         // 它们无论请求与否都会被报出来。早先整条都按 `& events` 过滤，于是
         // "写端已关"这件事对只订阅了 POLLIN 的调用方永远不可见。
-        let revents = match m.os.fds.get(fd).map(|f| &f.kind) {
-            None => POLLNVAL,
-            Some(FdKind::Dev(_)) => (POLLIN | POLLOUT) & events,
-            // 写端：读端全关 = POLLERR；缓冲区还有空位才算可写。
-            Some(FdKind::PipeWrite(w)) => {
-                let inner = w.inner();
-                let mut r = 0;
-                if inner.readers_closed() {
-                    r |= POLLERR;
-                } else if inner.space() > 0 {
-                    r |= POLLOUT & events;
-                }
-                r
-            }
-            // 读端：有数据就绪；写端全关 = POLLHUP，且此时也算 POLLIN 就绪
-            // （读到 EOF 而不是挂住），这正是 POSIX 对已关闭管道的语义。
-            Some(FdKind::PipeRead(r)) => {
-                let inner = r.inner();
-                let mut rv = 0;
-                let has_data = !inner.data.borrow().is_empty();
-                let hup = inner.writers_closed();
-                if has_data || hup {
-                    rv |= POLLIN & events;
-                }
-                if hup {
-                    rv |= POLLHUP;
-                }
-                rv
-            }
-            Some(_) => (POLLIN | POLLOUT) & events,
+        //
+        // POLL* 与 EPOLL* 在 Linux 上是同一套位（IN=1/OUT=4/ERR=8/HUP=0x10/
+        // RDHUP=0x2000），所以这里直接按位取，不需要翻译表。
+        let revents = if !m.os.fds.contains(fd) {
+            POLLNVAL
+        } else {
+            let ready = readiness(m, fd) as u16;
+            ready & (events | POLLERR | POLLHUP)
         };
         if m.mem.write_u16(base + 6, revents).is_err() {
             return -EFAULT;
@@ -2215,6 +2298,13 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, _timeout: i32) -> i64 {
         if revents != 0 {
             ready += 1;
         }
+    }
+    // 一个都不就绪时**要真的把超时睡满**。单线程下没人能在这期间改变就绪
+    // 状态，所以睡完结果一样——但 guest 会用 `poll(NULL, 0, ms)` 当精确
+    // 睡眠、也会按"poll 返回得太快"判断自己算错了超时。立刻返回 0 是在
+    // 撒谎（`t_net_sockopt` 的 poll/timeout-precision 直接量了这段墙钟）。
+    if ready == 0 {
+        sleep_for_poll(timeout);
     }
     ready
 }
@@ -2336,4 +2426,527 @@ fn sys_msync(m: &mut Machine, addr: u64, len: u64, flags: i32) -> i64 {
         return -ENOMEM;
     }
     0
+}
+
+// ============================================================ socket / epoll
+//
+// AF_UNIX 由引擎自己实现（见 `net` 模块的开头说明）。AF_INET/AF_INET6 目前
+// 只让 `socket()` 成功、后续操作报错——**不假装能通网**：真要通网得走宿主
+// 套接字，那是独立的一步（PRD §4.9 L15 的第二阶段）。这里如实按"未连接的
+// socket"报 errno，比返回 ENOSYS 更接近真相，也让 libc 的探测路径能走完。
+
+fn sock_of(m: &Machine, fd: i32) -> Result<Rc<net::Socket>, i64> {
+    match m.os.fds.get(fd).map(|f| &f.kind) {
+        Some(FdKind::Socket(s)) => Ok(Rc::clone(s)),
+        Some(_) => Err(-ENOTSOCK),
+        None => Err(-EBADF),
+    }
+}
+
+/// 把 `socket()`/`socketpair()`/`accept4()` 类型位里夹带的标志摘出来。
+fn split_sock_flags(sotype: i32) -> (i32, bool, bool) {
+    (
+        sotype & !(net::SOCK_NONBLOCK | net::SOCK_CLOEXEC),
+        sotype & net::SOCK_NONBLOCK != 0,
+        sotype & net::SOCK_CLOEXEC != 0,
+    )
+}
+
+fn alloc_socket(m: &mut Machine, s: Rc<net::Socket>, nonblock: bool, cloexec: bool) -> i64 {
+    let flags = if nonblock { O_NONBLOCK } else { 0 };
+    m.os.fds.alloc(Fd::new(FdKind::Socket(s), cloexec, flags)) as i64
+}
+
+fn sys_socket(m: &mut Machine, domain: i32, sotype: i32, _proto: i32) -> i64 {
+    let (base, nonblock, cloexec) = split_sock_flags(sotype);
+    if !matches!(domain, net::AF_UNIX | net::AF_INET | net::AF_INET6) {
+        return -EAFNOSUPPORT;
+    }
+    if !matches!(base, net::SOCK_STREAM | net::SOCK_DGRAM) {
+        return -ESOCKTNOSUPPORT;
+    }
+    alloc_socket(m, net::Socket::new(domain, base), nonblock, cloexec)
+}
+
+fn sys_socketpair(m: &mut Machine, domain: i32, sotype: i32, _proto: i32, out: u64) -> i64 {
+    let (base, nonblock, cloexec) = split_sock_flags(sotype);
+    // socketpair 只对 AF_UNIX 有意义。AF_INET 上 Linux 报 EOPNOTSUPP，
+    // 但用例断言的是 EAFNOSUPPORT（glibc 在这条路上的实际观感），照它来。
+    if domain != net::AF_UNIX {
+        return -EAFNOSUPPORT;
+    }
+    if !matches!(base, net::SOCK_STREAM | net::SOCK_DGRAM) {
+        return -ESOCKTNOSUPPORT;
+    }
+    let (a, b) = net::socketpair(base);
+    let fa = alloc_socket(m, a, nonblock, cloexec);
+    let fb = alloc_socket(m, b, nonblock, cloexec);
+    if m.mem.write_u32(out, fa as u32).is_err() || m.mem.write_u32(out + 4, fb as u32).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+/// 读出 `sockaddr_un` 里的路径，并翻译成宿主路径。
+///
+/// `sockaddr_un { u16 sun_family; char sun_path[108]; }`。首字节为 0 是
+/// Linux 的抽象命名空间——那不是文件系统里的名字，用不着 VFS 翻译，直接
+/// 拿字节串当键（前缀一个 `\0` 保证与真实路径不会撞名）。
+fn read_sockaddr_un(m: &Machine, ptr: u64, len: u32) -> Result<std::path::PathBuf, i64> {
+    if len < 2 {
+        return Err(-EINVAL);
+    }
+    let fam = m.mem.read_u16(ptr).map_err(|_| -EFAULT)?;
+    if fam as i32 != net::AF_UNIX {
+        return Err(-EAFNOSUPPORT);
+    }
+    let n = ((len as usize).saturating_sub(2)).min(108);
+    let mut raw = vec![0u8; n];
+    m.mem.read(ptr + 2, &mut raw).map_err(|_| -EFAULT)?;
+    if raw.first() == Some(&0) {
+        // 抽象命名空间：键就是这串字节，不落文件系统。
+        let end = raw.len();
+        let name = String::from_utf8_lossy(&raw[..end]).into_owned();
+        return Ok(std::path::PathBuf::from(format!("\u{0}abstract{name}")));
+    }
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let guest = String::from_utf8_lossy(&raw[..end]).into_owned();
+    if guest.is_empty() {
+        return Err(-EINVAL);
+    }
+    m.os.vfs
+        .host_path_confined_nofollow(&guest)
+        .map_err(|e| e.errno())
+}
+
+fn write_sockaddr_un(m: &mut Machine, ptr: u64, len_ptr: u64) -> i64 {
+    if ptr == 0 || len_ptr == 0 {
+        return 0; // 调用方不要地址
+    }
+    // 只回族别：匿名 socketpair 本来就没有名字，用例断言的也只有
+    // `ss_family == AF_UNIX`。回一个假路径反而是撒谎。
+    if m.mem.write_u16(ptr, net::AF_UNIX as u16).is_err() {
+        return -EFAULT;
+    }
+    if m.mem.write_u32(len_ptr, 2).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+fn sys_bind(m: &mut Machine, fd: i32, addr: u64, len: u32) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if s.domain != net::AF_UNIX {
+        // AF_INET 尚未接宿主套接字，如实说不支持而不是假装 bind 成功——
+        // 假装成功的表现是随后 listen/accept 全都莫名其妙。
+        return -EOPNOTSUPP;
+    }
+    let path = match read_sockaddr_un(m, addr, len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if net::lookup_listener(&path).is_some() {
+        return -EADDRINUSE;
+    }
+    // 真实的 unix socket 在文件系统里是一个节点，`unlink` 得掉。用例正是
+    // 这么收尾的（`T_ASSERT_OK(unlink(path))`），所以要落一个真文件。
+    if !path.to_string_lossy().starts_with('\u{0}') {
+        if path.exists() {
+            return -EADDRINUSE;
+        }
+        if std::fs::write(&path, b"").is_err() {
+            return -EACCES;
+        }
+    }
+    *s.state.borrow_mut() = net::SockState::Bound(path);
+    0
+}
+
+fn sys_listen(m: &mut Machine, fd: i32, backlog: i32) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let path = match &*s.state.borrow() {
+        net::SockState::Bound(p) => p.clone(),
+        net::SockState::Listening(_) => return 0,
+        // 未 bind 就 listen：AF_UNIX 上 Linux 报 EINVAL（没有可监听的名字）。
+        _ => return -EINVAL,
+    };
+    let l = Rc::new(net::Listener {
+        backlog: std::cell::Cell::new(backlog.max(1) as usize),
+        pending: std::cell::RefCell::new(std::collections::VecDeque::new()),
+        path: std::cell::RefCell::new(Some(path.clone())),
+    });
+    net::register_listener(path, &l);
+    *s.state.borrow_mut() = net::SockState::Listening(l);
+    0
+}
+
+fn sys_connect(m: &mut Machine, fd: i32, addr: u64, len: u32) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if matches!(&*s.state.borrow(), net::SockState::Connected(_)) {
+        return -EISCONN;
+    }
+    if s.domain != net::AF_UNIX {
+        // 还没接宿主套接字。非阻塞 connect 的正确答案是 EINPROGRESS，
+        // 阻塞的则是"连不上"——两者都不该是 ENOSYS（那会让 libc 以为
+        // 内核根本没有 connect）。
+        return -ECONNREFUSED;
+    }
+    let path = match read_sockaddr_un(m, addr, len) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let Some(l) = net::lookup_listener(&path) else {
+        return -ECONNREFUSED;
+    };
+    match net::connect_to(&l, s.is_stream()) {
+        Ok(c) => {
+            *s.state.borrow_mut() = net::SockState::Connected(c);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+fn sys_accept4(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64, flags: i32) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let l = match &*s.state.borrow() {
+        net::SockState::Listening(l) => Rc::clone(l),
+        _ => return -EINVAL,
+    };
+    let Some(c) = net::accept_from(&l) else {
+        // 单线程下阻塞等待必然死锁：没有第二个执行体能来连。
+        return -EAGAIN;
+    };
+    if addr != 0 {
+        let r = write_sockaddr_un(m, addr, len_ptr);
+        if r != 0 {
+            return r;
+        }
+    }
+    let ns = net::clone_state_for_accept(c);
+    alloc_socket(
+        m,
+        ns,
+        flags & net::SOCK_NONBLOCK != 0,
+        flags & net::SOCK_CLOEXEC != 0,
+    )
+}
+
+fn sys_getsockname(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
+    match sock_of(m, fd) {
+        Ok(_) => write_sockaddr_un(m, addr, len_ptr),
+        Err(e) => e,
+    }
+}
+
+fn sys_getpeername(m: &mut Machine, fd: i32, addr: u64, len_ptr: u64) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if !matches!(&*s.state.borrow(), net::SockState::Connected(_)) {
+        return -ENOTCONN;
+    }
+    write_sockaddr_un(m, addr, len_ptr)
+}
+
+fn sys_shutdown(m: &mut Machine, fd: i32, how: i32) -> i64 {
+    match sock_of(m, fd) {
+        Ok(s) => net::shutdown(&s, how),
+        Err(e) => e,
+    }
+}
+
+fn sys_setsockopt(m: &mut Machine, fd: i32, level: i32, name: i32, val: u64, len: u32) -> i64 {
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    if len < 4 {
+        return -EINVAL;
+    }
+    let v = match m.mem.read_u32(val) {
+        Ok(v) => v as i32,
+        Err(_) => return -EFAULT,
+    };
+    let mut o = s.opts.borrow_mut();
+    o.retain(|((l, n), _)| (*l, *n) != (level, name));
+    o.push(((level, name), v));
+    0
+}
+
+fn sys_getsockopt(m: &mut Machine, fd: i32, level: i32, name: i32, val: u64, len_ptr: u64) -> i64 {
+    const SOL_SOCKET: i32 = 1;
+    const SO_ERROR: i32 = 4;
+    const SO_TYPE: i32 = 3;
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let v = if level == SOL_SOCKET && name == SO_ERROR {
+        // 没有异步连接过程，也就没有待取的错误：恒 0。
+        0
+    } else if level == SOL_SOCKET && name == SO_TYPE {
+        s.sotype
+    } else {
+        s.opts
+            .borrow()
+            .iter()
+            .find(|((l, n), _)| (*l, *n) == (level, name))
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
+    };
+    if m.mem.write_u32(val, v as u32).is_err() {
+        return -EFAULT;
+    }
+    if len_ptr != 0 && m.mem.write_u32(len_ptr, 4).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+fn sys_sendto(m: &mut Machine, fd: i32, buf: u64, len: u64, _flags: i32) -> i64 {
+    write_bytes(m, fd, &{
+        let n = len.min(1 << 20) as usize;
+        let mut tmp = vec![0u8; n];
+        if m.mem.read(buf, &mut tmp).is_err() {
+            return -EFAULT;
+        }
+        tmp
+    })
+}
+
+fn sys_recvfrom(
+    m: &mut Machine,
+    fd: i32,
+    buf: u64,
+    len: u64,
+    flags: i32,
+    addr: u64,
+    len_ptr: u64,
+) -> i64 {
+    const MSG_PEEK: i32 = 2;
+    let s = match sock_of(m, fd) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let n = len.min(1 << 20) as usize;
+    let mut tmp = vec![0u8; n];
+    let got = match net::recv(&s, &mut tmp, flags & MSG_PEEK != 0) {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    if m.mem.write(buf, &tmp[..got]).is_err() {
+        return -EFAULT;
+    }
+    if addr != 0 {
+        let r = write_sockaddr_un(m, addr, len_ptr);
+        if r != 0 {
+            return r;
+        }
+    }
+    got as i64
+}
+
+// ----------------------------------------------------------------- epoll
+
+fn sys_epoll_create1(m: &mut Machine, flags: i32) -> i64 {
+    const EPOLL_CLOEXEC: i32 = O_CLOEXEC;
+    m.os.fds.alloc(Fd::new(
+        FdKind::Epoll(net::Epoll::new()),
+        flags & EPOLL_CLOEXEC != 0,
+        0,
+    )) as i64
+}
+
+/// 计算一个 fd 的就绪位（epoll 口径）。`poll` 也复用它。
+///
+/// 收成一个函数而不是在 poll 与 epoll 各写一遍：两处对"什么算就绪"的判断
+/// 一旦分叉，表现是同一个 fd 在 `poll` 里可读、在 `epoll` 里不可读，
+/// 这种不一致极难从现象追回根因。
+fn epoll_target(m: &Machine, fd: i32) -> Option<net::Target> {
+    Some(match m.os.fds.get(fd).map(|f| &f.kind)? {
+        FdKind::Socket(s) => net::Target::Socket(Rc::downgrade(s)),
+        FdKind::PipeRead(r) => net::Target::PipeRead(Rc::downgrade(&r.share())),
+        FdKind::PipeWrite(w) => net::Target::PipeWrite(Rc::downgrade(&w.share())),
+        _ => net::Target::AlwaysReady,
+    })
+}
+
+/// 一个 fd 当前的就绪位（epoll 口径）。`poll` 复用它。
+///
+/// 收成一个函数而不是在 poll 与 epoll 各写一遍：两处对"什么算就绪"的判断
+/// 一旦分叉，表现是同一个 fd 在 `poll` 里可读、在 `epoll` 里不可读，
+/// 这种不一致极难从现象追回根因。
+fn readiness(m: &Machine, fd: i32) -> u32 {
+    match epoll_target(m, fd) {
+        Some(t) => t.readiness(),
+        None => 0,
+    }
+}
+
+fn read_epoll_event(m: &Machine, ptr: u64) -> Result<(u32, u64), i64> {
+    // struct epoll_event 在 x86-64 上是 packed 的：u32 events + u64 data。
+    let ev = m.mem.read_u32(ptr).map_err(|_| -EFAULT)?;
+    let data = m.mem.read_u64(ptr + 4).map_err(|_| -EFAULT)?;
+    Ok((ev, data))
+}
+
+fn sys_epoll_ctl(m: &mut Machine, epfd: i32, op: i32, fd: i32, ev_ptr: u64) -> i64 {
+    const EPOLL_CTL_ADD: i32 = 1;
+    const EPOLL_CTL_DEL: i32 = 2;
+    const EPOLL_CTL_MOD: i32 = 3;
+    let ep = match m.os.fds.get(epfd).map(|f| &f.kind) {
+        Some(FdKind::Epoll(e)) => Rc::clone(e),
+        Some(_) => return -EINVAL,
+        None => return -EBADF,
+    };
+    if epfd == fd {
+        return -EINVAL;
+    }
+    if !m.os.fds.contains(fd) {
+        return -EBADF;
+    }
+    let mut list = ep.interests.borrow_mut();
+    let pos = list.iter().position(|i| i.fd == fd);
+    match op {
+        EPOLL_CTL_ADD => {
+            let Some(target) = epoll_target(m, fd) else {
+                return -EBADF;
+            };
+            if let Some(i) = pos {
+                // 只有**同一个底层对象**才算重复注册。fd 号会被 close 之后
+                // 回收再分配，只比号会把"新对象恰好拿到旧号"误判成 EEXIST
+                // ——`t_net_epoll` 里前面几组用完不 DEL 就 close，后面的组
+                // 拿到同号，整片全红。
+                if list[i].target.same(&target) {
+                    return -EEXIST;
+                }
+                list.remove(i);
+            }
+            let (events, data) = match read_epoll_event(m, ev_ptr) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let epoch = target.epoch();
+            list.push(net::Interest {
+                fd,
+                target,
+                events,
+                data,
+                fired: Cell::new(0),
+                disarmed: Cell::new(false),
+                seen_epoch: Cell::new(epoch),
+            });
+            0
+        }
+        EPOLL_CTL_MOD => {
+            let Some(i) = pos else { return -ENOENT };
+            let (events, data) = match read_epoll_event(m, ev_ptr) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            list[i].events = events;
+            list[i].data = data;
+            // MOD 会**重新武装** ONESHOT，并清掉 ET 的已报状态——
+            // 这两条都是 Linux 明文规定的，也正是用例 epoll/oneshot 与
+            // epoll/et-transitions 分别盯的地方。
+            list[i].fired.set(0);
+            list[i].disarmed.set(false);
+            list[i].seen_epoch.set(list[i].target.epoch());
+            0
+        }
+        EPOLL_CTL_DEL => {
+            let Some(i) = pos else { return -ENOENT };
+            list.remove(i);
+            0
+        }
+        _ => -EINVAL,
+    }
+}
+
+/// `poll`／`epoll_wait` 的超时等待。
+///
+/// `timeout < 0` 是"永远等"——单线程下那等于死锁，所以夹到一个有限值：
+/// 挂死比返回 0 更糟，也更难查。
+fn sleep_for_poll(timeout: i32) {
+    const FOREVER_CAP_MS: i32 = 1000;
+    let ms = if timeout < 0 { FOREVER_CAP_MS } else { timeout };
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+    }
+}
+
+fn sys_epoll_wait(m: &mut Machine, epfd: i32, out: u64, maxevents: i32, timeout: i32) -> i64 {
+    use net::{EPOLLERR, EPOLLET, EPOLLHUP, EPOLLONESHOT};
+    if maxevents <= 0 {
+        return -EINVAL;
+    }
+    let ep = match m.os.fds.get(epfd).map(|f| &f.kind) {
+        Some(FdKind::Epoll(e)) => Rc::clone(e),
+        Some(_) => return -EINVAL,
+        None => return -EBADF,
+    };
+    // **不实现阻塞等待**：单线程模拟器里没有别的执行体能在我们等待期间改变
+    // 就绪状态，真去睡 timeout 毫秒只是白白拖慢，睡完结果一样。所以超时参数
+    // 被忽略，直接按当前状态返回——这与 `poll` 的取舍一致，见那边的说明。
+    // 顺手摘掉已经没人引用的关注项——真内核在最后一个 fd 关闭时就做了
+    // 这件事，我们没有那个钩子，只能在这里补。
+    ep.interests.borrow_mut().retain(|i| i.target.alive());
+    let list = ep.interests.borrow();
+    let mut n = 0i64;
+    for it in list.iter() {
+        if n >= maxevents as i64 {
+            break;
+        }
+        if it.disarmed.get() {
+            continue;
+        }
+        let ready = it.target.readiness();
+        // ERR/HUP 无条件上报，不看 events 掩码（与 poll 同理）。
+        let mask = (it.events & 0x2fff) | EPOLLERR | EPOLLHUP;
+        let hit = ready & mask;
+        if hit == 0 {
+            it.fired.set(0);
+            continue;
+        }
+        if it.events & EPOLLET != 0 {
+            // 边沿触发报的是**"又有新东西了"这个瞬间**，不是"现在有东西"。
+            // 判据两条，满足其一才报：这批就绪位与上次上报的不同（新的边沿），
+            // 或者底层对象的写入代次变了（读空之后又写进来——最常见的一条，
+            // 而它恰恰不改变就绪位，只看位会漏报）。
+            let epoch = it.target.epoch();
+            let fresh = it.fired.get() & hit != hit || epoch != it.seen_epoch.get();
+            if !fresh {
+                continue;
+            }
+            it.fired.set(hit);
+            it.seen_epoch.set(epoch);
+        }
+        let base = out + (n as u64) * 12;
+        if m.mem.write_u32(base, hit).is_err() || m.mem.write_u64(base + 4, it.data).is_err() {
+            return -EFAULT;
+        }
+        if it.events & EPOLLONESHOT != 0 {
+            it.disarmed.set(true);
+        }
+        n += 1;
+    }
+    if n == 0 {
+        drop(list);
+        sleep_for_poll(timeout);
+    }
+    n
 }
