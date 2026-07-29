@@ -941,6 +941,7 @@ fn spawn_registered(
     spec: &backend::RunSpec,
     prepared: &backend::Prepared,
     reg: crate::runstate::Registration,
+    auto_remove: bool,
 ) -> Result<u32> {
     let supervised = std::env::var_os(SUPERVISED_ENV).is_some();
     if supervised {
@@ -964,6 +965,17 @@ fn spawn_registered(
         crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDOUT);
         crate::runstate::enforce_log_cap(&dir, crate::runstate::LOG_STDERR);
     }
+    // READY lives inside the state directory. A very short `run -d --rm`
+    // workload can otherwise publish READY, exit, and delete that directory
+    // before the waiting parent observes it. Keep the directory alive until
+    // the parent consumes the marker; bound the wait so an abandoned parent
+    // cannot hold an auto-remove supervisor forever.
+    if spec.startup_notify && auto_remove {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::runstate::startup_is_ready(reg.dir()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
     drop(reg);
     rc
 }
@@ -976,7 +988,7 @@ fn spawn_with_state(
     auto_remove: bool,
 ) -> Result<u32> {
     let reg = register_for_spawn(spec, target, auto_remove)?;
-    spawn_registered(b, spec, prepared, reg)
+    spawn_registered(b, spec, prepared, reg, auto_remove)
 }
 
 /// 原生模式：**宿主自己的**程序。Windows 上是 AppContainer+Job（native.rs），
@@ -1118,7 +1130,7 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
             let prepared = backend.prepare(&spec)?;
             #[cfg(windows)]
             {
-                spawn_registered(&backend, &spec, &prepared, reg)
+                spawn_registered(&backend, &spec, &prepared, reg, opts.auto_remove)
             }
             #[cfg(not(windows))]
             {

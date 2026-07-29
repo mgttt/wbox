@@ -371,19 +371,25 @@ try {
     Write-Host "PASS WP.7B wait persists and reports the guest exit code"
     Write-Host "PASS WP.7C container/image inspect emits machine-readable JSON"
 
-    $autoRemoveName = "product-auto-rm"
-    $autoRemove = & $portableWbox run -d --rm --name $autoRemoveName `
-        --workdir $env:SystemRoot\System32 -- cmd.exe /d /c "exit /b 0" 2>&1 | Out-String
-    Assert-Exit 0 "WP.7A detached --rm launch" $autoRemove
-    $autoRemoveDir = Join-Path $testHome ".wbox\run\$autoRemoveName"
+    $autoRemoveNames = 1..10 | ForEach-Object { "product-auto-rm-$_" }
+    foreach ($autoRemoveName in $autoRemoveNames) {
+        $autoRemove = & $portableWbox run -d --rm --name $autoRemoveName `
+            --workdir $env:SystemRoot\System32 -- cmd.exe /d /c "exit /b 0" 2>&1 | Out-String
+        Assert-Exit 0 "WP.7A detached --rm launch $autoRemoveName" $autoRemove
+    }
     foreach ($i in 1..30) {
-        if (-not (Test-Path -LiteralPath $autoRemoveDir)) { break }
+        $remainingAutoRemove = @(
+            $autoRemoveNames | Where-Object {
+                Test-Path -LiteralPath (Join-Path $testHome ".wbox\run\$_")
+            }
+        )
+        if ($remainingAutoRemove.Count -eq 0) { break }
         Start-Sleep -Milliseconds 200
     }
-    if (Test-Path -LiteralPath $autoRemoveDir) {
-        throw "WP.7A --rm left a detached state directory: $autoRemoveDir"
+    if ($remainingAutoRemove.Count -gt 0) {
+        throw "WP.7A --rm left detached state directories: $($remainingAutoRemove -join ', ')"
     }
-    Write-Host "PASS WP.7A detached --rm removes state and logs"
+    Write-Host "PASS WP.7A detached --rm consumes READY and removes state (10 iterations)"
 
     # WP.8-WP.12 continuously gate the Windows stop contract against a real
     # supervisor -> guest -> child tree. Every process is identified by a PID

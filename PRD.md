@@ -2465,6 +2465,12 @@ supervisor 发布 ERROR，父进程保留原始错误类别和退出码；父进
 `run -d` 的失败记录，或把 `start/restart` 的保存配置恢复成 created。READY 等待有界，
 超时会终止 supervisor，不能出现调用方报失败、后台后来又自行跑起来的分叉。
 
+极短的 `run -d --rm` 还有反向竞态：supervisor 已发布 READY 并正常退出，但紧接着
+删除了 READY 所在的状态目录，等待中的父进程可能只看到 rc=0 的 supervisor 消失，
+误报“发送 READY 前退出”。自动删除路径现在最多等待 5 秒让父进程消费 READY 后
+再删目录；父进程异常退出也不会永久拖住 supervisor。`WP.7A` 连续跑 10 个短命
+workload，同时断言全部启动成功且状态/日志最终归零。
+
 `WP.23A` 用不存在的 Windows EXE 断言 `CreateProcessW` 原错与 rc=4；`WP.23B`
 用本机拒绝连接的 registry 断言 pull 原错与 rc=5。两条都检查 `ps --all` 没有残留。
 
