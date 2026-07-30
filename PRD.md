@@ -40,7 +40,7 @@ PRD
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
 │       ├── 4.9.1 [TODO-WINDOW]   W1–W14、R8
-│       └── 4.9.2 [TODO-LINUX]    L1–L18、W5（历史编号）
+│       └── 4.9.2 [TODO-LINUX]    L1–L19、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2742,7 +2742,8 @@ TODO-LINUX
 ├── L15 socket 族与 epoll                                 [done] 跨宿主复核的四条 INET 缺口已补；见下方 L15
 ├── L16 eventfd                                           [done] t_eventfd 80/0 已移出基线
 ├── L17 timerfd                                           [done] t_timerfd 67/0 已移出基线（惰性到期，无后台线程）
-└── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
+├── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
+└── L19 signalfd 与挂起信号集合                           [partial] t_signalfd 82/3；handler 投递未做
 ```
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定

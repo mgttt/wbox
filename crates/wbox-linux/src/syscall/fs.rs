@@ -49,6 +49,10 @@ pub enum FdKind {
     Event(Rc<EventFd>),
     /// `timerfd`：到期计数器。见 [`TimerFd`]。
     Timer(Rc<TimerFd>),
+    /// `signalfd`：按屏蔽字消费挂起信号。只存关注的信号集合——挂起集合是
+    /// **进程**的状态（在 `Os` 里），不是 fd 的，多个 signalfd 关注同一个
+    /// 信号时谁先读谁拿走。
+    Signal(Rc<SignalFd>),
     /// epoll 实例。
     Epoll(Rc<crate::syscall::net::Epoll>),
     /// 已关闭但仍占位（`dup` 语义下的空洞）。
@@ -340,6 +344,20 @@ impl TimerFd {
     }
 }
 
+/// `signalfd(2)` 的关注集合。
+pub struct SignalFd {
+    /// 关注的信号位图（位 0 = 信号 1）。`signalfd4` 可以就地更新它。
+    pub mask: Cell<u64>,
+}
+
+impl SignalFd {
+    pub fn new(mask: u64) -> Rc<SignalFd> {
+        Rc::new(SignalFd {
+            mask: Cell::new(mask),
+        })
+    }
+}
+
 /// 读端的持有凭证：构造 +1、`Drop` -1。理由同 [`PipeWriter`]——
 /// 写端要靠"还有没有读端"来决定 `EPIPE`／`POLLERR`，手工记账必漏。
 pub struct PipeReader(Rc<PipeInner>);
@@ -546,6 +564,7 @@ impl FdTable {
                 FdKind::Socket(s) => FdKind::Socket(Rc::clone(s)),
                 FdKind::Event(e) => FdKind::Event(Rc::clone(e)),
                 FdKind::Timer(t) => FdKind::Timer(Rc::clone(t)),
+                FdKind::Signal(g) => FdKind::Signal(Rc::clone(g)),
                 FdKind::Epoll(e) => FdKind::Epoll(Rc::clone(e)),
                 FdKind::PipeWrite(w) => FdKind::PipeWrite(w.clone()),
                 FdKind::Closed => FdKind::Closed,

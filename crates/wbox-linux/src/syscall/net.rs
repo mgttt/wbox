@@ -636,6 +636,9 @@ pub enum Target {
     PipeWrite(std::rc::Weak<crate::syscall::fs::PipeInner>),
     Event(std::rc::Weak<crate::syscall::fs::EventFd>),
     Timer(std::rc::Weak<crate::syscall::fs::TimerFd>),
+    /// signalfd 的就绪要看**进程**的挂起集合，fd 自己只有关注掩码，
+    /// 所以这里存掩码 + 一个活性句柄，真正的判定在 `syscall::readiness` 里做。
+    Signal(std::rc::Weak<crate::syscall::fs::SignalFd>),
     /// 普通文件、目录、标准流、合成设备：Linux 上恒可读可写。
     AlwaysReady,
 }
@@ -649,6 +652,7 @@ impl Target {
             Target::PipeWrite(w) => w.upgrade().is_some_and(|i| !i.writers_closed()),
             Target::Event(w) => w.strong_count() > 0,
             Target::Timer(w) => w.strong_count() > 0,
+            Target::Signal(w) => w.strong_count() > 0,
             Target::AlwaysReady => true,
         }
     }
@@ -663,6 +667,7 @@ impl Target {
             }
             Target::Event(w) => w.upgrade().map(|e| e.epoch.get()).unwrap_or(0),
             Target::Timer(w) => w.upgrade().map(|t| t.epoch.get()).unwrap_or(0),
+            Target::Signal(_) => 0,
             Target::AlwaysReady => 0,
         }
     }
@@ -678,6 +683,7 @@ impl Target {
             (Target::PipeWrite(a), Target::PipeWrite(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::Event(a), Target::Event(b)) => std::rc::Weak::ptr_eq(a, b),
             (Target::Timer(a), Target::Timer(b)) => std::rc::Weak::ptr_eq(a, b),
+            (Target::Signal(a), Target::Signal(b)) => std::rc::Weak::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -728,6 +734,9 @@ impl Target {
                     0
                 }
             }
+            // signalfd 的就绪判定要看进程状态，这里给不出答案；
+            // `syscall::readiness` 会拦在前面单独处理，走不到这一支。
+            Target::Signal(_) => 0,
             Target::AlwaysReady => EPOLLIN | EPOLLOUT,
         }
     }

@@ -248,6 +248,22 @@ pub fn sys_kill(m: &mut Machine, pid: i32, signo: i32) -> ExecResult<i64> {
         });
     }
     if pid == m.os.pid || pid == 0 || pid == -1 {
+        // **被屏蔽的信号不投递，只挂起**。这是 POSIX 语义，也是
+        // "屏蔽 + signalfd" 这套写法能成立的前提——少了这一步，
+        // `kill(getpid(), SIGUSR1)` 会把自己打死，而调用方本意是让
+        // signalfd 收到它。
+        const SIGKILL: i32 = 9;
+        const SIGSTOP: i32 = 19;
+        let blocked = signo != SIGKILL
+            && signo != SIGSTOP
+            && (1..=64).contains(&signo)
+            && m.os.sig_blocked & (1u64 << (signo - 1)) != 0;
+        if blocked {
+            const SI_USER: i32 = 0;
+            let me = m.os.pid;
+            m.os.raise_signal(signo, SI_USER, me);
+            return Ok(0);
+        }
         // 默认动作是终止的信号才自杀；SIGCHLD/SIGURG/SIGWINCH 等默认忽略。
         const IGNORED: [i32; 4] = [
             17, /*CHLD*/

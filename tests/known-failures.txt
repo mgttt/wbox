@@ -43,8 +43,16 @@
 #      再校验 res，`old` 指针坏掉时新限额**仍然生效**）、以及 RLIMIT_NOFILE
 #      软上限真的卡住 fd 分配，且 `pipe`/`socketpair` 失败时要么两个都拿到、
 #      要么一个都不留。
-#   C. signalfd 未实现；信号不投递
+#   C. 信号**不投递**（handler 不会被调用）
 #      t_signalfd t_signal_timer
+#      **signalfd 与挂起集合已实现**：t_signalfd 从整份失败到 82 通过 / 3 失败，
+#      只剩 `unblock-delivers-and-clears-readiness` 一组——它要求解除屏蔽时
+#      真的去调 guest 的信号处理函数（构信号帧、改 rip、sigreturn），那是
+#      执行流层面的改动，不是再加一种 fd。
+#      做出来的那一半是完整可用的、不是半成品：**被屏蔽的信号本来就不投递**，
+#      只挂在 pending 上等 signalfd/sigwait 消费——而「屏蔽 + signalfd」正是
+#      现代服务端处理信号的标准写法（绕开 handler 里的异步安全约束）。
+#      t_signal_timer 仍整份失败：它靠 `pause()` 等待真正的投递。
 #      **timerfd 已实现并移出基线**（67/0）：到期是**惰性算出来的**，没有后台
 #      线程——只记"下次到期的绝对时刻"与周期，在 read/poll/epoll_wait 问起来
 #      时拿当前时间回算跨过了几个周期。配套把 poll/epoll_wait 的等待从"一次

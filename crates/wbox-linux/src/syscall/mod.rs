@@ -111,6 +111,24 @@ pub struct Os {
     pub release: String,
     /// `umask` 的当前值。只记录不生效，见分派表里的说明。
     pub umask: u32,
+    /// 信号屏蔽字（位 0 = 信号 1）。
+    ///
+    /// # 为什么"只记 pending、不投递"仍然有用
+    ///
+    /// 真正的信号投递要打断执行流（构帧、改 rip、`sigreturn`），那是另一件
+    /// 大工程。但**被屏蔽的信号本来就不投递**——它只是挂在 pending 上，等
+    /// `signalfd`/`sigwait`/解除屏蔽时才被消费。而"屏蔽 + signalfd"恰恰是
+    /// 现代服务端处理信号的标准写法（避免 handler 里的异步安全约束）。
+    /// 所以这一半单独做出来是完整可用的，不是半成品。
+    pub sig_blocked: u64,
+    /// 已挂起、还没被消费的信号。元素是 `(signo, si_code, si_pid)`。
+    pub sig_pending: Vec<(i32, i32, i32)>,
+    /// `sigaction` 记下的处理函数地址（下标即信号号）。目前只存不调用。
+    pub sig_handlers: [u64; 65],
+    /// `setitimer(ITIMER_REAL)` 的到期时刻（纳秒，0 = 未武装）。
+    /// 与 timerfd 同样是**惰性结算**的，见 `fs::TimerFd` 的说明。
+    pub alarm_deadline_ns: u64,
+    pub alarm_interval_ns: u64,
 }
 
 impl Default for Os {
@@ -137,6 +155,34 @@ impl Os {
             // "FATAL: kernel too old" 退出。
             release: "6.1.0-wbox".to_string(),
             umask: 0o022,
+            sig_blocked: 0,
+            sig_pending: Vec::new(),
+            sig_handlers: [0; 65],
+            alarm_deadline_ns: 0,
+            alarm_interval_ns: 0,
+        }
+    }
+
+    /// 把到当前时刻为止的 `ITIMER_REAL` 到期结算成 pending 的 SIGALRM。
+    pub fn settle_alarm(&mut self) {
+        const SIGALRM: i32 = 14;
+        const SI_KERNEL: i32 = 0x80;
+        if self.alarm_deadline_ns == 0 || now_ns() < self.alarm_deadline_ns {
+            return;
+        }
+        self.alarm_deadline_ns = if self.alarm_interval_ns == 0 {
+            0
+        } else {
+            now_ns() + self.alarm_interval_ns
+        };
+        self.raise_signal(SIGALRM, SI_KERNEL, 0);
+    }
+
+    /// 记一个挂起信号。**同号只挂一次**——标准信号不排队，这是 POSIX 语义，
+    /// 也是 `signalfd` 用例里连发两次 SIGUSR2 只读到一条的原因。
+    pub fn raise_signal(&mut self, signo: i32, code: i32, pid: i32) {
+        if !self.sig_pending.iter().any(|(s, _, _)| *s == signo) {
+            self.sig_pending.push((signo, code, pid));
         }
     }
 
@@ -157,6 +203,12 @@ impl Os {
             vfs: self.vfs.clone(),
             pid,
             ppid: self.pid,
+            sig_blocked: self.sig_blocked,
+            // **pending 不继承**：POSIX 规定 fork 出来的子进程 pending 集合为空。
+            sig_pending: Vec::new(),
+            sig_handlers: self.sig_handlers,
+            alarm_deadline_ns: 0,
+            alarm_interval_ns: 0,
             pid_alloc: Rc::clone(&self.pid_alloc),
             zombies: Vec::new(),
             fork_depth: self.fork_depth + 1,
@@ -254,9 +306,8 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         10 => sys_mprotect(m, a[0], a[1], a[2] as i32),
         11 => sys_munmap(m, a[0], a[1]),
         12 => sys_brk(m, a[0]),
-        // 信号：模拟器目前不投递信号，登记动作直接成功（guest 装了处理器
-        // 但永远收不到，行为等价于"没有信号发生"）。
-        13 | 14 | 131 => 0,
+        // rt_sigqueueinfo：没有队列可放，直接成功。13/14 见下方信号一节。
+        131 => 0,
         16 => sys_ioctl(m, a[0] as i32, a[1], a[2]),
         17 => sys_pread(m, a[0] as i32, a[1], a[2], a[3] as i64),
         // preadv/pwritev（以及带 flags 的 v2 变体）。偏移是 pos_l|pos_h<<32，
@@ -368,6 +419,13 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // ---- socket 族（AF_UNIX 走引擎内实现，见 syscall::net）----
         // eventfd(init) / eventfd2(init, flags)
         // timerfd_create / timerfd_settime / timerfd_gettime
+        // 信号：屏蔽字/挂起集合/signalfd/ITIMER_REAL（不含 handler 投递）
+        13 => sys_rt_sigaction(m, a[0] as i32, a[1], a[2]),
+        14 => sys_rt_sigprocmask(m, a[0] as i32, a[1], a[2], a[3]),
+        127 => sys_rt_sigpending(m, a[0], a[1]),
+        282 => sys_signalfd(m, a[0] as i32, a[1], a[2], 0),
+        289 => sys_signalfd(m, a[0] as i32, a[1], a[2], a[3] as i32),
+        38 => sys_setitimer(m, a[0] as i32, a[1], a[2]),
         283 => sys_timerfd_create(m, a[0] as i32, a[1] as i32),
         286 => sys_timerfd_settime(m, a[0] as i32, a[1] as i32, a[2], a[3]),
         287 => sys_timerfd_gettime(m, a[0] as i32, a[1]),
@@ -521,6 +579,43 @@ fn sys_read(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
             };
             tmp[..8].copy_from_slice(&v.to_le_bytes());
             Ok(8)
+        }
+        // signalfd：一次至少一条 128 字节记录，能装下几条就返回几条。
+        Some(FdKind::Signal(g)) => {
+            const REC: usize = 128;
+            if n < REC {
+                return -EINVAL;
+            }
+            let mask = g.mask.get();
+            let nb = m.os.fds.get(fd).map(|f| f.flags()).unwrap_or(0) & O_NONBLOCK != 0;
+            let mut off = 0usize;
+            while off + REC <= n {
+                let Some((sig, code, pid)) = take_pending(m, mask) else {
+                    break;
+                };
+                write_signalfd_siginfo(&mut tmp[off..off + REC], sig, code, pid);
+                off += REC;
+            }
+            if off == 0 {
+                if nb {
+                    return -EAGAIN;
+                }
+                // 阻塞读：唯一可能自己冒出来的信号是 ITIMER_REAL 的 SIGALRM
+                // （时间在走）。等它，带上限兜底——别的信号在单线程里没有
+                // 来源，等下去就是挂死。
+                let dl = m.os.alarm_deadline_ns;
+                if dl == 0 {
+                    return -EAGAIN;
+                }
+                let wait = dl.saturating_sub(now_ns()).min(5_000_000_000);
+                std::thread::sleep(std::time::Duration::from_nanos(wait));
+                let Some((sig, code, pid)) = take_pending(m, mask) else {
+                    return -EAGAIN;
+                };
+                write_signalfd_siginfo(&mut tmp[..REC], sig, code, pid);
+                off = REC;
+            }
+            Ok(off)
         }
         // timerfd 与 eventfd 同形：一次正好 8 字节，读走到期次数并清零。
         Some(FdKind::Timer(t)) => {
@@ -703,8 +798,8 @@ fn write_bytes(m: &mut Machine, fd: i32, data: &[u8]) -> i64 {
         },
         Some(FdKind::PipeRead(_)) => return -EBADF, // 读端不可写
         Some(FdKind::Epoll(_)) => return -EINVAL,
-        // timerfd 不可写：Linux 报 EINVAL。
-        Some(FdKind::Timer(_)) => return -EINVAL,
+        // timerfd / signalfd 不可写：Linux 报 EINVAL。
+        Some(FdKind::Timer(_)) | Some(FdKind::Signal(_)) => return -EINVAL,
         Some(FdKind::Event(e)) => {
             if data.len() < 8 {
                 return -EINVAL;
@@ -794,13 +889,39 @@ fn eventfd_scatter_read(m: &mut Machine, fd: i32, iov: &[(u64, u64)]) -> Option<
     enum Src {
         Event(Rc<fs::EventFd>),
         Timer(Rc<fs::TimerFd>),
+        Signal(Rc<fs::SignalFd>),
     }
     let src = match m.os.fds.get(fd).map(|f| &f.kind) {
         Some(FdKind::Event(e)) => Src::Event(Rc::clone(e)),
         Some(FdKind::Timer(t)) => Src::Timer(Rc::clone(t)),
+        Some(FdKind::Signal(g)) => Src::Signal(Rc::clone(g)),
         _ => return None,
     };
     let total: u64 = iov.iter().map(|(_, l)| *l).sum();
+    // signalfd 的记录是 128 字节，与 event/timer 的 8 字节不同。
+    if let Src::Signal(g) = &src {
+        const REC: usize = 128;
+        if (total as usize) < REC {
+            return Some(-EINVAL);
+        }
+        let Some((sig, code, pid)) = take_pending(m, g.mask.get()) else {
+            return Some(-EAGAIN);
+        };
+        let mut rec = [0u8; REC];
+        write_signalfd_siginfo(&mut rec, sig, code, pid);
+        let mut off = 0usize;
+        for (base, len) in iov {
+            if off >= REC {
+                break;
+            }
+            let k = (*len as usize).min(REC - off);
+            if m.mem.write(*base, &rec[off..off + k]).is_err() {
+                return Some(-EFAULT);
+            }
+            off += k;
+        }
+        return Some(REC as i64);
+    }
     if total < 8 {
         return Some(-EINVAL);
     }
@@ -811,6 +932,8 @@ fn eventfd_scatter_read(m: &mut Machine, fd: i32, iov: &[(u64, u64)]) -> Option<
             0 => None,
             v => Some(v),
         },
+        // signalfd 已在上面按 128 字节记录处理并提前返回。
+        Src::Signal(_) => unreachable!("signalfd 走的是上面的分支"),
     };
     let Some(v) = got else {
         return Some(-EAGAIN);
@@ -971,6 +1094,7 @@ fn sys_lseek(m: &mut Machine, fd: i32, off: i64, whence: i32) -> i64 {
         Some(FdKind::Dev(_)) => 0,
         // eventfd 可以 seek，但位置恒为 0（与 /dev/null 同理）。
         Some(FdKind::Event(_)) | Some(FdKind::Timer(_)) => 0,
+        Some(FdKind::Signal(_)) => -ESPIPE,
         // socket 与管道同档：不可 seek，报 ESPIPE 而不是 EBADF——
         // 后者会让 guest 以为 fd 本身有问题，与真实原因差得很远。
         Some(FdKind::Socket(_)) => -ESPIPE,
@@ -1029,6 +1153,7 @@ fn dup_impl_min(m: &mut Machine, fd: i32, at: Option<i32>, min: i32) -> i64 {
         Some(FdKind::Socket(s)) => FdKind::Socket(Rc::clone(s)),
         Some(FdKind::Event(e)) => FdKind::Event(Rc::clone(e)),
         Some(FdKind::Timer(t)) => FdKind::Timer(Rc::clone(t)),
+        Some(FdKind::Signal(g)) => FdKind::Signal(Rc::clone(g)),
         Some(FdKind::Epoll(e)) => FdKind::Epoll(Rc::clone(e)),
         _ => return -EBADF,
     };
@@ -2936,6 +3061,200 @@ fn sys_timerfd_gettime(m: &mut Machine, fd: i32, out: u64) -> i64 {
     write_timespec(m, out + 16, t.remaining(nownow))
 }
 
+// ---------------------------------------------------------------- 信号
+//
+// **只做"不需要打断执行流"的那一半**：屏蔽字、挂起集合、`signalfd`、
+// `ITIMER_REAL`。真正的投递（构信号帧、改 rip、`sigreturn`）没有做，
+// `sigaction` 记下的 handler 目前只存不调用。
+//
+// 这一半单独拿出来是完整可用的，不是半成品：被屏蔽的信号本来就不投递，
+// 只挂在 pending 上等 `signalfd`/`sigwait` 消费——而"屏蔽 + signalfd"正是
+// 现代服务端处理信号的标准写法（绕开 handler 里的异步安全约束）。
+
+const SIGKILL: i32 = 9;
+const SIGSTOP: i32 = 19;
+
+fn sigset_bit(signo: i32) -> u64 {
+    if (1..=64).contains(&signo) {
+        1u64 << (signo - 1)
+    } else {
+        0
+    }
+}
+
+fn sys_rt_sigaction(m: &mut Machine, signo: i32, act: u64, old: u64) -> i64 {
+    if !(1..=64).contains(&signo) || signo == SIGKILL || signo == SIGSTOP {
+        return -EINVAL;
+    }
+    if old != 0 {
+        // struct sigaction 的第 0 个字段就是 handler。
+        if m.mem
+            .write_u64(old, m.os.sig_handlers[signo as usize])
+            .is_err()
+        {
+            return -EFAULT;
+        }
+    }
+    if act != 0 {
+        let h = match m.mem.read_u64(act) {
+            Ok(v) => v,
+            Err(_) => return -EFAULT,
+        };
+        m.os.sig_handlers[signo as usize] = h;
+    }
+    0
+}
+
+fn sys_rt_sigprocmask(m: &mut Machine, how: i32, set: u64, old: u64, size: u64) -> i64 {
+    const SIG_BLOCK: i32 = 0;
+    const SIG_UNBLOCK: i32 = 1;
+    const SIG_SETMASK: i32 = 2;
+    // 内核只接受它自己那个 sigset_t 大小（x86-64 上 8 字节）。
+    if size != 8 {
+        return -EINVAL;
+    }
+    if old != 0 && m.mem.write_u64(old, m.os.sig_blocked).is_err() {
+        return -EFAULT;
+    }
+    if set == 0 {
+        return 0;
+    }
+    let v = match m.mem.read_u64(set) {
+        Ok(v) => v,
+        Err(_) => return -EFAULT,
+    };
+    // SIGKILL/SIGSTOP 不可屏蔽，内核**静默忽略**这两位而不是报错。
+    let v = v & !(sigset_bit(SIGKILL) | sigset_bit(SIGSTOP));
+    m.os.sig_blocked = match how {
+        SIG_BLOCK => m.os.sig_blocked | v,
+        SIG_UNBLOCK => m.os.sig_blocked & !v,
+        SIG_SETMASK => v,
+        _ => return -EINVAL,
+    };
+    0
+}
+
+fn sys_rt_sigpending(m: &mut Machine, out: u64, size: u64) -> i64 {
+    if size != 8 {
+        return -EINVAL;
+    }
+    m.os.settle_alarm();
+    let mut bits = 0u64;
+    for (s, _, _) in &m.os.sig_pending {
+        bits |= sigset_bit(*s);
+    }
+    if m.mem.write_u64(out, bits).is_err() {
+        return -EFAULT;
+    }
+    0
+}
+
+/// `signalfd` / `signalfd4`。`fd >= 0` 时是**就地更新掩码**而不是新建。
+fn sys_signalfd(m: &mut Machine, fd: i32, mask_ptr: u64, size: u64, flags: i32) -> i64 {
+    if size != 8 {
+        return -EINVAL;
+    }
+    if flags & !(O_NONBLOCK | O_CLOEXEC) != 0 {
+        return -EINVAL;
+    }
+    if mask_ptr == 0 {
+        return -EFAULT;
+    }
+    let mask = match m.mem.read_u64(mask_ptr) {
+        Ok(v) => v,
+        Err(_) => return -EFAULT,
+    };
+    // SIGKILL/SIGSTOP 永远不能被 signalfd 接管，内核静默忽略这两位。
+    let mask = mask & !(sigset_bit(SIGKILL) | sigset_bit(SIGSTOP));
+    if fd >= 0 {
+        return match m.os.fds.get(fd).map(|f| &f.kind) {
+            Some(FdKind::Signal(g)) => {
+                g.mask.set(mask);
+                fd as i64
+            }
+            Some(_) => -EINVAL,
+            None => -EBADF,
+        };
+    }
+    match m.os.fds.alloc(Fd::new(
+        FdKind::Signal(fs::SignalFd::new(mask)),
+        flags & O_CLOEXEC != 0,
+        flags & O_NONBLOCK,
+    )) {
+        Some(n) => n as i64,
+        None => -EMFILE,
+    }
+}
+
+/// 从挂起集合里取走第一个落在 `mask` 内的信号。**按信号号从小到大**——
+/// 内核就是这么排的，`signalfd/batched-read` 连发 USR2、USR1 后断言读出来的
+/// 顺序是 USR1、USR2。
+fn take_pending(m: &mut Machine, mask: u64) -> Option<(i32, i32, i32)> {
+    m.os.settle_alarm();
+    let mut best: Option<usize> = None;
+    for (i, (s, _, _)) in m.os.sig_pending.iter().enumerate() {
+        if sigset_bit(*s) & mask == 0 {
+            continue;
+        }
+        if best.is_none_or(|b| *s < m.os.sig_pending[b].0) {
+            best = Some(i);
+        }
+    }
+    best.map(|i| m.os.sig_pending.remove(i))
+}
+
+/// `struct signalfd_siginfo` 是 128 字节；只填用例断言的那几个字段，
+/// 其余留 0——填一堆猜出来的值只会让人误以为它们可信。
+fn write_signalfd_siginfo(buf: &mut [u8], signo: i32, code: i32, pid: i32) {
+    buf[0..4].copy_from_slice(&(signo as u32).to_le_bytes()); // ssi_signo
+    buf[4..8].copy_from_slice(&0i32.to_le_bytes()); // ssi_errno
+    buf[8..12].copy_from_slice(&code.to_le_bytes()); // ssi_code
+    buf[12..16].copy_from_slice(&(pid as u32).to_le_bytes()); // ssi_pid
+}
+
+fn sys_setitimer(m: &mut Machine, which: i32, new: u64, old: u64) -> i64 {
+    const ITIMER_REAL: i32 = 0;
+    if which != ITIMER_REAL {
+        // 只做 REAL：VIRTUAL/PROF 要按 CPU 时间计，本引擎没有那个账本。
+        return -EINVAL;
+    }
+    m.os.settle_alarm();
+    if old != 0 {
+        let rem = m.os.alarm_deadline_ns.saturating_sub(now_ns());
+        // struct itimerval { timeval it_interval; timeval it_value; }，
+        // timeval 是 (sec, usec)。
+        let w = |m: &mut Machine, at: u64, ns: u64| -> bool {
+            m.mem.write_u64(at, ns / 1_000_000_000).is_ok()
+                && m.mem.write_u64(at + 8, (ns % 1_000_000_000) / 1000).is_ok()
+        };
+        if !w(m, old, m.os.alarm_interval_ns) || !w(m, old + 16, rem) {
+            return -EFAULT;
+        }
+    }
+    if new == 0 {
+        return 0;
+    }
+    let r = |m: &Machine, at: u64| -> Result<u64, i64> {
+        let s = m.mem.read_u64(at).map_err(|_| -EFAULT)?;
+        let us = m.mem.read_u64(at + 8).map_err(|_| -EFAULT)?;
+        if us >= 1_000_000 {
+            return Err(-EINVAL);
+        }
+        Ok(s.saturating_mul(1_000_000_000) + us * 1000)
+    };
+    let interval = match r(m, new) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let value = match r(m, new + 16) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    m.os.alarm_interval_ns = interval;
+    m.os.alarm_deadline_ns = if value == 0 { 0 } else { now_ns() + value };
+    0
+}
+
 /// `eventfd` / `eventfd2`。
 fn sys_eventfd(m: &mut Machine, init: u64, flags: i32) -> i64 {
     const EFD_SEMAPHORE: i32 = 1;
@@ -3597,6 +3916,7 @@ fn epoll_target(m: &Machine, fd: i32) -> Option<net::Target> {
         FdKind::PipeWrite(w) => net::Target::PipeWrite(Rc::downgrade(&w.share())),
         FdKind::Event(e) => net::Target::Event(Rc::downgrade(e)),
         FdKind::Timer(t) => net::Target::Timer(Rc::downgrade(t)),
+        FdKind::Signal(g) => net::Target::Signal(Rc::downgrade(g)),
         _ => net::Target::AlwaysReady,
     })
 }
@@ -3607,6 +3927,21 @@ fn epoll_target(m: &Machine, fd: i32) -> Option<net::Target> {
 /// 一旦分叉，表现是同一个 fd 在 `poll` 里可读、在 `epoll` 里不可读，
 /// 这种不一致极难从现象追回根因。
 fn readiness(m: &Machine, fd: i32) -> u32 {
+    // signalfd 的就绪要看**进程**的挂起集合，不是 fd 自身的状态，
+    // 所以在通用路径之前拦下来。ITIMER_REAL 的到期也在这里顺手结算。
+    if let Some(FdKind::Signal(g)) = m.os.fds.get(fd).map(|f| &f.kind) {
+        let mask = g.mask.get();
+        let alarm_due = m.os.alarm_deadline_ns != 0 && now_ns() >= m.os.alarm_deadline_ns;
+        let hit =
+            m.os.sig_pending
+                .iter()
+                .any(|(s, _, _)| sigset_bit(*s) & mask != 0);
+        return if hit || (alarm_due && sigset_bit(14) & mask != 0) {
+            net::EPOLLIN
+        } else {
+            0
+        };
+    }
     match epoll_target(m, fd) {
         Some(t) => t.readiness(),
         None => 0,
@@ -3744,7 +4079,12 @@ fn sys_epoll_wait(m: &mut Machine, epfd: i32, out: u64, maxevents: i32, timeout:
         if it.disarmed.get() {
             continue;
         }
-        let ready = it.target.readiness();
+        // signalfd 的就绪要问进程状态，`Target` 给不出答案（见那边的说明）。
+        let ready = if matches!(it.target, net::Target::Signal(_)) {
+            readiness(m, it.fd)
+        } else {
+            it.target.readiness()
+        };
         // ERR/HUP 无条件上报，不看 events 掩码（与 poll 同理）。
         let mask = (it.events & 0x2fff) | EPOLLERR | EPOLLHUP;
         let hit = ready & mask;
@@ -3778,10 +4118,14 @@ fn sys_epoll_wait(m: &mut Machine, epfd: i32, out: u64, maxevents: i32, timeout:
         let ep2 = Rc::clone(&ep);
         drop(list);
         let woke = wait_until_ready(timeout, || {
-            ep2.interests
-                .borrow()
-                .iter()
-                .any(|i| !i.disarmed.get() && i.target.readiness() != 0)
+            ep2.interests.borrow().iter().any(|i| {
+                !i.disarmed.get()
+                    && if matches!(i.target, net::Target::Signal(_)) {
+                        readiness(m, i.fd) != 0
+                    } else {
+                        i.target.readiness() != 0
+                    }
+            })
         });
         if woke {
             return sys_epoll_wait(m, epfd, out, maxevents, 0);
