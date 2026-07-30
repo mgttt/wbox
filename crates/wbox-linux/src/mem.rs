@@ -221,6 +221,26 @@ impl Mem {
         Ok(())
     }
 
+    /// 忽略权限位地读。
+    ///
+    /// `MAP_SHARED` 的回写要用它：guest 完全可以先 `mprotect(PROT_NONE)` 再
+    /// `munmap`，而内核的页缓存并不因为映射不可读就丢掉内容——按 `PROT_READ`
+    /// 去读会失败，那段写入就静默丢了（`t_mmap` 的 file-shared-persist 正是
+    /// 这么写的）。未映射的页读成 0。
+    pub fn read_raw(&self, addr: u64, buf: &mut [u8]) {
+        let mut done = 0usize;
+        while done < buf.len() {
+            let a = addr.wrapping_add(done as u64);
+            let off = (a & PAGE_MASK) as usize;
+            let n = (PAGE_SIZE as usize - off).min(buf.len() - done);
+            match self.pages.get(&Self::pn(a)) {
+                Some(p) => buf[done..done + n].copy_from_slice(&p.data[off..off + n]),
+                None => buf[done..done + n].fill(0),
+            }
+            done += n;
+        }
+    }
+
     /// 忽略权限位地写（加载器与栈初始化用：那时还没设最终 prot）。
     pub fn write_raw(&mut self, addr: u64, buf: &[u8]) {
         let mut done = 0usize;

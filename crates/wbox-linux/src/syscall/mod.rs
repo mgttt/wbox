@@ -129,6 +129,33 @@ pub struct Os {
     /// 与 timerfd 同样是**惰性结算**的，见 `fs::TimerFd` 的说明。
     pub alarm_deadline_ns: u64,
     pub alarm_interval_ns: u64,
+    /// 活着的**文件映射**。见 [`FileMap`]。
+    pub file_maps: Vec<FileMap>,
+}
+
+/// 一段文件映射。
+///
+/// # 为什么要单独记账
+///
+/// 引擎的内存是自己的稀疏页表，不是宿主的 `mmap`——所以"写到映射里"只是改了
+/// 页表，宿主文件毫不知情。`MAP_SHARED` 承诺的"写入落到文件"于是完全没有兑现
+/// （`t_mmap` 的 file-shared-* 全组红）。
+///
+/// 记下 (地址, 长度, 文件, 偏移) 之后，就能在**可观测的时刻**把内容刷回去。
+/// 刷回点选在 `munmap`/`msync`/`mremap`/进程退出——POSIX 只保证这些点之后
+/// 数据可见，而 guest 也只能在这些点之后去读文件。每次 guest 写内存都同步
+/// 回盘既做不到（没有写钩子）也没必要。
+///
+/// 文件句柄是 `try_clone` 来的**独立副本**：guest 关掉自己那个 fd 之后映射
+/// 依然有效，这是 POSIX 明确规定的（`mremap/file-private-move-after-close`
+/// 专门测了这条）。
+pub struct FileMap {
+    pub base: u64,
+    pub len: u64,
+    pub file: std::fs::File,
+    pub offset: u64,
+    /// `MAP_SHARED`：写入要回盘。`MAP_PRIVATE` 只是"从文件初始化"，不回写。
+    pub shared: bool,
 }
 
 impl Default for Os {
@@ -160,6 +187,7 @@ impl Os {
             sig_handlers: [0; 65],
             alarm_deadline_ns: 0,
             alarm_interval_ns: 0,
+            file_maps: Vec::new(),
         }
     }
 
@@ -209,6 +237,11 @@ impl Os {
             sig_handlers: self.sig_handlers,
             alarm_deadline_ns: 0,
             alarm_interval_ns: 0,
+            // 快照式 fork：子进程有自己的页表副本，映射记账也各算各的。
+            // "MAP_SHARED 跨进程共享"那一层没做（基线 A 组），如实不继承——
+            // 继承一份句柄反而会让父子各自把自己的页写回同一个文件，
+            // 表现成互相覆盖，比不做更难查。
+            file_maps: Vec::new(),
             pid_alloc: Rc::clone(&self.pid_alloc),
             zombies: Vec::new(),
             fork_depth: self.fork_depth + 1,
@@ -1913,6 +1946,7 @@ fn sys_chdir(m: &mut Machine, path_ptr: u64) -> i64 {
 
 const MAP_FIXED: i32 = 0x10;
 const MAP_ANONYMOUS: i32 = 0x20;
+const MAP_SHARED: i32 = 0x01;
 
 fn prot_from_guest(p: i32) -> u8 {
     let mut o = 0;
@@ -1945,16 +1979,32 @@ fn sys_mmap(m: &mut Machine, addr: u64, len: u64, prot: i32, flags: i32, fd: i32
         m.mem.find_free(len)
     };
 
+    // MAP_FIXED 会**覆盖**目标区间上已有的映射。那上面若是共享文件映射，
+    // 覆盖之前必须先刷回——否则那段写入随覆盖一起消失，而 guest 完全看不出
+    // 发生过什么。刷不动就整条 mmap 失败并保持原样（`t_mmap` 的
+    // `--writeback-failure-fixed` 断言的正是"报 EIO 且内容还在"）。
+    if flags & MAP_FIXED != 0 {
+        if let Err(e) = flush_file_maps(m, base, len) {
+            return e;
+        }
+        if let Err(e) = split_file_maps(m, base, len) {
+            return e;
+        }
+    }
+
     // guest 请求的 prot 可能不含写；但文件映射要先把内容写进去，
     // 所以先按可写建立，填完再收紧。
     m.mem.map(base, len, PROT_READ | PROT_WRITE);
     m.mem.zero(base, len);
 
     if flags & MAP_ANONYMOUS == 0 {
-        // 文件映射：把内容读进来。这是"快照式"映射——不是真共享，
-        // 对 MAP_SHARED 的写不会回写到文件。已知缺口，见 crate 文档。
+        // 文件映射：先把内容读进来，再把这段映射**记账**（见 `FileMap`）。
+        // 记账是 MAP_SHARED 能回写的前提；没有它，写入只改了引擎自己的页表，
+        // 宿主文件毫不知情。
         let mut buf = vec![0u8; len as usize];
-        let got = match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
+        // 句柄要 `try_clone` 一份自己留着：guest 随后关掉它那个 fd 之后，
+        // 映射依然有效（POSIX 明确规定），回写也还得找得到文件。
+        let (got, own) = match m.os.fds.get_mut(fd).map(|f| &mut f.kind) {
             Some(FdKind::File(f)) => {
                 let cur = f.stream_position().ok();
                 let r = f
@@ -1963,7 +2013,7 @@ fn sys_mmap(m: &mut Machine, addr: u64, len: u64, prot: i32, flags: i32, fd: i32
                 if let Some(c) = cur {
                     let _ = f.seek(SeekFrom::Start(c));
                 }
-                r
+                (r, f.try_clone().ok())
             }
             Some(_) | None => {
                 m.mem.unmap(base, len);
@@ -1979,6 +2029,17 @@ fn sys_mmap(m: &mut Machine, addr: u64, len: u64, prot: i32, flags: i32, fd: i32
                 m.mem.unmap(base, len);
                 return host_err(&e);
             }
+        }
+        if let Some(file) = own {
+            // 同一段地址重新映射时，旧记账要先去掉。
+            let _ = split_file_maps(m, base, len);
+            m.os.file_maps.push(FileMap {
+                base,
+                len,
+                file,
+                offset: off as u64,
+                shared: flags & MAP_SHARED != 0,
+            });
         }
     }
 
@@ -2012,12 +2073,194 @@ fn sys_mprotect(m: &mut Machine, addr: u64, len: u64, prot: i32) -> i64 {
     0
 }
 
+/// 测试用的回写故障注入。
+///
+/// 回写失败**必须能被 guest 观察到**——`msync`/`munmap` 报 `EIO` 且映射保持
+/// 原样，让调用方有机会重试。真机上这条路要磁盘满/IO 错才走得到，没法在
+/// 门禁里稳定复现，所以留一个只认环境变量的注入点。`t_mmap` 的
+/// `--writeback-failure-*` 五个探针跑的就是它。
+fn fshare_fault() -> Option<String> {
+    std::env::var("WBOX_TEST_FSHARE_FAIL").ok()
+}
+
+thread_local! {
+    /// 回写尝试计数（注入点按第几次来决定失败哪一次）。
+    static FLUSH_ATTEMPT: Cell<u32> = const { Cell::new(0) };
+    /// 拆分尝试计数。
+    static SPLIT_ATTEMPT: Cell<u32> = const { Cell::new(0) };
+}
+
+/// 这一次回写是否要被注入成失败。
+fn inject_flush_failure() -> bool {
+    let Some(kind) = fshare_fault() else {
+        return false;
+    };
+    let n = FLUSH_ATTEMPT.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    });
+    match kind.as_str() {
+        "writeback" => n == 0,
+        "writeback-second" => n == 1,
+        _ => false,
+    }
+}
+
+fn inject_split_failure() -> bool {
+    if fshare_fault().as_deref() != Some("split") {
+        return false;
+    }
+    SPLIT_ATTEMPT.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v == 0
+    })
+}
+
+/// 把落在 `[addr, addr+len)` 内的**共享**文件映射刷回文件。
+///
+/// `addr == 0 && len == 0` 表示"全部刷"，用于进程退出与 `execve`。
+///
+/// 失败返回负 errno，且**一个字节都不落**——调用方据此保留映射并把错误交给
+/// guest。刷了一半再报错是最糟的：文件处于中间状态，而调用方以为什么都没写。
+fn flush_file_maps(m: &mut Machine, addr: u64, len: u64) -> Result<(), i64> {
+    let all = addr == 0 && len == 0;
+    let maps: Vec<(u64, u64, u64, usize)> =
+        m.os.file_maps
+            .iter()
+            .enumerate()
+            .filter(|(_, fm)| fm.shared)
+            .filter_map(|(i, fm)| {
+                let (s, e) = (fm.base, fm.base + fm.len);
+                let (rs, re) = if all { (s, e) } else { (addr, addr + len) };
+                let lo = s.max(rs);
+                let hi = e.min(re);
+                if lo >= hi {
+                    None
+                } else {
+                    Some((lo, hi - lo, fm.offset + (lo - s), i))
+                }
+            })
+            .collect();
+    if maps.is_empty() {
+        return Ok(());
+    }
+    if inject_flush_failure() {
+        return Err(-EIO);
+    }
+    for (start, n, off, i) in maps {
+        // 用 `read_raw`：guest 可能先 `mprotect(PROT_NONE)` 再 `munmap`，
+        // 而内核的页缓存不会因为映射不可读就丢内容。按 PROT_READ 去读会失败，
+        // 那段写入就静默丢了。
+        let mut buf = vec![0u8; n as usize];
+        m.mem.read_raw(start, &mut buf);
+        let fm = &mut m.os.file_maps[i];
+        let r = fm.file.seek(SeekFrom::Start(off)).and_then(|_| {
+            use std::io::Write as _;
+            fm.file.write_all(&buf)
+        });
+        if let Err(e) = r {
+            return Err(host_err(&e));
+        }
+    }
+    Ok(())
+}
+
+/// 按 `[addr, addr+len)` 裁剪映射记账。
+///
+/// 三种形态：整段被吃掉（删记录）、只切掉一头（改 base/len/offset）、
+/// **从中间挖掉一块**（要拆成两条记录，因此需要再复制一份文件句柄——
+/// 句柄用尽时如实报 `EMFILE` 并保持原样，而不是悄悄丢掉一半的回写能力）。
+fn split_file_maps(m: &mut Machine, addr: u64, len: u64) -> Result<(), i64> {
+    let end = addr + len;
+    let mut add: Vec<FileMap> = Vec::new();
+    let mut drop_idx: Vec<usize> = Vec::new();
+    for i in 0..m.os.file_maps.len() {
+        let (b, l, off) = {
+            let fm = &m.os.file_maps[i];
+            (fm.base, fm.len, fm.offset)
+        };
+        let (s, e) = (b, b + l);
+        if end <= s || addr >= e {
+            continue;
+        }
+        let head = addr > s;
+        let tail = end < e;
+        if head && tail {
+            if inject_split_failure() {
+                return Err(-EMFILE);
+            }
+            let Ok(dup) = m.os.file_maps[i].file.try_clone() else {
+                return Err(-EMFILE);
+            };
+            add.push(FileMap {
+                base: end,
+                len: e - end,
+                file: dup,
+                offset: off + (end - s),
+                shared: m.os.file_maps[i].shared,
+            });
+            m.os.file_maps[i].len = addr - s;
+        } else if head {
+            m.os.file_maps[i].len = addr - s;
+        } else if tail {
+            m.os.file_maps[i].base = end;
+            m.os.file_maps[i].len = e - end;
+            m.os.file_maps[i].offset = off + (end - s);
+        } else {
+            drop_idx.push(i);
+        }
+    }
+    for i in drop_idx.into_iter().rev() {
+        m.os.file_maps.remove(i);
+    }
+    m.os.file_maps.extend(add);
+    Ok(())
+}
+
 fn sys_munmap(m: &mut Machine, addr: u64, len: u64) -> i64 {
     if addr & PAGE_MASK != 0 {
         return -EINVAL;
     }
-    m.mem.unmap(addr, (len + PAGE_MASK) & !PAGE_MASK);
+    let len = (len + PAGE_MASK) & !PAGE_MASK;
+    // **先刷回再解除映射**：解除之后页表就读不到内容了。
+    // 刷不动就整条 `munmap` 失败并保持映射原样——guest 才有机会重试。
+    if let Err(e) = flush_file_maps(m, addr, len) {
+        return e;
+    }
+    if let Err(e) = split_file_maps(m, addr, len) {
+        return e;
+    }
+    m.mem.unmap(addr, len);
     0
+}
+
+/// 调整某段文件映射的记账长度（`mremap` 原地伸缩后）。
+fn resize_file_map(m: &mut Machine, base: u64, new_len: u64) {
+    if let Some(fm) = m.os.file_maps.iter_mut().find(|f| f.base == base) {
+        fm.len = new_len;
+    }
+}
+
+/// `mremap` 就地扩大文件映射时，把新增的那一段从文件补读进来。
+fn fill_grown_file_map(m: &mut Machine, base: u64, old_len: u64, grow: u64) {
+    let Some(i) = m.os.file_maps.iter().position(|f| f.base == base) else {
+        return;
+    };
+    let off = m.os.file_maps[i].offset + old_len;
+    let mut buf = vec![0u8; grow as usize];
+    let fm = &mut m.os.file_maps[i];
+    let n = match fm
+        .file
+        .seek(SeekFrom::Start(off))
+        .and_then(|_| read_up_to(&mut fm.file, &mut buf))
+    {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    let data = buf[..n].to_vec();
+    m.mem.write_raw(base + old_len, &data);
 }
 
 const MREMAP_MAYMOVE: i32 = 1;
@@ -2048,9 +2291,18 @@ fn sys_mremap(
     if !m.mem.is_mapped(old, old_len) {
         return -EFAULT;
     }
-    // 缩小：原地截掉尾部
-    if new_len <= old_len {
+    // 缩小/等长：原地截掉尾部（截掉的那段若是共享映射要先刷回）。
+    //
+    // **但 MREMAP_FIXED 不走这条**：它要求落在指定地址上，哪怕长度没变。
+    // 漏掉这个条件的表现是 `mremap(src, N, N, MAYMOVE|FIXED, target)` 原样
+    // 返回 src，调用方拿到的地址根本不是它指定的那个
+    // （`mremap/file-fixed-replaces-shared-target` 抓的就是这条）。
+    if new_len <= old_len && flags & MREMAP_FIXED == 0 {
+        if let Err(e) = flush_file_maps(m, old + new_len, old_len - new_len) {
+            return e;
+        }
         m.mem.unmap(old + new_len, old_len - new_len);
+        resize_file_map(m, old, new_len);
         return old as i64;
     }
     // 扩大：先试原地
@@ -2058,6 +2310,11 @@ fn sys_mremap(
     if flags & MREMAP_FIXED == 0 && !m.mem.is_mapped(old + old_len, grow) {
         m.mem.map(old + old_len, grow, PROT_READ | PROT_WRITE);
         m.mem.zero(old + old_len, grow);
+        // **扩大的那段要从文件补读**。文件映射扩大后，新增页对应的是文件里
+        // 更后面的内容，不是零页——`mremap/file-private-readback` 正是先缩到
+        // 一页再逐步扩回去，然后断言第 2、3 页读到的仍是文件内容。
+        fill_grown_file_map(m, old, old_len, grow);
+        resize_file_map(m, old, new_len);
         return old as i64;
     }
     if flags & (MREMAP_MAYMOVE | MREMAP_FIXED) == 0 {
@@ -2073,10 +2330,27 @@ fn sys_mremap(
     if m.mem.read(old, &mut buf).is_err() {
         return -EFAULT;
     }
+    // 目标区间可能压着别的映射（MREMAP_FIXED 的语义就是替换它）：
+    // 先把那边的共享内容刷回去再覆盖，否则那段写入直接丢了。
+    if let Err(e) = flush_file_maps(m, dst, new_len) {
+        return e;
+    }
+    if let Err(e) = split_file_maps(m, dst, new_len) {
+        return e;
+    }
     m.mem.map(dst, new_len, PROT_READ | PROT_WRITE);
     m.mem.zero(dst, new_len);
     m.mem.write_raw(dst, &buf);
     m.mem.unmap(old, old_len);
+    // 记账跟着搬：基址与长度都变了，文件与偏移不变。
+    if let Some(fm) = m.os.file_maps.iter_mut().find(|f| f.base == old) {
+        fm.base = dst;
+        fm.len = new_len;
+    }
+    // 搬完再补读扩大的那一段（要在记账更新之后，它按新基址找）。
+    if new_len > old_len {
+        fill_grown_file_map(m, dst, old_len, new_len - old_len);
+    }
     dst as i64
 }
 
@@ -2898,8 +3172,13 @@ fn sys_msync(m: &mut Machine, addr: u64, len: u64, flags: i32) -> i64 {
     if flags & MS_SYNC != 0 && flags & MS_ASYNC != 0 {
         return -EINVAL;
     }
-    if !m.mem.is_mapped(addr, (len + PAGE_MASK) & !PAGE_MASK) {
+    let len = (len + PAGE_MASK) & !PAGE_MASK;
+    if !m.mem.is_mapped(addr, len) {
         return -ENOMEM;
+    }
+    // MS_ASYNC 也刷：本引擎没有异步回写线程，"稍后写"就等于"不写"。
+    if let Err(e) = flush_file_maps(m, addr, len) {
+        return e;
     }
     0
 }

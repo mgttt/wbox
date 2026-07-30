@@ -78,8 +78,12 @@
 #      管道的 POLLHUP/POLLERR/EPIPE、管道 fsync 报 EINVAL；
 #      顺带修掉两个 dirfd 被丢弃的分发错误（faccessat、linkat）与
 #      "最小可用 fd 下界写死 3"。t_fd_open 与 t_fd_rw 现已全通并移出基线。
-#   G. mmap 的部分精度（私有文件映射的 mremap 增长回读）
-#      t_mmap
+#   G. mmap 的部分精度 —— **已修，整组清空**（t_mmap 140/0 + 5 个故障注入探针）。
+#      引擎的内存是自己的稀疏页表，不是宿主 mmap，所以"写到映射里"只改了
+#      页表、宿主文件毫不知情，`MAP_SHARED` 的承诺完全没兑现。现在给每段
+#      文件映射记账（地址/长度/文件副本/偏移/是否共享），在
+#      munmap/msync/mremap/MAP_FIXED 覆盖这些**可观测的时刻**刷回。
+#      回写失败要能被 guest 观察到：报 EIO 且映射保持原样，让调用方能重试。
 #
 # **H 组（宿主 symlink 不防护）已整组清空**：VFS 换成用户态的
 # `RESOLVE_IN_ROOT`（逐段解析，符号链接目标重新从 rootfs 根展开），
@@ -104,8 +108,6 @@ t_signal_timer
 t_proc
 
 
-# G. mmap 精度
-t_mmap
 
 
 # I. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
