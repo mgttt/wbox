@@ -15,6 +15,10 @@ use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::{PAGE_MASK, PROT_EXEC, PROT_READ, PROT_WRITE};
 use fs::{Fd, FdKind, FdTable, Vfs};
 use std::cell::Cell;
+#[cfg(windows)]
+use std::cell::RefCell;
+#[cfg(windows)]
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
@@ -109,8 +113,13 @@ pub struct Os {
     pub strace: bool,
     /// `uname` 报的内核版本。
     pub release: String,
-    /// `umask` 的当前值。只记录不生效，见分派表里的说明。
+    /// `umask` 的当前值。新建 guest 文件的虚拟 Unix mode 会应用它。
     pub umask: u32,
+    /// Windows 不保存 Unix permission bits；按稳定文件 identity 维护 guest
+    /// 自己的权限视图。放在共享表里，使 snapshot fork 创建或观察到的文件
+    /// 在父子进程间保持同一份文件系统元数据。
+    #[cfg(windows)]
+    file_modes: Rc<RefCell<HashMap<(u64, u64), u32>>>,
     /// 信号屏蔽字（位 0 = 信号 1）。
     ///
     /// # 为什么"只记 pending、不投递"仍然有用
@@ -182,6 +191,8 @@ impl Os {
             // "FATAL: kernel too old" 退出。
             release: "6.1.0-wbox".to_string(),
             umask: 0o022,
+            #[cfg(windows)]
+            file_modes: Rc::new(RefCell::new(HashMap::new())),
             sig_blocked: 0,
             sig_pending: Vec::new(),
             sig_handlers: [0; 65],
@@ -251,6 +262,8 @@ impl Os {
             strace: self.strace,
             release: self.release.clone(),
             umask: self.umask,
+            #[cfg(windows)]
+            file_modes: Rc::clone(&self.file_modes),
         }
     }
 }
@@ -1394,7 +1407,9 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opt.mode(mode & 0o777);
+        // 先以 000 创建，再在句柄上设置 guest mode。这样宿主进程自己的
+        // umask 不会二次收紧权限，也不存在先暴露过宽权限再修正的窗口。
+        opt.mode(0);
     }
     #[cfg(windows)]
     {
@@ -1403,7 +1418,6 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
         const FILE_SHARE_WRITE: u32 = 2;
         const FILE_SHARE_DELETE: u32 = 4;
         const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
-        let _ = mode;
         opt.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
     }
@@ -1411,6 +1425,25 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
         Ok(f) => f,
         Err(e) => return host_err(&e),
     };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(mode & !m.os.umask & 0o777);
+        if let Err(e) = f.set_permissions(permissions) {
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+            return host_err(&e);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let r = remember_created_mode(m, &f, mode);
+        if r != 0 {
+            drop(f);
+            let _ = std::fs::remove_file(&path);
+            return r;
+        }
+    }
     #[cfg(unix)]
     if let Err(e) = std::fs::remove_file(&path) {
         // 删不掉就别把这个 fd 交出去：交出去 = 在 rootfs 里留下可见垃圾，
@@ -1503,6 +1536,18 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         return -ENOTDIR;
     }
 
+    // O_CREAT 只在真正创建 inode 时应用 mode；打开既有文件不能改权限。
+    // O_EXCL 成功就必然是新文件，其余情况在碰宿主前记录是否存在。
+    let creates_new = if flags & O_CREAT == 0 {
+        false
+    } else if flags & O_EXCL != 0 {
+        true
+    } else {
+        match host.try_exists() {
+            Ok(exists) => !exists,
+            Err(e) => return host_err(&e),
+        }
+    };
     let mut opt = std::fs::OpenOptions::new();
     match flags & O_ACCMODE {
         O_RDONLY => opt.read(true),
@@ -1528,11 +1573,13 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         }
         // O_CREAT 的 mode 必须真的生效：guest 用 0604 之类的位创建文件后会
         // fstat 回来检查。忽略它会让 mode 断言以"权限位不对"的形式失败。
-        // Windows 没有 Unix 权限位，只能忽略（已知差异）。
+        // Windows 的权限位由 guest 自己按文件 identity 维护，见
+        // `remember_created_mode`；不要把宿主固定合成的 0644 暴露给 guest。
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opt.mode(mode & 0o777);
+            // 宿主 umask 不能参与 guest 语义；成功打开后在句柄上设置最终值。
+            opt.mode(0);
         }
         #[cfg(not(unix))]
         {
@@ -1541,6 +1588,25 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
     }
     match opt.open(&host) {
         Ok(f) => {
+            #[cfg(unix)]
+            if creates_new {
+                use std::os::unix::fs::PermissionsExt;
+                let permissions = std::fs::Permissions::from_mode(mode & !m.os.umask & 0o777);
+                if let Err(e) = f.set_permissions(permissions) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&host);
+                    return host_err(&e);
+                }
+            }
+            #[cfg(windows)]
+            if creates_new {
+                let r = remember_created_mode(m, &f, mode);
+                if r != 0 {
+                    drop(f);
+                    let _ = std::fs::remove_file(&host);
+                    return r;
+                }
+            }
             let fd = Fd::new(FdKind::File(f), flags & O_CLOEXEC != 0, flags);
             match m.os.fds.alloc(fd) {
                 Some(n) => n as i64,
@@ -1614,15 +1680,11 @@ fn sys_getdents64(m: &mut Machine, fd: i32, buf: u64, count: u64) -> i64 {
 }
 
 /// 按 x86-64 的 `struct stat`（144 字节）布局填缓冲区。
-fn write_stat(m: &mut Machine, out: u64, md: &std::fs::Metadata) -> i64 {
-    write_stat_with_identity(m, out, md, None)
-}
-
 fn write_stat_with_identity(
     m: &mut Machine,
     out: u64,
     md: &std::fs::Metadata,
-    _identity: Option<(u64, u64, u64)>,
+    identity: Option<(u64, u64, u64)>,
 ) -> i64 {
     let mut b = [0u8; 144];
 
@@ -1637,13 +1699,12 @@ fn write_stat_with_identity(
 
     // Unix 宿主上用真实值，guest 的 hardlink 计数、inode 比较才有意义。
     #[cfg(unix)]
-    let (dev, ino, nlink, mode, uid, gid, blksize, blocks) = {
+    let (dev, ino, nlink, uid, gid, blksize, blocks) = {
         use std::os::unix::fs::MetadataExt;
         (
             md.dev(),
             md.ino(),
             md.nlink(),
-            md.mode(),
             md.uid(),
             md.gid(),
             md.blksize() as i64,
@@ -1653,23 +1714,16 @@ fn write_stat_with_identity(
     // Windows 宿主：没有 inode，用合成值。guest 若靠 (dev, ino) 判断
     // "是不是同一个文件"会失效，这是已知缺口。
     #[cfg(not(unix))]
-    let (dev, ino, nlink, mode, uid, gid, blksize, blocks) = (
-        _identity.map_or(1, |v| v.0),
-        _identity.map_or(1, |v| v.1),
-        _identity.map_or(1, |v| v.2),
-        // 从文件类型合成 mode：Windows 没有 Unix 权限位。
-        if md.is_dir() {
-            0o040755u32
-        } else if md.file_type().is_symlink() {
-            0o120777
-        } else {
-            0o100644
-        },
+    let (dev, ino, nlink, uid, gid, blksize, blocks) = (
+        identity.map_or(1, |v| v.0),
+        identity.map_or(1, |v| v.1),
+        identity.map_or(1, |v| v.2),
         0u32,
         0u32,
         4096i64,
         size.div_ceil(512) as i64,
     );
+    let mode = metadata_mode(m, md, identity);
 
     b[0..8].copy_from_slice(&dev.to_le_bytes());
     b[8..16].copy_from_slice(&ino.to_le_bytes());
@@ -1690,6 +1744,36 @@ fn write_stat_with_identity(
         return -EFAULT;
     }
     0
+}
+
+fn metadata_mode(m: &Machine, md: &std::fs::Metadata, identity: Option<(u64, u64, u64)>) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = (m, identity);
+        md.mode()
+    }
+    #[cfg(windows)]
+    {
+        let file_type = if md.is_dir() {
+            0o040000
+        } else if md.file_type().is_symlink() {
+            0o120000
+        } else {
+            0o100000
+        };
+        let fallback = if md.is_dir() {
+            0o755
+        } else if md.file_type().is_symlink() {
+            0o777
+        } else {
+            0o644
+        };
+        let permissions = identity
+            .and_then(|(dev, ino, _)| m.os.file_modes.borrow().get(&(dev, ino)).copied())
+            .unwrap_or(fallback);
+        file_type | permissions
+    }
 }
 
 #[cfg(windows)]
@@ -1715,6 +1799,33 @@ fn windows_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64, u64
         ino,
         info.nNumberOfLinks as u64,
     ))
+}
+
+#[cfg(windows)]
+fn windows_path_identity(path: &std::path::Path) -> std::io::Result<(u64, u64, u64)> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    const FILE_SHARE_DELETE: u32 = 4;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    windows_file_identity(&file)
+}
+
+#[cfg(windows)]
+fn remember_created_mode(m: &mut Machine, file: &std::fs::File, requested: u32) -> i64 {
+    let (dev, ino, _) = match windows_file_identity(file) {
+        Ok(identity) => identity,
+        Err(e) => return host_err(&e),
+    };
+    let permissions = requested & !m.os.umask & 0o777;
+    m.os.file_modes.borrow_mut().insert((dev, ino), permissions);
+    0
 }
 
 fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
@@ -1803,7 +1914,20 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
         std::fs::symlink_metadata(&host)
     };
     match md {
-        Ok(md) => write_stat(m, out, &md),
+        Ok(md) => {
+            #[cfg(windows)]
+            let identity = if md.file_type().is_symlink() {
+                None
+            } else {
+                match windows_path_identity(&host) {
+                    Ok(identity) => Some(identity),
+                    Err(e) => return host_err(&e),
+                }
+            };
+            #[cfg(not(windows))]
+            let identity = None;
+            write_stat_with_identity(m, out, &md, identity)
+        }
         Err(e) => host_err(&e),
     }
 }
@@ -3063,10 +3187,8 @@ fn sys_poll(m: &mut Machine, fds_ptr: u64, nfds: u64, timeout: i32) -> i64 {
 /// 布局见 `struct statx`（256 字节）。
 fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -> i64 {
     const STATX_BASIC_STATS: u32 = 0x07ff;
-    // 先借 stat 拿到宿主元数据（复用同一套 dirfd/AT_EMPTY_PATH 语义）
-    let mut st = [0u8; 144];
-    let scratch = 0u64; // 不写 guest 内存，直接在宿主侧取
-    let _ = scratch;
+    #[allow(unused_mut)]
+    let mut identity = None;
     let md = {
         let path = match guest_path(m, path_ptr) {
             Ok(p) => p,
@@ -3074,8 +3196,26 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
         };
         if flags & AT_EMPTY_PATH != 0 && path.is_empty() {
             match m.os.fds.get(dirfd).map(|f| &f.kind) {
-                Some(FdKind::File(f)) => f.metadata(),
-                Some(FdKind::Dir { path, .. }) => std::fs::metadata(path),
+                Some(FdKind::File(f)) => {
+                    #[cfg(windows)]
+                    {
+                        identity = match windows_file_identity(f) {
+                            Ok(identity) => Some(identity),
+                            Err(e) => return host_err(&e),
+                        };
+                    }
+                    f.metadata()
+                }
+                Some(FdKind::Dir { path, .. }) => {
+                    #[cfg(windows)]
+                    {
+                        identity = match windows_path_identity(path) {
+                            Ok(identity) => Some(identity),
+                            Err(e) => return host_err(&e),
+                        };
+                    }
+                    std::fs::metadata(path)
+                }
                 Some(_) => return -EBADF,
                 None => return -EBADF,
             }
@@ -3085,27 +3225,28 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 Ok(p) => p,
                 Err(e) => return e,
             };
-            if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            let md = if flags & AT_SYMLINK_NOFOLLOW != 0 {
                 std::fs::symlink_metadata(&host)
             } else {
                 std::fs::metadata(&host)
+            };
+            #[cfg(windows)]
+            if md.as_ref().is_ok_and(|md| !md.file_type().is_symlink()) {
+                identity = match windows_path_identity(&host) {
+                    Ok(identity) => Some(identity),
+                    Err(e) => return host_err(&e),
+                };
             }
+            md
         }
     };
     let md = match md {
         Ok(v) => v,
         Err(e) => return host_err(&e),
     };
-    let _ = &mut st;
 
     let size = md.len();
-    let mode: u16 = if md.is_dir() {
-        0o040755
-    } else if md.file_type().is_symlink() {
-        0o120777
-    } else {
-        0o100644
-    };
+    let mode = metadata_mode(m, &md, identity) as u16;
     let (nlink, ino, blksize, blocks, uid, gid) = {
         #[cfg(unix)]
         {
@@ -3121,7 +3262,14 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
         }
         #[cfg(not(unix))]
         {
-            (1u32, 1u64, 4096u32, size.div_ceil(512), 0u32, 0u32)
+            (
+                identity.map_or(1, |v| v.2 as u32),
+                identity.map_or(1, |v| v.1),
+                4096u32,
+                size.div_ceil(512),
+                0u32,
+                0u32,
+            )
         }
     };
     let mtime = md

@@ -70,6 +70,84 @@ fn fstat_distinguishes_different_windows_files() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_ocreat_mode_is_guest_owned_across_metadata_views() {
+    let dir = std::env::temp_dir().join(format!(
+        "wbox-linux-mode-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+
+    let mut m = mach();
+    m.os.vfs = fs::Vfs {
+        prefix: Some(dir.clone()),
+        cwd: std::path::PathBuf::from("/"),
+        mounts: Vec::new(),
+    };
+    m.os.umask = 0o027;
+    let at = scratch(&mut m);
+    m.mem.write_raw(at, b"/created\0");
+    let fd = sys_openat(&mut m, AT_FDCWD, at, O_RDWR | O_CREAT | O_EXCL, 0o666);
+    assert!(fd >= 0, "O_CREAT failed: {fd}");
+    let fd = fd as i32;
+    let expected = 0o640;
+
+    assert_eq!(sys_fstat(&mut m, fd, at + 256), 0);
+    assert_eq!(
+        m.mem.read_u32(at + 256 + 24).unwrap() & 0o777,
+        expected,
+        "fstat must report mode & !guest_umask"
+    );
+    assert_eq!(sys_stat_path(&mut m, AT_FDCWD, at, at + 512, true), 0);
+    assert_eq!(
+        m.mem.read_u32(at + 512 + 24).unwrap() & 0o777,
+        expected,
+        "path stat must agree with fstat"
+    );
+    assert_eq!(sys_statx(&mut m, AT_FDCWD, at, 0, at + 768), 0);
+    assert_eq!(
+        m.mem.read_u16(at + 768 + 28).unwrap() as u32 & 0o777,
+        expected,
+        "statx must agree with fstat"
+    );
+    let reopened = sys_openat(&mut m, AT_FDCWD, at, O_RDWR | O_CREAT, 0o777);
+    assert!(
+        reopened >= 0,
+        "reopening an existing file failed: {reopened}"
+    );
+    assert_eq!(sys_fstat(&mut m, reopened as i32, at + 896), 0);
+    assert_eq!(
+        m.mem.read_u32(at + 896 + 24).unwrap() & 0o777,
+        expected,
+        "O_CREAT on an existing inode must not replace its mode"
+    );
+    assert_eq!(sys_close(&mut m, reopened as i32), 0);
+
+    let renamed = dir.join("renamed");
+    std::fs::rename(dir.join("created"), &renamed).unwrap();
+    std::fs::hard_link(&renamed, dir.join("linked")).unwrap();
+    for (name, out) in [
+        (b"/renamed\0".as_slice(), at + 1024),
+        (b"/linked\0", at + 1280),
+    ] {
+        m.mem.write_raw(at, name);
+        assert_eq!(sys_stat_path(&mut m, AT_FDCWD, at, out, true), 0);
+        assert_eq!(
+            m.mem.read_u32(out + 24).unwrap() & 0o777,
+            expected,
+            "mode must follow the Windows file identity across rename/hardlink"
+        );
+    }
+
+    drop(m);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn brk_grows_and_maps_new_pages() {
     let mut m = mach();
