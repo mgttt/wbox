@@ -2771,7 +2771,7 @@ TODO-LINUX
 ├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
 ├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [done] 门禁 CP.7/CP.8/AF.8；见下方 L8
-├── L9 Linux native / Wine 共用后端验收当前失败            [verify] 修已推，等 CI 绿；见下方 L9
+├── L9 Linux native / Wine 共用后端验收当前失败            [done] CI 三个 job 全绿；见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
@@ -3192,7 +3192,7 @@ Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不�
 「用 '..' 逃出了 rootfs」。反向用例 CP.5（正常嵌套路径照常拷得进去）与
 `in_image_symlink_still_follows` 保证挡得住的同时没把功能一起挡掉。
 
-##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[verify]`
+##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[done]`
 
 **已取得失败断言。** 原条目是"验收当前失败，待取得失败断言"——真正的问题
 不是用例红，而是 `test-wine-backend` 这个 **release 前置门禁在全 SKIP 时也返回 0**：
@@ -3246,14 +3246,23 @@ W 段的依赖检查刻意绕过 `WBOX_LBE_REQUIRE` 直接 `report SKIP`，于�
 `V.2b/V.2c`、`MS.3`、`INS.1/2/4` 全部 PASS，新增的 `INS.6` 也 PASS，收尾
 `rm -rf` 不再报 Permission denied。
 
-**`test-linux-backend` 还差最后一步，而且这一步本身就是上面那条教训的续集**：
-这个 job 跑两遍脚本，第二遍在**现造的 cgroup v2 委派子树**里跑（`C.1/C.2`
-那两条）。此前主跑就红，第二遍从来没执行过——于是 `PZ.2` 在委派环境下的
-偶发红一直被前面的失败挡着看不见。真相是用例夹具自己的竞态：guest 用
+**`test-linux-backend` 的最后一步本身就是上面那条教训的续集。** 这个 job 跑
+两遍脚本，第二遍在**现造的 cgroup v2 委派子树**里跑（`C.1/C.2` 那两条）。
+此前主跑就红，第二遍从来没执行过——于是 `PZ.2` 在委派环境下的偶发红一直被
+前面的失败挡着看不见。真相是用例夹具自己的竞态：guest 用
 `echo $i > /pz/pzcount` 记数，那是"截断再写"，宿主侧 `cat` 落在两步之间就读到
 空串（报文写的是"恢复 1 秒后=（空）"，而不是"仍等于暂停时的 40"——空串正是
 这个竞态的指纹，进程真没恢复的话读到的会是 40）。改成写临时文件再 `rename`，
-读者要么看到旧值要么看到新值。判据的力度没变。
+读者要么看到旧值要么看到新值，判据的力度没变。
+
+修这条时又踩了同一个形状的第三次：`mv` 不在 `APPLETS` 里，容器内它静默不
+存在，`/pz/pzcount` 从此没被建出来，PZ.1/PZ.2 双双读到空——脚本里那段
+harness 自检的注释warning 的正是这个（缺 applet 会伪装成产品回归）。补进
+`APPLETS` 后自检也一并覆盖它。
+
+**收口取证：GitHub CI 在 `63a5561` 上全绿**——`test-linux-backend`（主跑
+PASS=240 FAIL=0 SKIP=2，外加 cgroup v2 委派子树那一遍）、`test-wine-backend`、
+`guest-tests` 三个 job 都通过。至此本条回填 `[done]`。
 
 ##### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
 
