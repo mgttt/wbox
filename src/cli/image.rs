@@ -61,6 +61,9 @@ fn remove_cached_image(iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
             dir.display()
         )));
     }
+    // 构建过的镜像目录里可能留着 overlay 的 mode-000 work 树，先补权限再删。
+    #[cfg(unix)]
+    crate::fsutil::make_tree_owner_accessible(&dir);
     std::fs::remove_dir_all(&dir).map_err(|e| {
         WboxError::registry(format!("删除缓存目录 '{}' 失败：{}", dir.display(), e))
     })?;

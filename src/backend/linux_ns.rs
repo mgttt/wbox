@@ -413,6 +413,28 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
             // 宿主程序模式不换根，guest 路径就是宿主路径。
             None => std::path::PathBuf::from(&v.guest),
         };
+        // # 宿主程序模式不替用户在宿主上建目录
+        //
+        // 这里的 `create_at` 在宿主模式下**就是宿主自己的那条路径**（不换根，
+        // guest 路径即宿主路径）。早先缺了就 `create_dir_all`，于是
+        // `-v src:/mnt/data` 会在宿主的 `/mnt` 下真的建出一个目录——容器退出
+        // 后它还在。用户要的是"把 src 挂到容器里的 /mnt/data"，不是"改造我的
+        // 宿主文件系统"。
+        //
+        // 而且它多半还建不成：普通用户对 `/mnt` 没有写权限，报出来的是一句
+        // 光秃秃的 Permission denied，看不出根因是"挂载点不存在"。CI（uid
+        // 1001）上 INS 段整段红就是这么来的，本机因为恰好有 `/mnt/data`
+        // 而一直是绿的。
+        //
+        // 镜像模式没有这个问题：挂载点建在 overlay 的 upper 里，随容器一起
+        // 消失，宿主分毫未动——所以只在宿主模式下拒绝。
+        if !create_at.exists() && new_root.is_none() {
+            return Err(WboxError::spawn(format!(
+                "宿主程序模式下挂载点 '{}' 必须已存在（不换根时它就是宿主上的这条路径，\
+                 wbox 不会替你在宿主上创建它）：先 `mkdir -p {}`，或改用镜像模式",
+                v.guest, v.guest
+            )));
+        }
         // 挂载点必须先存在，且**类型要与源一致**：源是文件就建文件，
         // 源是目录才建目录。之前一律 create_dir_all，挂文件时内核会因为
         // "目录挂到文件上"报 ENOTDIR，而错误信息完全看不出根因。

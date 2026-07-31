@@ -34,6 +34,8 @@ mod restart;
 // 纯 Rust Linux ELF/OCI 执行运行时（PRD F4.R1-F4.R4）。
 #[allow(dead_code)]
 mod runtime;
+// 文件系统清理的共用动作（overlayfs 的 mode-000 work 目录要先补权限才删得掉）。
+mod fsutil;
 // seccomp-bpf 按 syscall 拦截（PRD F9.9）。解析与 BPF 构造可单测；落地在 linux_ns。
 mod seccomp;
 // 运行中容器的状态目录与发现（PRD F8.a）。跨平台：锁语义由 OS 保证。

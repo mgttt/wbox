@@ -836,30 +836,64 @@ fi
 # 全是可写的——用户写了 :ro 却能往里写，是个没兑现的承诺。
 #
 # 造一个真的带子挂载的源：VOLSRC/sub 上再 bind 一层。
+#
+# **造子挂载要 CAP_SYS_ADMIN，而 CI 的 runner 是普通用户**，直接
+# `mount --bind` 必然 EPERM。早先这里一见失败就 absent，于是在
+# WBOX_LBE_REQUIRE=1 的门禁上直接记 FAIL——本地 root 全绿、CI 常红，
+# 而真正被放空的恰恰是"递归只读"这条最该守住的断言。
+#
+# 修法不是放宽判据，是换个有权限的地方造：`unshare --map-root-user --mount`
+# 里就能 bind，wbox 从那儿起还能再嵌一层自己的 userns，被测代码路径分毫
+# 未变。只有连 userns 都开不了时才谈得上"本环境不具备该能力"。
 VOLSUB="$WORK/volsub"
 mkdir -p "$VOLSRC/sub" "$VOLSUB"
 echo seed > "$VOLSUB/inner.txt"
 if mount --bind "$VOLSUB" "$VOLSRC/sub" 2>/dev/null; then
-  run -v "$VOLSRC:/ro:ro" lbetest -- /bin/sh -c 'echo X > /ro/sub/should-fail.txt'
+  VSUB_MODE=direct
+elif unshare --map-root-user --mount -- /bin/sh -c \
+       'mount --bind "$1" "$2/sub"' wbox-vsub "$VOLSUB" "$VOLSRC" 2>/dev/null; then
+  VSUB_MODE=userns
+else
+  VSUB_MODE=none
+fi
+
+# 跑一条"源带子挂载"的用例。userns 模式下 bind 只在那个 mount namespace 里
+# 存在，所以挂载与 wbox 必须在**同一次** unshare 里执行。
+vsub_run() { # $1=-v 参数  $2=容器内命令；结果同 run()：$OUT / $rc
+  if [ "$VSUB_MODE" = direct ]; then
+    OUT=$(HOME=$WORK/home "$WBOX_ABS" run -v "$1" lbetest -- /bin/sh -c "$2" 2>&1)
+  else
+    OUT=$(unshare --map-root-user --mount -- /bin/sh -c '
+            mount --bind "$1" "$2/sub" || exit 97
+            HOME=$3 exec "$4" run -v "$5" lbetest -- /bin/sh -c "$6"' \
+          wbox-vsub "$VOLSUB" "$VOLSRC" "$WORK/home" "$WBOX_ABS" "$1" "$2" 2>&1)
+  fi
+  rc=$?
+  return $rc
+}
+
+if [ "$VSUB_MODE" != none ]; then
+  vsub_run "$VOLSRC:/ro:ro" 'echo X > /ro/sub/should-fail.txt'
   if [ "$rc" -ne 0 ] && [ ! -f "$VOLSUB/should-fail.txt" ]; then
-    report PASS "V.2b -v :ro 递归只读（子挂载也写不进去）"
+    report PASS "V.2b -v :ro 递归只读（子挂载也写不进去，$VSUB_MODE）"
   else
     report FAIL "V.2b :ro 递归只读" \
-      "rc=$rc（期望非 0）；子挂载是否被写入=$([ -f "$VOLSUB/should-fail.txt" ] && echo 是 || echo 否)"
+      "rc=$rc（期望非 0）；子挂载是否被写入=$([ -f "$VOLSUB/should-fail.txt" ] && echo 是 || echo 否) 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 160)"
   fi
   # 反向：同一个带子挂载的源，不加 :ro 时应当可写——只测"挡得住"会让
   # 一个"永远拒绝写"的实现也变绿。
-  run -v "$VOLSRC:/rw" lbetest -- /bin/sh -c 'echo Y > /rw/sub/ok.txt'
+  vsub_run "$VOLSRC:/rw" 'echo Y > /rw/sub/ok.txt'
   if [ "$rc" -eq 0 ] && [ -f "$VOLSUB/ok.txt" ]; then
     report PASS "V.2c 不加 :ro 时子挂载照常可写（递归只读没有误伤）"
   else
-    report FAIL "V.2c 子挂载可写" "rc=$rc 宿主有 ok.txt=$([ -f "$VOLSUB/ok.txt" ] && echo 是 || echo 否)"
+    report FAIL "V.2c 子挂载可写" "rc=$rc 宿主有 ok.txt=$([ -f "$VOLSUB/ok.txt" ] && echo 是 || echo 否) 输出: $(printf '%s' "$OUT" | tr '\n' ' ' | head -c 160)"
   fi
-  umount "$VOLSRC/sub" 2>/dev/null || true
+  [ "$VSUB_MODE" = direct ] && { umount "$VOLSRC/sub" 2>/dev/null || true; }
 else
-  # 无权限做 bind mount（需要 CAP_SYS_ADMIN 或在 userns 内）时跳过。
-  absent "V.2b/V.2c :ro 递归只读" "本环境无法建立测试用的子挂载（需要 mount --bind 权限）"
+  # 连 user namespace 都开不出来：这时确实造不出子挂载。
+  absent "V.2b/V.2c :ro 递归只读" "本环境既无 mount --bind 权限、也开不出 user namespace"
 fi
+rm -f "$VOLSUB/should-fail.txt" "$VOLSUB/ok.txt" 2>/dev/null || true
 rmdir "$VOLSRC/sub" 2>/dev/null || true
 
 # V.3 安全断言：挂到容器根会让隔离作废，必须拒绝
@@ -2662,25 +2696,33 @@ echo "=== INS inspect 如实反映挂载与端口（PRD F9.33）==="
 # docker 用户会拿 .Mounts / .HostConfig.PortBindings 去写脚本。
 INSH=$WORK/inshome
 rm -rf "$INSH" && mkdir -p "$INSH" "$WORK/insdata"
-HOME=$INSH "$WBOX_ABS" run -d --name insc -v "$WORK/insdata:/mnt/data:ro" -p 18099:80 \
-  -- /bin/sleep 30 >/dev/null 2>&1
+# 挂载点**由测试自己建**。这里是宿主程序模式（不换根），guest 路径就是宿主
+# 路径，wbox 不会替用户在宿主上创建它（见 INS.6）。早先这条写的是
+# `/mnt/data`，本机恰好有那个目录所以一直绿，CI 的 runner 没有、又是普通
+# 用户建不出来，于是 INS 段整段红——绿得没有道理才是真正的问题。
+INSMNT=$WORK/insmnt
+mkdir -p "$INSMNT"
+# 起容器的输出**要留着**：这条曾在 CI 上红成"没有名为 'insc' 的容器记录"，
+# 而真正的原因（run -d 自己失败了）被 >/dev/null 吞掉，只能靠猜。
+insout=$(HOME=$INSH "$WBOX_ABS" run -d --name insc -v "$WORK/insdata:$INSMNT:ro" -p 18099:80 \
+  -- /bin/sleep 30 2>&1); insrc=$?
 sleep 2
 
 # 先确认容器**真的**挂上了——不然下面比对的是两个都为空的东西
-insreal=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'mount | grep -c /mnt/data' 2>&1 | tail -1)
+insreal=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c "mount | grep -c $INSMNT" 2>&1 | tail -1)
 insj=$(HOME=$INSH "$WBOX_ABS" inspect insc 2>&1)
 if [ "$insreal" = "1" ] \
-   && printf '%s' "$insj" | grep -q '"Destination": "/mnt/data"' \
+   && printf '%s' "$insj" | grep -q "\"Destination\": \"$INSMNT\"" \
    && printf '%s' "$insj" | grep -q '"RW": false'; then
   report PASS "INS.1 inspect 的 Mounts 反映真实挂载（含 :ro）"
 else
-  report FAIL "INS.1 Mounts" "容器内挂载数=$insreal Mounts 段: $(printf '%s' "$insj" | grep -A6 '"Mounts"' | tr '\n' ' ' | head -c 160)"
+  report FAIL "INS.1 Mounts" "容器内挂载数=$insreal run -d rc=$insrc 输出: $(printf '%s' "$insout" | tr '\n' ' ' | head -c 160) Mounts 段: $(printf '%s' "$insj" | grep -A6 '"Mounts"' | tr '\n' ' ' | head -c 160)"
 fi
 
 if printf '%s' "$insj" | grep -q '"80/tcp"' && printf '%s' "$insj" | grep -q '"HostPort": "18099"'; then
   report PASS "INS.2 inspect 的 PortBindings 反映 -p 发布的端口"
 else
-  report FAIL "INS.2 PortBindings" "$(printf '%s' "$insj" | grep -A5 PortBindings | tr '\n' ' ' | head -c 160)"
+  report FAIL "INS.2 PortBindings" "run -d rc=$insrc 输出: $(printf '%s' "$insout" | tr '\n' ' ' | head -c 120) $(printf '%s' "$insj" | grep -A5 PortBindings | tr '\n' ' ' | head -c 160)"
 fi
 
 # 没挂卷的容器要如实是空，不能反过来凭空造出条目
@@ -2696,7 +2738,7 @@ fi
 # 网络模式是三态（none / host / container:X），而记录里原本只有 allow_network
 # 这个两态开关，于是一个**确实共享了对端 netns** 的容器被报成 "none"。
 # 判据先确认两边 net namespace 真是同一个，再看 inspect 怎么说。
-HOME=$INSH "$WBOX_ABS" run -d --name inspeer --network container:insc -- /bin/sleep 30 >/dev/null 2>&1
+inspout=$(HOME=$INSH "$WBOX_ABS" run -d --name inspeer --network container:insc -- /bin/sleep 30 2>&1); insprc=$?
 sleep 2
 insa=$(HOME=$INSH "$WBOX_ABS" exec insc -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
 insb=$(HOME=$INSH "$WBOX_ABS" exec inspeer -- /bin/sh -c 'readlink /proc/self/ns/net' 2>&1 | tail -1)
@@ -2705,7 +2747,7 @@ if [ -n "$insa" ] && [ "$insa" = "$insb" ] \
    && printf '%s' "$insm" | grep -q 'container:insc'; then
   report PASS "INS.4 inspect 的 NetworkMode 反映 container:<NAME> 三态"
 else
-  report FAIL "INS.4 NetworkMode 三态" "netns 相同=$([ "$insa" = "$insb" ] && echo 是 || echo 否) inspect: $(printf '%s' "$insm" | tr -d ' ')"
+  report FAIL "INS.4 NetworkMode 三态" "netns 相同=$([ "$insa" = "$insb" ] && echo 是 || echo 否) run -d rc=$insprc 输出: $(printf '%s' "$inspout" | tr '\n' ' ' | head -c 120) inspect: $(printf '%s' "$insm" | tr -d ' ')"
 fi
 
 insm=$(HOME=$INSH "$WBOX_ABS" inspect insplain 2>&1 | grep NetworkMode)
@@ -2715,8 +2757,25 @@ else
   report FAIL "INS.5 none 未受影响" "$(printf '%s' "$insm" | tr -d ' ')"
 fi
 
+# INS.6 宿主程序模式不替用户在宿主上造挂载点。
+#
+# 不换根时 guest 路径**就是**宿主路径，缺了就 mkdir 等于容器悄悄改造了宿主
+# 文件系统，而且退出后不会还原。判据有两条，缺一不可：要报错，且宿主上
+# **确实没有**被建出这个目录——只看报错的话，一个"先建再失败"的实现也会绿。
+INSGHOST=$WORK/insghost/deep/target
+rm -rf "$WORK/insghost"
+insout=$(HOME=$INSH "$WBOX_ABS" run --name insghost -v "$WORK/insdata:$INSGHOST:ro" \
+  -- /bin/true 2>&1); insrc=$?
+if [ "$insrc" -ne 0 ] && printf '%s' "$insout" | grep -q '必须已存在' \
+   && [ ! -e "$INSGHOST" ]; then
+  report PASS "INS.6 宿主模式下缺失的挂载点明确报错，且不在宿主上凭空创建"
+else
+  report FAIL "INS.6 宿主模式挂载点" \
+    "rc=$insrc 宿主被建出目录=$([ -e "$INSGHOST" ] && echo 是 || echo 否) 输出: $(printf '%s' "$insout" | tr '\n' ' ' | head -c 200)"
+fi
+
 HOME=$INSH "$WBOX_ABS" rm -f $(HOME=$INSH "$WBOX_ABS" ps -aq) >/dev/null 2>&1
-rm -rf "$INSH" "$WORK/insdata"
+rm -rf "$INSH" "$WORK/insdata" "$INSMNT" "$WORK/insghost"
 
 echo
 echo "=== IMQ images -q / rmi 多引用（PRD F9.31）==="
