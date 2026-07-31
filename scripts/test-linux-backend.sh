@@ -101,7 +101,7 @@ mkdir -p "$CACHE/rootfs/bin" "$CACHE/rootfs/proc" "$CACHE/rootfs/etc" "$CACHE/ro
 cp "$BB_ABS" "$CACHE/rootfs/bin/busybox"
 chmod +x "$CACHE/rootfs/bin/busybox"
 # busybox 按 argv[0] 分派 applet，故给用到的都建符号链接
-APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink hostname rm"
+APPLETS="sh id ls dd sleep echo cat grep mount test true false readlink hostname rm mv"
 for a in $APPLETS; do
   ln -sf busybox "$CACHE/rootfs/bin/$a"
 done
@@ -2005,7 +2005,9 @@ echo "=== PZ pause / unpause（PRD F9.21）==="
 PZFILE=$WORK/pzcount
 rm -f "$PZFILE"
 #
-# 计数**先写临时文件再 rename**。直接 `echo $i > /pz/pzcount` 是"截断再写"，
+# 计数**先写临时文件再 rename**（`mv` 已在 APPLETS 里，缺了会被上面的 harness
+# 自检当场 die——第一版忘了加，容器里 `mv` 静默失效，判据只看到一个空文件）。
+# 直接 `echo $i > /pz/pzcount` 是"截断再写"，
 # 宿主侧 `cat` 正好落在这两步之间就读到空串——判据于是报"恢复 1 秒后=（空）"
 # 而产品无恙（CI 上撞到过）。rename 是原子的，读者要么看到旧值要么看到新值，
 # 永远不是半个。判据的力度没变：真的没恢复时读到的仍是暂停时那个数。
