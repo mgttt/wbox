@@ -39,7 +39,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W14、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W18、R8
 │       └── 4.9.2 [TODO-LINUX]    L1–L20、W5（历史编号）
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -2429,8 +2429,29 @@ TODO-WINDOW
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 ├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
+├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [active] t_fd_open 0604→0644
+├── W17 Linux signal 修复的 Windows 跨宿主验收               [planned] SIG_IGN/exec/setitimer
+├── W18 guest known-failure 收紧到断言级                     [planned] 先拆 t_signalfd
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+`W16` 来自 Windows `guest-tests` 的基线外回归：
+`t_fd_open/open/ocreat-mode` 以 `0604` 创建文件，`fstat` 却固定得到 `0644`。
+根因不能归为 NTFS 没有 Unix mode 后直接豁免；纯 Rust guest 内核必须维护自己的
+权限语义，新建 mode 应先应用 guest `umask`，随后由 `fstat`/`stat`/`statx`
+一致返回，并且不能因宿主默认权限、rename 或 hardlink 改变。**禁止**把
+`t_fd_open` 加回 `known-failures` 或放宽断言。完成判据是 Windows 真机
+`t_fd_open` 86/0，且 Linux 结果不倒退。
+
+`W17` 在 Linux agent 完成 signal disposition 与投递后接手 Windows 最终验收：
+至少覆盖 `SIG_IGN`、`execve` 重置 caught disposition 并保留 ignored
+disposition、`setitimer(which, NULL, old)` 解除 timer，以及既有 Ubuntu 24.04
+`WU.1/WU.2` 产品门禁。另一宿主的单元测试不能替代这里的 Windows guest 证据。
+
+`W18` 修复文件级基线会吞掉同一二进制内新回归的问题。当前 `t_signalfd`
+已有 82 条断言通过、仅 handler 投递相关断言失败，继续豁免整个文件会让这
+82 条重新变红时仍被放行。优先把 handler-delivery 拆成独立 guest 用例；
+完成判据是已通过的 signalfd 行为处于基线之外，基线只包含尚未实现的能力。
 
 `W13` 固定 Ubuntu 24.04 linux/amd64 manifest digest，由 Linux CI 生成最小
 runtime fixture；`WU.1` 在 Windows 校验来源并授予 AppContainer 只读 ACL，
