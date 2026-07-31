@@ -44,11 +44,11 @@
 #      软上限真的卡住 fd 分配，且 `pipe`/`socketpair` 失败时要么两个都拿到、
 #      要么一个都不留。
 #   C. 信号**不投递**（handler 不会被调用）
-#      t_signalfd t_signal_timer
-#      **signalfd 与挂起集合已实现**：t_signalfd 从整份失败到 82 通过 / 3 失败，
-#      只剩 `unblock-delivers-and-clears-readiness` 一组——它要求解除屏蔽时
-#      真的去调 guest 的信号处理函数（构信号帧、改 rip、sigreturn），那是
-#      执行流层面的改动，不是再加一种 fd。
+#      t_signal_handler t_signal_timer
+#      **signalfd 与挂起集合已实现**：纯 signalfd 行为拆回 t_signalfd 后
+#      75/0，整份移出基线；解除屏蔽后的 handler 投递独立为
+#      t_signal_handler（7/3）。它要求真的去调 guest 的信号处理函数
+#      （构信号帧、改 rip、sigreturn），那是执行流层面的改动，不是再加一种 fd。
 #      做出来的那一半是完整可用的、不是半成品：**被屏蔽的信号本来就不投递**，
 #      只挂在 pending 上等 signalfd/sigwait 消费——而「屏蔽 + signalfd」正是
 #      现代服务端处理信号的标准写法（绕开 handler 里的异步安全约束）。
@@ -100,8 +100,8 @@ t_fork_mem
 t_net_epoll
 t_net_sockopt
 
-# C. signalfd / 信号投递
-t_signalfd
+# C. signal handler 投递
+t_signal_handler
 t_signal_timer
 
 # D. 快照式 fork 的并发语义差异

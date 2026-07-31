@@ -18,12 +18,6 @@
 
 #define KERNEL_SIGSET_SIZE 8
 
-static volatile sig_atomic_t g_seen;
-
-static void OnSignal(int sig) {
-  if (sig == SIGUSR1) g_seen = 1;
-}
-
 static int sfd4(int fd, const sigset_t *mask, size_t size, int flags) {
   return syscall(SYS_signalfd4, fd, mask, size, flags);
 }
@@ -176,30 +170,6 @@ int main(void) {
     T_ASSERT_ERRNO(read(b, &si, sizeof si), EAGAIN);
     close(b);
     close(a);
-  }
-
-  T_BEGIN("signalfd/unblock-delivers-and-clears-readiness");
-  {
-    int fd;
-    struct sigaction sa;
-    struct pollfd p;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = OnSignal;
-    sigemptyset(&sa.sa_mask);
-    T_ASSERT_OK(sigaction(SIGUSR1, &sa, NULL));
-    Block(&mask, SIGUSR1);
-    fd = sfd4(-1, &mask, KERNEL_SIGSET_SIZE, SFD_NONBLOCK);
-    p = (struct pollfd){fd, POLLIN, 0};
-    T_ASSERT(fd >= 0);
-    g_seen = 0;
-    T_ASSERT_OK(kill(getpid(), SIGUSR1));
-    T_ASSERT_EQ(poll(&p, 1, 1000), 1);
-    T_ASSERT_OK(sigprocmask(SIG_UNBLOCK, &mask, NULL));
-    T_ASSERT_EQ(g_seen, 1);
-    T_ASSERT_EQ(poll(&p, 1, 0), 0);
-    T_ASSERT_ERRNO(read(fd, &si, sizeof si), EAGAIN);
-    T_ASSERT_OK(sigprocmask(SIG_BLOCK, &mask, NULL));
-    close(fd);
   }
 
   T_BEGIN("signalfd/epoll-and-close-purge");

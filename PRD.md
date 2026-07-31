@@ -2431,7 +2431,7 @@ TODO-WINDOW
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [planned] SIG_IGN/exec/setitimer
-├── W18 guest known-failure 收紧到断言级                     [planned] 先拆 t_signalfd
+├── W18 guest known-failure 收紧到能力级                     [active] 拆分 t_signalfd/handler
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2455,10 +2455,12 @@ rename 与 hardlink 因 identity 不变而保持权限，再次 `O_CREAT` 打开
 disposition、`setitimer(which, NULL, old)` 解除 timer，以及既有 Ubuntu 24.04
 `WU.1/WU.2` 产品门禁。另一宿主的单元测试不能替代这里的 Windows guest 证据。
 
-`W18` 修复文件级基线会吞掉同一二进制内新回归的问题。当前 `t_signalfd`
-已有 82 条断言通过、仅 handler 投递相关断言失败，继续豁免整个文件会让这
-82 条重新变红时仍被放行。优先把 handler-delivery 拆成独立 guest 用例；
-完成判据是已通过的 signalfd 行为处于基线之外，基线只包含尚未实现的能力。
+`W18` 修复文件级基线会吞掉同一二进制内新回归的问题。原 `t_signalfd`
+已有 82 条断言通过、仅 handler 投递相关断言失败，继续豁免整个文件会让
+已实现的 signalfd 主路径重新变红时仍被放行。现按能力拆分：fd/mask/pending/
+readiness/dup/epoll/fork 留在 `t_signalfd`（75/0，移出基线），解除屏蔽后的
+signal-frame/handler/sigreturn 单列 `t_signal_handler`（当前 7/3，留在基线）。
+完成判据是 Windows guest CI 证明前者直接受门禁保护、后者仍被精确登记。
 
 `W13` 固定 Ubuntu 24.04 linux/amd64 manifest digest，由 Linux CI 生成最小
 runtime fixture；`WU.1` 在 Windows 校验来源并授予 AppContainer 只读 ACL，
@@ -2771,7 +2773,7 @@ TODO-LINUX
 ├── L16 eventfd                                           [done] t_eventfd 80/0 已移出基线
 ├── L17 timerfd                                           [done] t_timerfd 67/0 已移出基线（惰性到期，无后台线程）
 ├── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
-├── L19 signalfd 与挂起信号集合                           [partial] t_signalfd 82/3；handler 投递未做
+├── L19 signalfd 与挂起信号集合                           [partial] t_signalfd 75/0；t_signal_handler 7/3
 └── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
 ```
 

@@ -29,7 +29,7 @@
 |---|---|---|
 | A | `MAP_SHARED` 不跨进程共享、文件映射不写回 | `t_exec` `t_fork_mem` |
 | B | socket 族与 epoll —— AF_UNIX/AF_INET/epoll 与 rlimit 校验均已实现；`t_negative` 已移出基线，另两条各只剩 1 条快照 fork 语义差异（D 组同因） | `t_net_epoll` `t_net_sockopt` |
-| C | 信号**不投递**（handler 不会被调用）。eventfd 80/0、timerfd 67/0 已移出基线；signalfd 与挂起集合已实现，`t_signalfd` 82/3，只剩「解除屏蔽要调 handler」一组 | `t_signalfd` `t_signal_timer` |
+| C | 信号**不投递**（handler 不会被调用）。eventfd 80/0、timerfd 67/0 已移出基线；signalfd 主路径拆分后 `t_signalfd` 75/0 并移出基线，解除屏蔽后的投递单列为 `t_signal_handler` 7/3 | `t_signal_handler` `t_signal_timer` |
 | D | 快照式 fork 的并发语义差异 | `t_proc` |
 | ~~E~~ | ~~`mount(2)` 未实现~~ —— **已实现，整组清空**（路径改写式挂载 + 真的生效的 `MS_RDONLY`） | — |
 | ~~F~~ | ~~file description 级共享状态未建模~~ —— **已修，整组清空**（状态标志改为按「打开文件描述」共享） | — |
@@ -96,7 +96,7 @@ guest-tests job 在 Windows 上跑 native，本地 Linux 开发也常用 native�
 | 环境 | 当时基线 | 失败项 |
 |---|---|---|
 | 真 Windows（本机，native） | 20 个用例：**20 PASS / 0 FAIL / 0 SKIP** | 无 |
-| wine（当时机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signalfd`、`t_timerfd` 待复核 |
+| wine（当时机器基线） | `t_net_sockopt @wine` | 新增 `t_eventfd`、`t_signal_timer`、`t_signal_handler`、`t_timerfd` 待复核 |
 
 真机断言级统计为 **1226 条：pass=1217 fail=0 skip=9**；skip 均为 symlink
 EPERM 宿主限制降级与 t_exec 内的环境降级项。
