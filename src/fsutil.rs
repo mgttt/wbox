@@ -54,7 +54,7 @@ pub fn make_tree_owner_accessible(path: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
