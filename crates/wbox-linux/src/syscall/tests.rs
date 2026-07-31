@@ -18,6 +18,65 @@ fn scratch(m: &mut Machine) -> u64 {
     at
 }
 
+#[test]
+fn sig_ign_prevents_termination_and_discards_pending_signal() {
+    const SIGUSR1: i32 = 10;
+    const SIG_IGN: u64 = 1;
+
+    let mut m = mach();
+    let at = scratch(&mut m);
+    m.os.sig_blocked = sigset_bit(SIGUSR1);
+    let pid = m.os.pid;
+    assert_eq!(process::sys_kill(&mut m, pid, SIGUSR1).unwrap(), 0);
+    assert!(m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1));
+
+    m.mem.write_u64(at, SIG_IGN).unwrap();
+    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, at, 0), 0);
+    assert!(!m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1));
+
+    assert_eq!(process::sys_kill(&mut m, pid, SIGUSR1).unwrap(), 0);
+    assert!(
+        !m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1),
+        "SIG_IGN must discard the signal even while it is blocked"
+    );
+}
+
+#[test]
+fn exec_reset_preserves_ignored_dispositions_only() {
+    const SIGUSR1: usize = 10;
+    const SIGUSR2: usize = 12;
+
+    let mut m = mach();
+    m.os.sig_handlers[SIGUSR1] = 0x1234;
+    m.os.sig_handlers[SIGUSR2] = 1;
+    m.os.sig_blocked = sigset_bit(SIGUSR1 as i32);
+    m.os.raise_signal(SIGUSR1 as i32, 0, m.os.pid);
+    let blocked = m.os.sig_blocked;
+    let pending = m.os.sig_pending.clone();
+
+    m.os.reset_caught_signal_handlers_for_exec();
+
+    assert_eq!(m.os.sig_handlers[SIGUSR1], 0);
+    assert_eq!(m.os.sig_handlers[SIGUSR2], 1);
+    assert_eq!(m.os.sig_blocked, blocked);
+    assert_eq!(m.os.sig_pending, pending);
+}
+
+#[test]
+fn setitimer_null_disarms_after_reporting_old_timer() {
+    let mut m = mach();
+    let at = scratch(&mut m);
+    m.os.alarm_interval_ns = 2_000_000_000;
+    m.os.alarm_deadline_ns = now_ns() + 5_000_000_000;
+
+    assert_eq!(sys_setitimer(&mut m, 0, 0, at), 0);
+    assert_eq!(m.mem.read_u64(at).unwrap(), 2);
+    assert!(m.mem.read_u64(at + 16).unwrap() <= 5);
+    assert!(m.mem.read_u64(at + 16).unwrap() >= 4);
+    assert_eq!(m.os.alarm_interval_ns, 0);
+    assert_eq!(m.os.alarm_deadline_ns, 0);
+}
+
 #[cfg(windows)]
 #[test]
 fn fstat_distinguishes_different_windows_files() {

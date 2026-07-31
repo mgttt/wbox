@@ -225,6 +225,17 @@ impl Os {
         }
     }
 
+    /// `execve` resets caught dispositions while preserving signals explicitly
+    /// ignored with `SIG_IGN`.
+    pub fn reset_caught_signal_handlers_for_exec(&mut self) {
+        const SIG_IGN: u64 = 1;
+        for handler in &mut self.sig_handlers[1..] {
+            if *handler != SIG_IGN {
+                *handler = 0;
+            }
+        }
+    }
+
     /// 分配一个新 pid（整棵进程树共享计数器）。
     pub fn alloc_pid(&self) -> i32 {
         let p = self.pid_alloc.get();
@@ -3528,6 +3539,11 @@ fn sys_rt_sigaction(m: &mut Machine, signo: i32, act: u64, old: u64) -> i64 {
             Err(_) => return -EFAULT,
         };
         m.os.sig_handlers[signo as usize] = h;
+        if h == 1 {
+            // POSIX discards a pending standard signal when its disposition
+            // becomes SIG_IGN.
+            m.os.sig_pending.retain(|(s, _, _)| *s != signo);
+        }
     }
     0
 }
@@ -3659,6 +3675,8 @@ fn sys_setitimer(m: &mut Machine, which: i32, new: u64, old: u64) -> i64 {
         }
     }
     if new == 0 {
+        m.os.alarm_deadline_ns = 0;
+        m.os.alarm_interval_ns = 0;
         return 0;
     }
     let r = |m: &Machine, at: u64| -> Result<u64, i64> {

@@ -191,6 +191,7 @@ pub fn sys_execve(m: &mut Machine, path: u64, argv_p: u64, envp_p: u64) -> Resul
 
     m.os.exe = m.os.vfs.guest_abs(&prog);
     m.os.fds.close_on_exec();
+    m.os.reset_caught_signal_handlers_for_exec();
     // 子进程表跨 exec 保留（Linux 语义：exec 换的是镜像，不是进程）。
     m.os.tid_address = 0;
     Ok(())
@@ -248,6 +249,9 @@ pub fn sys_kill(m: &mut Machine, pid: i32, signo: i32) -> ExecResult<i64> {
         });
     }
     if pid == m.os.pid || pid == 0 || pid == -1 {
+        if m.os.sig_handlers[signo as usize] == 1 {
+            return Ok(0);
+        }
         // **被屏蔽的信号不投递，只挂起**。这是 POSIX 语义，也是
         // "屏蔽 + signalfd" 这套写法能成立的前提——少了这一步，
         // `kill(getpid(), SIGUSR1)` 会把自己打死，而调用方本意是让
