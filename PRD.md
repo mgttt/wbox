@@ -2429,7 +2429,7 @@ TODO-WINDOW
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 ├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
-├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [active] t_fd_open 0604→0644
+├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [planned] SIG_IGN/exec/setitimer
 ├── W18 guest known-failure 收紧到断言级                     [planned] 先拆 t_signalfd
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
@@ -2442,6 +2442,13 @@ TODO-WINDOW
 一致返回，并且不能因宿主默认权限、rename 或 hardlink 改变。**禁止**把
 `t_fd_open` 加回 `known-failures` 或放宽断言。完成判据是 Windows 真机
 `t_fd_open` 86/0，且 Linux 结果不倒退。
+
+**已完成**（`3f4319e`，CI `30593765474` 的 Windows guest job）：
+Windows 现在按 `(volume serial, file index)` 维护 guest permission bits，
+新建时应用 guest `umask`，`fstat`/路径 `stat`/`statx` 使用同一份 mode；
+rename 与 hardlink 因 identity 不变而保持权限，再次 `O_CREAT` 打开既有 inode
+不会覆盖原 mode。Windows 定向单测覆盖上述路径，CI `t_fd_open` 为 86/0；
+本机 WN.1–WN.8、WP 产品全套及 Ubuntu 24.04 WU.1/WU.2 同步通过。
 
 `W17` 在 Linux agent 完成 signal disposition 与投递后接手 Windows 最终验收：
 至少覆盖 `SIG_IGN`、`execve` 重置 caught disposition 并保留 ignored
