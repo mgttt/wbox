@@ -2770,7 +2770,7 @@ TODO-LINUX
 ├── W5 Q2 端口映射 `-p` 可行性取证（历史编号）            [done] 语义不适用
 ├── L7 `load` / `import` 解包的符号链接边界               [done] 见下方 L7
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [done] 门禁 CP.7/CP.8/AF.8；见下方 L8
-├── L9 Linux native / Wine 共用后端验收当前失败            [done] 见下方 L9
+├── L9 Linux native / Wine 共用后端验收当前失败            [verify] 修已推，等 CI 绿；见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
 ├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
@@ -3191,7 +3191,7 @@ Dockerfile 的 `ADD` 只做了**词法**路径检查（有没有 `..`、是不�
 「用 '..' 逃出了 rootfs」。反向用例 CP.5（正常嵌套路径照常拷得进去）与
 `in_image_symlink_still_follows` 保证挡得住的同时没把功能一起挡掉。
 
-##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[done]`
+##### L9 Linux native / Wine 共用后端验收 `[Linux agent]` `[verify]`
 
 **已取得失败断言。** 原条目是"验收当前失败，待取得失败断言"——真正的问题
 不是用例红，而是 `test-wine-backend` 这个 **release 前置门禁在全 SKIP 时也返回 0**：
@@ -3215,6 +3215,31 @@ W 段的依赖检查刻意绕过 `WBOX_LBE_REQUIRE` 直接 `report SKIP`，于�
 取证：不设开关时 `SKIP W.1-W.4`、PASS=232 FAIL=0、exit 0（本地行为不变）；
 设 `WBOX_WINE_REQUIRE=1` 时两条 FAIL 都报出来、exit 1。两个开关的对照表见
 `docs/testing.md`。
+
+**重开：这条曾被过早标 `[done]`。** 门禁开关本身是对的，但 `test-linux-backend`
+与 `test-wine-backend` 在 CI 上持续 `FAIL=5`，而**本地一直是 PASS=239 FAIL=0**。
+差别只有一个——本机是 root，CI runner 是 uid 1001。三条根因都是"本机恰好满足"：
+
+1. **`MS.3` 阶段目录残留 / 收尾 `rm -rf` 报 Permission denied。** rootless
+   overlayfs 会建一个 mode-000 的 `work/work`；root 绕过权限位，
+   `remove_dir_all` 直接成功，普通用户连 `opendir` 都做不成。修法是把
+   runstate 里早就有的"先补属主权限再删"提成共用的 `fsutil::remove_tree`，
+   build 与 `rmi` 一并改用。
+2. **`INS.1/2/4`。** 宿主程序模式下不换根，guest 路径**就是**宿主路径，缺了
+   就 `create_dir_all` 等于容器悄悄改造宿主文件系统、退出后也不还原；普通
+   用户对 `/mnt` 没写权限时还只报一句光秃秃的 Permission denied。改为明确
+   拒绝并说清怎么办（新增 `INS.6` 守住"报错且宿主上确实没被建出来"）；用例
+   的挂载点改由测试自己建——原先写死 `/mnt/data`，本机恰好有那个目录才一直绿。
+3. **`V.2b/V.2c`。** 造子挂载要 `CAP_SYS_ADMIN`，一见 `mount --bind` 失败就
+   `absent`，在 `WBOX_LBE_REQUIRE=1` 下直接记 FAIL，而被放空的恰恰是最该守住
+   的那条断言。改成换个有权限的地方造：`unshare --map-root-user --mount` 里
+   能 bind，wbox 从那儿起还能再嵌一层自己的 userns，被测代码路径分毫未变。
+
+**教训写在这里，因为它比这三个 bug 本身更值钱：门禁"本地全绿"不构成完成
+证据。** 本机与 CI 的差异（uid、已有目录、内核能力）会让同一份代码得出相反
+结论，所以本条在 GitHub CI 的 `test-linux-backend` 与 `test-wine-backend`
+两个 job 都变绿之前保持 `[verify]`，不回填 `[done]`。以 uid 1001 在本机复跑
+的结果是 PASS=240 FAIL=0 SKIP=2、收尾退出码 0，但那只是**必要条件**。
 
 ##### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
 
