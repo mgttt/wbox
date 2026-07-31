@@ -166,6 +166,14 @@ int main(void) {
       T_ASSERT_OK(closedir(d));
     }
     T_ASSERT(saw_leaf);
+    T_ASSERT_OK(unlink(p));
+    strcpy(p, dirpath);
+    for (;;) {
+      T_ASSERT_OK(rmdir(p));
+      char *slash = strrchr(p, '/');
+      if (!slash) break;
+      *slash = '\0';
+    }
   }
 
   /* --- UTF-8 filename --- */

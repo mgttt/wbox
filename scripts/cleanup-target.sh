@@ -39,4 +39,12 @@ for directory in "$target_dir/tmp" "$target_dir"/review-*; do
   removed=$((removed + 1))
 done
 
-printf 'target cleanup: removed %s regenerable directories\n' "$removed"
+removed_files=0
+for file in "$target_dir"/*.tmp "$target_dir"/*.part "$target_dir"/review-*; do
+  [ -f "$file" ] || continue
+  rm -f -- "$file"
+  removed_files=$((removed_files + 1))
+done
+
+printf 'target cleanup: removed %s regenerable directories and %s temporary files\n' \
+  "$removed" "$removed_files"

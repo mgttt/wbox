@@ -31,6 +31,7 @@ $targetPrefix = $targetRoot.TrimEnd(
     [System.IO.Path]::AltDirectorySeparatorChar
 ) + [System.IO.Path]::DirectorySeparatorChar
 $removed = 0
+$removedFiles = 0
 
 function Remove-TargetDirectory {
     param([Parameter(Mandatory)][System.IO.DirectoryInfo]$Directory)
@@ -46,6 +47,17 @@ function Remove-TargetDirectory {
         Remove-Item -LiteralPath $fullPath -Recurse -Force
     }
     $script:removed++
+}
+
+function Remove-TargetFile {
+    param([Parameter(Mandatory)][System.IO.FileInfo]$File)
+
+    $fullPath = [System.IO.Path]::GetFullPath($File.FullName)
+    if (-not $fullPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to clean file outside Cargo target directory: $fullPath"
+    }
+    Remove-Item -LiteralPath $fullPath -Force
+    $script:removedFiles++
 }
 
 if (-not $KeepIncremental) {
@@ -66,4 +78,16 @@ foreach ($directory in $temporaryDirs) {
     Remove-TargetDirectory -Directory $directory
 }
 
-Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' })"
+$temporaryFiles = @(
+    Get-ChildItem -LiteralPath $targetRoot -File -Force |
+        Where-Object {
+            $_.Name -like "*.tmp" -or
+            $_.Name -like "*.part" -or
+            $_.Name -like "review-*"
+        }
+)
+foreach ($file in $temporaryFiles) {
+    Remove-TargetFile -File $file
+}
+
+Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' }) and $removedFiles temporary file$(if ($removedFiles -eq 1) { '' } else { 's' })"

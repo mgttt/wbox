@@ -2425,7 +2425,7 @@ TODO-WINDOW
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
-├── W12 构建后清理 target 增量与测试垃圾                   [done] scripts/build.ps1
+├── W12 构建后清理增量与临时垃圾、保留 Cargo 缓存           [done] scripts/build.ps1
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 ├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
@@ -2497,7 +2497,9 @@ CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` �
 locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核又补齐：CI Rust
 固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
 昂贵 job 只在它通过后启动；Quick 默认保留 incremental 热缓存，需要回收空间时
-显式 `-CleanIncremental`，构建 wrapper 仍按 W12/L11 默认清理。本地精确 channel
+显式 `-CleanIncremental`，构建 wrapper 仍按 W12/L11 清理 incremental、tmp、
+review、`.tmp/.part` 等可再生残留，但保留 `deps/build/.fingerprint` 有效缓存。
+本地精确 channel
 pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
 
 `W11` 已完成。detached 父进程不再把“supervisor 进程创建成功”当成容器启动成功：
@@ -2773,7 +2775,7 @@ TODO-LINUX
 ├── L8 `cp` 穿过 upper/rootfs 中间符号链接                [done] 门禁 CP.7/CP.8/AF.8；见下方 L8
 ├── L9 Linux native / Wine 共用后端验收当前失败            [done] CI 三个 job 全绿；见下方 L9
 ├── L10 TLS 要不要也换成第一方实现                        [done] 做了，见下方
-├── L11 构建后清理 target 增量与测试垃圾                   [done] scripts/build.sh
+├── L11 构建后清理增量与临时垃圾、保留 Cargo 缓存           [done] scripts/build.sh
 ├── L12 guest VFS 的宿主符号链接逃逸（Critical）           [done] 见下方 L12
 ├── L13 自研 TLS 的 Docker Hub pull 有界超时与成功门禁      [done] 每次请求有整体预算；见下方 L13
 ├── L14 file description 级共享状态                       [done] F 组基线整组清空；见下方 L14
