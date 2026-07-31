@@ -1409,7 +1409,7 @@ fn open_tmpfile(m: &mut Machine, dir: &std::path::Path, flags: i32, mode: u32) -
         use std::os::unix::fs::OpenOptionsExt;
         // 先以 000 创建，再在句柄上设置 guest mode。这样宿主进程自己的
         // umask 不会二次收紧权限，也不存在先暴露过宽权限再修正的窗口。
-        opt.mode(0);
+        opt.mode(0o0);
     }
     #[cfg(windows)]
     {
@@ -1579,7 +1579,7 @@ fn sys_openat(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, mode: u32)
         {
             use std::os::unix::fs::OpenOptionsExt;
             // 宿主 umask 不能参与 guest 语义；成功打开后在句柄上设置最终值。
-            opt.mode(0);
+            opt.mode(0o0);
         }
         #[cfg(not(unix))]
         {
