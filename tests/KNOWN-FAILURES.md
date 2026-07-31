@@ -29,7 +29,7 @@
 |---|---|---|
 | A | `MAP_SHARED` 不跨进程共享、文件映射不写回 | `t_exec` `t_fork_mem` |
 | B | socket 族与 epoll —— AF_UNIX/AF_INET/epoll 与 rlimit 校验均已实现；`t_negative` 已移出基线，另两条各只剩 1 条快照 fork 语义差异（D 组同因） | `t_net_epoll` `t_net_sockopt` |
-| C | 信号**不投递**（handler 不会被调用）。eventfd 80/0、timerfd 67/0 已移出基线；signalfd 主路径拆分后 `t_signalfd` 75/0 并移出基线，解除屏蔽后的投递单列为 `t_signal_handler` 7/3 | `t_signal_handler` `t_signal_timer` |
+| ~~C~~ | ~~信号不投递~~ —— **已实现，整组清空**（`t_signalfd` 75/0、`t_signal_handler` 10/0、`t_signal_timer` 36/0）。按 x86-64 内核布局在 guest 栈上构 `rt_sigframe`，靠 libc 的 `SA_RESTORER` 走回 `rt_sigreturn`；`pause`/`nanosleep` 可被 `alarm`/`setitimer` 打断。剩余缺口（sigaltstack、SA_RESTART、纯计算循环里的投递点、x87 状态）见 `syscall/signal.rs` 顶部 | — |
 | D | 快照式 fork 的并发语义差异 | `t_proc` |
 | ~~E~~ | ~~`mount(2)` 未实现~~ —— **已实现，整组清空**（路径改写式挂载 + 真的生效的 `MS_RDONLY`） | — |
 | ~~F~~ | ~~file description 级共享状态未建模~~ —— **已修，整组清空**（状态标志改为按「打开文件描述」共享） | — |

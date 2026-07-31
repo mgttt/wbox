@@ -2780,9 +2780,31 @@ TODO-LINUX
 ├── L16 eventfd                                           [done] t_eventfd 80/0 已移出基线
 ├── L17 timerfd                                           [done] t_timerfd 67/0 已移出基线（惰性到期，无后台线程）
 ├── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
-├── L19 signalfd 与挂起信号集合                           [partial] t_signalfd 75/0；t_signal_handler 7/3
-└── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
+├── L19 signalfd 与挂起信号集合                           [done] t_signalfd 75/0，C 组整组清空
+├── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
+└── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
 ```
+
+`L21` 把信号的另一半做完：在 guest 栈上按 x86-64 内核的真实布局构
+`rt_sigframe`（`pretcode` + `ucontext` + `siginfo`），把 rip 改到 handler，
+靠 libc 的 `SA_RESTORER` 走回 `rt_sigreturn` 还原整套寄存器与屏蔽字。
+
+**没有走"把上下文藏在引擎里"那条捷径。** 那样 guest 也看不出差别——除非它
+去读 `ucontext`，而带 `SA_SIGINFO` 的 handler 第三个参数正是它（libunwind、
+崩溃采集器、Go 运行时都会读）。藏起来等于给出一个"看着像、其实是垃圾"的
+指针，比不支持更坏。
+
+投递点在 syscall 边界与可中断等待里，于是 `pause`/`nanosleep` 能被
+`alarm`/`setitimer` 打断并如实回 `EINTR`（`nanosleep` 分片睡，`rem` 写回真实
+剩余时间）。配套补齐：`SIG_IGN` 当场丢弃而不是留在 pending、`execve` 的处置
+复位（装了 handler 的复位成 `SIG_DFL`，`SIG_IGN` 保留）、`setitimer(NULL)`
+按内核语义**解除**定时器、`alarm`/`getitimer`，以及 `rt_sigaction` 四个字段
+整读整写（早先只写 handler 那 8 字节，`old.sa_flags`/`sa_mask` 是调用方栈上
+的残值）。
+
+剩余缺口逐条写在 `crates/wbox-linux/src/syscall/signal.rs` 顶部：`sigaltstack`
+未做（`SA_ONSTACK` 仍用当前栈）、`SA_RESTART` 未做、纯计算循环里没有投递点、
+不保存 x87/SSE 状态。
 
 `L13` 由 Windows W13 接门禁时发现：公开 CLI 对固定
 `ubuntu@sha256:52df9b1e...cf3faf` 执行 `image pull`，超过 10 分钟仍无输出且

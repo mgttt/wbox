@@ -9,6 +9,7 @@
 pub mod fs;
 pub mod net;
 pub mod process;
+pub mod signal;
 
 use crate::cpu::{R10, R11, R8, R9, RAX, RCX, RDI, RDX, RSI};
 use crate::machine::{Exception, ExecResult, Machine};
@@ -27,6 +28,7 @@ pub const EPERM: i64 = 1;
 pub const EIO: i64 = 5;
 pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
+pub const EINTR: i64 = 4;
 pub const E2BIG: i64 = 7;
 pub const ENOEXEC: i64 = 8;
 pub const EBADF: i64 = 9;
@@ -132,8 +134,8 @@ pub struct Os {
     pub sig_blocked: u64,
     /// 已挂起、还没被消费的信号。元素是 `(signo, si_code, si_pid)`。
     pub sig_pending: Vec<(i32, i32, i32)>,
-    /// `sigaction` 记下的处理函数地址（下标即信号号）。目前只存不调用。
-    pub sig_handlers: [u64; 65],
+    /// `sigaction` 记下的处置（下标即信号号）。构帧与投递见 [`signal`]。
+    pub sig_actions: [signal::SigAction; 65],
     /// `setitimer(ITIMER_REAL)` 的到期时刻（纳秒，0 = 未武装）。
     /// 与 timerfd 同样是**惰性结算**的，见 `fs::TimerFd` 的说明。
     pub alarm_deadline_ns: u64,
@@ -195,7 +197,7 @@ impl Os {
             file_modes: Rc::new(RefCell::new(HashMap::new())),
             sig_blocked: 0,
             sig_pending: Vec::new(),
-            sig_handlers: [0; 65],
+            sig_actions: [signal::SigAction::default(); 65],
             alarm_deadline_ns: 0,
             alarm_interval_ns: 0,
             file_maps: Vec::new(),
@@ -204,8 +206,7 @@ impl Os {
 
     /// 把到当前时刻为止的 `ITIMER_REAL` 到期结算成 pending 的 SIGALRM。
     pub fn settle_alarm(&mut self) {
-        const SIGALRM: i32 = 14;
-        const SI_KERNEL: i32 = 0x80;
+        use signal::{SIGALRM, SI_KERNEL};
         if self.alarm_deadline_ns == 0 || now_ns() < self.alarm_deadline_ns {
             return;
         }
@@ -225,13 +226,22 @@ impl Os {
         }
     }
 
-    /// `execve` resets caught dispositions while preserving signals explicitly
-    /// ignored with `SIG_IGN`.
+    /// `execve` 的信号处置：**装了 handler 的整条复位成 `SIG_DFL`，
+    /// 显式 `SIG_IGN` 的保持不动**。
+    ///
+    /// 新镜像的代码段跟旧的毫无关系，旧的 handler 地址在新镜像里指向任意
+    /// 字节——真去调就是跳进随机代码。而 `SIG_IGN` 必须留着：shell 用
+    /// "先 `signal(SIGINT, SIG_IGN)` 再 exec" 起一个不受 Ctrl-C 影响的后台
+    /// 作业，复位它会让那条约定失效。
+    ///
+    /// 复位是**整条**换成默认值，不只是清 handler：留着旧的
+    /// `sa_flags`/`sa_restorer` 等于让新镜像继承一个它没设过的 restorer 地址。
+    ///
+    /// 屏蔽字、挂起集合与 `ITIMER_REAL` 都跨 exec 保留（内核同此）。
     pub fn reset_caught_signal_handlers_for_exec(&mut self) {
-        const SIG_IGN: u64 = 1;
-        for handler in &mut self.sig_handlers[1..] {
-            if *handler != SIG_IGN {
-                *handler = 0;
+        for sa in &mut self.sig_actions[1..] {
+            if sa.handler != signal::SIG_IGN {
+                *sa = signal::SigAction::default();
             }
         }
     }
@@ -256,7 +266,7 @@ impl Os {
             sig_blocked: self.sig_blocked,
             // **pending 不继承**：POSIX 规定 fork 出来的子进程 pending 集合为空。
             sig_pending: Vec::new(),
-            sig_handlers: self.sig_handlers,
+            sig_actions: self.sig_actions,
             alarm_deadline_ns: 0,
             alarm_interval_ns: 0,
             // 快照式 fork：子进程有自己的页表副本，映射记账也各算各的。
@@ -329,6 +339,11 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
 
     // execve 成功时**不能**走后面统一的"写 rax / 设 rip"收尾：新程序的
     // 入口和栈已经设好了，再改就跳回旧镜像了。所以它在分派表之前单独处理。
+    // rt_sigreturn 与 execve 同理：整套寄存器（含 rax）都要从信号帧里恢复，
+    // 走后面统一的"写 rax / 设 rip"收尾就把恢复的值又盖掉了。
+    if nr == 15 {
+        return signal::sys_rt_sigreturn(m);
+    }
     if nr == 59 {
         match process::sys_execve(m, a[0], a[1], a[2]) {
             Ok(()) => return Ok(()),
@@ -394,8 +409,9 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // nanosleep / clock_nanosleep：真的睡。clock_nanosleep 的 req 在 a[2]。
         35 => process::sys_nanosleep(m, a[0], a[1]),
         230 => process::sys_nanosleep(m, a[2], a[3]),
-        // pause / sigsuspend：等不到的等待，见 pause_deadlock 的说明。
-        34 | 130 => return Err(process::pause_deadlock(m)),
+        // pause / sigsuspend：真的等，等到有信号能投递为止。
+        34 => process::sys_pause(m, None)?,
+        130 => process::sys_pause(m, Some((a[0], a[1])))?,
         // kill/tkill/tgkill：给自己发致命信号必须真的终止（abort() 靠它）。
         62 => process::sys_kill(m, a[0] as i32, a[1] as i32)?,
         200 => process::sys_kill(m, a[0] as i32, a[1] as i32)?,
@@ -477,11 +493,13 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
         // eventfd(init) / eventfd2(init, flags)
         // timerfd_create / timerfd_settime / timerfd_gettime
         // 信号：屏蔽字/挂起集合/signalfd/ITIMER_REAL（不含 handler 投递）
-        13 => sys_rt_sigaction(m, a[0] as i32, a[1], a[2]),
+        13 => sys_rt_sigaction(m, a[0] as i32, a[1], a[2], a[3]),
         14 => sys_rt_sigprocmask(m, a[0] as i32, a[1], a[2], a[3]),
         127 => sys_rt_sigpending(m, a[0], a[1]),
         282 => sys_signalfd(m, a[0] as i32, a[1], a[2], 0),
         289 => sys_signalfd(m, a[0] as i32, a[1], a[2], a[3] as i32),
+        36 => sys_getitimer(m, a[0] as i32, a[1]),
+        37 => sys_alarm(m, a[0]),
         38 => sys_setitimer(m, a[0] as i32, a[1], a[2]),
         283 => sys_timerfd_create(m, a[0] as i32, a[1] as i32),
         286 => sys_timerfd_settime(m, a[0] as i32, a[1] as i32, a[2], a[3]),
@@ -522,7 +540,10 @@ pub fn dispatch(m: &mut Machine, ret_rip: u64) -> ExecResult<()> {
     m.cpu.regs[RCX] = ret_rip;
     m.cpu.regs[R11] = m.cpu.flags.pack();
     m.cpu.rip = ret_rip;
-    Ok(())
+    // **投递点**：返回值与 rip 都摆好之后再看有没有信号要投。放在这里，
+    // 被中断的上下文（含 rax）正是 guest 该在 `rt_sigreturn` 之后看到的
+    // 那一份——比如 `pause` 已经把 -EINTR 写进 rax，handler 跑完回来它还在。
+    signal::deliver_pending(m)
 }
 
 /// 读 guest 里的 NUL 结尾路径。
@@ -3509,39 +3530,41 @@ fn sys_timerfd_gettime(m: &mut Machine, fd: i32, out: u64) -> i64 {
 // 只挂在 pending 上等 `signalfd`/`sigwait` 消费——而"屏蔽 + signalfd"正是
 // 现代服务端处理信号的标准写法（绕开 handler 里的异步安全约束）。
 
-const SIGKILL: i32 = 9;
-const SIGSTOP: i32 = 19;
+use signal::{sigset_bit, SIGKILL, SIGSTOP};
 
-fn sigset_bit(signo: i32) -> u64 {
-    if (1..=64).contains(&signo) {
-        1u64 << (signo - 1)
-    } else {
-        0
+/// `rt_sigaction`。**四个字段整读整写**——见 `signal::write_sigaction`。
+fn sys_rt_sigaction(m: &mut Machine, signo: i32, act: u64, old: u64, sigsetsize: u64) -> i64 {
+    // 内核只认自己那个 sigset_t 大小（x86-64 上 8 字节）。放行别的值等于
+    // 接受了一个我们并没有按它去解释的结构。
+    if sigsetsize != 8 {
+        return -EINVAL;
     }
-}
-
-fn sys_rt_sigaction(m: &mut Machine, signo: i32, act: u64, old: u64) -> i64 {
     if !(1..=64).contains(&signo) || signo == SIGKILL || signo == SIGSTOP {
         return -EINVAL;
     }
+    // 先把新值读出来再动旧值：读失败时 old 不能已经被改写（内核同此顺序）。
+    let new = if act != 0 {
+        match signal::read_sigaction(m, act) {
+            Ok(v) => Some(v),
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
     if old != 0 {
-        // struct sigaction 的第 0 个字段就是 handler。
-        if m.mem
-            .write_u64(old, m.os.sig_handlers[signo as usize])
-            .is_err()
-        {
-            return -EFAULT;
+        let cur = m.os.sig_actions[signo as usize];
+        if let Err(e) = signal::write_sigaction(m, old, &cur) {
+            return e;
         }
     }
-    if act != 0 {
-        let h = match m.mem.read_u64(act) {
-            Ok(v) => v,
-            Err(_) => return -EFAULT,
-        };
-        m.os.sig_handlers[signo as usize] = h;
-        if h == 1 {
-            // POSIX discards a pending standard signal when its disposition
-            // becomes SIG_IGN.
+    if let Some(mut v) = new {
+        // sa_mask 里的 SIGKILL/SIGSTOP 内核静默丢掉，不报错。
+        v.mask &= !signal::unmaskable();
+        m.os.sig_actions[signo as usize] = v;
+        // 处置改成 SIG_IGN 时，**已经挂起的那一个当场丢掉**（POSIX 明文）。
+        // 留着的话它会在下一次 `sigprocmask(SIG_UNBLOCK)` 时诈尸，而 guest
+        // 明明已经声明不要它了。
+        if v.handler == signal::SIG_IGN {
             m.os.sig_pending.retain(|(s, _, _)| *s != signo);
         }
     }
@@ -3655,49 +3678,95 @@ fn write_signalfd_siginfo(buf: &mut [u8], signo: i32, code: i32, pid: i32) {
     buf[12..16].copy_from_slice(&(pid as u32).to_le_bytes()); // ssi_pid
 }
 
+const ITIMER_REAL: i32 = 0;
+
+/// 把 `ITIMER_REAL` 的现状写成一个 `struct itimerval`。
+///
+/// `struct itimerval { timeval it_interval; timeval it_value; }`，`timeval`
+/// 是 `(sec, usec)`。
+fn write_itimerval(m: &mut Machine, at: u64) -> i64 {
+    let rem = m.os.alarm_deadline_ns.saturating_sub(now_ns());
+    let interval = m.os.alarm_interval_ns;
+    let w = |m: &mut Machine, at: u64, ns: u64| -> bool {
+        m.mem.write_u64(at, ns / 1_000_000_000).is_ok()
+            && m.mem.write_u64(at + 8, (ns % 1_000_000_000) / 1000).is_ok()
+    };
+    if !w(m, at, interval) || !w(m, at + 16, rem) {
+        return -EFAULT;
+    }
+    0
+}
+
+fn sys_getitimer(m: &mut Machine, which: i32, out: u64) -> i64 {
+    if which != ITIMER_REAL {
+        return -EINVAL;
+    }
+    if out == 0 {
+        return -EFAULT;
+    }
+    m.os.settle_alarm();
+    write_itimerval(m, out)
+}
+
 fn sys_setitimer(m: &mut Machine, which: i32, new: u64, old: u64) -> i64 {
-    const ITIMER_REAL: i32 = 0;
     if which != ITIMER_REAL {
         // 只做 REAL：VIRTUAL/PROF 要按 CPU 时间计，本引擎没有那个账本。
         return -EINVAL;
     }
     m.os.settle_alarm();
     if old != 0 {
-        let rem = m.os.alarm_deadline_ns.saturating_sub(now_ns());
-        // struct itimerval { timeval it_interval; timeval it_value; }，
-        // timeval 是 (sec, usec)。
-        let w = |m: &mut Machine, at: u64, ns: u64| -> bool {
-            m.mem.write_u64(at, ns / 1_000_000_000).is_ok()
-                && m.mem.write_u64(at + 8, (ns % 1_000_000_000) / 1000).is_ok()
+        let r = write_itimerval(m, old);
+        if r != 0 {
+            return r;
+        }
+    }
+    // `new == NULL` **是解除定时器**，不是"什么都不做"。内核把 new 当成
+    // 一份全零的 itimerval（`SYSCALL_DEFINE3(setitimer)` 里那句 memset），
+    // 早先这里直接 return 0，于是 `setitimer(ITIMER_REAL, NULL, &old)` 之后
+    // 定时器还在走，guest 以为自己关掉了。
+    let (interval, value) = if new == 0 {
+        (0, 0)
+    } else {
+        let r = |m: &Machine, at: u64| -> Result<u64, i64> {
+            let s = m.mem.read_u64(at).map_err(|_| -EFAULT)?;
+            let us = m.mem.read_u64(at + 8).map_err(|_| -EFAULT)?;
+            if us >= 1_000_000 {
+                return Err(-EINVAL);
+            }
+            Ok(s.saturating_mul(1_000_000_000) + us * 1000)
         };
-        if !w(m, old, m.os.alarm_interval_ns) || !w(m, old + 16, rem) {
-            return -EFAULT;
-        }
-    }
-    if new == 0 {
-        m.os.alarm_deadline_ns = 0;
-        m.os.alarm_interval_ns = 0;
-        return 0;
-    }
-    let r = |m: &Machine, at: u64| -> Result<u64, i64> {
-        let s = m.mem.read_u64(at).map_err(|_| -EFAULT)?;
-        let us = m.mem.read_u64(at + 8).map_err(|_| -EFAULT)?;
-        if us >= 1_000_000 {
-            return Err(-EINVAL);
-        }
-        Ok(s.saturating_mul(1_000_000_000) + us * 1000)
-    };
-    let interval = match r(m, new) {
-        Ok(v) => v,
-        Err(e) => return e,
-    };
-    let value = match r(m, new + 16) {
-        Ok(v) => v,
-        Err(e) => return e,
+        let interval = match r(m, new) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let value = match r(m, new + 16) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        (interval, value)
     };
     m.os.alarm_interval_ns = interval;
     m.os.alarm_deadline_ns = if value == 0 { 0 } else { now_ns() + value };
     0
+}
+
+/// `alarm(seconds)`：`ITIMER_REAL` 的秒级简写。
+///
+/// 返回**上一个** alarm 的剩余秒数，按内核的做法**向上取整**（还剩 1.2 秒
+/// 报 2，不然 `alarm(2)` 立刻查会报 1，调用方会以为自己少设了一秒）。
+/// `seconds == 0` 只取消、不重设。
+fn sys_alarm(m: &mut Machine, seconds: u64) -> i64 {
+    m.os.settle_alarm();
+    let rem = m.os.alarm_deadline_ns.saturating_sub(now_ns());
+    let prev = rem.div_ceil(1_000_000_000);
+    // alarm 与 setitimer 是同一个定时器：设 alarm 会清掉 setitimer 的周期。
+    m.os.alarm_interval_ns = 0;
+    m.os.alarm_deadline_ns = if seconds == 0 {
+        0
+    } else {
+        now_ns() + seconds.saturating_mul(1_000_000_000)
+    };
+    prev as i64
 }
 
 /// `eventfd` / `eventfd2`。

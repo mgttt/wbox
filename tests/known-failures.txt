@@ -43,16 +43,17 @@
 #      再校验 res，`old` 指针坏掉时新限额**仍然生效**）、以及 RLIMIT_NOFILE
 #      软上限真的卡住 fd 分配，且 `pipe`/`socketpair` 失败时要么两个都拿到、
 #      要么一个都不留。
-#   C. 信号**不投递**（handler 不会被调用）
-#      t_signal_handler t_signal_timer
-#      **signalfd 与挂起集合已实现**：纯 signalfd 行为拆回 t_signalfd 后
-#      75/0，整份移出基线；解除屏蔽后的 handler 投递独立为
-#      t_signal_handler（7/3）。它要求真的去调 guest 的信号处理函数
-#      （构信号帧、改 rip、sigreturn），那是执行流层面的改动，不是再加一种 fd。
-#      做出来的那一半是完整可用的、不是半成品：**被屏蔽的信号本来就不投递**，
-#      只挂在 pending 上等 signalfd/sigwait 消费——而「屏蔽 + signalfd」正是
-#      现代服务端处理信号的标准写法（绕开 handler 里的异步安全约束）。
-#      t_signal_timer 仍整份失败：它靠 `pause()` 等待真正的投递。
+#   C. 信号 —— **已实现并整组清空**（t_signalfd 75/0、t_signal_handler 10/0、
+#      t_signal_timer 36/0）。
+#      投递真的做了：按 x86-64 内核的布局在 guest 栈上构 `rt_sigframe`
+#      （pretcode + ucontext + siginfo），把 rip 改到 handler，靠 libc 的
+#      SA_RESTORER 走回 `rt_sigreturn` 还原整套寄存器与屏蔽字。投递点在
+#      syscall 边界与可中断等待里，于是 `pause`/`nanosleep` 能被
+#      `alarm`/`setitimer` 打断并如实回 EINTR。配套补齐了 SIG_IGN 的当场丢弃、
+#      execve 的处置复位（handler 复位、SIG_IGN 保留）、`setitimer(NULL)` 解除
+#      定时器、`alarm`/`getitimer`，以及 `rt_sigaction` 的四个字段整读整写。
+#      剩余缺口写在 syscall/signal.rs 顶部：sigaltstack、SA_RESTART、
+#      纯计算循环里的投递点、x87/SSE 状态。
 #      **timerfd 已实现并移出基线**（67/0）：到期是**惰性算出来的**，没有后台
 #      线程——只记"下次到期的绝对时刻"与周期，在 read/poll/epoll_wait 问起来
 #      时拿当前时间回算跨过了几个周期。配套把 poll/epoll_wait 的等待从"一次
@@ -99,10 +100,6 @@ t_fork_mem
 # B. socket / epoll
 t_net_epoll
 t_net_sockopt
-
-# C. signal handler 投递
-t_signal_handler
-t_signal_timer
 
 # D. 快照式 fork 的并发语义差异
 t_proc

@@ -18,8 +18,19 @@ fn scratch(m: &mut Machine) -> u64 {
     at
 }
 
+/// `SIG_IGN` 的两条语义，**顺序不能反**。
+///
+/// 一、改成 `SIG_IGN` 时把已挂起的那一个丢掉（POSIX 明文）。
+///
+/// 二、**屏蔽优先于处置**：被屏蔽的信号照样挂起，即使处置是 `SIG_IGN`。
+/// 内核 `sig_ignored()` 第一句就是这个判断，注释写得很直白——"Blocked
+/// signals are never ignored, since the signal handler may change by the time
+/// it is unblocked."。在真机上验过：block SIGUSR1、`signal(SIGUSR1, SIG_IGN)`、
+/// `kill(getpid(), SIGUSR1)`，`sigpending()` 报它在挂起集合里。
+/// 反过来实现（先看 SIG_IGN 再看屏蔽）会让"先屏蔽、临时忽略、稍后改回
+/// handler 再解除屏蔽"这套常见写法丢信号。
 #[test]
-fn sig_ign_prevents_termination_and_discards_pending_signal() {
+fn sig_ign_discards_pending_but_blocking_still_wins() {
     const SIGUSR1: i32 = 10;
     const SIG_IGN: u64 = 1;
 
@@ -31,14 +42,50 @@ fn sig_ign_prevents_termination_and_discards_pending_signal() {
     assert!(m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1));
 
     m.mem.write_u64(at, SIG_IGN).unwrap();
-    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, at, 0), 0);
+    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, at, 0, 8), 0);
     assert!(!m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1));
 
     assert_eq!(process::sys_kill(&mut m, pid, SIGUSR1).unwrap(), 0);
     assert!(
-        !m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1),
-        "SIG_IGN must discard the signal even while it is blocked"
+        m.os.sig_pending.iter().any(|(s, _, _)| *s == SIGUSR1),
+        "被屏蔽的信号即使处置是 SIG_IGN 也要挂起（内核 sig_ignored 的第一句）"
     );
+
+    // 解除屏蔽后再发一次：这时才轮到 SIG_IGN 说话，当场丢掉。
+    m.os.sig_blocked = 0;
+    m.os.sig_pending.clear();
+    assert_eq!(process::sys_kill(&mut m, pid, SIGUSR1).unwrap(), 0);
+    assert!(m.os.sig_pending.is_empty(), "未屏蔽时 SIG_IGN 应当场丢弃");
+}
+
+/// `rt_sigaction` 的 `old` 要把**四个字段**都写回去，不能只写 handler。
+///
+/// 「先取旧的、改一位、再装回去」是最常见的写法；只写 8 字节的话，
+/// `old.sa_flags`/`sa_mask` 是调用方栈上的残值，那份垃圾会被原样装回内核。
+#[test]
+fn rt_sigaction_round_trips_all_four_fields() {
+    const SIGUSR1: i32 = 10;
+    let mut m = mach();
+    let at = scratch(&mut m);
+    let old = at + 256;
+
+    let want = signal::SigAction {
+        handler: 0x4321,
+        flags: signal::SA_RESTORER | signal::SA_NODEFER,
+        restorer: 0x8765,
+        mask: sigset_bit(12),
+    };
+    signal::write_sigaction(&mut m, at, &want).unwrap();
+    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, at, 0, 8), 0);
+    // old 缓冲先填上垃圾：只写 handler 的实现会把后三个字段留成这份垃圾。
+    for off in 0..4u64 {
+        m.mem.write_u64(old + off * 8, 0xdead_beef).unwrap();
+    }
+    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, 0, old, 8), 0);
+    assert_eq!(signal::read_sigaction(&m, old).unwrap(), want);
+
+    // sigsetsize 不是 8 就 EINVAL——放行等于接受一个我们并没按它解释的结构。
+    assert_eq!(sys_rt_sigaction(&mut m, SIGUSR1, 0, old, 16), -EINVAL);
 }
 
 #[test]
@@ -47,8 +94,13 @@ fn exec_reset_preserves_ignored_dispositions_only() {
     const SIGUSR2: usize = 12;
 
     let mut m = mach();
-    m.os.sig_handlers[SIGUSR1] = 0x1234;
-    m.os.sig_handlers[SIGUSR2] = 1;
+    m.os.sig_actions[SIGUSR1] = signal::SigAction {
+        handler: 0x1234,
+        flags: signal::SA_RESTORER,
+        restorer: 0x5678,
+        mask: 0,
+    };
+    m.os.sig_actions[SIGUSR2].handler = signal::SIG_IGN;
     m.os.sig_blocked = sigset_bit(SIGUSR1 as i32);
     m.os.raise_signal(SIGUSR1 as i32, 0, m.os.pid);
     let blocked = m.os.sig_blocked;
@@ -56,8 +108,9 @@ fn exec_reset_preserves_ignored_dispositions_only() {
 
     m.os.reset_caught_signal_handlers_for_exec();
 
-    assert_eq!(m.os.sig_handlers[SIGUSR1], 0);
-    assert_eq!(m.os.sig_handlers[SIGUSR2], 1);
+    // 装了 handler 的整条复位（连 flags/restorer 一起），SIG_IGN 保持。
+    assert_eq!(m.os.sig_actions[SIGUSR1], signal::SigAction::default());
+    assert_eq!(m.os.sig_actions[SIGUSR2].handler, signal::SIG_IGN);
     assert_eq!(m.os.sig_blocked, blocked);
     assert_eq!(m.os.sig_pending, pending);
 }

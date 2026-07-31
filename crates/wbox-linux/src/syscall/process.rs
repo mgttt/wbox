@@ -32,7 +32,7 @@
 //! 必须限深，否则一个 fork 炸弹会把宿主栈打爆成 SIGSEGV。超限返回 `EAGAIN`
 //! ——正是 Linux 在达到进程数上限时给的 errno，guest 侧的 libc 认得。
 
-use super::{guest_path, E2BIG, EAGAIN, ECHILD, EFAULT, EINVAL, ENOSYS, ESRCH, PATH_MAX};
+use super::{guest_path, E2BIG, EAGAIN, ECHILD, EFAULT, EINTR, EINVAL, ENOSYS, ESRCH, PATH_MAX};
 use crate::cpu::{Cpu, R11, RAX, RCX};
 use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::Mem;
@@ -191,6 +191,7 @@ pub fn sys_execve(m: &mut Machine, path: u64, argv_p: u64, envp_p: u64) -> Resul
 
     m.os.exe = m.os.vfs.guest_abs(&prog);
     m.os.fds.close_on_exec();
+    // 信号处置的复位规则见 `Os::reset_caught_signal_handlers_for_exec`。
     m.os.reset_caught_signal_handlers_for_exec();
     // 子进程表跨 exec 保留（Linux 语义：exec 换的是镜像，不是进程）。
     m.os.tid_address = 0;
@@ -249,54 +250,87 @@ pub fn sys_kill(m: &mut Machine, pid: i32, signo: i32) -> ExecResult<i64> {
         });
     }
     if pid == m.os.pid || pid == 0 || pid == -1 {
-        if m.os.sig_handlers[signo as usize] == 1 {
-            return Ok(0);
-        }
+        use crate::syscall::signal::{self, Disposition};
         // **被屏蔽的信号不投递，只挂起**。这是 POSIX 语义，也是
         // "屏蔽 + signalfd" 这套写法能成立的前提——少了这一步，
         // `kill(getpid(), SIGUSR1)` 会把自己打死，而调用方本意是让
         // signalfd 收到它。
-        const SIGKILL: i32 = 9;
-        const SIGSTOP: i32 = 19;
-        let blocked = signo != SIGKILL
-            && signo != SIGSTOP
-            && (1..=64).contains(&signo)
-            && m.os.sig_blocked & (1u64 << (signo - 1)) != 0;
+        let blocked = signal::sigset_bit(signo) & !signal::unmaskable() & m.os.sig_blocked != 0;
         if blocked {
-            const SI_USER: i32 = 0;
             let me = m.os.pid;
-            m.os.raise_signal(signo, SI_USER, me);
+            m.os.raise_signal(signo, signal::SI_USER, me);
             return Ok(0);
         }
-        // 默认动作是终止的信号才自杀；SIGCHLD/SIGURG/SIGWINCH 等默认忽略。
-        const IGNORED: [i32; 4] = [
-            17, /*CHLD*/
-            23, /*URG*/
-            28, /*WINCH*/
-            18, /*CONT*/
-        ];
-        if !IGNORED.contains(&signo) {
-            return Err(Exception::Killed { signo });
+        // 没被屏蔽：这一刻就按处置决定命运。
+        //
+        // `SIG_IGN`（以及默认动作就是忽略的那几个）**当场丢掉**，不进
+        // pending——留着的话 `sigpending()` 会一直报它，而真实内核在这一刻
+        // 就把它扔了；后来某次 `sigprocmask(SIG_BLOCK)` 再解除时还会诈尸。
+        match signal::disposition(m, signo) {
+            Disposition::Ignore => Ok(0),
+            Disposition::Terminate => Err(Exception::Killed { signo }),
+            Disposition::Handle(_) => {
+                // 挂起，由 syscall 边界的投递点构帧跳进 handler——也就是
+                // 这条 kill 返回之前，与内核的可观测顺序一致。
+                let me = m.os.pid;
+                m.os.raise_signal(signo, signal::SI_USER, me);
+                Ok(0)
+            }
         }
-        return Ok(0);
+    } else {
+        // 别的进程：快照式 fork 下子进程早已退出，没有活的目标。
+        Ok(-ESRCH)
     }
-    // 别的进程：快照式 fork 下子进程早已退出，没有活的目标。
-    Ok(-ESRCH)
 }
 
-/// `pause` / `sigsuspend`：等一个**永远不会来**的信号。
+/// `pause` / `sigsuspend`：等到有信号可投递为止，然后回 `EINTR`。
 ///
-/// 信号投递还没实现（见 crate 文档的缺口清单），所以这里的等待是**确定的
-/// 死锁**，不是"暂时等不到"。返回 `EINTR` 或 `ENOSYS` 都会让 guest 的
-/// `for (;;) pause();` 变成满 CPU 空转——CI 上表现为几百秒后超时，比失败
-/// 难查得多。所以直接按 SIGKILL 终止，并把原因打到 stderr。
-pub fn pause_deadlock(m: &Machine) -> Exception {
-    eprintln!(
-        "wbox-linux: pid={} 调用了 pause()/sigsuspend()，但本模拟器不投递信号，\
-         该等待永远不会返回；按 SIGKILL 终止。",
-        m.os.pid
-    );
-    Exception::Killed { signo: 9 }
+/// `sigsuspend` 多一步：先把屏蔽字换成调用方给的那份，醒来再换回去
+/// （`mask` 是 `(set_ptr, sigsetsize)`）。构帧发生在 syscall 边界的投递点，
+/// 而屏蔽字要在**构帧之前**还原——不然 handler 会带着 sigsuspend 的临时
+/// 屏蔽字跑，`SIG_UNBLOCK` 的那一半就白做了。
+///
+/// # 什么时候仍然按 SIGKILL 收场
+///
+/// 单线程模拟器里信号只有两个来源：guest 自己 `kill`，和 `ITIMER_REAL`
+/// 到期。`pause()` 之后 guest 不再执行任何指令，所以**没有定时器武装时
+/// 这个等待是确定的死锁**，不是"暂时等不到"。那时回 `EINTR` 会让
+/// `for (;;) pause();` 变成满 CPU 空转（CI 上表现为几百秒后超时，比失败
+/// 难查得多），所以照旧终止并把原因打到 stderr。
+pub fn sys_pause(m: &mut Machine, mask: Option<(u64, u64)>) -> ExecResult<i64> {
+    use crate::syscall::signal;
+
+    let saved = m.os.sig_blocked;
+    if let Some((set, size)) = mask {
+        if size != 8 {
+            return Ok(-EINVAL);
+        }
+        match m.mem.read_u64(set) {
+            Ok(v) => m.os.sig_blocked = v & !signal::unmaskable(),
+            Err(_) => return Ok(-EFAULT),
+        }
+    }
+    let restore = |m: &mut Machine| {
+        if mask.is_some() {
+            m.os.sig_blocked = saved;
+        }
+    };
+    loop {
+        if signal::has_deliverable(m) {
+            restore(m);
+            return Ok(-EINTR);
+        }
+        if m.os.alarm_deadline_ns == 0 {
+            restore(m);
+            eprintln!(
+                "wbox-linux: pid={} 调用了 pause()/sigsuspend()，当前没有武装任何定时器，\
+                 单线程模拟器里不会再有信号到来，该等待永远不会返回；按 SIGKILL 终止。",
+                m.os.pid
+            );
+            return Err(Exception::Killed { signo: 9 });
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 /// `nanosleep` / `clock_nanosleep`。
@@ -313,8 +347,28 @@ pub fn sys_nanosleep(m: &mut Machine, req: u64, rem: u64) -> i64 {
         return -EINVAL;
     }
     // 上限一小时：guest 传个荒谬的值不该把整条 CI 挂住。
-    let d = std::time::Duration::new(secs.min(3600), nanos as u32);
-    std::thread::sleep(d);
+    let total = std::time::Duration::new(secs.min(3600), nanos as u32);
+    // **分片睡**而不是一次睡满：定时器到期要能把这一觉打断。一次 `sleep`
+    // 睡满的话，`setitimer(100ms)` + `nanosleep(2s)` 会老老实实睡够 2 秒，
+    // 而 guest 等的是 100ms 后的 EINTR。
+    let slice = std::time::Duration::from_millis(1);
+    let start = std::time::Instant::now();
+    while start.elapsed() < total {
+        if crate::syscall::signal::has_deliverable(m) {
+            // 被打断：`rem` 要写回真实剩余时间，guest 拿它续睡。
+            let left = total.saturating_sub(start.elapsed());
+            if rem != 0
+                && (m.mem.write_u64(rem, left.as_secs()).is_err()
+                    || m.mem
+                        .write_u64(rem + 8, left.subsec_nanos() as u64)
+                        .is_err())
+            {
+                return -EFAULT;
+            }
+            return -EINTR;
+        }
+        std::thread::sleep(slice.min(total.saturating_sub(start.elapsed())));
+    }
     // 睡满了，剩余时间是 0；`rem` 只在被打断时才有意义，但 Linux 允许
     // 正常返回时也不动它——这里显式清零更保险（guest 可能不初始化）。
     if rem != 0 {
