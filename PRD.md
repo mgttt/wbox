@@ -2431,7 +2431,7 @@ TODO-WINDOW
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [planned] SIG_IGN/exec/setitimer
-├── W18 guest known-failure 收紧到能力级                     [active] 拆分 t_signalfd/handler
+├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2461,6 +2461,11 @@ disposition、`setitimer(which, NULL, old)` 解除 timer，以及既有 Ubuntu 2
 readiness/dup/epoll/fork 留在 `t_signalfd`（75/0，移出基线），解除屏蔽后的
 signal-frame/handler/sigreturn 单列 `t_signal_handler`（当前 7/3，留在基线）。
 完成判据是 Windows guest CI 证明前者直接受门禁保护、后者仍被精确登记。
+
+**已完成**（`f0ab93a` + `ce4b0de`，CI `30594591829`）：同一份
+`t_signalfd.c` 通过编译宏生成两个 guest ELF，没有增加 C fixture 欠债；
+`t_signalfd` 75/0 直接 PASS，`t_signal_handler` 7/3 精确命中基线，
+guest 总计 14 PASS / 8 FAIL，未出现基线外回归或基线过期。
 
 `W13` 固定 Ubuntu 24.04 linux/amd64 manifest digest，由 Linux CI 生成最小
 runtime fixture；`WU.1` 在 Windows 校验来源并授予 AppContainer 只读 ACL，
