@@ -2004,8 +2004,13 @@ echo "=== PZ pause / unpause（PRD F9.21）==="
 # 只断言"pause 返回 0"证明不了任何事——信号发出去了不等于进程真停了。
 PZFILE=$WORK/pzcount
 rm -f "$PZFILE"
+#
+# 计数**先写临时文件再 rename**。直接 `echo $i > /pz/pzcount` 是"截断再写"，
+# 宿主侧 `cat` 正好落在这两步之间就读到空串——判据于是报"恢复 1 秒后=（空）"
+# 而产品无恙（CI 上撞到过）。rename 是原子的，读者要么看到旧值要么看到新值，
+# 永远不是半个。判据的力度没变：真的没恢复时读到的仍是暂停时那个数。
 HOME=$WORK/home "$WBOX_ABS" run -d --name pzc -v "$WORK:/pz" lbetest -- \
-  /bin/sh -c 'i=0; while :; do i=$((i+1)); echo $i > /pz/pzcount; sleep 0.05; done' >/dev/null 2>&1
+  /bin/sh -c 'i=0; while :; do i=$((i+1)); echo $i > /pz/pzcount.tmp; mv /pz/pzcount.tmp /pz/pzcount; sleep 0.05; done' >/dev/null 2>&1
 sleep 2
 pout=$(HOME=$WORK/home "$WBOX_ABS" pause pzc 2>&1); prc=$?
 # 两次采样都在 pause **之后**。先前拿 pause 之前的读数当基线是错的：
@@ -2063,7 +2068,7 @@ else
 fi
 HOME=$WORK/home "$WBOX_ABS" kill pzc >/dev/null 2>&1
 HOME=$WORK/home "$WBOX_ABS" rm pzc >/dev/null 2>&1
-rm -f "$PZFILE"
+rm -f "$PZFILE" "$PZFILE.tmp"
 
 # 已退出的容器要报错。静默成功会让脚本以为它还在、还能 unpause 回来。
 pout=$(HOME=$WORK/home "$WBOX_ABS" pause nosuchpz 2>&1); prc=$?

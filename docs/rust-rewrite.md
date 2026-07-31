@@ -131,10 +131,17 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 4. **线程**（`clone(CLONE_VM|CLONE_THREAD)`）与真正的 futex 等待。
    `clone` 带线程标志时明确返回 `ENOSYS`——不假装成功，否则 guest 会以为
    多了一个执行流。当前 `futex` 直接返回成功，单线程下无竞争路径不会走到那里。
-5. **信号投递**。`sigaction`/`sigprocmask` 登记接口返回成功但信号永不投递，
-   等价于"没有信号发生"。因此 `pause()`/`sigsuspend()` 是**确定的死锁**，
-   不是"暂时等不到"：返回 `EINTR`/`ENOSYS` 会让 `for (;;) pause();` 满 CPU
-   空转（CI 上表现为几百秒后超时），所以直接按 SIGKILL 终止并打印原因。
+5. ~~信号投递~~ —— **已实现**（`crates/wbox-linux/src/syscall/signal.rs`）。
+   在 guest 栈上按 x86-64 内核的真实布局构 `rt_sigframe`（`pretcode` +
+   `ucontext` + `siginfo`），改 rip 进 handler，靠 libc 的 `SA_RESTORER`
+   走回 `rt_sigreturn` 还原整套寄存器与屏蔽字。**没有把上下文藏在引擎里**：
+   那样 guest 也看不出差别，除非它去读 `ucontext`——而带 `SA_SIGINFO` 的
+   handler 第三个参数正是它，给个"看着像、其实是垃圾"的指针比不支持更坏。
+   投递点在 syscall 边界与可中断等待里，于是 `pause`/`nanosleep` 能被
+   `alarm`/`setitimer` 打断并如实回 `EINTR`（不再需要"按 SIGKILL 终止"那条
+   兜底——只在**确实没有武装任何定时器**、单线程下不可能再有信号到来时才走）。
+   剩余缺口：`sigaltstack` 未做（`SA_ONSTACK` 仍用当前栈）、`SA_RESTART`
+   未做、纯计算循环里没有投递点、不保存 x87/SSE 状态。
 6. **socket 族与 epoll/eventfd/timerfd/signalfd**。
 7. **JIT**。当前纯解释执行，见 §2 的性能说明。
 8. **file description 级共享状态**。`dup` 出来的 fd 应与原 fd 共享
@@ -157,9 +164,11 @@ sha256sum 对已知常量（`"abc"` 的 SHA-256）逐位相符，是整数/移�
 `tests/run-guest-tests.sh` 现在按**容器语义**跑（`WBOX_PREFIX` 指向 workdir）
 ——这套用例本就是这么设计的，见 `tests/KNOWN-FAILURES.md` 的说明。
 
-21 个用例，当前在 Linux 宿主上 **14 通过 / 7 失败**（旧引擎除
-`t_net_sockopt@wine` 外全通）。此前是 5 通过 / 16 失败，收紧来自宿主 symlink
-防护落地：`t_sec_path` 与 `t_sec_linkabs` 转绿并移出基线（H 组整组清空）。
+22 个用例，当前在 Linux 宿主上 **17 通过 / 5 失败**（旧引擎除
+`t_net_sockopt@wine` 外全通）。此前是 5 通过 / 16 失败。最近一次收紧来自
+信号投递落地：`t_signal_handler`（10/0）与 `t_signal_timer`（36/0）转绿并
+移出基线，C 组整组清空；再往前是宿主 symlink 防护，`t_sec_path` 与
+`t_sec_linkabs` 转绿并移出基线（H 组整组清空）。
 更早：`t_stress` 已随 `O_TMPFILE` 的实现转绿并从基线移出；`t_exec` 从 7 个失败
 降到 2 个、`t_fork_mem` 从 19 个降到 12 个、`t_proc` 从 300s 超时变成快速失败。
 这是一次真实的 ABI 覆盖回退，逐条根因与分组见

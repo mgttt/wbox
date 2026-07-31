@@ -264,7 +264,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 21 个用例在 Linux 宿主上 14 通过 / 7 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程/信号/socket/`MAP_SHARED` 未做，Python 等动态运行时尚不可靠 |
+| 运行 Linux OCI 镜像 | 部分 | 纯 Rust 引擎已取代 Blink：Alpine 3.20 / Ubuntu 24.04 手工跑通、静态 BusyBox 过 WP 产品门禁。**但 ABI 覆盖仍有明显缺口**（guest C 套件 22 个用例在 Linux 宿主上 17 通过 / 5 失败，基线见 `tests/known-failures.txt`、裁决理由见 `tests/KNOWN-FAILURES.md`），线程与 `MAP_SHARED` 跨进程共享未做（信号投递、socket 族与 epoll 已实现），Python 等动态运行时尚不可靠 |
 | 免虚拟化 | **有，且这是 wbox 存在的理由** | WSL2 要 Hyper-V，wbox 不要 |
 | 双层隔离 | 有 | AppContainer 套模拟器 |
 | 可写 rootfs 层 | 有 | 运行前把只读镜像缓存复制成容器私有 rootfs，只向该 profile 的确定性 AppContainer SID 授修改权（F4.8 / `acl.rs`）；与 Q3 的 overlay upper 不是同一机制 |
@@ -3240,6 +3240,19 @@ W 段的依赖检查刻意绕过 `WBOX_LBE_REQUIRE` 直接 `report SKIP`，于�
 结论，所以本条在 GitHub CI 的 `test-linux-backend` 与 `test-wine-backend`
 两个 job 都变绿之前保持 `[verify]`，不回填 `[done]`。以 uid 1001 在本机复跑
 的结果是 PASS=240 FAIL=0 SKIP=2、收尾退出码 0，但那只是**必要条件**。
+
+**CI 取证（`test-wine-backend` / `guest-tests`）：三条修复后两个 job 都已变绿**，
+`V.2b/V.2c`、`MS.3`、`INS.1/2/4` 全部 PASS，新增的 `INS.6` 也 PASS，收尾
+`rm -rf` 不再报 Permission denied。
+
+**`test-linux-backend` 还差最后一步，而且这一步本身就是上面那条教训的续集**：
+这个 job 跑两遍脚本，第二遍在**现造的 cgroup v2 委派子树**里跑（`C.1/C.2`
+那两条）。此前主跑就红，第二遍从来没执行过——于是 `PZ.2` 在委派环境下的
+偶发红一直被前面的失败挡着看不见。真相是用例夹具自己的竞态：guest 用
+`echo $i > /pz/pzcount` 记数，那是"截断再写"，宿主侧 `cat` 落在两步之间就读到
+空串（报文写的是"恢复 1 秒后=（空）"，而不是"仍等于暂停时的 40"——空串正是
+这个竞态的指纹，进程真没恢复的话读到的会是 40）。改成写临时文件再 `rename`，
+读者要么看到旧值要么看到新值。判据的力度没变。
 
 ##### ~~L10 TLS 要不要也换成第一方~~ —— 已完成 `[done]`
 
