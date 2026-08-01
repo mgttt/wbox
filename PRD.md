@@ -2649,7 +2649,7 @@ TODO-WINDOW
 ├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
 ├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
 ├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
-├── W60 宿主原生虚拟化 API 可用性事实                                                 [in-progress] contract/mapping done
+├── W60 宿主原生虚拟化 API 可用性事实                                                 [done] WHPX passive probe
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3967,8 +3967,13 @@ provider 生命周期和验收策略不得下沉。Windows 真机门禁至少覆
 禁用或缺失组件的可解释结果，以及最小 feature 依赖树。
 第一阶段已在 platform 冻结五态事实契约（额外区分 ABI incompatible），并在
 wbox-machine 将 API、状态、API version 和 native code 收成单一能力对象；未知 backend
-或与预选宿主不匹配的事实会被拒绝，不得污染路线状态。原生三宿主 adapter 尚未完成，
-因此产品输出仍保持 `unprobed`。
+或与预选宿主不匹配的事实会被拒绝，不得污染路线状态。原生 adapter 固定 revision
+`d4d11d748fca7f1dc0c48ffdc69b68ab01fc9cbe`：Windows
+动态加载 `WinHvPlatform.dll` 并查询 HypervisorPresent，Arm64 额外检查
+Arm64Support；Linux 打开 `/dev/kvm` 并要求 API version 12；macOS 读取
+`kern.hv_support`。本机 Windows 真机结果为 `whpx/unavailable`，说明 API 探测成功、
+但当前虚拟服务器未向内层暴露可用 hypervisor；该结果不改变既有 user-mode guest
+路线。Linux/macOS 真机验收仍分别由 L33/M17 跟踪。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

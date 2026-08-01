@@ -237,7 +237,7 @@ pub const fn current_isa() -> Option<Isa> {
 
 pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
     let processor = agenterm_platform::hardware::processor_facts();
-    HardwareCapabilities {
+    let mut capabilities = HardwareCapabilities {
         native_isa: match processor.architecture {
             agenterm_platform::hardware::ProcessorArchitecture::X86_64 => Some(Isa::X86_64),
             agenterm_platform::hardware::ProcessorArchitecture::Aarch64 => Some(Isa::Aarch64),
@@ -255,7 +255,19 @@ pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
         acceleration: host
             .map(host_acceleration_api)
             .map(AccelerationCapabilities::unprobed),
+    };
+    let probe_failed = host.is_some()
+        && host == crate::route::current_host()
+        && capabilities
+            .apply_native_virtualization(agenterm_platform::native_virtualization::probe())
+            .is_err();
+    if probe_failed {
+        capabilities.acceleration = capabilities.acceleration.map(|mut acceleration| {
+            acceleration.state = ProbeState::Failed;
+            acceleration
+        });
     }
+    capabilities
 }
 
 fn map_cpu_feature(feature: agenterm_platform::hardware::ProcessorFeature) -> Option<CpuFeature> {
@@ -303,14 +315,17 @@ mod tests {
     }
 
     #[test]
-    fn hardware_detection_does_not_claim_unprobed_acceleration() {
+    fn hardware_detection_probes_only_the_current_host() {
         for host in HostOs::ALL {
             let hardware = detect_hardware(Some(host));
             let acceleration = hardware.acceleration.expect("host acceleration candidate");
             assert_eq!(acceleration.api(), host_acceleration_api(host));
-            assert_eq!(acceleration.state(), ProbeState::Unprobed);
+            if Some(host) == crate::route::current_host() {
+                assert_ne!(acceleration.state(), ProbeState::Unprobed);
+            } else {
+                assert_eq!(acceleration.state(), ProbeState::Unprobed);
+            }
             assert_eq!(acceleration.api_version(), None);
-            assert_eq!(acceleration.native_code(), None);
         }
     }
 

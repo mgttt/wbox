@@ -12,7 +12,7 @@ fn runtime_contract_check_passes() {
 }
 
 #[test]
-fn host_probe_keeps_acceleration_state_explicit() {
+fn host_probe_reports_a_real_acceleration_state() {
     let output = lab().arg("host").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -21,7 +21,8 @@ fn host_probe_keeps_acceleration_state_explicit() {
     assert!(stdout.contains("page_size="));
     assert!(stdout.contains("allocation_granularity="));
     assert!(stdout.contains("physical_memory_bytes="));
-    assert!(stdout.contains("/unprobed"));
+    assert!(stdout.contains("acceleration="));
+    assert!(!stdout.contains("/unprobed"));
 }
 
 #[test]
