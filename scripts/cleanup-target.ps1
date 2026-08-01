@@ -2,7 +2,11 @@
 param(
     [string]$TargetDir,
     [switch]$KeepIncremental,
-    [switch]$CleanIncremental
+    [switch]$CleanIncremental,
+    [ValidateRange(1, 1048576)]
+    [int]$MaxIncrementalSizeMiB = 512,
+    [ValidateRange(1, 100)]
+    [int]$KeepIncrementalPerCrate = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,6 +104,54 @@ if (-not $KeepIncremental) {
                 if (-not (Get-ChildItem -LiteralPath $crateDir.FullName -Force | Select-Object -First 1)) {
                     Remove-TargetDirectory -Directory $crateDir
                 }
+            }
+
+            # Cargo keys incremental units by crate plus a compilation hash. Feature,
+            # target and test changes therefore leave complete but cold units behind.
+            # Keep the newest units for every crate and prune only the global LRU tail
+            # needed to bring the cache under its configured budget.
+            $crateDirs = @(Get-ChildItem -LiteralPath $incrementalRoot -Directory -Force)
+            $incrementalUnits = @(
+                foreach ($crateDir in $crateDirs) {
+                    $separator = $crateDir.Name.LastIndexOf("-")
+                    $crateName = if ($separator -gt 0) {
+                        $crateDir.Name.Substring(0, $separator)
+                    } else {
+                        $crateDir.Name
+                    }
+                    $bytes = (Get-ChildItem -LiteralPath $crateDir.FullName -File -Recurse -Force `
+                            -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                    [pscustomobject]@{
+                        Directory = $crateDir
+                        CrateName = $crateName
+                        Bytes = if ($null -eq $bytes) { 0L } else { [long]$bytes }
+                    }
+                }
+            )
+            $protectedPaths = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($group in @($incrementalUnits | Group-Object -Property CrateName)) {
+                $group.Group |
+                    Sort-Object { $_.Directory.LastWriteTimeUtc } -Descending |
+                    Select-Object -First $KeepIncrementalPerCrate |
+                    ForEach-Object { [void]$protectedPaths.Add($_.Directory.FullName) }
+            }
+
+            $incrementalBytes = [long](
+                $incrementalUnits | Measure-Object -Property Bytes -Sum
+            ).Sum
+            $maxIncrementalBytes = [long]$MaxIncrementalSizeMiB * 1MB
+            if ($incrementalBytes -gt $maxIncrementalBytes) {
+                $incrementalUnits |
+                    Where-Object { -not $protectedPaths.Contains($_.Directory.FullName) } |
+                    Sort-Object { $_.Directory.LastWriteTimeUtc } |
+                    ForEach-Object {
+                        if ($incrementalBytes -gt $maxIncrementalBytes) {
+                            $incrementalBytes -= $_.Bytes
+                            Remove-TargetDirectory -Directory $_.Directory
+                        }
+                    }
             }
         }
     }

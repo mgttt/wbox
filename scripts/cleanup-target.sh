@@ -5,11 +5,26 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
 keep_incremental=${WBOX_KEEP_INCREMENTAL:-0}
 clean_incremental=${WBOX_CLEAN_INCREMENTAL:-0}
+max_incremental_mib=${WBOX_MAX_INCREMENTAL_MIB:-512}
+keep_incremental_per_crate=${WBOX_KEEP_INCREMENTAL_PER_CRATE:-2}
 
 if [ "$keep_incremental" = 1 ] && [ "$clean_incremental" = 1 ]; then
   printf 'target cleanup: WBOX_KEEP_INCREMENTAL and WBOX_CLEAN_INCREMENTAL conflict\n' >&2
   exit 1
 fi
+
+case "$max_incremental_mib" in
+  '' | *[!0-9]* | 0*)
+    printf 'target cleanup: incremental limits must be positive integers\n' >&2
+    exit 1
+    ;;
+esac
+case "$keep_incremental_per_crate" in
+  '' | *[!0-9]* | 0*)
+    printf 'target cleanup: incremental limits must be positive integers\n' >&2
+    exit 1
+    ;;
+esac
 
 case "$target_dir" in
   /*) ;;
@@ -59,11 +74,38 @@ if [ "$keep_incremental" != 1 ]; then
             removed_files=$((removed_files + 1))
           fi
         done
-        if [ -z "$(find "$crate_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        if [ -z "$(ls -A "$crate_dir")" ]; then
           rmdir -- "$crate_dir"
           removed=$((removed + 1))
         fi
       done
+
+      max_incremental_kib=$((max_incremental_mib * 1024))
+      incremental_kib=$(du -sk "$incremental_root" | awk '{print $1}')
+      if [ "$incremental_kib" -gt "$max_incremental_kib" ]; then
+        # Cargo directory names are controlled identifiers without whitespace.
+        # Process the global LRU tail, but retain the newest units for each crate.
+        for crate_dir in $(LC_ALL=C ls -1trd "$incremental_root"/* 2>/dev/null); do
+          [ -d "$crate_dir" ] || continue
+          crate_base=${crate_dir##*/}
+          crate_name=${crate_base%-*}
+          newer=0
+          for sibling in "$incremental_root/$crate_name-"*; do
+            [ -d "$sibling" ] || continue
+            if [ "$sibling" -nt "$crate_dir" ]; then
+              newer=$((newer + 1))
+            fi
+          done
+          if [ "$newer" -ge "$keep_incremental_per_crate" ]; then
+            size=$(du -sk "$crate_dir" | awk '{print $1}')
+            rm -rf -- "$crate_dir"
+            removed_kib=$((removed_kib + size))
+            removed=$((removed + 1))
+            incremental_kib=$((incremental_kib - size))
+            [ "$incremental_kib" -le "$max_incremental_kib" ] && break
+          fi
+        done
+      fi
     fi
   fi
 fi

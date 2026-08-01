@@ -51,9 +51,11 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
 证据仍由下述唯一 owning gate 产出。`check.ps1` 和构建 wrapper 默认清理 Cargo
-遗留的孤立 incremental session 锁、空目录与测试临时目录，同时保留仍有 session
-对应的热缓存。需要完整释放 debug 增量缓存时显式传 `-CleanIncremental`；需要连
-孤立项也不扫描时传 `-KeepIncremental`。
+遗留的孤立 incremental session 锁、空目录与测试临时目录。完整增量单元采用有界
+LRU：默认保留每个 crate 最近两个单元，并将 `target/debug/incremental/` 控制在
+512 MiB 以内。Windows 可用 `-MaxIncrementalSizeMiB` 调整预算，Linux/macOS 使用
+`WBOX_MAX_INCREMENTAL_MIB`；需要完整释放 debug 增量缓存时显式传
+`-CleanIncremental`，需要跳过增量目录扫描时传 `-KeepIncremental`。
 
 CI 固定 Rust 1.97.1。升级编译器是独立变更：先跑 Quick 和双目标 Clippy，再观察
 完整 CI，不能让浮动 `stable` 在普通功能提交中突然改变 lint 规则。本地暂不放
@@ -85,13 +87,15 @@ scripts/build.sh
 scripts/build.sh --release -p wbox-linux
 ```
 
-wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认只在
-`target/debug/incremental/` 删除已经没有对应 session 目录的孤立 `.lock` 和空 crate
-目录，并清理 target 根目录的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。
-`deps/`、`build/`、`.fingerprint/` 以及仍可复用的 incremental session 都保留。
+wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认在
+`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录，并在超过 512 MiB 时
+按最后修改时间回收旧单元；每个 crate 最近两个单元受保护。它还会清理 target 根目录
+的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。`deps/`、`build/`、
+`.fingerprint/` 以及预算内的热 incremental session 都保留。
 Windows 可传 `-CleanIncremental` 完整释放 debug 增量缓存，Linux 可设置
 `WBOX_CLEAN_INCREMENTAL=1`；`-KeepIncremental` / `WBOX_KEEP_INCREMENTAL=1` 则跳过
-增量目录扫描。两类开关互斥。
+增量目录扫描。两类开关互斥。脚本直调时可通过 `-KeepIncrementalPerCrate` 或
+`WBOX_KEEP_INCREMENTAL_PER_CRATE` 调整每个 crate 的保留数。
 
 测试不得直接并发修改进程环境。使用 `crate::testenv::EnvGuard`；需要临时 HOME
 时使用 `cli::TempHome`，额外变量经其同一守卫设置，避免重入锁。

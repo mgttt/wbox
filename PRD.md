@@ -2711,9 +2711,10 @@ CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` �
 locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核又补齐：CI Rust
 固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
 昂贵 job 只在它通过后启动；Quick 和构建 wrapper 默认清理 incremental 中没有
-对应 session 的孤立锁与空目录，以及 tmp、review、`.tmp/.part` 等可再生残留，
-同时保留仍可复用的 incremental、deps、build、fingerprint 缓存。完整清理 debug
-增量缓存需显式使用 `-CleanIncremental` / `WBOX_CLEAN_INCREMENTAL=1`。
+对应 session 的孤立锁与空目录，以及 tmp、review、`.tmp/.part` 等可再生残留。
+debug incremental 采用 512 MiB 有界 LRU，并保留每个 crate 最近两个编译单元；
+deps、build、fingerprint 与预算内热缓存继续复用。完整清理 debug 增量缓存需显式
+使用 `-CleanIncremental` / `WBOX_CLEAN_INCREMENTAL=1`。
 本地精确 channel
 pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
 

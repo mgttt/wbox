@@ -5,6 +5,8 @@ param(
     [string]$Target,
     [switch]$KeepIncremental,
     [switch]$CleanIncremental,
+    [ValidateRange(1, 1048576)]
+    [int]$MaxIncrementalSizeMiB = 512,
     [string[]]$ExtraArgs = @()
 )
 
@@ -35,7 +37,8 @@ try {
     try {
         & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
             -KeepIncremental:$KeepIncremental `
-            -CleanIncremental:$CleanIncremental
+            -CleanIncremental:$CleanIncremental `
+            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB
     } finally {
         Pop-Location
     }

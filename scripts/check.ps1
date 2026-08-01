@@ -3,7 +3,9 @@ param(
     [switch]$Quick,
     [switch]$WindowsTarget,
     [switch]$CleanIncremental,
-    [switch]$KeepIncremental
+    [switch]$KeepIncremental,
+    [ValidateRange(1, 1048576)]
+    [int]$MaxIncrementalSizeMiB = 512
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +40,8 @@ try {
     try {
         & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
             -KeepIncremental:$KeepIncremental `
-            -CleanIncremental:$CleanIncremental
+            -CleanIncremental:$CleanIncremental `
+            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB
     } catch {
         Write-Error "post-check cleanup failed: $_"
         $exitCode = 1
