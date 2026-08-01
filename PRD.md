@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W25、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W29、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -2583,7 +2583,10 @@ TODO-WINDOW
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 初版 + 10 tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 16 unit tests
+├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 6 process tests
+├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
+├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 

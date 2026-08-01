@@ -1,5 +1,49 @@
 use crate::route::HostOs;
 
+/// Processor ISA taxonomy across application processors and device cores.
+///
+/// `Isa` below remains the two-ISA desktop guest matrix contract. Keeping the
+/// sets distinct prevents ESP32 device targets from being mistaken for an OS
+/// guest route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessorIsa {
+    X86_64,
+    Aarch64,
+    X86_32,
+    Arm32,
+    RiscV32,
+    Xtensa32,
+}
+
+impl ProcessorIsa {
+    pub const ALL: [Self; 6] = [
+        Self::X86_64,
+        Self::Aarch64,
+        Self::X86_32,
+        Self::Arm32,
+        Self::RiscV32,
+        Self::Xtensa32,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86-64",
+            Self::Aarch64 => "aarch64",
+            Self::X86_32 => "x86-32",
+            Self::Arm32 => "arm32",
+            Self::RiscV32 => "riscv32",
+            Self::Xtensa32 => "xtensa32",
+        }
+    }
+
+    pub const fn pointer_width(self) -> u8 {
+        match self {
+            Self::X86_64 | Self::Aarch64 => 64,
+            Self::X86_32 | Self::Arm32 | Self::RiscV32 | Self::Xtensa32 => 32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Isa {
     X86_64,
@@ -18,6 +62,13 @@ impl Isa {
 
     pub const fn pointer_width(self) -> u8 {
         64
+    }
+
+    pub const fn processor_isa(self) -> ProcessorIsa {
+        match self {
+            Self::X86_64 => ProcessorIsa::X86_64,
+            Self::Aarch64 => ProcessorIsa::Aarch64,
+        }
     }
 }
 
@@ -151,6 +202,19 @@ mod tests {
     fn isa_contract_is_explicitly_64_bit() {
         for isa in Isa::ALL {
             assert_eq!(isa.pointer_width(), 64);
+        }
+    }
+
+    #[test]
+    fn processor_taxonomy_prefills_32_and_64_bit_domains() {
+        assert_eq!(ProcessorIsa::ALL.len(), 6);
+        let width32 = ProcessorIsa::ALL
+            .into_iter()
+            .filter(|isa| isa.pointer_width() == 32)
+            .count();
+        assert_eq!(width32, 4);
+        for isa in Isa::ALL {
+            assert_eq!(isa.processor_isa().pointer_width(), 64);
         }
     }
 

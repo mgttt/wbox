@@ -66,6 +66,18 @@ Virtualization.framework 等宿主平台 ABI 取得隔离或加速，但不得�
 产品来补能力。这样 portable、系统原生和 VM 后端共用上层状态模型，同时保持
 Rust-only 构建与运行边界。
 
+`wbox-machine-lab` 是这层契约的只读实验台：可探测当前硬件事实、展开完整路线、
+检查 ELF64/PE32+/Mach-O64 的 guest/ISA 身份并运行矩阵不变量。它不启动 guest，
+也不替代产品门禁。32 位处理器单独建模：x86-32/ARM32 预留，ESP32 的
+Xtensa32/RISC-V32 × bare-metal/FreeRTOS 形成独立设备矩阵，不混入桌面 3×3×2；
+当前尚未桥接的 ELF32/PE32 与 Mach-O universal 明确拒绝，扩展入口分别由
+`WM-ARTIFACT-32` / `WM-ARTIFACT-FAT` 跟踪。
+
+GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩阵表达，
+工作负载分别预填为 parallel/tensor/language compute。当前九格全部是 research；
+设备发现与宿主 API 归 `agenterm-platform`，内存、队列、调度、隔离和执行 provider
+契约归 `wbox-machine`，未取得运行证据前不得转为 available。
+
 ## 2. Windows 后端
 
 ### 2.1 原生程序
