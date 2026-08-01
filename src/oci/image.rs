@@ -10,7 +10,7 @@ use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
 use agenterm_platform::filesystem_publish::{publish_directory, DirectoryPublishErrorKind};
 use agenterm_platform::locking::{LockErrorKind, PathLock};
-use agenterm_platform::process_metrics::{self, ProcessMetricsErrorKind};
+use agenterm_platform::process_observation::{self, ProcessObservation};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -279,12 +279,14 @@ fn recover_cache_artifacts(
                     report.skipped_uncertain += 1;
                     continue;
                 };
-                match process_metrics::metrics(pid) {
-                    Err(error) if error.kind() == ProcessMetricsErrorKind::NotFound => {
+                match process_observation::observe(pid) {
+                    ProcessObservation::Dead { .. } => {
                         agenterm_platform::filesystem_cleanup::remove_tree(&candidate)?;
                         report.removed_staging += 1;
                     }
-                    Ok(_) | Err(_) => report.skipped_uncertain += 1,
+                    _ => {
+                        report.skipped_uncertain += 1;
+                    }
                 }
             }
             Err(error) => return Err(error.into()),

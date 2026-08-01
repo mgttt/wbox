@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W75、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L46、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M31
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W76、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L47、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M32
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2665,6 +2665,7 @@ TODO-WINDOW
 ├── W73 pull 崩溃后废弃 staging/backup 识别与恢复                                     [done] owner receipt + crash probe
 ├── W74 link-like 文件系统条目分类下沉并收紧目录发布/清理                              [done] junction root + publish reject
 ├── W75 动态可用物理内存事实下沉并接入 machine lab                                   [done] 34.4/64.0 GiB + typed semantics
+├── W76 单 PID 存活/启动身份从重型 process 拆分并接入 OCI recovery                    [done] Dead-only cleanup
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3096,7 +3097,8 @@ TODO-LINUX
 ├── L43 可回滚目录发布 Linux 真机验收                                   [next] rename/rollback/mode-000 cleanup
 ├── L44 pull owner/backup 崩溃恢复 Linux 真机验收                       [next] flock + /proc NotFound + crash
 ├── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
-└── L46 动态可用物理内存 Linux 真机验收                                [next] MemAvailable + pressure/cgroup distinction
+├── L46 动态可用物理内存 Linux 真机验收                                [next] MemAvailable + pressure/cgroup distinction
+└── L47 轻量进程观察 Linux 真机验收                                    [next] live/dead/zombie/permission + start ticks
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3137,6 +3139,12 @@ rename 行为。
 必须另行记录 cgroup v1/v2 memory limit/current；不得把宿主 `MemAvailable` 当作容器、
 进程或 guest 的可分配预算。内存压力下允许数值下降乃至为零，格式错误、缺字段和乘法
 溢出必须类型化失败；交叉编译不能替代 procfs 真机行为。
+
+`L47` 在非 root Linux 真机仅启用 platform `process-observation`，验证当前进程为
+`Live` 且带 `/proc/<pid>/stat` start ticks、已退出并 wait 的 PID 为 `Dead`，以及已退出但
+尚未 wait 的真实 zombie 同样为 `Dead`。另在权限受限 PID 可构造时必须返回 `Unknown` 而非
+误判死亡；PID 重用时 start identity 必须变化。该门禁不授权 kill/list/tree ownership，
+交叉编译与纯 parser fixture 均不能替代 procfs 生命周期行为。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3818,7 +3826,8 @@ TODO-MACOS
 ├── M28 可回滚目录发布 macOS 真机验收                                 [next] APFS rename/rollback/cleanup
 ├── M29 pull owner/backup 崩溃恢复 macOS 真机验收                     [next] flock + ESRCH + APFS rename
 ├── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
-└── M31 动态可用物理内存 macOS 真机验收                              [next] Mach free+inactive + pressure distinction
+├── M31 动态可用物理内存 macOS 真机验收                              [next] Mach free+inactive + pressure distinction
+└── M32 轻量进程观察 macOS 真机验收                                  [next] proc_bsdinfo live/dead/permission + start time
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3850,6 +3859,11 @@ metadata 被归为 link-like、普通目录保持 real directory；cleanup/usage
 `wbox-machine-lab host`，交叉核对 Mach `free_count + inactive_count` 乘宿主页大小，语义
 必须为 `macos-free-plus-inactive`。该估算不等于 memory-pressure 等级，也不包含产品可用
 预算；双 ISA 交叉编译只能证明 Mach ABI 与公共类型可构建，不能替代原生计数和压力变化。
+
+`M32` 在 Intel 与 Apple Silicon 真机仅启用 platform `process-observation`，验证当前 PID
+带 `proc_bsdinfo` start time、已退出 PID 为 `Dead`、权限拒绝为 `Unknown`，并确认 PID 重用
+不能复用旧 start identity。该最小 feature 不应带入 ToolHelp/Job/Pipes/console 等完整 process
+依赖；双 ISA 交叉编译只证明 ABI 可构建，不替代真实 `proc_pidinfo` 错误分类。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3918,9 +3932,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`9cc8c6a6301a29929250e952e49e2fa2d5380137`，关闭 default features，按消费包启用
+`1e781cc058050bae5d534126a3ca5499c95a8b81`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4367,6 +4381,22 @@ ARM64 与 macOS 双 ISA 严格编译通过；wbox-machine 39 tests、根 470 tes
 3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 428.4 MiB 可再生缓存；
 release 产品门禁 WP.1-WP.27 与 Ubuntu 24.04 WU.1/WU.2 通过。Linux/macOS 真机分别
 交接 L46/M31。
+
+`W76` 将完整 process facade 内的单 PID `observe/start_identity` 拆为独立
+`process-observation` feature 和 contract/adapter：Windows 只需要 limited process query
+并使用 creation FILETIME，Linux 读取 `/proc/<pid>/stat` start ticks 且把 Z/X/x 状态判为
+`Dead`，macOS 使用 `proc_bsdinfo` start time；权限、解析和不完整查询统一保持 `Unknown`。
+完整 process 通过兼容重导出保留 API，但最小 feature 不再引入 ToolHelp、Job Object、Pipes
+或 console。platform 最小 12 tests、all-features 158 tests、严格 Clippy 与 Windows i686、
+Linux ARM64、macOS 双 ISA 编译通过。
+
+wbox OCI 的旧版 markerless staging 恢复删除 process-metrics 的语义借用，改为仅在明确
+`ProcessObservation::Dead` 时清理；`Live`、`Unknown` 和未来新增状态全部 fail closed 保留。
+`stats` 对 CPU/RSS/page-fault 的合法 metrics 消费不变，缓存 owner receipt、锁、当前 staging
+排除和 backup 裁决仍归 wbox 产品层。OCI 定向 46 tests 通过；Linux/macOS 真机生命周期
+分别交接 L47/M32。wbox 根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable
+targets 通过，Quick 释放 456.0 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定
+Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
