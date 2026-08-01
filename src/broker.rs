@@ -13,8 +13,8 @@ use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenAppContainerSid, TokenUser, PSECURITY_DESCRIPTOR,
-    SECURITY_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, TokenAppContainerSid, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FlushFileBuffers, GetFileInformationByHandleEx, ReadFile,
@@ -823,40 +823,16 @@ fn write_all(handle: HANDLE, mut buffer: &[u8]) -> Result<()> {
 }
 
 fn current_user_sid_string() -> Result<String> {
-    let current = unsafe { GetCurrentProcess() };
-    let mut token_handle = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(current, TOKEN_QUERY, &mut token_handle) } == 0 {
-        return Err(last_error("OpenProcessToken(current user)"));
-    }
-    let token_handle = OwnedHandle(token_handle);
-    let mut needed = 0;
+    let identity = agenterm_platform::user_identity::current_user_identity()
+        .map_err(|error| WboxError::spawn(format!("读取当前用户 SID 失败：{error}")))?;
+    let sid = identity
+        .windows_sid()
+        .ok_or_else(|| WboxError::spawn("Windows broker 未得到 SID 用户身份"))?;
+    let mut aligned_sid = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
     unsafe {
-        GetTokenInformation(
-            token_handle.raw(),
-            TokenUser,
-            std::ptr::null_mut(),
-            0,
-            &mut needed,
-        )
-    };
-    if needed < std::mem::size_of::<TOKEN_USER>() as u32 {
-        return Err(last_error("GetTokenInformation(TokenUser size)"));
+        std::ptr::copy_nonoverlapping(sid.as_ptr(), aligned_sid.as_mut_ptr().cast(), sid.len());
     }
-    let mut storage = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
-    if unsafe {
-        GetTokenInformation(
-            token_handle.raw(),
-            TokenUser,
-            storage.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    } == 0
-    {
-        return Err(last_error("GetTokenInformation(TokenUser)"));
-    }
-    let user = storage.as_ptr() as *const TOKEN_USER;
-    token::sid_to_string(unsafe { (*user).User.Sid })
+    token::sid_to_string(aligned_sid.as_mut_ptr().cast())
         .map_err(|e| WboxError::spawn(format!("转换当前用户 SID 失败：{}", e)))
 }
 

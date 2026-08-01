@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W58、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W59、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L32、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M16
 ├── 5  非功能需求 N1–N4
@@ -2648,6 +2648,7 @@ TODO-WINDOW
 ├── W56 单 PID suspend/resume 下沉并删除 pause 直接 libc 调用                        [done] Win Unsupported + 5 tests
 ├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
 ├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
+├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3940,6 +3941,11 @@ token 查询，Unix IPC 的十处 euid 比较也统一使用该事实；wbox Lin
 策略仍归产品。固定 revision `2c6dc9ea3678f20c396b7c29082a854bb3c90342`；Windows
 SID/ACL/IPC 真机测试、all-features 和五目标严格 Clippy 已通过，Linux/macOS 运行验收
 见 L32/M16。
+
+`W59` 删除 Windows broker 为 owner-only named pipe 重复执行的当前进程
+`OpenProcessToken + TokenUser` 查询，改用 platform 已校验并复制的当前用户 SID；wbox
+只在 SDDL 转换边界创建满足 Win32 指针对齐的临时缓冲。目标 AppContainer 进程的 token
+查询、SID 匹配、注册握手和访问授权仍属于 broker 产品策略，不下沉到 platform。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
