@@ -65,7 +65,14 @@ mod ratchet {
     /// 这句话就不成立了。
     #[test]
     fn only_first_party_and_platform_abi_dependencies() {
-        const ALLOWED: &[&str] = &["wbox-codec", "libc", "windows-sys", "version", "features"];
+        const ALLOWED: &[&str] = &[
+            "wbox-codec",
+            "libc",
+            "windows-sys",
+            "workspace",
+            "version",
+            "features",
+        ];
         let toml = include_str!("../Cargo.toml");
         let mut in_deps = false;
         for line in toml.lines() {

@@ -14,6 +14,10 @@ license = "MIT OR Apache-2.0"
 [workspace]
 members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-machine", "crates/wbox-tls"]
 
+[workspace.dependencies]
+# 单点冻结 Windows ABI 声明版本，各 package 仍只启用自身需要的 feature。
+windows-sys = { version = "0.61", default-features = false }
+
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
 # 这一条取代了原先的 serde_json / sha2 / base64 / flate2 / tar 五个第三方 crate。
@@ -45,7 +49,7 @@ libc = "0.2"
 
 # windows-sys 只启用用到的 feature，保持编译快、二进制小。
 [dependencies.windows-sys]
-version = "0.59"
+workspace = true
 features = [
     # 基础类型：HANDLE、BOOL、PSID、CloseHandle 等
     "Win32_Foundation",

@@ -226,6 +226,7 @@ mod tests {
         // 平台 ABI 声明：只是 extern 声明，不编译任何第三方实现代码。
         const PLATFORM_ABI: &[&str] = &[
             "libc",
+            "windows-link",
             "windows-sys",
             "windows-targets",
             "windows_aarch64_gnullvm",

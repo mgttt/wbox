@@ -16,7 +16,9 @@
 
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::{GetLastError, LocalFree, HLOCAL};
+use windows_sys::Win32::Foundation::{
+    GetLastError, LocalFree, GENERIC_EXECUTE, GENERIC_READ, HLOCAL,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSidToSidW, GetNamedSecurityInfoW, SetEntriesInAclW, SetNamedSecurityInfoW,
     EXPLICIT_ACCESS_W, SET_ACCESS, SE_FILE_OBJECT, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
@@ -32,9 +34,8 @@ use crate::token::to_wide;
 
 /// "ALL APPLICATION PACKAGES" 知名 SID（S-1-15-2-1）。
 const ALL_APP_PACKAGES_SID: &str = "S-1-15-2-1";
-/// GENERIC_READ | GENERIC_EXECUTE（windows-sys 0.59 未在启用的 feature 集内导出常量，
-/// 按 Win32 头文件值定义：只读 + 遍历/执行，rootfs 只需读）。
-const ACCESS_READ_EXECUTE: u32 = 0x8000_0000 | 0x2000_0000;
+/// rootfs 只需读取与遍历/执行权限。
+const ACCESS_READ_EXECUTE: u32 = GENERIC_READ | GENERIC_EXECUTE;
 /// FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE |
 /// DELETE | FILE_DELETE_CHILD。
 ///

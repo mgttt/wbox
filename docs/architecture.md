@@ -56,6 +56,8 @@ research；尤其不能把所有 `not(windows)` 都当成 Linux。
 `filesystem-conventions` 统一宿主可执行文件后缀与同目录定位。依赖固定到不可变
 Git SHA；该 feature 不引入原生依赖，且未启用完整 filesystem/process/locking/UI。
 这样验证跨仓版本、三宿主选择器和依赖棘轮，不改变执行、隔离或状态生命周期语义。
+workspace 统一持有 `windows-sys` 版本，各 package 只声明自身最小 feature，避免未来
+启用通用原生机制时出现两套 Windows ABI 依赖。
 OCI 默认架构也必须消费这一宿主身份：Linux 原生 provider 跟随 target ISA，
 Windows/macOS 的近期用户态模拟路线保持 `amd64`，不能把宿主 AArch64 误当成
 已实现的 AArch64 guest runtime。

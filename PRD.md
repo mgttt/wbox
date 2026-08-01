@@ -2594,6 +2594,7 @@ TODO-WINDOW
 ├── W32 CPU 并行与 zero-copy 实验矩阵                            [done] 30 路预填 + Windows 实测
 ├── W33 NUMA/RDMA/共享 ring/scatter-gather                       [research] 当前宿主无 RDMA adapter
 ├── W34 FP64 FMA 算力计量                                         [done] 143–145 GFLOPS 本机长测
+├── W35 Windows ABI 依赖单点化与 agenterm-platform 版本收敛        [done] windows-sys 0.61 单节点
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3576,8 +3577,9 @@ cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke �
 此前 review 发现的两个上游阻塞已修复并有行为门禁：`PathLock` 现在规范化路径
 别名并由真实子进程验证互斥与释放；Windows `protect_private_directory()` 现在
 写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox 尚未
-启用完整 `locking`/`filesystem` feature；迁移生命周期锁或安全目录仍须先处理
-`windows-sys` 版本收敛，并逐项对照现有产品语义。
+启用完整 `locking`/`filesystem` feature。workspace 已将四处 Windows ABI 声明
+收敛到单点 `windows-sys 0.61`，迁移生命周期锁或安全目录仍须逐项对照现有产品
+语义并通过产品门禁。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

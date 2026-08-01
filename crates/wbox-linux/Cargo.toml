@@ -15,7 +15,7 @@ libc = "0.2"
 # Windows 侧只用来接系统 CSPRNG（guest 的 getrandom）。windows-sys 是纯
 # FFI 声明，不编译任何 C 代码，与根包用的是同一个版本。
 [target.'cfg(windows)'.dependencies.windows-sys]
-version = "0.59"
+workspace = true
 features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",

@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 wbox-machine = { path = "../wbox-machine" }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
-version = "0.59"
+workspace = true
 features = [
     "Win32_Foundation",
     "Win32_Security",

@@ -17,12 +17,11 @@ use windows_sys::Win32::Security::{
     WinCapabilityInternetClientSid, WinCapabilityPrivateNetworkClientServerSid,
     SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES, WELL_KNOWN_SID_TYPE,
 };
+use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::error::{ErrKind, KindExt, Result};
 
-// winnt.h: an enabled SID participates in access checks. windows-sys 0.59
-// exposes this under an optional SystemServices feature that wbox does not need.
-const SE_GROUP_ENABLED: u32 = 0x0000_0004;
+const ENABLED_ATTRIBUTES: u32 = SE_GROUP_ENABLED as u32;
 
 /// RAII 包装：AppContainer profile（命名内核隔离配置）。
 ///
@@ -255,7 +254,7 @@ impl CapabilitySid {
     pub fn enabled_attributes(&self) -> SID_AND_ATTRIBUTES {
         SID_AND_ATTRIBUTES {
             Sid: self.sid,
-            Attributes: SE_GROUP_ENABLED,
+            Attributes: ENABLED_ATTRIBUTES,
         }
     }
 }
@@ -400,7 +399,7 @@ mod real_windows_tests {
         assert_eq!(cap.desc(), "INTERNET_CLIENT");
         assert_eq!(
             cap.enabled_attributes().Attributes,
-            SE_GROUP_ENABLED,
+            ENABLED_ATTRIBUTES,
             "capability SID 必须启用后才参与访问检查"
         );
     }
@@ -421,7 +420,7 @@ mod real_windows_tests {
         ] {
             assert_eq!(sid_to_string(cap.sid).unwrap(), expected);
             assert_eq!(cap.desc(), desc);
-            assert_eq!(cap.enabled_attributes().Attributes, SE_GROUP_ENABLED);
+            assert_eq!(cap.enabled_attributes().Attributes, ENABLED_ATTRIBUTES);
         }
     }
 
