@@ -53,3 +53,17 @@ pub mod proc;
 pub mod sse;
 pub mod stack;
 pub mod syscall;
+
+#[cfg(test)]
+mod dependency_tests {
+    #[test]
+    fn direct_platform_dependency_requests_only_identity_and_entropy() {
+        let dependency = include_str!("../Cargo.toml")
+            .lines()
+            .find(|line| line.starts_with("agenterm-platform ="))
+            .expect("wbox-linux must declare agenterm-platform directly");
+        assert!(dependency.contains("\"entropy\""));
+        assert!(dependency.contains("\"file-identity\""));
+        assert!(!dependency.contains("\"filesystem\""));
+    }
+}

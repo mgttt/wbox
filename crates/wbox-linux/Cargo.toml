@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 # 零第三方实现依赖。宿主 CSPRNG 与文件对象身份复用第一方 agenterm-platform；
 # guest syscall、权限策略和 Linux ABI 仍由本 crate 实现。
 [dependencies]
-agenterm-platform = { workspace = true, features = ["entropy", "filesystem"] }
+agenterm-platform = { workspace = true, features = ["entropy", "file-identity"] }
 
 [[bin]]
 name = "wbox-linux"

@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W56、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W57、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L31、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M14
+│       └── 4.9.3 [TODO-MACOS]    M1–M15
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2646,6 +2646,7 @@ TODO-WINDOW
 ├── W54 用户主目录约定下沉与 `.wbox` 根路径收敛                                    [done] USERPROFILE only + 456 tests
 ├── W55 构建结束后回收不可恢复的 incremental working session                       [done] wrapper + fixture
 ├── W56 单 PID suspend/resume 下沉并删除 pause 直接 libc 调用                        [done] Win Unsupported + 5 tests
+├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3053,7 +3054,7 @@ TODO-LINUX
 ├── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
 ├── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
 ├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
-├── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
+├── L23 宿主文件对象身份 Linux 真机验收                     [next] identity-only + dev/ino/nlink
 ├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
 ├── L25 AArch64 Linux seccomp syscall 表可移植性              [done] ISA catalog + full workspace Clippy
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
@@ -3682,8 +3683,13 @@ TODO-MACOS
 ├── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
 ├── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
 ├── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
-└── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
+├── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
+└── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
 ```
+
+`M15` 在 Intel 与 Apple Silicon 真机只启用 platform `file-identity`，验证文件与目录
+identity、hard-link count 及 rename 后对象稳定性，并确认依赖树不含 ACL/Authorization/
+Threading。完整 filesystem 的兼容重导出只需编译门禁，不替代最小 feature 真机运行。
 
 `M14` 在 Intel 与 Apple Silicon 真机运行 platform process-control 测试，确认目标 PID
 真实进入 stopped 状态并在 resume 后可继续调度。该机制验收不等于 wbox 已在 macOS
@@ -3903,6 +3909,16 @@ Windows 因缺少可靠的通用单进程原语而显式 Unsupported。wbox `pau
 判据。Windows 定向 5 项通过，platform 五目标严格 Clippy 通过；Linux/macOS 真机
 运行验收分别交接 L31/M14。该 revision 紧随机制提交补齐完整 `process` feature 对
 Suspend/Resume 错误种类的穷尽映射，不固定在仅最小 feature 可编译的中间提交上。
+
+`W57` 把文件对象身份从完整 `filesystem` 拆为独立 `file-identity` feature：Windows
+只启用 Foundation/FileSystem，Unix 使用标准 metadata 扩展且无额外依赖；完整
+filesystem 继续包含并从旧路径重导出 identity API，保持兼容。`wbox-linux` 改为直接
+引用新 facade，manifest 门禁要求直接依赖只申请 entropy/file-identity；隔离
+`cargo tree -p wbox-linux -e features` 不含完整 filesystem、Authorization 和 Threading。
+workspace 根包因真实使用私有目录/原子发布而启用 filesystem 时，Cargo 会统一 feature，
+不能用运行时 capability 状态反推 guest 的直接依赖。
+platform identity-only/完整 filesystem Windows 真机测试与五目标严格 Clippy 已通过，
+Linux/macOS 真机运行分别并入 L23/M15。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

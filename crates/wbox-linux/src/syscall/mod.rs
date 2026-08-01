@@ -1716,7 +1716,7 @@ fn write_stat_with_identity(
     m: &mut Machine,
     out: u64,
     md: &std::fs::Metadata,
-    identity: Option<agenterm_platform::filesystem::FileIdentity>,
+    identity: Option<agenterm_platform::file_identity::FileIdentity>,
 ) -> i64 {
     let mut b = [0u8; 144];
 
@@ -1781,7 +1781,7 @@ fn write_stat_with_identity(
 fn metadata_mode(
     m: &Machine,
     md: &std::fs::Metadata,
-    identity: Option<agenterm_platform::filesystem::FileIdentity>,
+    identity: Option<agenterm_platform::file_identity::FileIdentity>,
 ) -> u32 {
     #[cfg(unix)]
     {
@@ -1819,7 +1819,7 @@ fn metadata_mode(
 
 #[cfg(windows)]
 fn remember_created_mode(m: &mut Machine, file: &std::fs::File, requested: u32) -> i64 {
-    let identity = match agenterm_platform::filesystem::file_identity(file) {
+    let identity = match agenterm_platform::file_identity::file_identity(file) {
         Ok(identity) => identity,
         Err(e) => return host_err(&e),
     };
@@ -1834,7 +1834,7 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
     let (md, identity) = match m.os.fds.get(fd).map(|f| &f.kind) {
         Some(FdKind::File(f)) => {
             #[cfg(windows)]
-            let identity = match agenterm_platform::filesystem::file_identity(f) {
+            let identity = match agenterm_platform::file_identity::file_identity(f) {
                 Ok(identity) => Some(identity),
                 Err(e) => return host_err(&e),
             };
@@ -1921,7 +1921,7 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
             let identity = if md.file_type().is_symlink() {
                 None
             } else {
-                match agenterm_platform::filesystem::path_identity(&host) {
+                match agenterm_platform::file_identity::path_identity(&host) {
                     Ok(identity) => Some(identity),
                     Err(e) => return host_err(&e),
                 }
@@ -3169,7 +3169,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 Some(FdKind::File(f)) => {
                     #[cfg(windows)]
                     {
-                        identity = match agenterm_platform::filesystem::file_identity(f) {
+                        identity = match agenterm_platform::file_identity::file_identity(f) {
                             Ok(identity) => Some(identity),
                             Err(e) => return host_err(&e),
                         };
@@ -3179,7 +3179,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 Some(FdKind::Dir { path, .. }) => {
                     #[cfg(windows)]
                     {
-                        identity = match agenterm_platform::filesystem::path_identity(path) {
+                        identity = match agenterm_platform::file_identity::path_identity(path) {
                             Ok(identity) => Some(identity),
                             Err(e) => return host_err(&e),
                         };
@@ -3202,7 +3202,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
             };
             #[cfg(windows)]
             if md.as_ref().is_ok_and(|md| !md.file_type().is_symlink()) {
-                identity = match agenterm_platform::filesystem::path_identity(&host) {
+                identity = match agenterm_platform::file_identity::path_identity(&host) {
                     Ok(identity) => Some(identity),
                     Err(e) => return host_err(&e),
                 };
