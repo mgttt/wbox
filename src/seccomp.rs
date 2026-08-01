@@ -33,8 +33,13 @@ use crate::error::{Result, WboxError};
 /// 直接写号（`--seccomp-deny 101`），所以这张表短并不构成能力缺口——它只是
 /// 让常见写法有个可读的名字，而号是逃生口。
 ///
-/// 号一律取自 `libc::SYS_*`，因此**跨架构自动正确**，不写死 x86-64 的数字。
-#[cfg(target_os = "linux")]
+/// 号一律取自目标架构的 `libc::SYS_*`，不写死 x86-64 数字。catalog 只在已经有
+/// `AUDIT_ARCH` 门禁的 ISA 上提供；某个 ABI 没有的 syscall 名不会伪造或映射到
+/// 另一个入口（例如 AArch64 只有 `mknodat`，没有 legacy `mknod`）。
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub const SYSCALL_NAMES: &[(&str, libc::c_long)] = &[
     ("ptrace", libc::SYS_ptrace),
     ("mount", libc::SYS_mount),
@@ -63,17 +68,23 @@ pub const SYSCALL_NAMES: &[(&str, libc::c_long)] = &[
     ("acct", libc::SYS_acct),
     ("settimeofday", libc::SYS_settimeofday),
     ("clock_settime", libc::SYS_clock_settime),
+    #[cfg(target_arch = "x86_64")]
     ("mknod", libc::SYS_mknod),
+    ("mknodat", libc::SYS_mknodat),
     ("quotactl", libc::SYS_quotactl),
     ("syslog", libc::SYS_syslog),
+    #[cfg(target_arch = "x86_64")]
     ("uselib", libc::SYS_uselib),
     ("personality", libc::SYS_personality),
     ("process_vm_readv", libc::SYS_process_vm_readv),
     ("process_vm_writev", libc::SYS_process_vm_writev),
 ];
 
-/// 非 Linux 构建下没有 `libc::SYS_*`，用空表顶上，只保留解析层可编译。
-#[cfg(not(target_os = "linux"))]
+/// 非 Linux 或尚未适配 seccomp AUDIT_ARCH 的构建使用空表，只保留裸号解析。
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 pub const SYSCALL_NAMES: &[(&str, i64)] = &[];
 
 /// 生效的 seccomp 策略。
@@ -432,6 +443,28 @@ mod tests {
         assert!(p.denied().contains(&(libc::SYS_mount as i64)));
         assert!(p.summary().contains("ptrace"));
         assert!(p.summary().contains("EPERM"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn x86_64_catalog_keeps_legacy_and_at_mknod_entries() {
+        for name in ["mknod", "mknodat", "uselib"] {
+            assert!(
+                SeccompPolicy::resolve(&[name.to_owned()]).is_ok(),
+                "x86-64 catalog should contain {name}"
+            );
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn aarch64_catalog_exposes_only_real_mknod_entry() {
+        let policy = SeccompPolicy::resolve(&["mknodat".to_owned()]).unwrap();
+        assert_eq!(policy.denied(), &[libc::SYS_mknodat as i64]);
+        for absent in ["mknod", "uselib"] {
+            let error = SeccompPolicy::resolve(&[absent.to_owned()]).unwrap_err();
+            assert!(format!("{error}").contains("未知 syscall"));
+        }
     }
 
     /// seccomp 装上就撤不掉，靠"跑一遍看看"调试代价太高：指令序列必须能离线

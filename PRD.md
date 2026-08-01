@@ -1723,7 +1723,9 @@ Windows 的 AppContainer 是另一套 SID 模型，逐条对应不了。
   exec"与"guest 自己发起的 exec"，所以这个配置没有可用形态。不拦的话用户只会
   看到一句 "Operation not permitted"，看不出是自己配的。
 - 名表**刻意不求全**，只收常被点名拦截的那些；写不出名字可以**直接写号**
-  （`--seccomp-deny 165`）。号一律取自 `libc::SYS_*`，跨架构自动正确。
+  （`--seccomp-deny 165`）。号一律取自目标 ISA 的 `libc::SYS_*`；名称集合也按 ABI
+  存在性构造，不能因为 x86-64 有 legacy `mknod`/`uselib` 就在 AArch64 伪造编号。
+  AArch64 的节点创建入口是 `mknodat`，两架构都显式提供该名称。
 
 BPF 指令序列是纯函数、可离线断言（`filter_program_shape_and_jump_offsets`）：
 seccomp 一装上就撤不掉，靠"跑一遍看看"调试代价太高，而跳转偏移算错的表现是
@@ -3016,7 +3018,7 @@ TODO-LINUX
 ├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
 ├── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
 ├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
-├── L25 AArch64 Linux seccomp syscall 表可移植性              [next] mknod/uselib 不能引用缺失常量
+├── L25 AArch64 Linux seccomp syscall 表可移植性              [done] ISA catalog + full workspace Clippy
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
 └── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
 ```
@@ -3031,10 +3033,12 @@ view 存活、oversized open 在 `mmap` 前返回 `SizeMismatch`，以及 1/2/4/
 checksum。映射名称与 RAII 归 platform；数据布局、同步、
 cache-line 槽、worker 划分和性能口径归 wbox。双 Linux ISA 交叉编译不能替代真机。
 
-`L25` 来自本阶段新增的 AArch64 Linux workspace 门禁：`src/seccomp.rs` 无条件引用
-x86 有而 AArch64 `libc` 不提供的 `SYS_mknod`、`SYS_uselib`，导致 bin/all-targets 编译
-失败；workspace library 路径及 platform `process-metrics` 本身已通过。修复应按 ISA
-构造审计过的 syscall 集合并补双 ISA 编译断言，不能伪造 syscall number 或放宽 lint。
+`L25` 已按 ISA 构造 syscall catalog：x86-64 保留真实存在的 legacy `mknod`/`uselib`
+并新增 `mknodat`，AArch64 只暴露真实存在的 `mknodat`，不会把名称偷偷映射到另一
+入口。两边号码都来自各自 `libc::SYS_*`；架构专属测试固定名称可用性和拒绝行为。
+x86-64/AArch64 Linux workspace all-targets Clippy `-D warnings` 均通过，AArch64 不再
+停在 library 子集。本 Windows 宿主没有可用 WSL，所以这证明 catalog/BPF/全构建图
+可编译，不替代 Linux 真机 SEC.1–SEC.6 行为门禁。
 
 `L24` 在 Linux 真机运行 platform `process-metrics` 测试和无专属 cgroup 的
 `wbox stats`，核对 `/proc/<pid>/stat` 的累计 CPU、`statm` RSS、进程退出竞态与多成员
@@ -3735,8 +3739,8 @@ CPU 时间与 resident bytes：Windows 使用 process times/working set，Linux 
 page size 和字段偏移解析，只保留容器成员选择、逐 PID 退出容错、饱和聚合、cgroup
 优先级、采样窗口和来源标签。完整 `process` feature 仍关闭；platform feature 已在
 Windows 真机测试，并通过 Windows i686、Linux x64/AArch64、macOS x64/AArch64
-严格编译；wbox workspace 通过 Windows、Linux x64 与双 macOS ISA，AArch64 Linux
-library 通过但 bin 被既有 seccomp 常量阻塞（L25）。Linux 产品验收交接为 L24。
+严格编译；wbox workspace 通过 Windows、Linux 双 ISA 与双 macOS ISA。AArch64
+seccomp catalog 阻塞已由 L25 解除；Linux 产品验收交接为 L24。
 
 `W48` 在 platform 增加独立 `shared-memory` feature：可移植名称映射到 Windows
 page-file mapping 或 POSIX shm，create 排他，view/handle 由 RAII 回收；POSIX creator
