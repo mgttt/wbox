@@ -1107,7 +1107,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                     None => println!("[{}/{}] FROM {}", step, instructions.len(), base),
                 }
                 // 重建输出目录：残留的上一次构建会让结果不可复现
-                crate::fsutil::remove_tree(&build_dir);
+                let _ = agenterm_platform::filesystem_cleanup::remove_tree(&build_dir);
                 std::fs::create_dir_all(&build_dir)
                     .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
                 // 若后面有缓存命中，这份基础 rootfs 会被命中层整体覆盖；
@@ -1253,14 +1253,13 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 // 断开硬链接）。合并失败要让整个 build 失败——半合并的 staging
                 // 是错的内容，比构建失败糟得多。
                 let layer = build_dir.join(format!(".wbox-step-{}", step));
-                // 用 `fsutil::remove_tree` 而不是裸 `remove_dir_all`：这棵树里
-                // 就有 overlayfs 建的 mode-000 `work/work`，裸删在非 root 下
-                // 静默失败，`.wbox-step-*` 会留在镜像缓存旁边。
-                crate::fsutil::remove_tree(&layer);
+                // 这棵树里有 overlayfs 建的 mode-000 `work/work`；共享 cleanup
+                // 机制会先恢复 owner access，避免 `.wbox-step-*` 留在缓存旁边。
+                let _ = agenterm_platform::filesystem_cleanup::remove_tree(&layer);
                 run_step_with(&rootfs, cmd, &cfg, Some(&layer))?;
                 #[cfg(target_os = "linux")]
                 merge_overlay_upper(&layer.join("upper"), &rootfs)?;
-                crate::fsutil::remove_tree(&layer);
+                let _ = agenterm_platform::filesystem_cleanup::remove_tree(&layer);
             }
             Instruction::Run(cmd) => {
                 println!("[{}/{}] RUN {}", step, instructions.len(), cmd);
@@ -1284,7 +1283,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     {
         // staging 带构建 AppContainer SID 的临时修改 ACE，不能直接 rename 成最终
         // 镜像。重新创建目标并只复制内容/symlink，让其继承镜像缓存的干净 DACL。
-        crate::fsutil::remove_tree(&out_dir);
+        let _ = agenterm_platform::filesystem_cleanup::remove_tree(&out_dir);
         std::fs::create_dir_all(&out_dir)
             .map_err(|e| WboxError::args(format!("创建镜像目录失败：{}", e)))?;
         crate::backend::copy_rootfs_tree(&rootfs, &out_dir.join("rootfs"))?;
@@ -1293,7 +1292,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
     // 阶段临时目录只在构建期有用，留着会在镜像缓存旁边堆一堆半成品 rootfs
     for d in stage_dirs.iter() {
         // 阶段目录里可能嵌着 `.wbox-step-*` 的 overlay work 树，同样要补权限再删。
-        crate::fsutil::remove_tree(d);
+        let _ = agenterm_platform::filesystem_cleanup::remove_tree(d);
     }
 
     std::fs::write(out_dir.join("config.json"), cfg.to_json())

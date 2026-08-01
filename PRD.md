@@ -2657,6 +2657,7 @@ TODO-WINDOW
 ├── W65 单 PID page-fault 事实下沉并接入 memory lab                                [done] cold 8209 / warm 0
 ├── W66 当前进程 processor-affinity 事实下沉并接入 machine snapshot                  [done] group 0 / CPU 0–7
 ├── W67 detached child 启动下沉并删除 supervisor 平台重复实现                        [done] WP.1–WP.27 + WU.1/WU.2
+├── W68 受限权限目录树清理下沉并删除本地 fsutil                                      [done] readonly + junction + WP.18
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3081,8 +3082,14 @@ TODO-LINUX
 ├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + minor/major delta
 ├── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
 ├── L38 processor-affinity Linux 真机验收                              [next] sched_getaffinity + cpuset/taskset
-└── L39 detached child/session Linux 真机验收                          [next] setsid + READY/ERROR + 生命周期
+├── L39 detached child/session Linux 真机验收                          [next] setsid + READY/ERROR + 生命周期
+└── L40 受限权限目录树清理 Linux 真机验收                              [next] mode-000 + symlink canary
 ```
+
+`L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
+`filesystem-cleanup` 删除整树；另放一条指向树外 mode-000 canary 的 symlink，确认 cleanup
+不穿越链接、不改变 canary mode。缺失根幂等成功，真实权限错误必须返回；交叉编译不能
+替代 VFS 行为证据。删除根的选择、并发写入隔离与失败策略仍归调用产品。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3616,8 +3623,9 @@ W 段的依赖检查刻意绕过 `WBOX_LBE_REQUIRE` 直接 `report SKIP`，于�
 1. **`MS.3` 阶段目录残留 / 收尾 `rm -rf` 报 Permission denied。** rootless
    overlayfs 会建一个 mode-000 的 `work/work`；root 绕过权限位，
    `remove_dir_all` 直接成功，普通用户连 `opendir` 都做不成。修法是把
-   runstate 里早就有的"先补属主权限再删"提成共用的 `fsutil::remove_tree`，
-   build 与 `rmi` 一并改用。
+   最初把 runstate 里早就有的"先补属主权限再删"提成共用的
+   `fsutil::remove_tree`，build 与 `rmi` 一并改用；W68 后该通用机制下沉为
+   `agenterm-platform::filesystem_cleanup`，本地模块已经删除。
 2. **`INS.1/2/4`。** 宿主程序模式下不换根，guest 路径**就是**宿主路径，缺了
    就 `create_dir_all` 等于容器悄悄改造宿主文件系统、退出后也不还原；普通
    用户对 `/mnt` 没写权限时还只报一句光秃秃的 Permission denied。改为明确
@@ -3756,8 +3764,13 @@ TODO-MACOS
 ├── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
 ├── M22 单 PID CPU/RSS/page-fault macOS 真机验收                     [next] total + page-ins
 ├── M23 processor-affinity macOS 真机验收                            [next] advisory 必须 Unsupported
-└── M24 detached child/session macOS 真机验收                        [next] setsid + Intel/Apple Silicon
+├── M24 detached child/session macOS 真机验收                        [next] setsid + Intel/Apple Silicon
+└── M25 受限权限目录树清理 macOS 真机验收                            [next] mode-000 + symlink canary
 ```
+
+`M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
+canary 门禁，确认 owner access 恢复和不跟随链接语义。APFS 行为与双 ISA 原生运行不可由
+Linux 实测或 macOS 交叉编译代替；主动对抗并发 path replacement 不属于该 helper 契约。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3826,9 +3839,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`23eef3e90bf72b07a5839f9b6db6859c77692b69`，关闭 default features，按消费包启用
+`143f53599f9368e6b8bd69dc429a13e1fc7befdc`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-spawn`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-spawn`、`filesystem-cleanup`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4149,6 +4162,19 @@ caller Job，并以类型化 mode 如实返回；spawn 窗口内对进程级标�
 首次把 fallback 写到 stderr 导致 WP.6 精确失败，删除产品层额外输出后完整 WP.1–WP.27、
 WU.1/WU.2、Quick 门禁与 458/3 ignored 根测试通过。platform 最小 feature 14 tests、
 all-features 127 tests 和严格 Clippy 通过；Linux/macOS 原生 session 行为交接 L39/M24。
+
+`W68` 将“调用者拥有且已经静止”的目录树清理拆成零额外依赖
+`filesystem-cleanup` feature。Windows 递归清除 readonly 属性，并把任意 reparse point
+当作叶节点；Unix 只补 owner `rwx/rw`，不跟随 symlink。缺失路径幂等成功，真实错误
+返回调用方；安全删除根的选择、对抗并发 path replacement 和失败是否致命仍是产品策略。
+Windows junction 门禁证明删除父树后，树外 readonly canary 仍存在且属性不变；最小 feature
+13 tests、all-features 131 tests 与五目标严格 Clippy 通过。
+
+wbox 固定该 revision 并删除 108 行 `src/fsutil.rs`。build staging、overlay step 和状态
+目录沿用 best-effort 收尾，`image rm` 则传播清理错误；产品用例在镜像 rootfs 内放置
+readonly 文件后仍能删除完整缓存。Windows Quick 门禁通过并回收 431.7 MiB 可再生目录；
+完整 WP.1–WP.27（含 OCI build/cache 的 WP.18）通过；Linux/macOS 原生 mode-000 与
+symlink 行为分别交接 L40/M25。wbox 根测试 458 passed / 3 environment ignored。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

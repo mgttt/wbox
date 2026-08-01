@@ -703,8 +703,8 @@ fn purge_dir(dir: &Path) {
     // `..`），因此必定落在状态根目录之下；guest 无法把它指到别处。
     // Windows 上还要求先关掉 owner 锁句柄，否则文件仍被占用——`Drop` 已经
     // 先 `drop(lock)` 再调本函数。
-    // overlayfs 留下的 mode-000 `work/work` 得先补回属主权限，见 `fsutil`。
-    crate::fsutil::remove_tree(dir);
+    // overlayfs 留下的 mode-000 `work/work` 由共享 cleanup 机制先恢复 owner access。
+    let _ = agenterm_platform::filesystem_cleanup::remove_tree(dir);
 }
 
 impl Drop for Registration {

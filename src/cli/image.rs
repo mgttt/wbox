@@ -61,10 +61,9 @@ fn remove_cached_image(iref: &oci::ImageRef) -> Result<std::path::PathBuf> {
             dir.display()
         )));
     }
-    // 构建过的镜像目录里可能留着 overlay 的 mode-000 work 树，先补权限再删。
-    #[cfg(unix)]
-    crate::fsutil::make_tree_owner_accessible(&dir);
-    std::fs::remove_dir_all(&dir).map_err(|e| {
+    // 构建过的镜像目录里可能留着 overlay 的 mode-000 work 树或 Windows
+    // readonly 文件；共享 cleanup 机制恢复删除权限且不穿越 link/reparse point。
+    agenterm_platform::filesystem_cleanup::remove_tree(&dir).map_err(|e| {
         WboxError::registry(format!("删除缓存目录 '{}' 失败：{}", dir.display(), e))
     })?;
     Ok(dir)
@@ -320,6 +319,21 @@ mod tests {
     fn image_rm_removes_planted_cache_by_default() {
         let home = TempHome::new("rm-yes");
         let dir = home.plant_fake_image("registry-1.docker.io", "library_fake", "latest");
+        let restricted = dir.join("rootfs/restricted");
+        std::fs::create_dir_all(&restricted).unwrap();
+        let restricted_file = restricted.join("index");
+        std::fs::write(&restricted_file, b"value").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(&restricted_file).unwrap().permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&restricted_file, permissions).unwrap();
+        }
         assert!(dir.is_dir());
         cmd_image_rm(&["fake:latest".to_string()]).unwrap();
         assert!(!dir.exists());
