@@ -115,6 +115,9 @@ WBOX_LINUX=target/release/wbox-linux.exe bash tests/run.sh
 
 单项可直接运行构建后的 guest ELF。构建与 runner 细节见
 `tests/guest/build.sh` 和 `tests/run-guest-tests.sh`。
+runner 不按命令名盲信 `timeout`：它优先探测当前 Bash 同目录工具，并验证候选能传播
+子进程退出码。Windows System32 的交互式 `timeout.exe` 不符合该契约；若 GNU/BusyBox
+兼容实现不存在，runner 在执行任何 guest 前直接 FATAL，避免批量制造假回归。
 
 ### 2.3 Windows/wine 场景矩阵
 

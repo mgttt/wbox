@@ -109,6 +109,6 @@ t_proc
 
 # I. Windows 宿主的路径能力差异（不是本轮文件身份回归）
 # 真实 volume/file identity 已让 hardlink 的 ino/nlink 断言通过；剩余差异是
-# symlink 环路映射 EINVAL、unlink(directory) 映射 EACCES，以及 Win32 不接受
-# 文件名中的双引号。Linux 宿主上本用例通过，故仍标 @windows。
+# unlink(directory) 映射 EACCES，以及 Win32 不接受文件名中的双引号（三条断言）。
+# Linux 宿主上本用例通过，故仍标 @windows。
 t_path @windows

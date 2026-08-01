@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W45、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W46、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L23、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -2605,6 +2605,7 @@ TODO-WINDOW
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
+├── W46 Windows guest runner 超时工具语义探测                            [done] 正式套件 15/6/1
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3686,8 +3687,16 @@ PathLock 仍使用“可不存在路径”的规范身份，两者不能互换�
 `GetFileInformationByHandle`、共享打开常量和直接 `windows-sys` 依赖，guest mode
 表、umask、stat/statx 布局、errno 与 VFS 路由继续归产品层。Windows platform
 filesystem 8 项测试、wbox-linux 178 项测试、`t_fd_open` 86/0、Quick 300 项、
-WP.1-WP.27 及 Windows i686/Linux x64/双 macOS ISA workspace Clippy 通过；`t_path`
-现为 80/5，hardlink/`ino`/`nlink` 已通过，剩余 Windows 路径差异仍保留整文件基线。
+WP.1-WP.27 及 Windows i686/Linux x64/双 macOS ISA workspace Clippy 通过；正式 guest
+runner 中 `t_path` 为 81/4，hardlink/`ino`/`nlink` 与 symlink loop 已通过，剩余
+Windows 路径差异仍保留整文件基线。
+
+`W46` 修复 Windows Git Bash 的 PATH 会先命中 System32 `timeout.exe` 的门禁误判。
+runner 现在优先检查当前 Bash 同目录候选，并通过“`timeout 0` 是否传播子进程退出码”
+验证 GNU/BusyBox 语义；没有兼容实现时直接 FATAL，不能把工具参数错误伪装成每个
+guest 都回归。Windows 真机使用 `/usr/bin/timeout.exe` 完成 `--skip-slow` 正式裁决：
+15 PASS、`t_exec/t_fork_mem/t_net_epoll/t_net_sockopt/t_path/t_proc` 六个既有基线失败、
+1 个 slow SKIP，整体 rc0；其中 `t_fd_open` 86/0、`t_path` 81/4。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

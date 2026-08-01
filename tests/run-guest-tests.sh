@@ -111,10 +111,29 @@ if [ "${WBOX_GUEST_NO_PREFIX:-0}" != 1 ]; then
 fi
 
 TIMEOUT=${WBOX_GUEST_TIMEOUT:-120}
+resolve_timeout() {
+  local candidate rc
+  for candidate in \
+    "${BASH%/*}/timeout.exe" \
+    "${BASH%/*}/timeout" \
+    "$(command -v timeout 2>/dev/null || true)"; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    "$candidate" 0 sh -c 'exit 7' >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 7 ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+TIMEOUT_BIN=$(resolve_timeout) ||
+  die "GNU/BusyBox-compatible timeout not found (Windows timeout.exe is not supported)"
 [ "$LIST" = 1 ] || {
   echo "[mode] $MODE"
   echo "[wbox-linux] $WBOX_ABS"
   echo "[guest-bin] $BIN ($([ "$SKIP_SLOW" = 1 ] && echo 'skip slow' || echo 'all'))"
+  echo "[timeout] $TIMEOUT_BIN (${TIMEOUT}s)"
 }
 
 for b in "$WORK"/t_*; do
@@ -128,13 +147,13 @@ for b in "$WORK"/t_*; do
   case $name in
     t_stress*) [ "$SKIP_SLOW" = 1 ] && { report SKIP "$name" "slow (--skip-slow)"; continue; } ;;
   esac
-  OUT=$(timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" 2>&1); rc=$?
+  OUT=$("$TIMEOUT_BIN" "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" 2>&1); rc=$?
   OUT=$(printf '%s' "$OUT" | tr -d '\r')
   probe_detail=
   if [ "$name" = t_fork_mem ] && [ "$rc" -eq 0 ]; then
     for stage in system machine args thread; do
       PROBE=$(env WBOX_TEST_FORK_FAIL="$stage" \
-        timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
+        "$TIMEOUT_BIN" "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
         --fork-failure 2>&1)
       prc=$?
       if [ "$prc" -ne 0 ]; then
@@ -152,7 +171,7 @@ FAIL fork/failure-$stage: rc=$prc $(printf '%s' "$PROBE" | tail -2 | head -c 160
       [ "$stage" = munmap-second ] && fault=writeback-second
       [ "$stage" = split ] && fault=split
       PROBE=$(env WBOX_TEST_FSHARE_FAIL="$fault" \
-        timeout "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
+        "$TIMEOUT_BIN" "$TIMEOUT" "${RUN[@]}" "$WBOX_ABS" "$rel" \
         "--writeback-failure-$stage" 2>&1)
       prc=$?
       if [ "$prc" -ne 0 ]; then
