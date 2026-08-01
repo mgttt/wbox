@@ -90,6 +90,12 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- parallel
 SMT 必然增益或必然退化。实验不固定 affinity，数字包含线程创建与调度噪声；下一步
 应先保留重复分布并探索可选 placement，不能把任何一次 8-thread 峰值写成宿主常量。
 
+接入宿主累计 page-fault delta 后，16 MiB source + 16 MiB destination 的首次逐页触碰
+（8192 个 4 KiB 页）观察到 8209 total faults，紧接的 warm touch 为 0；已驻留的串行
+read/write 也为 0。threaded 模式则随 worker/repeat 出现额外 faults，主要包含线程栈和
+runtime 首次触页，不能归因成数据集缺页。指标查询位于计时区外，但 delta 的归因边界
+仍是整个进程区间；这条经验应保留到未来 affinity、NUMA 和 page-fault lab。
+
 ## 3. 已获得的方法经验
 
 ```text

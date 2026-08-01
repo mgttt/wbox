@@ -7,4 +7,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 wbox-machine = { path = "../wbox-machine" }
-agenterm-platform = { workspace = true, features = ["shared-memory"] }
+agenterm-platform = { workspace = true, features = ["process-metrics", "shared-memory"] }

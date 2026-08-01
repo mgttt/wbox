@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W64、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W65、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L37、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M21
+│       └── 4.9.3 [TODO-MACOS]    M1–M22
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2631,7 +2631,7 @@ TODO-WINDOW
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
-├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；18 tests
+├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；19 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
@@ -2654,6 +2654,7 @@ TODO-WINDOW
 ├── W62 CPU cache hierarchy 下沉并驱动 HPC 共享布局                                  [done] L1/L2/L3 + 64-byte line
 ├── W63 shared mapping memory bandwidth/page-touch 真机实验                          [done] 128 MiB + cold/warm/read/write/copy
 ├── W64 shared mapping threaded memory scaling                                     [done] 1/2/4/8 workers + repeat=7×2
+├── W65 单 PID page-fault 事实下沉并接入 memory lab                                [done] cold 8209 / warm 0
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3063,7 +3064,7 @@ TODO-LINUX
 ├── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
 ├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
 ├── L23 宿主文件对象身份 Linux 真机验收                     [next] identity-only + dev/ino/nlink
-├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
+├── L24 宿主单 PID CPU/RSS/page-fault Linux 真机验收         [next] stat minor/major + stats 退出竞态
 ├── L25 AArch64 Linux seccomp syscall 表可移植性              [done] ISA catalog + full workspace Clippy
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
 ├── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
@@ -3075,7 +3076,7 @@ TODO-LINUX
 ├── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
 ├── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
 ├── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
-├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + fault 口径决策
+├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + minor/major delta
 └── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
 ```
 
@@ -3087,8 +3088,8 @@ checksum 与全区域验证必须逐 worker 通过；不能把 Windows 的 4-wor
 `L36` 运行 release `wbox-hpc-lab memory --mib 128 --passes 3 --repeat 3`，记录
 cold/warm page-touch 与 read/write/copy，并核对 POSIX shm 清理。不要拿 Windows VM
 数值作为 Linux 通过阈值；只裁决输出、checksum、流量计数和重复执行稳定性。若 Linux
-能以最小依赖取得进程级 major/minor fault 累计值，再与 macOS 一起评估是否扩展
-platform `process-metrics`，不能先为单宿主增加字段。
+必须输出 platform 提供的 minor/major delta，并验证 cold total 显著大于 warm；threaded
+区间包含线程栈/runtime faults，不能把全部 delta 归因给数据 mapping。
 
 `L35` 在 Linux 真机运行 platform `cache-hierarchy` 单元测试、
 `wbox-machine-lab host` 与小规模 `wbox-hpc-lab bench`，交叉核对 cache sysfs 的
@@ -3147,9 +3148,10 @@ x86-64/AArch64 Linux workspace all-targets Clippy `-D warnings` 均通过，AArc
 可编译，不替代 Linux 真机 SEC.1–SEC.6 行为门禁。
 
 `L24` 在 Linux 真机运行 platform `process-metrics` 测试和无专属 cgroup 的
-`wbox stats`，核对 `/proc/<pid>/stat` 的累计 CPU、`statm` RSS、进程退出竞态与多成员
-饱和聚合。PID 树选择、cgroup 优先级、RSS 重复计数标签和 CPU 百分比继续归 wbox；
-Windows 实测及 Linux 交叉编译不能替代该产品门禁。
+`wbox stats`，核对 `/proc/<pid>/stat` 的累计 CPU、minor/major faults、`statm` RSS、
+进程退出竞态与多成员饱和聚合。还要以首次逐页触碰与已驻留复读验证 fault delta，
+不能沿用 Windows 只有 total 的分类口径。PID 树选择、cgroup 优先级、RSS 重复计数标签
+和 CPU 百分比继续归 wbox；Windows 实测及 Linux 交叉编译不能替代该产品门禁。
 
 `L23` 在 Linux 真机运行 platform filesystem 测试和 `t_fd_open`/`t_path`，证明
 `FileIdentity` 的 device/inode/link-count 与现有 guest Unix metadata 一致，且 rename
@@ -3736,17 +3738,21 @@ TODO-MACOS
 ├── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
 ├── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
 ├── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
-└── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
+├── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
+└── M22 单 PID CPU/RSS/page-fault macOS 真机验收                     [next] total + page-ins
 ```
+
+`M22` 在 Intel 与 Apple Silicon 运行 platform `process-metrics` 行为门禁，交叉核对
+`PROC_PIDTASKINFO` 的 total faults 与 actual page-ins。soft 保持 unknown；不能用
+`total - pageins` 猜造 soft。还要覆盖短区间 checked delta 与计数回绕/负值失败语义。
 
 `M21` 在 Intel 与 Apple Silicon 分别记录 process-available worker 扫描，比较物理核与
 SMT/效率核区间，但不从逻辑 CPU 编号猜造 cluster placement。所有 worker 档位保持稳定
 checksum；吞吐和 speedup 只作为同机观测，不设跨 ISA 门槛。
 
 `M20` 在 Intel 与 Apple Silicon 分别运行 release `wbox-hpc-lab memory`，裁决
-POSIX shm、page-touch、checksum 和 payload/traffic 双口径。吞吐只做同机复测，不设
-跨 ISA 阈值；同时调查 `getrusage` 的 page-fault 字段能否与 Windows/Linux 保持累计
-计数语义，再决定是否扩展 platform `process-metrics`。
+POSIX shm、page-touch、checksum、payload/traffic 和 fault delta。吞吐只做同机复测，
+不设跨 ISA 阈值；fault total/page-ins 必须来自 platform M22 契约，soft 保持 unknown。
 
 `M19` 在 Intel 与 Apple Silicon 真机运行 platform `cache-hierarchy`、
 `wbox-machine-lab host` 与小规模 HPC 多进程门禁，交叉核对 `hw.cachelinesize`、
@@ -3794,13 +3800,13 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`7bc0130756b0fc146158333111ad2d775dfc8e66`，关闭 default features，按消费包启用
+`5504ceae3efadf24f23f813d281e015a76bbf3fd`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`virtualization-probe` 与 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
-并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
-内部模块。
+并增加跨 rename/hardlink 稳定的文件对象身份、共享内存、处理器/缓存事实以及累计
+CPU/RSS/page-fault 进程指标；wbox 只依赖公共契约，不引用 adapter 内部模块。
 Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，消费 crate 只继承并
 追加自身最小 feature；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
 platform package，且未启用 `full/process/window/ipc/pty`。Quick 300 项库测试与双
@@ -3899,7 +3905,7 @@ guest 都回归。Windows 真机使用 `/usr/bin/timeout.exe` 完成 `--skip-slo
 15 PASS、`t_exec/t_fork_mem/t_net_epoll/t_net_sockopt/t_path/t_proc` 六个既有基线失败、
 1 个 slow SKIP，整体 rc0；其中 `t_fd_open` 86/0、`t_path` 81/4。
 
-`W47` 在 platform 增加独立 `process-metrics` feature，只暴露单个宿主 PID 的累计
+`W47` 在 platform 增加独立 `process-metrics` feature，初版只暴露单个宿主 PID 的累计
 CPU 时间与 resident bytes：Windows 使用 process times/working set，Linux 使用
 `/proc` stat/statm，macOS 使用 `PROC_PIDTASKINFO`。wbox 的 `stats` 删除本地 tick、
 page size 和字段偏移解析，只保留容器成员选择、逐 PID 退出容错、饱和聚合、cgroup
@@ -4061,7 +4067,7 @@ passes 和流量计数均做 checked arithmetic。当前 Windows VM 用 128 MiB 
 3 passes/median=3 实测：cold/warm 约 2293/28.9 ns/page，read/write 约 5.82/4.27
 GiB/s，copy payload/traffic 约 5.08/10.15 GiB/s。数据集超过 35.75 MiB L3，结果仍
 只是当前虚拟机观测，不是裸机 DRAM 指标或产品 SLA；page-fault 计数 API 是否下沉，
-要等 Linux/macOS 同口径实验后再决定。
+后续已由 W65 以三宿主可成立的累计事实契约完成。
 
 `W64` 在相同 mapping 上按 process-available worker scan 执行分区 threaded
 read/write/copy；每个线程只持有互不重叠的 destination slice，read checksum 必须与
@@ -4074,6 +4080,19 @@ read/write/copy；每个线程只持有互不重叠的 destination slice，read 
 离群值，证明当前 VM 调度噪声足以扭曲“峰值”。因此 4 个物理核只是当前较稳定的
 拐点，SMT 收益不稳定，不能形成硬编码 worker 策略。Linux/macOS 真机分别由 L37/
 M21 验收后，才评估 process affinity/placement 是否值得形成跨产品契约。
+
+`W65` 扩展 platform 的轻量 `process-metrics` 契约，增加累计 `PageFaultCounters` 与
+checked delta：Windows `PROCESS_MEMORY_COUNTERS.PageFaultCount` 只证明 total，
+soft/hard 保持 unknown；Linux `/proc/<pid>/stat` 分别证明 minor/major；macOS
+`PROC_PIDTASKINFO` 证明 total faults 与 actual page-ins，不能用相减猜造 soft。字段必须
+满足分类值不大于 total、已知分类和不大于 total；回绕、负值或前后分类形状变化均
+失败。查询位于计时区外，但 delta 覆盖整个进程区间，thread stack/runtime 首次触页也
+会计入。Windows release 以 16 MiB source + 16 MiB destination（8192 个 4 KiB 页）
+实测 cold touch 8209 faults、紧接 warm touch 0，已驻留串行 read/write 也为 0；threaded
+区间出现随 worker/repeat 增长的额外 faults，因此不把它们伪归因给数据 mapping。
+platform all-features 118 tests、Windows 行为门禁与 Windows i686、Linux AArch64、
+macOS 双 ISA 严格编译已通过；wbox-hpc-lab 19 tests 通过，Linux/macOS 真机由 L24/L36
+和 M20/M22 接续验收。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

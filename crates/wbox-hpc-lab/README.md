@@ -56,6 +56,13 @@ SMT still adds bandwidth without introducing an affinity policy. Each bandwidth
 row reports sample `min_ms`, median `elapsed_ms`, and `max_ms` so scheduler noise
 is visible rather than hidden behind one aggregate.
 
+Every timed interval is also bracketed by `agenterm-platform` process metrics.
+`faults_total` is available on all hosts; `faults_soft` and `faults_hard` remain
+`unknown` unless the native API proves that classification. Metric queries are
+outside `elapsed_ms`, but the delta belongs to the whole process interval: it
+may include allocator, thread-stack, and runtime faults in addition to dataset
+faults. Cold/warm page-touch is therefore the strongest controlled comparison.
+
 `logical_copies=0` has a narrow meaning: after initialization, the benchmark
 does not copy the dataset between application buffers or processes. It does not
 mean zero memory traffic, zero page faults, or that CPU caches remain coherent

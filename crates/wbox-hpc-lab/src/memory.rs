@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use agenterm_platform::shared_memory::SharedMemory;
+use agenterm_platform::{
+    process_metrics::{self, PageFaultCounters},
+    shared_memory::SharedMemory,
+};
 use wbox_machine::{current_host, detect_hardware, detect_host_memory};
 
 use crate::{
@@ -72,6 +75,8 @@ fn benchmark(config: Config) -> Result<(), String> {
     let cache_line = cache_line_bytes(&hardware)?;
     let logical = hardware.logical_processors.unwrap_or(1);
     let worker_counts = worker_scan(logical);
+    let single_direction = TrafficAccounting::new(config.bytes, config.passes, 1);
+    let copy_traffic = TrafficAccounting::new(config.bytes, config.passes, 2);
     let mut dataset = Dataset::new(config.bytes)?;
     println!(
         "metric=memory-bandwidth memory=shared-mapping dataset_bytes={} mapping_bytes={} page_size={} cache_line_bytes={} physical_memory_bytes={} logical_processors={} passes={} repeat={} statistic=median",
@@ -85,64 +90,67 @@ fn benchmark(config: Config) -> Result<(), String> {
         config.repeat,
     );
 
-    let cold_touch = measure(|| dataset.touch_pages(page_size, 0x5a));
-    let warm_touch = measure(|| dataset.touch_pages(page_size, 0xa5));
+    let (cold_touch, cold_faults) =
+        sample_page_faults(|| measure(|| dataset.touch_pages(page_size, 0x5a)))?;
+    let (warm_touch, warm_faults) =
+        sample_page_faults(|| measure(|| dataset.touch_pages(page_size, 0xa5)))?;
     let pages = pages_spanned(dataset.mapping_bytes(), page_size)?;
     println!(
-        "mode=page-touch phase=cold pages={} elapsed_ms={:.3} ns_per_page={:.3} checksum={:#018x}",
+        "mode=page-touch phase=cold pages={} elapsed_ms={:.3} ns_per_page={:.3} faults_total={} faults_soft={} faults_hard={} checksum={:#018x}",
         pages,
         millis(cold_touch.elapsed),
         nanos_per_unit(cold_touch.elapsed, pages),
+        cold_faults.total,
+        optional_faults(cold_faults.soft),
+        optional_faults(cold_faults.hard),
         cold_touch.checksum,
     );
     println!(
-        "mode=page-touch phase=warm pages={} elapsed_ms={:.3} ns_per_page={:.3} checksum={:#018x}",
+        "mode=page-touch phase=warm pages={} elapsed_ms={:.3} ns_per_page={:.3} faults_total={} faults_soft={} faults_hard={} checksum={:#018x}",
         pages,
         millis(warm_touch.elapsed),
         nanos_per_unit(warm_touch.elapsed, pages),
+        warm_faults.total,
+        optional_faults(warm_faults.soft),
+        optional_faults(warm_faults.hard),
         warm_touch.checksum,
     );
 
     dataset.initialize_source();
-    let read = measure_repeated(config.repeat, || dataset.read(config.passes));
+    let (read, read_faults) =
+        sample_page_faults(|| measure_repeated(config.repeat, || dataset.read(config.passes)))?;
     print_bandwidth(
         "read",
         1,
         &read,
         read.elapsed,
-        config.bytes,
-        config.passes,
-        1,
+        single_direction,
+        read_faults,
     )?;
 
-    let write = measure_repeated(config.repeat, || dataset.write(config.passes));
+    let (write, write_faults) =
+        sample_page_faults(|| measure_repeated(config.repeat, || dataset.write(config.passes)))?;
     print_bandwidth(
         "write",
         1,
         &write,
         write.elapsed,
-        config.bytes,
-        config.passes,
-        1,
+        single_direction,
+        write_faults,
     )?;
     dataset.verify_write(config.passes)?;
 
-    let copy = measure_repeated(config.repeat, || dataset.copy(config.passes));
-    print_bandwidth(
-        "copy",
-        1,
-        &copy,
-        copy.elapsed,
-        config.bytes,
-        config.passes,
-        2,
-    )?;
+    let (copy, copy_faults) =
+        sample_page_faults(|| measure_repeated(config.repeat, || dataset.copy(config.passes)))?;
+    print_bandwidth("copy", 1, &copy, copy.elapsed, copy_traffic, copy_faults)?;
     dataset.verify_copy()?;
 
     for workers in worker_counts {
-        let threaded_read = measure_repeated(config.repeat, || {
-            dataset.threaded_read(config.passes, workers)
-        });
+        let (threaded_read, threaded_read_faults) = sample_page_faults(|| {
+            measure_repeated(config.repeat, || {
+                dataset.threaded_read(config.passes, workers)
+            })
+        })?;
         if threaded_read.checksum != read.checksum {
             return Err(format!(
                 "threaded read checksum mismatch with {workers} workers"
@@ -153,40 +161,58 @@ fn benchmark(config: Config) -> Result<(), String> {
             workers,
             &threaded_read,
             read.elapsed,
-            config.bytes,
-            config.passes,
-            1,
+            single_direction,
+            threaded_read_faults,
         )?;
 
-        let threaded_write = measure_repeated(config.repeat, || {
-            dataset.threaded_write(config.passes, workers)
-        });
+        let (threaded_write, threaded_write_faults) = sample_page_faults(|| {
+            measure_repeated(config.repeat, || {
+                dataset.threaded_write(config.passes, workers)
+            })
+        })?;
         dataset.verify_write(config.passes)?;
         print_bandwidth(
             "write-threads",
             workers,
             &threaded_write,
             write.elapsed,
-            config.bytes,
-            config.passes,
-            1,
+            single_direction,
+            threaded_write_faults,
         )?;
 
-        let threaded_copy = measure_repeated(config.repeat, || {
-            dataset.threaded_copy(config.passes, workers)
-        });
+        let (threaded_copy, threaded_copy_faults) = sample_page_faults(|| {
+            measure_repeated(config.repeat, || {
+                dataset.threaded_copy(config.passes, workers)
+            })
+        })?;
         dataset.verify_copy()?;
         print_bandwidth(
             "copy-threads",
             workers,
             &threaded_copy,
             copy.elapsed,
-            config.bytes,
-            config.passes,
-            2,
+            copy_traffic,
+            threaded_copy_faults,
         )?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct TrafficAccounting {
+    bytes_per_pass: usize,
+    passes: usize,
+    factor: usize,
+}
+
+impl TrafficAccounting {
+    const fn new(bytes_per_pass: usize, passes: usize, factor: usize) -> Self {
+        Self {
+            bytes_per_pass,
+            passes,
+            factor,
+        }
+    }
 }
 
 fn print_bandwidth(
@@ -194,18 +220,18 @@ fn print_bandwidth(
     workers: usize,
     measurement: &Measurement,
     baseline: Duration,
-    bytes: usize,
-    passes: usize,
-    traffic_factor: usize,
+    traffic: TrafficAccounting,
+    page_faults: PageFaultCounters,
 ) -> Result<(), String> {
-    let payload_bytes = bytes
-        .checked_mul(passes)
+    let payload_bytes = traffic
+        .bytes_per_pass
+        .checked_mul(traffic.passes)
         .ok_or_else(|| "memory payload byte count overflows usize".to_owned())?;
     let traffic_bytes = payload_bytes
-        .checked_mul(traffic_factor)
+        .checked_mul(traffic.factor)
         .ok_or_else(|| "memory traffic byte count overflows usize".to_owned())?;
     println!(
-        "mode={} workers={} elapsed_ms={:.3} min_ms={:.3} max_ms={:.3} speedup={:.3} payload_gib_s={:.3} traffic_gib_s={:.3} payload_bytes={} traffic_bytes={} checksum={:#018x}",
+        "mode={} workers={} elapsed_ms={:.3} min_ms={:.3} max_ms={:.3} speedup={:.3} payload_gib_s={:.3} traffic_gib_s={:.3} payload_bytes={} traffic_bytes={} faults_total={} faults_soft={} faults_hard={} checksum={:#018x}",
         mode,
         workers,
         millis(measurement.elapsed),
@@ -216,9 +242,27 @@ fn print_bandwidth(
         gib_per_second(traffic_bytes, measurement.elapsed),
         payload_bytes,
         traffic_bytes,
+        page_faults.total,
+        optional_faults(page_faults.soft),
+        optional_faults(page_faults.hard),
         measurement.checksum,
     );
     Ok(())
+}
+
+fn sample_page_faults<T>(action: impl FnOnce() -> T) -> Result<(T, PageFaultCounters), String> {
+    let before = process_metrics::metrics(std::process::id()).map_err(|error| error.to_string())?;
+    let result = action();
+    let after = process_metrics::metrics(std::process::id()).map_err(|error| error.to_string())?;
+    let delta = after
+        .page_faults
+        .checked_delta_since(before.page_faults)
+        .ok_or_else(|| "process page-fault counter wrapped or changed classification".to_owned())?;
+    Ok((result, delta))
+}
+
+fn optional_faults(value: Option<u64>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |value| value.to_string())
 }
 
 fn pages_spanned(bytes: usize, page_size: usize) -> Result<usize, String> {
@@ -526,5 +570,14 @@ mod tests {
             assert_eq!(dataset.threaded_copy(3, workers), expected_copy);
             dataset.verify_copy().unwrap();
         }
+    }
+
+    #[test]
+    fn first_touch_reports_process_page_fault_delta() {
+        let mut dataset = Dataset::new(4 * 1024 * 1024).unwrap();
+        let (_, faults) = sample_page_faults(|| dataset.touch_pages(4096, 1)).unwrap();
+        assert!(faults.total > 0);
+        #[cfg(windows)]
+        assert_eq!((faults.soft, faults.hard), (None, None));
     }
 }
