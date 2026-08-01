@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W18、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W25、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -2574,8 +2574,39 @@ TODO-WINDOW
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [done] handler/timer/全门禁
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
+├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 3
+├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [next] 只读依赖图
+├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
+├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
+├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
+├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
+├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+**等待 `agenterm-platform` 期间的预判行动树：**
+
+```text
+PRE-PLATFORM
+├── A. 看清现状
+│   └── W20 生成模块依赖图，标出 CPU/寄存器/内存/调度与 ELF/syscall/VFS 的边界
+├── B. 冻结长期接口
+│   ├── W21 定义 MachineCore、AddressSpace、TaskScheduler、GuestPersonality
+│   └── 写清 agenterm-platform、宿主 ABI 与 wbox 产品策略各自所有权
+├── C. 先建防线
+│   └── W22 用现有 x86-64 fixture 固定指令、异常、内存、fork/signal 可观察行为
+├── D. 为第二 ISA 留真位置
+│   └── W23 固定 AArch64 target、寄存器/异常模型、最小 ELF fixture 与 CI 入口
+├── E. 防止生命周期返工
+│   └── W24 设计可迁移状态 schema，记录 host/guest/ISA/provider/artifact contract
+└── F. 建立双向演进
+    └── W25 定义“wbox 孵化 -> 通用 crate 承接 -> wbox 回用”的准入与删除旧实现规则
+```
+
+执行约束：W20 是下一项；W21 完成前不创建抽象 crate，W22 完成前不移动
+`crates/wbox-linux` 的 CPU/内存热路径。`agenterm-platform` 没有稳定 commit/API 前
+不写临时适配层。W25 的能力只有在脱离 OCI、guest ABI 和路由策略后仍独立成立，
+才可下沉；下沉后 wbox 必须直接引用并删除原实现，不长期复制两份。
 
 `W16` 来自 Windows `guest-tests` 的基线外回归：
 `t_fd_open/open/ocreat-mode` 以 `0604` 创建文件，`fstat` 却固定得到 `0644`。
