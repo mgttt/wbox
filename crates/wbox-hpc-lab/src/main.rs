@@ -4,7 +4,7 @@ use std::hint::black_box;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use wbox_machine::{current_host, detect_hardware, HostOs};
+use wbox_machine::{current_host, detect_hardware, CpuFeature, HardwareCapabilities, HostOs, Isa};
 
 #[cfg(windows)]
 mod shared_windows;
@@ -77,8 +77,11 @@ fn parse_flops_args(args: &[String]) -> Result<FlopsConfig, String> {
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn flops_benchmark(config: FlopsConfig) -> Result<(), String> {
-    let kernel = fp64_kernel_name()?;
     let hardware = detect_hardware(current_host());
+    let kernel_support = KernelSupport::from_hardware(&hardware);
+    let kernel = kernel_support.fp64_kernel.ok_or_else(|| {
+        "FP64 throughput lab requires hardware-reported AVX2+FMA or AArch64 NEON".to_owned()
+    })?;
     let logical = hardware.logical_processors.unwrap_or(1);
     println!(
         "metric=fp64-flops kernel={} logical_processors={} iterations_per_worker={} flops_per_iteration={} repeat={} statistic=median",
@@ -109,18 +112,32 @@ fn flops_benchmark(_config: FlopsConfig) -> Result<(), String> {
     Err("FP64 throughput lab is not implemented for this ISA".to_owned())
 }
 
-#[cfg(target_arch = "x86_64")]
-fn fp64_kernel_name() -> Result<&'static str, String> {
-    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-        Ok("avx2-fma")
-    } else {
-        Err("FP64 throughput lab requires AVX2 and FMA".to_owned())
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelSupport {
+    avx2_checksum: bool,
+    fp64_kernel: Option<&'static str>,
 }
 
-#[cfg(target_arch = "aarch64")]
-fn fp64_kernel_name() -> Result<&'static str, String> {
-    Ok("neon-fma")
+impl KernelSupport {
+    fn from_hardware(hardware: &HardwareCapabilities) -> Self {
+        let avx2 = hardware.supports_cpu_feature(CpuFeature::X86Avx2);
+        let fma = hardware.supports_cpu_feature(CpuFeature::X86Fma);
+        let neon = hardware.supports_cpu_feature(CpuFeature::ArmNeon);
+        match hardware.native_isa {
+            Some(Isa::X86_64) => Self {
+                avx2_checksum: avx2,
+                fp64_kernel: (avx2 && fma).then_some("avx2-fma"),
+            },
+            Some(Isa::Aarch64) => Self {
+                avx2_checksum: false,
+                fp64_kernel: neon.then_some("neon-fma"),
+            },
+            None => Self {
+                avx2_checksum: false,
+                fp64_kernel: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +193,7 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
     } = config;
     let host = current_host();
     let hardware = detect_hardware(host);
+    let kernel_support = KernelSupport::from_hardware(&hardware);
     let logical = hardware.logical_processors.unwrap_or(1);
     let workers = worker_scan(logical);
     println!(
@@ -203,8 +221,10 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
         serial.checksum,
     );
 
-    if simd_checksum(dataset.data(), rounds).is_some() {
-        let simd = measure_repeated(repeat, || simd_checksum(dataset.data(), rounds).unwrap());
+    if kernel_support.avx2_checksum {
+        let simd = measure_repeated(repeat, || {
+            simd_checksum(dataset.data(), rounds, kernel_support.avx2_checksum).unwrap()
+        });
         ensure_checksum(serial.checksum, simd.checksum, "simd")?;
         println!(
             "mode=simd workers=1 isa=avx2 memory=borrowed-shared elapsed_ms={:.3} speedup={:.3} checksum={:#018x} logical_copies=0",
@@ -228,9 +248,10 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
             threaded.checksum,
         );
 
-        if threaded_simd_checksum(dataset.data(), rounds, count).is_some() {
+        if kernel_support.avx2_checksum {
             let simd_threads = measure_repeated(repeat, || {
-                threaded_simd_checksum(dataset.data(), rounds, count).unwrap()
+                threaded_simd_checksum(dataset.data(), rounds, count, kernel_support.avx2_checksum)
+                    .unwrap()
             });
             ensure_checksum(serial.checksum, simd_threads.checksum, "simd-threads")?;
             println!(
@@ -406,8 +427,13 @@ fn threaded_checksum(data: &[u32], rounds: u32, workers: usize) -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn threaded_simd_checksum(data: &[u32], rounds: u32, workers: usize) -> Option<u64> {
-    if !std::is_x86_feature_detected!("avx2") {
+fn threaded_simd_checksum(
+    data: &[u32],
+    rounds: u32,
+    workers: usize,
+    avx2_available: bool,
+) -> Option<u64> {
+    if !avx2_available {
         return None;
     }
     Some(std::thread::scope(|scope| {
@@ -425,7 +451,12 @@ fn threaded_simd_checksum(data: &[u32], rounds: u32, workers: usize) -> Option<u
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn threaded_simd_checksum(_data: &[u32], _rounds: u32, _workers: usize) -> Option<u64> {
+fn threaded_simd_checksum(
+    _data: &[u32],
+    _rounds: u32,
+    _workers: usize,
+    _avx2_available: bool,
+) -> Option<u64> {
     None
 }
 
@@ -553,9 +584,9 @@ unsafe fn fp64_fma_kernel(iterations: u64, seed: u64) -> f64 {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn simd_checksum(data: &[u32], rounds: u32) -> Option<u64> {
-    if std::is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 was checked immediately before entering the kernel.
+fn simd_checksum(data: &[u32], rounds: u32, avx2_available: bool) -> Option<u64> {
+    if avx2_available {
+        // SAFETY: the shared hardware snapshot reported AVX2 before entering the kernel.
         Some(unsafe { checksum_avx2(data, rounds) })
     } else {
         None
@@ -563,7 +594,7 @@ fn simd_checksum(data: &[u32], rounds: u32) -> Option<u64> {
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-fn simd_checksum(_data: &[u32], _rounds: u32) -> Option<u64> {
+fn simd_checksum(_data: &[u32], _rounds: u32, _avx2_available: bool) -> Option<u64> {
     None
 }
 
@@ -819,12 +850,16 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn avx2_checksum_matches_scalar_when_available() {
         let data = (0..259).map(input_value).collect::<Vec<_>>();
-        if std::is_x86_feature_detected!("avx2") {
+        let support = KernelSupport::from_hardware(&detect_hardware(current_host()));
+        if support.avx2_checksum {
             let expected = checksum(&data, 7);
-            // SAFETY: guarded by runtime AVX2 detection.
+            // SAFETY: guarded by the shared hardware capability snapshot.
             assert_eq!(unsafe { checksum_avx2(&data, 7) }, expected);
             for workers in [1, 2, 4, 8] {
-                assert_eq!(threaded_simd_checksum(&data, 7, workers), Some(expected));
+                assert_eq!(
+                    threaded_simd_checksum(&data, 7, workers, support.avx2_checksum),
+                    Some(expected)
+                );
             }
         }
     }
@@ -834,6 +869,40 @@ mod tests {
         assert_eq!(worker_scan(1), vec![1]);
         assert_eq!(worker_scan(6), vec![1, 2, 4, 6]);
         assert_eq!(worker_scan(8), vec![1, 2, 4, 8]);
+    }
+
+    #[test]
+    fn kernel_selection_requires_matching_machine_facts() {
+        let mut hardware = detect_hardware(None);
+
+        hardware.native_isa = Some(Isa::X86_64);
+        hardware.cpu_features = vec![CpuFeature::X86Avx2];
+        assert_eq!(
+            KernelSupport::from_hardware(&hardware),
+            KernelSupport {
+                avx2_checksum: true,
+                fp64_kernel: None,
+            }
+        );
+        hardware.cpu_features.push(CpuFeature::X86Fma);
+        assert_eq!(
+            KernelSupport::from_hardware(&hardware).fp64_kernel,
+            Some("avx2-fma")
+        );
+
+        hardware.native_isa = Some(Isa::Aarch64);
+        assert_eq!(
+            KernelSupport::from_hardware(&hardware),
+            KernelSupport {
+                avx2_checksum: false,
+                fp64_kernel: None,
+            }
+        );
+        hardware.cpu_features.push(CpuFeature::ArmNeon);
+        assert_eq!(
+            KernelSupport::from_hardware(&hardware).fp64_kernel,
+            Some("neon-fma")
+        );
     }
 
     #[test]
@@ -885,8 +954,9 @@ mod tests {
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn fma_kernel_returns_finite_result_when_available() {
-        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-            // SAFETY: guarded by runtime AVX2 and FMA detection.
+        let support = KernelSupport::from_hardware(&detect_hardware(current_host()));
+        if support.fp64_kernel == Some("avx2-fma") {
+            // SAFETY: guarded by the shared AVX2 and FMA capability snapshot.
             assert!(unsafe { fp64_fma_kernel(10, 0) }.is_finite());
         }
     }
@@ -894,8 +964,11 @@ mod tests {
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn neon_fma_kernel_returns_finite_result() {
-        // SAFETY: Advanced SIMD is part of the supported AArch64 target contract.
-        assert!(unsafe { fp64_fma_kernel(10, 0) }.is_finite());
+        let support = KernelSupport::from_hardware(&detect_hardware(current_host()));
+        if support.fp64_kernel == Some("neon-fma") {
+            // SAFETY: guarded by the shared AArch64 NEON capability snapshot.
+            assert!(unsafe { fp64_fma_kernel(10, 0) }.is_finite());
+        }
     }
 
     #[test]

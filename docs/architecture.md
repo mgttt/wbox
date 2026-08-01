@@ -102,6 +102,9 @@ CPU 并行与数据移动按正交维度建模：scalar/SIMD/thread/process 允�
 `logical_copies=0` 仅表示初始化后不在应用 buffer/进程之间复制数据，不代表没有
 page fault、cache coherence 或内存流量。NUMA/RDMA 必须经过拓扑/adapter 探测和
 真实传输门禁，不能从 API 存在推断可用。
+实验启动时只从 `wbox-machine::HardwareCapabilities` 生成一次内核能力快照；不得在
+lab 内重复调用架构 feature detector。共享层报告事实，AVX2、FMA、NEON 的组合选择
+以及 unsafe kernel 进入条件仍由实验层负责。
 
 FLOPS 只由可审计的浮点 kernel 计算。FP64 lab 在 x86-64 每轮执行 8 条独立 AVX2
 FMA，在 AArch64 每轮执行 16 条独立 NEON FMA，分别按 `8 × 4 × 2` 与

@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W34、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W42、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -2601,6 +2601,7 @@ TODO-WINDOW
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
+├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；11 tests
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3623,6 +3624,13 @@ SSE2/AVX/AVX2/FMA/NEON 检测下沉到零依赖 `hardware` feature；`wbox-machi
 实测为 8 逻辑处理器并报告 SSE2/AVX/AVX2/FMA；x86_64 Linux、x86_64 macOS、
 AArch64 macOS 与 i686 Windows 只提供严格交叉编译证据。WHPX/KVM/HVF 是否真正
 可用仍为 `Unprobed`，guest ISA、设备 ISA、加速策略和验收语义没有下沉。
+
+`W42` 删除 `wbox-hpc-lab` 的直接 CPU feature detector，以一次不可变
+`HardwareCapabilities` 快照生成 `KernelSupport`：x86-64 checksum 只接受 AVX2，
+FP64 内核只接受 AVX2+FMA；AArch64 FP64 内核只接受 NEON。ISA 与 feature 不匹配、
+或者缺少任一事实时保持 unsupported。共享层只报告处理器事实，内核组合、FLOP
+计数、worker 扫描和性能验收继续归 wbox；Windows 实机 11 项测试及小规模
+checksum/FMA 行为通过，Linux/macOS 仅以交叉编译证明契约可编译。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
