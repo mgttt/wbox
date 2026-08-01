@@ -36,8 +36,9 @@ try {
     $exitCode = 1
 } finally {
     try {
-        # CleanIncremental remains accepted for compatibility; cleanup is now the default.
-        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:$KeepIncremental
+        & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
+            -KeepIncremental:$KeepIncremental `
+            -CleanIncremental:$CleanIncremental
     } catch {
         Write-Error "post-check cleanup failed: $_"
         $exitCode = 1

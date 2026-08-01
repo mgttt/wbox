@@ -4,10 +4,14 @@ param(
     [string]$Package,
     [string]$Target,
     [switch]$KeepIncremental,
+    [switch]$CleanIncremental,
     [string[]]$ExtraArgs = @()
 )
 
 $ErrorActionPreference = "Stop"
+if ($KeepIncremental -and $CleanIncremental) {
+    throw "-KeepIncremental and -CleanIncremental cannot be used together"
+}
 
 $cargoArgs = @("build", "--locked")
 if ($Release) {
@@ -29,7 +33,9 @@ try {
     $buildExit = $LASTEXITCODE
 } finally {
     try {
-        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:$KeepIncremental
+        & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
+            -KeepIncremental:$KeepIncremental `
+            -CleanIncremental:$CleanIncremental
     } finally {
         Pop-Location
     }

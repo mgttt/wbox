@@ -2706,9 +2706,10 @@ workspace、Clippy、WP 全套及 WU.1/WU.2 均已复核通过。
 CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` 也统一使用
 locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核又补齐：CI Rust
 固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
-昂贵 job 只在它通过后启动；Quick 现在默认清理 incremental，连续本地迭代可显式
-`-KeepIncremental`。构建 wrapper 仍按 W12/L11 清理 incremental、tmp、review、
-`.tmp/.part` 等可再生残留，但保留 `deps/build/.fingerprint` 有效缓存。
+昂贵 job 只在它通过后启动；Quick 和构建 wrapper 默认清理 incremental 中没有
+对应 session 的孤立锁与空目录，以及 tmp、review、`.tmp/.part` 等可再生残留，
+同时保留仍可复用的 incremental、deps、build、fingerprint 缓存。完整清理 debug
+增量缓存需显式使用 `-CleanIncremental` / `WBOX_CLEAN_INCREMENTAL=1`。
 本地精确 channel
 pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
 

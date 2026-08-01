@@ -50,9 +50,10 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 验证按成本递增：先 `lint.ps1 -Mode Static`，再 `check.ps1 -Quick`，然后运行改动
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
-证据仍由下述唯一 owning gate 产出。`check.ps1` 默认清理 incremental 与测试临时
-目录；需要为连续本地迭代保留热缓存时显式传 `-KeepIncremental`。构建 wrapper
-同样默认清 incremental，满足阶段性交付后的磁盘清理要求。
+证据仍由下述唯一 owning gate 产出。`check.ps1` 和构建 wrapper 默认清理 Cargo
+遗留的孤立 incremental session 锁、空目录与测试临时目录，同时保留仍有 session
+对应的热缓存。需要完整释放 debug 增量缓存时显式传 `-CleanIncremental`；需要连
+孤立项也不扫描时传 `-KeepIncremental`。
 
 CI 固定 Rust 1.97.1。升级编译器是独立变更：先跑 Quick 和双目标 Clippy，再观察
 完整 CI，不能让浮动 `stable` 在普通功能提交中突然改变 lint 规则。本地暂不放
@@ -74,12 +75,13 @@ scripts/build.sh
 scripts/build.sh --release -p wbox-linux
 ```
 
-wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`，删除所有 target
-三元组下可再生成的 `incremental/`，以及根目录的 `tmp/`、`review-*`、`*.tmp`、
-`*.part` 临时状态。`deps/`、`build/`、`.fingerprint/` 是 Cargo 用于避免全量重编的
-有效缓存，和最终二进制一样保留；不能因为文件多就当成垃圾删除。Windows 可传
-`-KeepIncremental`，Linux 可设置 `WBOX_KEEP_INCREMENTAL=1` 临时保留增量缓存；
-不得把该选项写入 CI 或长期开发命令。
+wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认只在
+`target/debug/incremental/` 删除已经没有对应 session 目录的孤立 `.lock` 和空 crate
+目录，并清理 target 根目录的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。
+`deps/`、`build/`、`.fingerprint/` 以及仍可复用的 incremental session 都保留。
+Windows 可传 `-CleanIncremental` 完整释放 debug 增量缓存，Linux 可设置
+`WBOX_CLEAN_INCREMENTAL=1`；`-KeepIncremental` / `WBOX_KEEP_INCREMENTAL=1` 则跳过
+增量目录扫描。两类开关互斥。
 
 测试不得直接并发修改进程环境。使用 `crate::testenv::EnvGuard`；需要临时 HOME
 时使用 `cli::TempHome`，额外变量经其同一守卫设置，避免重入锁。

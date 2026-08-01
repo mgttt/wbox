@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$TargetDir,
-    [switch]$KeepIncremental
+    [switch]$KeepIncremental,
+    [switch]$CleanIncremental
 )
 
 $ErrorActionPreference = "Stop"
@@ -67,13 +68,40 @@ function Remove-TargetFile {
     $script:removedFiles++
 }
 
+if ($KeepIncremental -and $CleanIncremental) {
+    throw "-KeepIncremental and -CleanIncremental cannot be used together"
+}
+
 if (-not $KeepIncremental) {
-    $incrementalDirs = @(
-        Get-ChildItem -LiteralPath $targetRoot -Directory -Recurse -Force |
-            Where-Object { $_.Name -eq "incremental" }
-    )
-    foreach ($directory in $incrementalDirs) {
-        Remove-TargetDirectory -Directory $directory
+    $incrementalRoot = Join-Path $targetRoot "debug\incremental"
+    if (Test-Path -LiteralPath $incrementalRoot -PathType Container) {
+        if ($CleanIncremental) {
+            Remove-TargetDirectory -Directory (Get-Item -LiteralPath $incrementalRoot -Force)
+        } else {
+            # Cargo leaves old session lock files behind after replacing a session.
+            # A live/reusable lock has a sibling session directory whose name starts
+            # with the lock basename followed by the session metadata hash.
+            $crateDirs = @(Get-ChildItem -LiteralPath $incrementalRoot -Directory -Force)
+            foreach ($crateDir in $crateDirs) {
+                $sessionDirs = @(Get-ChildItem -LiteralPath $crateDir.FullName -Directory -Force)
+                $lockFiles = @(
+                    Get-ChildItem -LiteralPath $crateDir.FullName -File -Filter "*.lock" -Force
+                )
+                foreach ($lockFile in $lockFiles) {
+                    $sessionPrefix = $lockFile.BaseName + "-"
+                    $hasSession = $sessionDirs | Where-Object {
+                        $_.Name.StartsWith($sessionPrefix, [System.StringComparison]::Ordinal)
+                    } | Select-Object -First 1
+                    if (-not $hasSession) {
+                        Remove-TargetFile -File $lockFile
+                    }
+                }
+
+                if (-not (Get-ChildItem -LiteralPath $crateDir.FullName -Force | Select-Object -First 1)) {
+                    Remove-TargetDirectory -Directory $crateDir
+                }
+            }
+        }
     }
 }
 
