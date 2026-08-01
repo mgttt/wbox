@@ -1814,34 +1814,16 @@ pub enum Kill {
 /// supervisor 一死内核就会收走整棵树。直接去杀 guest 反而漏掉它的子孙。
 ///
 /// **平台差异如实记录**：Windows 没有 SIGTERM 这类"请你自己退出"的通用机制
-/// （控制台事件对无控制台的后台进程不适用），因此 `Graceful` 在 Windows 上
-/// 等同于 `Forceful`。这不是偷懒，是平台确实没有对齐物；`wbox stop` 的文案
-/// 会说明这一点。
-#[cfg(unix)]
+/// （控制台事件对无控制台的后台进程不适用），所以 Windows 构建不提供
+/// `Graceful` 变体；`wbox stop` 走 Job 强制终止。Unix 才把两种产品意图映射为
+/// platform 的 SIGTERM/SIGKILL 机制。
 pub fn terminate_pid(pid: u32, how: Kill) -> bool {
-    let sig = match how {
-        Kill::Graceful => libc::SIGTERM,
-        Kill::Forceful => libc::SIGKILL,
+    let mode = match how {
+        #[cfg(unix)]
+        Kill::Graceful => agenterm_platform::process_control::TerminationMode::Graceful,
+        Kill::Forceful => agenterm_platform::process_control::TerminationMode::Forceful,
     };
-    // SAFETY: kill(2) 只按 pid 递送信号，不解引用任何指针。
-    unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
-}
-
-#[cfg(windows)]
-pub fn terminate_pid(pid: u32, _how: Kill) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-    // SAFETY: OpenProcess 失败返回 null，此时不调用 TerminateProcess；
-    // 句柄无论成败都只关一次。
-    unsafe {
-        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-        if h.is_null() {
-            return false;
-        }
-        let ok = TerminateProcess(h, 1) != 0;
-        CloseHandle(h);
-        ok
-    }
+    agenterm_platform::process_control::terminate(pid, mode).is_ok()
 }
 
 #[cfg(test)]
@@ -1887,8 +1869,23 @@ mod kill_tests {
     /// 不存在的 pid 应当返回失败而不是 panic，也不该误伤别人。
     #[test]
     fn terminate_missing_pid_reports_failure() {
+        assert!(!terminate_pid(0, Kill::Forceful));
         // 极大的 pid 在两个平台都几乎不可能被占用
         assert!(!terminate_pid(4_000_000_000, Kill::Forceful));
+    }
+
+    #[test]
+    fn process_control_dependency_stays_lightweight() {
+        assert_eq!(
+            agenterm_platform::capability_status(agenterm_platform::Capability::ProcessControl),
+            agenterm_platform::CapabilityStatus::Available
+        );
+        assert_eq!(
+            agenterm_platform::capability_status(agenterm_platform::Capability::Process),
+            agenterm_platform::CapabilityStatus::Unsupported {
+                reason: std::borrow::Cow::Borrowed("feature-disabled")
+            }
+        );
     }
 }
 

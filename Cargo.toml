@@ -36,8 +36,9 @@ wbox-linux = { path = "crates/wbox-linux" }
 # 宿主身份由 agenterm-platform 提供；产品矩阵与路由仍在本 crate。
 wbox-machine = { path = "crates/wbox-machine" }
 
-# 只消费跨产品成立的宿主文件系统与锁机制；目录用途、状态和 guest 路由仍由 wbox 持有。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "a2a9f5d6e9ba0d85497192a1e2b4a40583052c0c", default-features = false, features = ["filesystem", "locking"] }
+# 只消费跨产品成立的宿主文件、锁与单进程控制机制；目录用途、进程树所有权、
+# 状态和 guest 路由仍由 wbox 持有。
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "13b203ec75044e429ac0a4cded7b7682421e18b2", default-features = false, features = ["filesystem", "locking", "process-control"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。

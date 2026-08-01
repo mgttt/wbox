@@ -2599,6 +2599,7 @@ TODO-WINDOW
 ├── W37 状态 liveness marker/owner guard 分层                         [done] PathLock + 跨进程/别名门禁
 ├── W38 私有状态目录与配置原子发布下沉                               [done] 0700/0600 + protected DACL
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
+├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3574,8 +3575,8 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`a2a9f5d6e9ba0d85497192a1e2b4a40583052c0c`，关闭 default features，启用
-`filesystem` 与 `locking`。`platform_kind()` 驱动
+`13b203ec75044e429ac0a4cded7b7682421e18b2`，关闭 default features，启用
+`filesystem`、`locking` 与轻量 `process-control`。`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
 cross-check 已随本阶段同步通过。macOS 原生运行与三宿主真机 smoke 尚未由 wbox
@@ -3604,6 +3605,14 @@ reservation token、meta、READY/ERROR、exit-code 和 Linux container PID 统�
 判据仍归产品层。消费侧并发读 meta 门禁曾在 Windows 稳定复现 `MoveFileExW`
 `ERROR_ACCESS_DENIED`；上游现仅对 access/sharing/lock 三类瞬态错误做 32 次有界退避，
 platform 自身并发 reader 门禁重复通过，永久错误在重试耗尽后仍返回调用方。
+
+`W40` 把单 PID 的 graceful/forceful 终止机制拆为独立 `process-control` feature：
+Unix 分别映射 SIGTERM/SIGKILL，Windows 对通用 graceful 明确 Unsupported、forceful
+映射 `TerminateProcess`。原完整 `process` feature 向下依赖它并保留兼容 `kill()`，
+wbox 只启用轻量面且有 capability 门禁证明进程清单、Job、pipe/console 未被带入。
+三宿主在进入原生 API 前统一拒绝 PID 0，防止 Unix 把“单 PID”误解释成当前进程组。
+`stop` 超时、Windows 命名 Job 终止、Linux supervisor/PDEATHSIG、容器成员枚举和
+进程树所有权仍是 wbox 产品/隔离后端语义，不下沉为“杀一个 PID”等于“杀容器”。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
