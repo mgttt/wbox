@@ -884,9 +884,7 @@ fn register_for_spawn(
     // 不存在的目录写临时文件，报出来的错与真实原因毫无关系。
     if spec.private_tmp {
         let dir = crate::runstate::private_tmp_dir(reg.dir());
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            WboxError::args(format!("创建私有临时目录 '{}' 失败：{}", dir.display(), e))
-        })?;
+        crate::runstate::create_private_directory(&dir)?;
         #[cfg(windows)]
         crate::acl::grant_modify_recursive_for_profile(&dir, &spec.name)?;
     }

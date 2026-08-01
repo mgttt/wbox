@@ -54,9 +54,9 @@ research；尤其不能把所有 `not(windows)` 都当成 Linux。
 首批实际接入面是宿主身份与轻量文件系统约定：`wbox-machine::current_host()` 把
 `agenterm_platform::platform_kind()` 映射为 wbox `HostOs`，`EmuBackend` 用
 `filesystem-conventions` 统一宿主可执行文件后缀与同目录定位。依赖固定到不可变
-Git SHA；`filesystem-conventions` 不引入原生依赖，`locking` 承载 OCI pull 提交锁
-与状态 owner guard。状态 marker、liveness 分类、产品超时和路由仍由 wbox 持有；
-未启用完整 filesystem/process/UI。
+Git SHA；`filesystem` 承载宿主约定、私有目录 ACL/mode 与私有原子文件发布，
+`locking` 承载 OCI pull 提交锁与状态 owner guard。状态 marker、liveness 分类、
+产品超时、目录用途和路由仍由 wbox 持有；未启用 process/UI。
 workspace 统一持有 `windows-sys` 版本，各 package 只声明自身最小 feature，避免未来
 启用通用原生机制时出现两套 Windows ABI 依赖。
 OCI 默认架构也必须消费这一宿主身份：Linux 原生 provider 跟随 target ISA，

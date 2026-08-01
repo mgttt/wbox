@@ -405,8 +405,7 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
             Liveness::Exited => purge_dir(&dir),
         }
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
+    create_private_directory(&dir)?;
     let token = next_reservation_token();
     std::fs::write(dir.join(DETACHED_RESERVATION), &token)
         .map_err(|e| WboxError::args(format!("写入 detached 预留令牌失败：{}", e)))?;
@@ -449,8 +448,7 @@ pub fn create_pending(
             name, name
         )));
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
+    create_private_directory(&dir)?;
     let result = (|| {
         write_run_config(&dir.join(CREATE_CONFIG), args)?;
         let entry = Entry {
@@ -487,15 +485,18 @@ pub fn create_pending(
 /// 更容易被同机别的用户读到。
 fn write_run_config(path: &Path, args: &[String]) -> Result<()> {
     let config = wbox_codec::json!({ "schema": 1, "run_args": args });
-    std::fs::write(path, config.to_string())
-        .map_err(|e| WboxError::args(format!("写 {} 失败：{}", path.display(), e)))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| WboxError::args(format!("限制 {} 权限失败：{}", path.display(), e)))?;
-    }
-    Ok(())
+    let parent = path
+        .parent()
+        .ok_or_else(|| WboxError::args(format!("配置路径 '{}' 缺少父目录", path.display())))?;
+    agenterm_platform::filesystem::protect_private_directory(parent).map_err(|error| {
+        WboxError::args(format!(
+            "限制配置目录 '{}' 权限失败：{}",
+            parent.display(),
+            error
+        ))
+    })?;
+    agenterm_platform::filesystem::write_private_atomic(path, config.to_string().as_bytes())
+        .map_err(|error| WboxError::args(format!("写 {} 失败：{}", path.display(), error)))
 }
 
 /// `run -d` 的父进程记下重启配置，好让 `start`/`restart` 对它同样可用。
@@ -899,8 +900,7 @@ pub fn register_with_context(
             Liveness::Exited => purge_dir(&dir),
         }
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
+    create_private_directory(&dir)?;
     let lock = try_lock_exclusive(&dir.join("lock"))?.ok_or_else(|| {
         WboxError::args(format!(
             "无法独占容器 '{}' 的锁文件（是否有并发的 wbox？）",
@@ -1158,6 +1158,20 @@ pub fn private_tmp_dir(dir: &Path) -> PathBuf {
     dir.join("tmp")
 }
 
+/// Create a product-owned directory and apply the shared host-private contract.
+pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        WboxError::args(format!("创建私有目录 '{}' 失败：{}", path.display(), error))
+    })?;
+    agenterm_platform::filesystem::protect_private_directory(path).map_err(|error| {
+        WboxError::args(format!(
+            "限制私有目录 '{}' 权限失败：{}",
+            path.display(),
+            error
+        ))
+    })
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1248,6 +1262,45 @@ mod tests {
         };
         assert!(!dir.exists(), "drop 后状态目录应已删除：{}", dir.display());
         assert!(list().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_directory_and_saved_config_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _home = TempHome::new("private-state");
+        create_pending(
+            "private",
+            &["--env=TOKEN=secret".into()],
+            &["true".into()],
+            "native",
+            None,
+        )
+        .unwrap();
+        let dir = dir_for("private").unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join(CREATE_CONFIG))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("platform-private")),
+            "私有原子发布不得残留临时文件"
+        );
     }
 
     #[cfg(unix)]

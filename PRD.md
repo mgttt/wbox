@@ -208,7 +208,7 @@ PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全�
 
 - 七个第一方 workspace 包：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、
   `wbox-linux`、`wbox-machine` 与实验包 `wbox-hpc-lab`；
-- 固定到不可变 Git SHA、仅启用零原生依赖 conventions 的第一方
+- 固定到不可变 Git SHA、按需启用 `filesystem`/`locking` 的第一方
   `agenterm-platform`；
 - `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
   声明，不编译任何第三方实现代码，属第一档明确允许的那类。
@@ -2597,6 +2597,7 @@ TODO-WINDOW
 ├── W35 Windows ABI 依赖单点化与 agenterm-platform 版本收敛        [done] windows-sys 0.61 单节点
 ├── W36 OCI pull 提交锁下沉与崩溃释放门禁                           [done] PathLock + 无 Drop 子进程
 ├── W37 状态 liveness marker/owner guard 分层                         [done] PathLock + 跨进程/别名门禁
+├── W38 私有状态目录与配置原子发布下沉                               [done] 0700/0600 + protected DACL
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3569,8 +3570,8 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`869cde4bcd665b15d7bad23745bc6a0ca0ecce53`，关闭 default features，启用
-`filesystem-conventions` 与 `locking`。`platform_kind()` 驱动
+`fa53f0a1ef4ab30e94ca17f98c9d4a4560d4a747`，关闭 default features，启用
+`filesystem` 与 `locking`。`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
 cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke 尚未由 wbox 门禁
@@ -3578,12 +3579,11 @@ cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke �
 
 此前 review 发现的两个上游阻塞已修复并有行为门禁：`PathLock` 现在规范化路径
 别名并由真实子进程验证互斥与释放；Windows `protect_private_directory()` 现在
-写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox
-尚未启用完整 `filesystem` feature。`locking` 已替换 OCI pull 提交锁和状态 owner
-guard：前者保留 wbox 的 300 秒产品超时，但不再以崩溃后永久残留的目录作为互斥
-所有权；后者只下沉内核 guard，持久 marker、liveness 分类和生命周期策略仍归
-wbox。workspace 已将四处 Windows ABI 声明收敛到单点 `windows-sys 0.61`；迁移
-安全目录仍须逐项对照现有产品语义并通过产品门禁。
+写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox 已用
+`filesystem` 保护新状态目录和 private tmp，并以私有独占临时文件原子发布含 argv/
+环境的重启配置，删除 Unix “公开写后再 chmod”窗口。`locking` 已替换 OCI pull
+提交锁和状态 owner guard：产品超时、持久 marker、liveness 分类和生命周期策略
+仍归 wbox。workspace 已将四处 Windows ABI 声明收敛到单点 `windows-sys 0.61`。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
