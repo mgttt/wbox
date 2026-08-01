@@ -8,6 +8,7 @@ use super::registry::RegistryClient;
 use super::ImageRef;
 use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
+use agenterm_platform::filesystem_publish::{publish_directory, DirectoryPublishErrorKind};
 use agenterm_platform::locking::{LockErrorKind, PathLock};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -108,58 +109,35 @@ impl PullCommitLock {
     }
 }
 
-fn replace_cache_dir_with(
-    staging: &Path,
-    dest: &Path,
-    mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
-) -> crate::fault::Result<()> {
-    if !dest.exists() {
-        rename(staging, dest).with_context(|| {
-            format!(
-                "提交镜像缓存失败：{} -> {}",
-                staging.display(),
-                dest.display()
-            )
-        })?;
-        return Ok(());
-    }
-
-    let backup = sibling_path(dest, "backup", true)?;
-    rename(dest, &backup).with_context(|| {
-        format!(
-            "备份旧镜像缓存失败：{} -> {}",
-            dest.display(),
-            backup.display()
-        )
-    })?;
-
-    if let Err(install_error) = rename(staging, dest) {
-        if let Err(rollback_error) = rename(&backup, dest) {
-            crate::bail!(
-                "提交新镜像缓存失败：{}；回滚旧缓存也失败：{}。旧缓存保留在 {}",
-                install_error,
-                rollback_error,
-                backup.display()
-            );
+fn replace_cache_dir(staging: &Path, dest: &Path) -> crate::fault::Result<()> {
+    let outcome = publish_directory(staging, dest).map_err(|error| match error.kind() {
+        DirectoryPublishErrorKind::Backup => {
+            crate::fail!("备份旧镜像缓存失败：{}", error.detail())
         }
-        return Err(crate::fail!(
-            "提交新镜像缓存失败，旧缓存已恢复：{}",
-            install_error
-        ));
-    }
-
-    if let Err(e) = std::fs::remove_dir_all(&backup) {
+        DirectoryPublishErrorKind::InstallRolledBack => {
+            crate::fail!("提交新镜像缓存失败，旧缓存已恢复：{}", error.detail())
+        }
+        DirectoryPublishErrorKind::Rollback => crate::fail!(
+            "提交新镜像缓存失败且回滚旧缓存也失败：{}。旧缓存保留在 {}",
+            error.detail(),
+            error
+                .retained_backup()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_owned())
+        ),
+        DirectoryPublishErrorKind::Install => {
+            crate::fail!("提交镜像缓存失败：{}", error.detail())
+        }
+        _ => crate::fail!("镜像缓存目录发布失败：{}", error.detail()),
+    })?;
+    if let (Some(backup), Some(error)) = (outcome.retained_backup(), outcome.cleanup_error()) {
         eprintln!(
             "wbox: 警告：新镜像已提交，但旧缓存备份清理失败 {}：{}",
             backup.display(),
-            e
+            error
         );
     }
     Ok(())
-}
-
-fn replace_cache_dir(staging: &Path, dest: &Path) -> crate::fault::Result<()> {
-    replace_cache_dir_with(staging, dest, |from, to| std::fs::rename(from, to))
 }
 
 /// 拉取一个镜像并解包到 `dest`（dest 下生成 rootfs/ 与元数据文件）。
@@ -917,46 +895,32 @@ mod tests {
     }
 
     #[test]
-    fn failed_cache_swap_restores_old_cache_and_cleans_staging() {
-        let dir = tmpdir("pull-rollback");
+    fn cache_publish_replaces_old_cache_and_cleans_backup() {
+        let dir = tmpdir("pull-replace");
         let dest = dir.join("image");
         std::fs::create_dir_all(dest.join("rootfs")).unwrap();
         std::fs::write(dest.join("rootfs/marker"), b"old-complete").unwrap();
 
-        let staging = StagingDir::create(&dest).unwrap();
+        let mut staging = StagingDir::create(&dest).unwrap();
         std::fs::create_dir_all(staging.path.join("rootfs")).unwrap();
         std::fs::write(staging.path.join("rootfs/marker"), b"new-complete").unwrap();
         std::fs::write(staging.path.join("manifest.json"), b"{}").unwrap();
         let staging_path = staging.path.clone();
 
-        let mut rename_call = 0;
-        let err = replace_cache_dir_with(&staging.path, &dest, |from, to| {
-            rename_call += 1;
-            if rename_call == 2 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected install rename failure",
-                ));
-            }
-            std::fs::rename(from, to)
-        })
-        .unwrap_err();
-        assert!(err.to_string().contains("旧缓存已恢复"), "{err}");
+        replace_cache_dir(&staging.path, &dest).unwrap();
+        staging.disarm();
+        assert!(!staging_path.exists(), "staging 应已成为正式缓存");
         assert_eq!(
             std::fs::read(dest.join("rootfs/marker")).unwrap(),
-            b"old-complete"
+            b"new-complete"
         );
-
-        // 模拟 pull_image 错误返回：guard 必须清掉未提交的 staging。
-        drop(staging);
-        assert!(!staging_path.exists(), "失败 staging 不应残留");
         assert!(
             std::fs::read_dir(&dir).unwrap().all(|e| !e
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .contains("backup")),
-            "成功回滚后不应残留 backup"
+                .contains("platform-backup")),
+            "成功发布后不应残留 backup"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
