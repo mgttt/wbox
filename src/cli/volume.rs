@@ -76,20 +76,9 @@ fn list(args: &[String]) -> Result<u32> {
 /// 卷占用的磁盘，人读形式。取不到（权限等）时给 `-`，不猜也不报错——
 /// 这一列是参考信息，不该让整条 `ls` 失败。
 fn dir_size(dir: &std::path::Path) -> String {
-    fn walk(p: &std::path::Path) -> Option<u64> {
-        let meta = std::fs::symlink_metadata(p).ok()?;
-        if meta.is_dir() {
-            let mut sum = 0u64;
-            for e in std::fs::read_dir(p).ok()?.flatten() {
-                sum += walk(&e.path()).unwrap_or(0);
-            }
-            return Some(sum);
-        }
-        Some(meta.len())
-    }
-    match walk(dir) {
-        Some(n) => super::stats::human_bytes(n),
-        None => "-".to_string(),
+    match crate::disk_usage::logical_size(dir) {
+        Ok(n) => super::stats::human_bytes(n),
+        Err(_) => "-".to_string(),
     }
 }
 

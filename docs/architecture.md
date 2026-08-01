@@ -128,6 +128,9 @@ GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩�
 宿主页大小、映射 allocation granularity 与物理总量也由 `agenterm-platform`
 的 `host-memory` 契约提供；wbox-machine 直接重导出该事实类型。它不包含 cgroup、
 Job Object 或进程限额，资源预算和超限策略仍归具体执行 provider。
+路径所在卷的总容量、当前用户可用量和 allocation unit 由独立 `storage` feature
+提供；`wbox system df` 持有镜像、容器、命名卷、构建缓存的分类、逻辑字节统计和
+reclaimable 策略。platform 不认识 OCI 或 wbox 状态树。
 
 点/线/面/体是分布式执行的共同拓扑：资源节点是点，带方向与 transport 的连接是线，
 调度/流水线/数据并行/task graph 是面，跨执行域的 placement、协调、一致性和故障

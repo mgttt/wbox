@@ -39,11 +39,11 @@ PRD
 │   ├── F6 Linux/macOS 上执行 Windows CLI  F6.L1–F6.L5（legacy）/ F6.R1–F6.R7
 │   ├── F7 环境与凭证边界          F7.1–F7.5
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
-│   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
+│   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W52、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L28、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M11
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W53、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L29、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M12
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -401,6 +401,7 @@ wbox 的可移植核心。
 | 容器内工作目录 | 有 | F9.37：**修掉镜像 `WorkingDir` 与 `-w` 双双被静默丢掉的缺陷**；不存在时逐级创建，且建在容器可写层（门禁 WD.1–WD.5）|
 | `ADD` / `ps --filter` | 有 | F9.38：`ADD` 自动解开本地 tar（远程 URL 明确不做）；`ps --filter status=|name=`（门禁 AF.1–AF.7）|
 | **多阶段构建** | 有 | F9.39：`FROM ... AS <名字>` + `COPY --from=<名字>`；各阶段 config 独立，中间阶段不进最终镜像（门禁 MS.1–MS.5）|
+| **磁盘占用** `system df` | 有 | F9.40：镜像/容器/命名卷/构建缓存的 total、active、逻辑大小与可回收量；同时报告 backing volume 容量（门禁 SDF.1–SDF.6）|
 | 端口映射 `-p` | 部分 | F9.2，**仅 TCP**；UDP/ICMP 做不到 |
 | 镜像 pull/list/show/rm/inspect | 有 | |
 | 镜像构建 | 部分 | F9.3 子集 + **分层缓存**（F9.5）；F9.36 补 `LABEL`/`EXPOSE`/`USER`/`ARG`，F9.38 补 `ADD`，F9.39 补**多阶段构建**；剩下不做的只有 `ADD` 的远程取回（理由见 F9.38） |
@@ -598,7 +599,7 @@ wbox 的可移植核心。
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + 模拟器 VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
-| Q3 Podman | —— | F9.1–F9.39 已全部完成并各有门禁 | — |
+| Q3 Podman | —— | F9.1–F9.40 已全部完成并各有门禁 | — |
 | Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
 | Q3 Podman | ~~多阶段构建~~ | **已完成**（F9.39，门禁 MS.1–MS.5）：按上述做法实现——每个 `FROM` 切换产物目录，非最终阶段用临时目录，多阶段时禁用前缀缓存并出声 | — |
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
@@ -617,7 +618,7 @@ portable 后端只补那些在“免安装、无服务、无驱动”前提下�
 
 §2.4.3 说「下一步做什么」，粒度是缺口；这一节把四格拉到**同一深度**：每格的能力
 序列在哪、还剩什么、判据是什么。补这一节的直接原因是四格深度本来不齐——Q3 有
-F9.1–F9.39 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有一张对照表**，
+F9.1–F9.40 逐条带门禁，Q2 有 F4.R0–R7 的纵切图，**Q1 却只有一张对照表**，
 读者无从知道那一格接下来能做什么。
 
 ---
@@ -679,7 +680,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 
 ##### Q3（Linux × Linux 镜像）路线图
 
-**F9.1–F9.39 已全部完成并各有门禁**（逐条见 §2.4 的 Q3 表与 §4 的 F9 树）。
+**F9.1–F9.40 已全部完成并各有门禁**（逐条见 §2.4 的 Q3 表与 §4 的 F9 树）。
 剩下的都是**已论证的不做**：自定义 bridge 与内建 DNS（要常驻用户态网络栈）、
 pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`events`（要常驻事件
 流）、`update` 改运行中容器的限额（没设限额就没有 cgroup 可改）、`ADD` 的远程取回
@@ -1504,7 +1505,8 @@ F9
 ├── F9.36 `--entrypoint`/`--env-file`/四条 Dockerfile 指令 —— [done]（门禁 EP.1–EP.7）
 ├── F9.37 容器内工作目录（WorkingDir / `-w`）—— [done]（仅 Linux 镜像模式，门禁 WD.1–WD.5）
 ├── F9.38 `ADD` 与 `ps --filter`              —— [done]（门禁 AF.1–AF.7）
-└── F9.39 多阶段构建                        —— [done]（门禁 MS.1–MS.5）
+├── F9.39 多阶段构建                        —— [done]（门禁 MS.1–MS.5）
+└── F9.40 `wbox system df` 磁盘占用          —— [done]（门禁 SDF.1–SDF.6）
 ```
 
 #### F9.1 卷 / 绑定挂载
@@ -2537,6 +2539,26 @@ rootfs 记进一张表供 `COPY --from` 取。这样指令执行的那一大段�
 **`--from` 的源必须是绝对路径**：它在那个阶段的 rootfs 内，相对路径没有可解释的
 基准点。取源仍走 `resolve_rootfs_path`，复用同一份 `..` 逃逸校验。
 
+#### F9.40 `wbox system df` 磁盘占用
+
+**F9.40 磁盘占用** `[done]`（门禁 SDF.1–SDF.6）。命令形状与 Docker/Podman 的
+`system df` 对齐，报告 Images、Containers、Local Volumes、Build Cache 四类对象的
+总数、活跃数、逻辑大小与可回收量；额外报告 `~/.wbox` 所在卷的总容量、当前用户
+可用容量和最小分配单元。未创建 `.wbox` 时查询最近的现存父目录，不为只读查询制造
+状态目录。
+
+分类和策略留在 wbox：任何状态的容器记录都使其镜像成为 active；Running 容器和
+被 Running 容器挂载的命名卷为 active；Exited 容器、未引用镜像、未使用卷及全部
+构建缓存计入 reclaimable，Created 容器不自动归为可回收。目录大小不跟随符号链接，
+但按逻辑字节统计，硬链接可能重复计数，CLI 必须明确提示。平台层只提供路径所在卷的
+事实，不知道 image/container/volume，也不决定删除策略。
+
+门禁：SDF.1 严格接受 `system df` 且拒绝缺失/未知/额外参数；SDF.2 嵌套目录逻辑
+字节和不存在目录为零；SDF.3 临时 HOME 内同时造镜像、Running 容器、命名卷和构建
+缓存，核对 active/reclaimable；SDF.4 空 HOME 查询最近父卷且不创建 `.wbox`；
+SDF.5 platform storage 在 Windows/i686 Windows/AArch64 Linux/双 macOS 目标严格
+Clippy，Windows 原生单测查询真实卷；SDF.6 Windows 产品实测输出四类对象与卷容量。
+
 ### 4.9 跨宿主协作交接点
 
 本节是 Windows 与 Linux agent 共享的工作面。队列按**最终必须在哪台宿主验收**
@@ -2614,6 +2636,7 @@ TODO-WINDOW
 ├── W50 共享映射长度失配 fail-closed                                          [done] oversized open 无指针暴露
 ├── W51 三宿主双 ISA 非宿主目标持续编译门禁                                    [done] 四目标 all-targets Clippy
 ├── W52 宿主内存几何与物理容量下沉                                               [done] 4 KiB/64 KiB/64 GiB 实测
+├── W53 宿主卷容量下沉与 `system df` Windows 验收                                  [done] 11 images/2.5 GiB + 4 KiB unit
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3024,8 +3047,14 @@ TODO-LINUX
 ├── L25 AArch64 Linux seccomp syscall 表可移植性              [done] ISA catalog + full workspace Clippy
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
 ├── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
-└── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
+├── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
+└── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
 ```
+
+`L29` 在 Linux 真机运行 platform `storage` 单元测试和 `wbox system df`，以 `df`/
+`statvfs` 交叉核对总容量、当前用户可用量和 fragment size；再造 active/exited 容器、
+命名卷、镜像与 build cache 核对分类。容器 overlay upper 的逻辑大小必须计入容器行，
+符号链接不得把统计带出 `~/.wbox`；交叉编译通过不能替代这些运行证据。
 
 `L28` 在 Linux 真机运行 platform `host-memory` 单元测试和
 `wbox-machine-lab host`，核对 `_SC_PAGESIZE`、`_SC_PHYS_PAGES` 乘积及非零/溢出失败。
@@ -3628,8 +3657,13 @@ TODO-MACOS
 ├── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
 ├── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
 ├── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
-└── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
+├── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
+└── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
 ```
+
+`M12` 在 Intel 与 Apple Silicon 真机运行 platform `storage` 单元测试及
+`wbox system df`，核对 APFS 容量、当前用户可用量和 allocation unit，并验证空 HOME
+最近父目录语义。双 macOS ISA Clippy 只证明 `fsblkcnt_t` 宽度适配可编译。
 
 `M11` 在 Intel 与 Apple Silicon 真机运行 platform `host-memory` 单元测试和
 `wbox-machine-lab host`，核对页大小、映射粒度与 `hw.memsize`，并保持宿主容量和
@@ -3642,9 +3676,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`b85dc538e14fde0f02ef6f28d938fcecd0ad281f`，关闭 default features，按消费包启用
+`c2e521ba0ccd501ee2c6bfeb176fb26a930e844d`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`、`shared-memory`、零依赖 `hardware` 与独立 `host-memory`。
+`process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory` 与 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
@@ -3802,6 +3836,18 @@ physical 68718866432 bytes；上游五目标严格 Clippy、Windows 原生单测
 26 单测/9 进程测试、wbox Quick 301 项及完整 workspace Rust 门禁通过，Unix 真机
 交接见 L28/M11。后续 revision 又把三宿主原始数值统一送入公共校验，纯测试覆盖零值、
 非整页 allocation granularity、物理容量小于一页与页数乘法溢出。
+
+`W53` 在 platform 增加独立 `storage` feature：Windows 由
+`GetVolumePathNameW`、`GetDiskFreeSpaceExW` 与 `GetDiskFreeSpaceW` 返回路径所在卷的
+总容量、当前用户可用量和 cluster size；Linux/macOS 使用 `statvfs`，并以可无损扩宽
+的计数契约兼容两端不同的 `fsblkcnt_t` 宽度。零容量、零/超大分配单元、可用量大于
+总量和乘法溢出均 fail closed。wbox 固定 platform revision
+`c2e521ba0ccd501ee2c6bfeb176fb26a930e844d`，新增 `system df` 产品分类并删除
+`volume ls` 的重复目录遍历；同时修复持久挂载记录按首个冒号切分导致 Windows
+`C:\...` 命名卷永远被误判为空闲的问题。Windows 真机实测 11 个镜像约 2.5 GiB，
+卷总量 250.0 GiB、当前用户可用 44.3 GiB、allocation unit 4096 bytes；wbox 454 项
+测试中 451 通过/3 个需外部网络环境的门禁保持 ignored，host 严格 Clippy 通过。
+platform 五目标严格 Clippy 通过，Linux/macOS 真机验收交接见 L29/M12。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

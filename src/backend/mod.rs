@@ -725,6 +725,18 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
+/// Split a persisted `host:guest[:ro|:rw]` mount without touching the host path.
+/// Parsing from the right preserves a Windows drive-letter colon.
+pub(crate) fn recorded_volume_parts(spec: &str) -> Option<(&str, &str, bool)> {
+    let (body, read_only) = match spec.rsplit_once(':') {
+        Some((body, "ro")) => (body, true),
+        Some((body, "rw")) => (body, false),
+        _ => (spec, false),
+    };
+    let (host, guest) = body.rsplit_once(':')?;
+    Some((host, guest, read_only))
+}
+
 /// 解析 `-v` 取值。
 ///
 /// 形如 `host:guest`、`host:guest:ro`、`host:guest:rw`。从右往左先剥离
@@ -737,19 +749,8 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
             spec, why
         ))
     };
-    let (body, mode) = match spec.rsplit_once(':') {
-        Some((body, "ro")) => (body, Some("ro")),
-        Some((body, "rw")) => (body, Some("rw")),
-        _ => (spec, None),
-    };
-    let (host, guest) = body
-        .rsplit_once(':')
-        .ok_or_else(|| bad("缺少容器路径分隔符"))?;
-    let read_only = match mode {
-        None | Some("rw") => false,
-        Some("ro") => true,
-        Some(m) => return Err(bad(&format!("未知模式 '{}'", m))),
-    };
+    let (host, guest, read_only) =
+        recorded_volume_parts(spec).ok_or_else(|| bad("缺少容器路径分隔符"))?;
     if host.is_empty() || guest.is_empty() {
         return Err(bad("宿主路径与容器路径都不能为空"));
     }
@@ -813,6 +814,18 @@ pub fn parse_volume(spec: &str) -> Result<VolumeMount> {
 #[cfg(test)]
 mod volume_tests {
     use super::*;
+
+    #[test]
+    fn persisted_volume_parts_preserve_windows_drive_colon() {
+        assert_eq!(
+            recorded_volume_parts(r"C:\data:/guest:ro"),
+            Some((r"C:\data", "/guest", true))
+        );
+        assert_eq!(
+            recorded_volume_parts(r"C:\data:/guest"),
+            Some((r"C:\data", "/guest", false))
+        );
+    }
 
     #[test]
     fn parses_basic_and_modes() {

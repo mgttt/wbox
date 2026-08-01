@@ -34,11 +34,7 @@ fn container_value(name: &str) -> Result<wbox_codec::json::Value> {
         .map(|v| {
             // 记录形如 `host:guest` 或 `host:guest:ro`。从右往左剥模式，
             // 免得把 Windows 盘符冒号当成分隔符（与 `-v` 的解析同一取舍）。
-            let (rest, ro) = match v.strip_suffix(":ro") {
-                Some(r) => (r, true),
-                None => (v.strip_suffix(":rw").unwrap_or(v), false),
-            };
-            let (host, guest) = rest.rsplit_once(':').unwrap_or((rest, ""));
+            let (host, guest, ro) = backend::recorded_volume_parts(v).unwrap_or((v, "", false));
             wbox_codec::json!({
                 "Type": "bind",
                 "Source": host,

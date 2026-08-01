@@ -19,6 +19,7 @@ mod error;
 mod fault;
 // OCI 镜像拉取：纯 Rust 依赖，跨平台可编译（Linux 沙箱用于实测拉取逻辑）。
 mod build;
+mod disk_usage;
 mod layers;
 mod oci;
 mod platform;

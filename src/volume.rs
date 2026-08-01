@@ -106,8 +106,9 @@ pub fn users(name: &str) -> Vec<String> {
         .filter(|(e, _)| {
             e.exec_context.as_ref().is_some_and(|c| {
                 c.volumes.iter().any(|v| {
-                    // 记录里存的是解析后的宿主路径，与卷目录比对即可
-                    v.split(':').next().map(|h| h == dir.to_string_lossy()) == Some(true)
+                    // 从右侧切 guest/mode，Windows 盘符里的冒号属于 host。
+                    crate::backend::recorded_volume_parts(v)
+                        .is_some_and(|(host, _, _)| std::path::Path::new(host) == dir)
                 })
             })
         })

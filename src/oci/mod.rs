@@ -289,6 +289,8 @@ pub struct CachedImage {
     pub tag: String,
     /// 层数；读不到时为 "-"。
     pub layers: String,
+    /// Exact cache directory; consumers must not reconstruct it from display text.
+    pub directory: PathBuf,
 }
 
 /// 从缓存目录三元组还原一个**可用的**镜像引用。
@@ -369,6 +371,7 @@ pub fn list_refs() -> crate::error::Result<Vec<CachedImage>> {
                     registry: registry.clone(),
                     tag,
                     layers,
+                    directory: tag_entry.path(),
                 });
             }
         }

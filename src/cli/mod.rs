@@ -32,6 +32,7 @@ pub mod start;
 mod stats;
 mod status;
 pub mod stop;
+mod system;
 pub mod top;
 mod volume;
 pub mod wait;
@@ -70,6 +71,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox volume create <NAME>...                     创建命名卷（见 PRD F9.35）
   wbox volume ls [-q] | volume inspect <NAME>...   列出/查看命名卷
   wbox volume rm [-f] <NAME>...                    删除命名卷（运行中被占用时拒绝）
+  wbox system df                                  显示镜像、容器、卷和构建缓存磁盘占用
   wbox ps [-a] [-q]                                列出已登记的容器（-a 含已退出的残留；-q 只出名字）
   wbox inspect <NAME|REF>...                       输出容器或镜像的机器可读 JSON
   wbox wait <NAME>...                              等待容器退出并打印 guest 退出码
@@ -203,9 +205,9 @@ const VERBS: &[(&str, Scope, Handler)] = &[
     ("platform", Scope::Top, platform::cmd_platform),
 ];
 
-/// 两个**分组**动词（`image` / `container`）不在表里：它们自己带子命令，
+/// **分组**动词不在表里：它们自己带子命令，
 /// 形状与表里的一元动词不同。列在这里是为了帮助主题判定不漏掉它们。
-const GROUPS: &[&str] = &["image", "container", "volume"];
+const GROUPS: &[&str] = &["image", "container", "volume", "system"];
 
 fn lookup(command: &str, scope: Option<Scope>) -> Option<Handler> {
     VERBS
@@ -274,7 +276,7 @@ fn dispatch_command_help(args: &[String]) -> Option<Result<u32>> {
         print!("{}", USAGE);
         return Some(Ok(0));
     }
-    if matches!(command, "image" | "container") && is_help_arg(args.get(2)) {
+    if matches!(command, "image" | "container" | "volume" | "system") && is_help_arg(args.get(2)) {
         print!("{}", USAGE);
         return Some(Ok(0));
     }
@@ -291,6 +293,7 @@ pub fn dispatch(args: &[String]) -> Result<u32> {
         Some("image") => image::cmd_image(&args[1..]),
         Some("container") => cmd_container(&args[1..]),
         Some("volume") => volume::cmd_volume(&args[1..]),
+        Some("system") => system::cmd_system(&args[1..]),
         // 内部动词：端口转发的中继子进程，不进动词表也不进帮助。
         #[cfg(target_os = "linux")]
         Some("__port-relay") => crate::portfwd::cmd_internal_relay(&args[1..]),
@@ -406,6 +409,7 @@ mod tests {
             vec!["build", "--help"],
             vec!["pull", "-h"],
             vec!["image", "pull", "--help"],
+            vec!["system", "df", "--help"],
             vec!["container", "create", "--help"],
             vec!["container", "start", "--help"],
             vec!["container", "inspect", "--help"],

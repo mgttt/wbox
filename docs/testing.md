@@ -53,9 +53,9 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
 证据仍由下述唯一 owning gate 产出。`check.ps1` 和构建 wrapper 默认清理 Cargo
-遗留的孤立 incremental session 锁、空目录与测试临时目录。完整增量单元采用两级
-有界 LRU：无论总量是否超预算，每个 crate 默认只保留最新单元；超过 512 MiB
-后继续回收可再生的冷单元，同时至少保留最新一份。Windows 可用
+遗留的孤立 incremental session 锁、空目录与测试临时目录。增量缓存采用三级
+有界清理：编译单元内只留最新完整 session，每个 crate 默认只保留最新单元；
+超过 512 MiB 后继续回收可再生的冷单元，同时至少保留最新一份。Windows 可用
 `-MaxIncrementalSizeMiB` 调整预算，Linux/macOS 使用
 `WBOX_MAX_INCREMENTAL_MIB`；需要完整释放 debug 增量缓存时显式传
 `-CleanIncremental`，需要跳过增量目录扫描时传 `-KeepIncremental`。
@@ -89,6 +89,9 @@ Windows 上该门禁只做类型检查与 lint，不链接或运行 Darwin 产�
 scripts/build.ps1
 scripts/build.ps1 -Release
 scripts/build.ps1 -Release -Package wbox-linux
+
+# 产品侧磁盘统计 + platform 卷事实
+target/debug/wbox.exe system df
 ```
 
 ```bash
