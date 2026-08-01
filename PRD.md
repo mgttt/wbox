@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W62、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L35、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M19
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W63、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L36、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M20
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2631,7 +2631,7 @@ TODO-WINDOW
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
-├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；13 tests
+├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；16 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
@@ -2652,6 +2652,7 @@ TODO-WINDOW
 ├── W60 宿主原生虚拟化 API 可用性事实                                                 [done] WHPX passive probe
 ├── W61 系统处理器/NUMA 拓扑事实与进程预算分层                                        [done] 8T/4C/1P/1N/1G
 ├── W62 CPU cache hierarchy 下沉并驱动 HPC 共享布局                                  [done] L1/L2/L3 + 64-byte line
+├── W63 shared mapping memory bandwidth/page-touch 真机实验                          [done] 128 MiB + cold/warm/read/write/copy
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3072,8 +3073,15 @@ TODO-LINUX
 ├── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
 ├── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
 ├── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
-└── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
+├── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
+└── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + fault 口径决策
 ```
+
+`L36` 运行 release `wbox-hpc-lab memory --mib 128 --passes 3 --repeat 3`，记录
+cold/warm page-touch 与 read/write/copy，并核对 POSIX shm 清理。不要拿 Windows VM
+数值作为 Linux 通过阈值；只裁决输出、checksum、流量计数和重复执行稳定性。若 Linux
+能以最小依赖取得进程级 major/minor fault 累计值，再与 macOS 一起评估是否扩展
+platform `process-metrics`，不能先为单宿主增加字段。
 
 `L35` 在 Linux 真机运行 platform `cache-hierarchy` 单元测试、
 `wbox-machine-lab host` 与小规模 `wbox-hpc-lab bench`，交叉核对 cache sysfs 的
@@ -3719,8 +3727,14 @@ TODO-MACOS
 ├── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
 ├── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
 ├── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
-└── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
+├── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
+└── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
 ```
+
+`M20` 在 Intel 与 Apple Silicon 分别运行 release `wbox-hpc-lab memory`，裁决
+POSIX shm、page-touch、checksum 和 payload/traffic 双口径。吞吐只做同机复测，不设
+跨 ISA 阈值；同时调查 `getrusage` 的 page-fault 字段能否与 Windows/Linux 保持累计
+计数语义，再决定是否扩展 platform `process-metrics`。
 
 `M19` 在 Intel 与 Apple Silicon 真机运行 platform `cache-hierarchy`、
 `wbox-machine-lab host` 与小规模 HPC 多进程门禁，交叉核对 `hw.cachelinesize`、
@@ -4026,6 +4040,16 @@ cache line 均为 64 bytes。wbox-hpc-lab 删除硬编码 64，把最大 data/un
 纳入父/子进程协议，并以通用非二次幂 align-up、零值/溢出门禁保持布局安全；小规模
 1/2/4/8 worker 共享映射 checksum 已通过。platform 114 个 all-features tests、六目标
 严格 Clippy 和最小依赖树已通过；Linux/macOS 真机验收分别交接 L35/M19。
+
+`W63` 在 `wbox-hpc-lab memory` 增加同一 shared mapping 上的 cold/warm page-touch、
+顺序 read/write/copy 实验。copy 同时报告 payload 与最小 read+write 逻辑流量，防止把
+一次 application copy 误写成单向内存流量；它不宣称覆盖 cache write-allocate 等物理
+总线流量。每个 kernel 返回 checksum，write/copy 还在计时区外做全区域验证；尺寸、
+passes 和流量计数均做 checked arithmetic。当前 Windows VM 用 128 MiB 数据集、256 MiB 映射、
+3 passes/median=3 实测：cold/warm 约 2293/28.9 ns/page，read/write 约 5.82/4.27
+GiB/s，copy payload/traffic 约 5.08/10.15 GiB/s。数据集超过 35.75 MiB L3，结果仍
+只是当前虚拟机观测，不是裸机 DRAM 指标或产品 SLA；page-fault 计数 API 是否下沉，
+要等 Linux/macOS 同口径实验后再决定。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

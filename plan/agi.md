@@ -72,8 +72,15 @@ AArch64 路径使用 16 条独立 128-bit NEON FP64 FMA 链，按
 ```powershell
 cargo run --release -p wbox-hpc-lab -- bench --items 4000000 --rounds 32 --repeat 3
 cargo run --release -p wbox-hpc-lab -- flops --iterations 200000000 --repeat 5
+cargo run --release -p wbox-hpc-lab -- memory --mib 128 --passes 3 --repeat 3
 cargo run -p wbox-machine --bin wbox-machine-lab -- parallel
 ```
+
+同一 Windows VM 的 128 MiB 数据集（256 MiB shared mapping，3 passes，median=3）
+实测 cold page touch 为约 2293 ns/page，warm 为约 28.9 ns/page；顺序读约
+5.82 GiB/s，顺序写约 4.27 GiB/s，copy 的 payload 约 5.08 GiB/s、按读写总流量
+约 10.15 GiB/s。数据集约为 35.75 MiB L3 的 3.6 倍，因此不把结果冒充 cache-only
+带宽；页触碰差异也只说明当前 VM 的首次提交/缺页成本，不等同于裸机 DRAM 延迟。
 
 ## 3. 已获得的方法经验
 

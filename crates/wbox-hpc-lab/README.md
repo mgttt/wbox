@@ -20,6 +20,8 @@ cargo run --release -p wbox-hpc-lab -- bench
 cargo run --release -p wbox-hpc-lab -- bench --items 4000000 --rounds 32 --repeat 3
 cargo run --release -p wbox-hpc-lab -- flops
 cargo run --release -p wbox-hpc-lab -- flops --iterations 200000000 --repeat 5
+cargo run --release -p wbox-hpc-lab -- memory
+cargo run --release -p wbox-hpc-lab -- memory --mib 128 --passes 3 --repeat 3
 ```
 
 The reported time is the median. Process measurements include process startup.
@@ -35,6 +37,16 @@ but still needs native measurements. This is a best-case arithmetic
 microbenchmark, not an application performance promise; memory bandwidth and
 arithmetic intensity still bound real workloads.
 
+The `memory` command allocates one paging-file/POSIX-shm-backed mapping split
+into equal source and destination regions. It reports cold and warm page-touch
+latency, sequential read and write throughput, and copy throughput. Copy counts
+one payload byte and a minimum of two logical traffic bytes because memory must
+be read and written; this is not a claim about cache write-allocate or physical
+bus traffic. Both rates are printed. Full-region write/copy verification runs
+outside the timed interval. The default 128 MiB region exceeds the current Windows
+host's last-level cache, while the complete mapping occupies 256 MiB. Results
+are host observations rather than a hardware or cloud SLA.
+
 `logical_copies=0` has a narrow meaning: after initialization, the benchmark
 does not copy the dataset between application buffers or processes. It does not
 mean zero memory traffic, zero page faults, or that CPU caches remain coherent
@@ -45,6 +57,7 @@ Current experiments establish:
 - scalar, explicit AVX2, scoped-thread, and AVX2 plus thread execution;
 - named shared-memory execution across Windows processes;
 - cache-line-separated result slots to avoid intentional false sharing;
+- cold/warm page-touch and read/write/copy memory-path measurements;
 - worker-count scans that expose physical-core, SMT, startup, and scheduler
   effects.
 
