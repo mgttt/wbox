@@ -16,6 +16,7 @@ dependencies = [
  "wbox-codec",
  "wbox-http",
  "wbox-linux",
+ "wbox-machine",
  "windows-sys",
 ]
 
@@ -38,6 +39,10 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "wbox-machine"
+version = "1.0.0-rc2"
 
 [[package]]
 name = "wbox-tls"

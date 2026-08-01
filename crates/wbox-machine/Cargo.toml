@@ -1,0 +1,8 @@
+[package]
+name = "wbox-machine"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "wbox ISA, host hardware, guest ABI, and execution provider contracts"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

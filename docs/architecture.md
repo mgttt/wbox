@@ -19,9 +19,11 @@ CLI (`src/cli`)
 ├── image pull/list/show/rm
 └── platform -> 三宿主 × 三来宾 × 双 ISA 能力矩阵
         |
-产品平台契约 (`src/platform.rs`)
+机器与产品平台契约 (`crates/wbox-machine`；`src/platform.rs` 兼容重导出)
 ├── HostOs / GuestOs / Isa（x86-64、AArch64）
-├── ExecutionProvider / IsolationModel / Priority
+├── HardwareCapabilities / CPU feature / 原生加速 API 候选与探测状态
+├── GuestAbi / BinaryFormat（Linux syscall/ELF、Windows NT/PE、Darwin/Mach-O）
+├── ExecutionProvider / ProviderCapabilities / IsolationModel / Priority
 └── available / legacy / planned / research
         |
 目标分类与环境构造 (`src/backend`)
@@ -42,7 +44,8 @@ CLI 只负责解析和分派；`RunSpec` 表达后端无关意图；后端负责
 工作目录、环境和命令翻译为宿主机制。不可将某个平台的句柄、路径或 fd 语义
 泄漏到公共层。
 
-`src/platform.rs` 是 wbox 的产品语义，不是操作系统 FFI 集合。未来可由
+`crates/wbox-machine` 是 wbox 的产品与机器语义，`src/platform.rs` 仅保留兼容
+重导出；两者都不是操作系统 FFI 集合。未来可由
 `agenterm-platform` 提供进程树、原子文件和跨进程锁等机制，但产品路线、执行
 provider 选择和能力状态仍由 wbox 持有。契约实际按 Host × Guest × ISA 展开为
 18 条；未验收的平台组合必须显式 planned 或

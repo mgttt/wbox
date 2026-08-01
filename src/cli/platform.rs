@@ -25,22 +25,48 @@ fn current_isa_name() -> &'static str {
 }
 
 fn print_human() {
+    let hardware = platform::detect_hardware(platform::current_host());
     println!("wbox platform contract {}", platform::CONTRACT_REVISION);
     println!(
         "current host: {}/{}",
         current_host_name(),
         current_isa_name()
     );
-    println!("HOST     GUEST    ISA      PRIORITY  STATUS     EXECUTION                 ISOLATION");
+    let features = hardware
+        .cpu_features
+        .iter()
+        .map(|feature| feature.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    println!(
+        "hardware: logical-cpus={} features={} acceleration={}/{}",
+        hardware
+            .logical_processors
+            .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+        if features.is_empty() {
+            "none"
+        } else {
+            &features
+        },
+        hardware
+            .acceleration_api
+            .map_or("none", platform::AccelerationApi::as_str),
+        hardware.acceleration_state.as_str(),
+    );
+    println!(
+        "HOST     GUEST    ISA      ABI            FORMAT    PRIORITY  STATUS     EXECUTION                 ISOLATION"
+    );
     for host in HostOs::ALL {
         for guest in GuestOs::ALL {
             for isa in Isa::ALL {
                 let item = platform::route(host, guest, isa);
                 println!(
-                    "{:<8} {:<8} {:<8} {:<9} {:<10} {:<25} {}",
+                    "{:<8} {:<8} {:<8} {:<14} {:<9} {:<9} {:<10} {:<25} {}",
                     host.as_str(),
                     guest.as_str(),
                     isa.as_str(),
+                    item.guest_contract.abi.as_str(),
+                    item.guest_contract.binary_format.as_str(),
                     item.priority.as_str(),
                     item.availability.as_str(),
                     item.provider.as_str(),
@@ -59,6 +85,7 @@ fn string(value: &str) -> Value {
 }
 
 fn print_json() {
+    let hardware = platform::detect_hardware(platform::current_host());
     let routes = HostOs::ALL
         .into_iter()
         .flat_map(|host| {
@@ -73,9 +100,17 @@ fn print_json() {
                 string(item.availability.as_str()),
             );
             object.insert("guest".to_owned(), string(item.guest.as_str()));
+            object.insert(
+                "guest_abi".to_owned(),
+                string(item.guest_contract.abi.as_str()),
+            );
             object.insert("host".to_owned(), string(item.host.as_str()));
             object.insert("isa".to_owned(), string(item.isa.as_str()));
             object.insert("isolation".to_owned(), string(item.isolation.as_str()));
+            object.insert(
+                "binary_format".to_owned(),
+                string(item.guest_contract.binary_format.as_str()),
+            );
             object.insert("priority".to_owned(), string(item.priority.as_str()));
             object.insert("provider".to_owned(), string(item.provider.as_str()));
             object.insert("reason".to_owned(), string(item.reason));
@@ -89,6 +124,36 @@ fn print_json() {
     );
     root.insert("current_host".to_owned(), string(current_host_name()));
     root.insert("current_isa".to_owned(), string(current_isa_name()));
+    let mut hardware_json = Map::new();
+    hardware_json.insert(
+        "acceleration_api".to_owned(),
+        string(
+            hardware
+                .acceleration_api
+                .map_or("none", platform::AccelerationApi::as_str),
+        ),
+    );
+    hardware_json.insert(
+        "acceleration_state".to_owned(),
+        string(hardware.acceleration_state.as_str()),
+    );
+    hardware_json.insert(
+        "cpu_features".to_owned(),
+        Value::Array(
+            hardware
+                .cpu_features
+                .iter()
+                .map(|feature| string(feature.as_str()))
+                .collect(),
+        ),
+    );
+    hardware_json.insert(
+        "logical_processors".to_owned(),
+        hardware.logical_processors.map_or(Value::Null, |count| {
+            Value::Number(Number::PosInt(count as u64))
+        }),
+    );
+    root.insert("hardware".to_owned(), Value::Object(hardware_json));
     root.insert("routes".to_owned(), Value::Array(routes));
     println!("{}", Value::Object(root).to_string_pretty());
 }

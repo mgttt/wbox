@@ -291,6 +291,7 @@ mod tests {
             root.join("crates/wbox-codec/Cargo.toml"),
             root.join("crates/wbox-http/Cargo.toml"),
             root.join("crates/wbox-linux/Cargo.toml"),
+            root.join("crates/wbox-machine/Cargo.toml"),
             root.join("crates/wbox-tls/Cargo.toml"),
         ] {
             let Ok(text) = std::fs::read_to_string(&manifest) else {
