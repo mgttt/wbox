@@ -18,7 +18,7 @@ members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", 
 # 单点冻结 Windows ABI 声明版本，各 package 仍只启用自身需要的 feature。
 windows-sys = { version = "0.61", default-features = false }
 # 单点冻结共享宿主机制，各 package 只启用自身消费的最小 feature。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "59dc327a66fcd75f9690f7c82bca022078cd88ce", default-features = false }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "dd13b01b521ecd69c37fb958106e44b87931946e", default-features = false }
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
@@ -40,7 +40,7 @@ wbox-machine = { path = "crates/wbox-machine" }
 
 # 只消费跨产品成立的宿主熵、文件、锁、存储卷事实与单进程控制/观测机制；目录用途、进程树所有权、
 # TLS/guest 错误策略、状态和 guest 路由仍由 wbox 持有。
-agenterm-platform = { workspace = true, features = ["entropy", "filesystem", "filesystem-entry", "filesystem-cleanup", "filesystem-publish", "filesystem-usage", "ipc", "locking", "process-control", "process-image", "process-metrics", "process-observation", "process-spawn", "storage", "user-identity"] }
+agenterm-platform = { workspace = true, features = ["entropy", "filesystem", "filesystem-entry", "filesystem-cleanup", "filesystem-publish", "filesystem-usage", "ipc", "locking", "process-control", "process-image", "process-metrics", "process-observation", "process-security", "process-spawn", "storage", "user-identity"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。

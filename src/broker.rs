@@ -11,15 +11,12 @@ use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenAppContainerSid, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
-};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessId, OpenProcessToken};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessId};
 
 const MAGIC: u32 = 0x5742_4f58; // "WBOX"
 const VERSION: u16 = 1;
@@ -710,45 +707,19 @@ fn write_response(pipe: &mut impl std::io::Write, response: &Response) -> Result
 }
 
 fn process_appcontainer_sid_string(process: HANDLE) -> Result<String> {
-    let mut token_handle = std::ptr::null_mut();
-    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token_handle) } == 0 {
-        return Err(last_error("OpenProcessToken(AppContainer client)"));
-    }
-    let token_handle = OwnedHandle(token_handle);
-    let mut needed = 0;
+    use std::os::windows::io::{BorrowedHandle, RawHandle};
+
+    let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
+    let facts = agenterm_platform::process_security::process_handle(process)
+        .map_err(|error| WboxError::spawn(format!("读取 broker 进程安全身份失败：{error}")))?;
+    let sid = facts
+        .windows_app_container_sid()
+        .ok_or_else(|| WboxError::spawn("broker 拒绝注册：目标进程不是 AppContainer"))?;
+    let mut aligned_sid = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
     unsafe {
-        GetTokenInformation(
-            token_handle.raw(),
-            TokenAppContainerSid,
-            std::ptr::null_mut(),
-            0,
-            &mut needed,
-        )
-    };
-    if needed < std::mem::size_of::<TOKEN_APPCONTAINER_INFORMATION>() as u32 {
-        return Err(last_error("GetTokenInformation(TokenAppContainerSid size)"));
+        std::ptr::copy_nonoverlapping(sid.as_ptr(), aligned_sid.as_mut_ptr().cast(), sid.len());
     }
-    let mut storage = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
-    if unsafe {
-        GetTokenInformation(
-            token_handle.raw(),
-            TokenAppContainerSid,
-            storage.as_mut_ptr().cast(),
-            needed,
-            &mut needed,
-        )
-    } == 0
-    {
-        return Err(last_error("GetTokenInformation(TokenAppContainerSid)"));
-    }
-    let info = storage.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION;
-    let sid = unsafe { (*info).TokenAppContainer };
-    if sid.is_null() {
-        return Err(WboxError::spawn(
-            "broker 拒绝注册：目标进程不是 AppContainer",
-        ));
-    }
-    token::sid_to_string(sid)
+    token::sid_to_string(aligned_sid.as_mut_ptr().cast())
         .map_err(|e| WboxError::spawn(format!("转换 AppContainer SID 失败：{}", e)))
 }
 
