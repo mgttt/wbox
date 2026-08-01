@@ -2656,6 +2656,7 @@ TODO-WINDOW
 ├── W64 shared mapping threaded memory scaling                                     [done] 1/2/4/8 workers + repeat=7×2
 ├── W65 单 PID page-fault 事实下沉并接入 memory lab                                [done] cold 8209 / warm 0
 ├── W66 当前进程 processor-affinity 事实下沉并接入 machine snapshot                  [done] group 0 / CPU 0–7
+├── W67 detached child 启动下沉并删除 supervisor 平台重复实现                        [done] WP.1–WP.27 + WU.1/WU.2
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3079,8 +3080,14 @@ TODO-LINUX
 ├── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
 ├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + minor/major delta
 ├── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
-└── L38 processor-affinity Linux 真机验收                              [next] sched_getaffinity + cpuset/taskset
+├── L38 processor-affinity Linux 真机验收                              [next] sched_getaffinity + cpuset/taskset
+└── L39 detached child/session Linux 真机验收                          [next] setsid + READY/ERROR + 生命周期
 ```
+
+`L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
+等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
+必须保留并回收启动期 `Child`，不能以丢弃句柄代替启动证据；交叉编译不证明 `setsid`
+真的建立了新 session。可执行文件、参数、stdio、restart、状态协议与 reaping 仍归 wbox。
 
 `L38` 在裸进程、`taskset` 收窄和可用的 cgroup cpuset 三种环境运行 platform
 `processor-affinity` 与 `wbox-machine-lab host`，交叉核对 `/proc/self/status` 的
@@ -3748,8 +3755,13 @@ TODO-MACOS
 ├── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
 ├── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
 ├── M22 单 PID CPU/RSS/page-fault macOS 真机验收                     [next] total + page-ins
-└── M23 processor-affinity macOS 真机验收                            [next] advisory 必须 Unsupported
+├── M23 processor-affinity macOS 真机验收                            [next] advisory 必须 Unsupported
+└── M24 detached child/session macOS 真机验收                        [next] setsid + Intel/Apple Silicon
 ```
+
+`M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
+`Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
+stdio、状态、restart 与 reaping 语义不下沉；双 ISA 交叉编译只能证明 adapter 可编译。
 
 `M23` 在 Intel 与 Apple Silicon 验证 platform `processor-affinity` 明确返回
 `Unsupported`，因为 macOS affinity tag 是调度提示而不是严格 allowed-CPU 集合。不得把
@@ -3814,9 +3826,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`6352ddb1573aab8afbb6cdc6f4b9f74011df0acc`，关闭 default features，按消费包启用
+`23eef3e90bf72b07a5839f9b6db6859c77692b69`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-spawn`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4122,6 +4134,21 @@ policy 仍可能进一步收窄；macOS affinity tag 只是 advisory，因此不
 不变。
 platform Windows 真机、all-features 与 Windows i686、Linux 双 ISA、macOS 双 ISA 严格
 编译通过；Linux/macOS 原生行为分别交接 L38/M23。
+
+`W67` 将 detached child 的宿主启动机制拆成独立 `process-spawn` feature：Windows
+优先使用 `CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW`，仅在 `ACCESS_DENIED` 时退回
+caller Job，并以类型化 mode 如实返回；spawn 窗口内对进程级标准句柄 inherit 位加锁、
+清除并恢复。Linux/macOS adapter 在 `pre_exec` 中检查 `setsid` 结果。wbox 保留并观察
+`Child` 直到 READY/ERROR，再让 supervisor 独立存活；可执行文件、参数、日志、restart、
+状态和回收策略仍是产品语义。`src/cli/run.rs` 因此删除本地 `setsid`、平台分支 spawn 与
+标准句柄 guard，`src/cli/run.rs` 净删 104 行，根包也不再直接启用
+`Win32_System_Console`。
+
+本 Windows runner 实测 Job breakaway 被拒绝，platform 正确走 caller-job fallback；wbox
+不向普通 CLI 追加告警，以保持 `run -d` 只输出容器名以及 PowerShell pipeline EOF 契约。
+首次把 fallback 写到 stderr 导致 WP.6 精确失败，删除产品层额外输出后完整 WP.1–WP.27、
+WU.1/WU.2、Quick 门禁与 458/3 ignored 根测试通过。platform 最小 feature 14 tests、
+all-features 127 tests 和严格 Clippy 通过；Linux/macOS 原生 session 行为交接 L39/M24。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
