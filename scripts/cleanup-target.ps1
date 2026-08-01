@@ -108,8 +108,7 @@ if (-not $KeepIncremental) {
 
             # Cargo keys incremental units by crate plus a compilation hash. Feature,
             # target and test changes therefore leave complete but cold units behind.
-            # Keep the newest units for every crate and prune only the global LRU tail
-            # needed to bring the cache under its configured budget.
+            # Bound those units per crate even when the global cache is under budget.
             $crateDirs = @(Get-ChildItem -LiteralPath $incrementalRoot -Directory -Force)
             $incrementalUnits = @(
                 foreach ($crateDir in $crateDirs) {
@@ -128,21 +127,34 @@ if (-not $KeepIncremental) {
                     }
                 }
             )
-            $protectedPaths = [System.Collections.Generic.HashSet[string]]::new(
-                [System.StringComparer]::OrdinalIgnoreCase
-            )
             foreach ($group in @($incrementalUnits | Group-Object -Property CrateName)) {
                 $group.Group |
                     Sort-Object { $_.Directory.LastWriteTimeUtc } -Descending |
-                    Select-Object -First $KeepIncrementalPerCrate |
-                    ForEach-Object { [void]$protectedPaths.Add($_.Directory.FullName) }
+                    Select-Object -Skip $KeepIncrementalPerCrate |
+                    ForEach-Object { Remove-TargetDirectory -Directory $_.Directory }
             }
 
+            $incrementalUnits = @(
+                $incrementalUnits | Where-Object {
+                    Test-Path -LiteralPath $_.Directory.FullName -PathType Container
+                }
+            )
             $incrementalBytes = [long](
                 $incrementalUnits | Measure-Object -Property Bytes -Sum
             ).Sum
             $maxIncrementalBytes = [long]$MaxIncrementalSizeMiB * 1MB
             if ($incrementalBytes -gt $maxIncrementalBytes) {
+                # Preserve the newest unit for every crate. Second-newest units are
+                # then a global LRU tail that can be discarded to meet the budget.
+                $protectedPaths = [System.Collections.Generic.HashSet[string]]::new(
+                    [System.StringComparer]::OrdinalIgnoreCase
+                )
+                foreach ($group in @($incrementalUnits | Group-Object -Property CrateName)) {
+                    $group.Group |
+                        Sort-Object { $_.Directory.LastWriteTimeUtc } -Descending |
+                        Select-Object -First 1 |
+                        ForEach-Object { [void]$protectedPaths.Add($_.Directory.FullName) }
+                }
                 $incrementalUnits |
                     Where-Object { -not $protectedPaths.Contains($_.Directory.FullName) } |
                     Sort-Object { $_.Directory.LastWriteTimeUtc } |

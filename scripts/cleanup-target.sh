@@ -80,30 +80,54 @@ if [ "$keep_incremental" != 1 ]; then
         fi
       done
 
+      # Bound complete units per crate even while the global cache is under budget.
+      for crate_dir in "$incremental_root"/*; do
+        [ -d "$crate_dir" ] || continue
+        crate_base=${crate_dir##*/}
+        crate_name=${crate_base%-*}
+        newer=0
+        for sibling in "$incremental_root/$crate_name-"*; do
+          [ -d "$sibling" ] || continue
+          if [ "$sibling" -nt "$crate_dir" ]; then
+            newer=$((newer + 1))
+          fi
+        done
+        if [ "$newer" -ge "$keep_incremental_per_crate" ]; then
+          size=$(du -sk "$crate_dir" | awk '{print $1}')
+          rm -rf -- "$crate_dir"
+          removed_kib=$((removed_kib + size))
+          removed=$((removed + 1))
+        fi
+      done
+
       max_incremental_kib=$((max_incremental_mib * 1024))
       incremental_kib=$(du -sk "$incremental_root" | awk '{print $1}')
       if [ "$incremental_kib" -gt "$max_incremental_kib" ]; then
-        # Cargo directory names are controlled identifiers without whitespace.
-        # Process the global LRU tail, but retain the newest units for each crate.
-        for crate_dir in $(LC_ALL=C ls -1trd "$incremental_root"/* 2>/dev/null); do
-          [ -d "$crate_dir" ] || continue
-          crate_base=${crate_dir##*/}
-          crate_name=${crate_base%-*}
-          newer=0
-          for sibling in "$incremental_root/$crate_name-"*; do
-            [ -d "$sibling" ] || continue
-            if [ "$sibling" -nt "$crate_dir" ]; then
-              newer=$((newer + 1))
+        # Prune the global LRU tail further, retaining each crate's newest unit.
+        while [ "$incremental_kib" -gt "$max_incremental_kib" ]; do
+          oldest=
+          for crate_dir in "$incremental_root"/*; do
+            [ -d "$crate_dir" ] || continue
+            crate_base=${crate_dir##*/}
+            crate_name=${crate_base%-*}
+            has_newer=0
+            for sibling in "$incremental_root/$crate_name-"*; do
+              if [ -d "$sibling" ] && [ "$sibling" -nt "$crate_dir" ]; then
+                has_newer=1
+                break
+              fi
+            done
+            if [ "$has_newer" -eq 1 ] &&
+              { [ -z "$oldest" ] || [ "$oldest" -nt "$crate_dir" ]; }; then
+              oldest=$crate_dir
             fi
           done
-          if [ "$newer" -ge "$keep_incremental_per_crate" ]; then
-            size=$(du -sk "$crate_dir" | awk '{print $1}')
-            rm -rf -- "$crate_dir"
-            removed_kib=$((removed_kib + size))
-            removed=$((removed + 1))
-            incremental_kib=$((incremental_kib - size))
-            [ "$incremental_kib" -le "$max_incremental_kib" ] && break
-          fi
+          [ -n "$oldest" ] || break
+          size=$(du -sk "$oldest" | awk '{print $1}')
+          rm -rf -- "$oldest"
+          removed_kib=$((removed_kib + size))
+          removed=$((removed + 1))
+          incremental_kib=$((incremental_kib - size))
         done
       fi
     fi

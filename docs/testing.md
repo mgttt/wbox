@@ -51,9 +51,10 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
 证据仍由下述唯一 owning gate 产出。`check.ps1` 和构建 wrapper 默认清理 Cargo
-遗留的孤立 incremental session 锁、空目录与测试临时目录。完整增量单元采用有界
-LRU：默认保留每个 crate 最近两个单元，并将 `target/debug/incremental/` 控制在
-512 MiB 以内。Windows 可用 `-MaxIncrementalSizeMiB` 调整预算，Linux/macOS 使用
+遗留的孤立 incremental session 锁、空目录与测试临时目录。完整增量单元采用两级
+有界 LRU：无论总量是否超预算，每个 crate 默认最多保留最近两个单元；超过 512 MiB
+后继续回收各 crate 的第二份冷单元，同时至少保留最新一份。Windows 可用
+`-MaxIncrementalSizeMiB` 调整预算，Linux/macOS 使用
 `WBOX_MAX_INCREMENTAL_MIB`；需要完整释放 debug 增量缓存时显式传
 `-CleanIncremental`，需要跳过增量目录扫描时传 `-KeepIncremental`。
 
@@ -88,8 +89,8 @@ scripts/build.sh --release -p wbox-linux
 ```
 
 wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认在
-`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录，并在超过 512 MiB 时
-按最后修改时间回收旧单元；每个 crate 最近两个单元受保护。它还会清理 target 根目录
+`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录及每个 crate 超出两份的
+旧单元；总量超过 512 MiB 时再按最后修改时间回收第二份冷单元。它还会清理 target 根目录
 的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。`deps/`、`build/`、
 `.fingerprint/` 以及预算内的热 incremental session 都保留。
 Windows 可传 `-CleanIncremental` 完整释放 debug 增量缓存，Linux 可设置
