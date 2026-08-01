@@ -90,6 +90,8 @@ Linux 走 `setns`，Windows 没有对应原语，可行性取证见 PRD §4.9 W2
 - [docs/testing.md](docs/testing.md)：本地验证、测试分层和 CI 门禁。
 - [docs/rust-rewrite.md](docs/rust-rewrite.md)：`wbox-linux` 纯 Rust 模拟器的
   架构、已验证范围与剩余缺口。
+- [plan/agi.md](plan/agi.md)：廉价 PFLOPS、异构/分布式算力与 AGI 基础设施的
+  长期实验假设、计量方法和演进路线。
 - [tests/KNOWN-FAILURES.md](tests/KNOWN-FAILURES.md)：guest 回归问题台账。
 - [CHANGELOG.md](CHANGELOG.md)：按版本记录的已交付变更。
 
