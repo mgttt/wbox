@@ -3897,11 +3897,12 @@ wbox 新增唯一 `paths::root()`，保留产品名 `.wbox`，images、run、vol
 incremental 保留 166.5 MiB 完整热缓存且 working session 为 0。
 
 `W56` 将产品无关的单宿主 PID suspend/resume 下沉到 `agenterm-platform` revision
-`e7207406ed8487ae29506acc35bf11136bc18303`：Unix adapter 使用 SIGSTOP/SIGCONT，
+`2a0a7f95296afe42995e2a9f3d35f444661b33f0`：Unix adapter 使用 SIGSTOP/SIGCONT，
 Windows 因缺少可靠的通用单进程原语而显式 Unsupported。wbox `pause` 删除直接
 `libc::kill`，但继续持有容器进程树枚举、退出竞态容忍、至少一次成功和 paused 状态
 判据。Windows 定向 5 项通过，platform 五目标严格 Clippy 通过；Linux/macOS 真机
-运行验收分别交接 L31/M14。
+运行验收分别交接 L31/M14。该 revision 紧随机制提交补齐完整 `process` feature 对
+Suspend/Resume 错误种类的穷尽映射，不固定在仅最小 feature 可编译的中间提交上。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
