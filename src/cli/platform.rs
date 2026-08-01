@@ -68,6 +68,30 @@ fn print_human() {
         Some(Err(error)) => println!("system-topology: failed ({error})"),
         None => println!("system-topology: unprobed"),
     }
+    match hardware.cache_hierarchy.as_ref() {
+        Some(Ok(hierarchy)) => {
+            println!(
+                "cache-hierarchy: geometries={} max-data-line-bytes={}",
+                hierarchy.geometries.len(),
+                hierarchy
+                    .max_data_line_bytes()
+                    .map_or_else(|| "unknown".to_owned(), |line| line.to_string())
+            );
+            for cache in &hierarchy.geometries {
+                println!(
+                    "  cache: L{} {} size={} line={} instances={} shared-logical-cpus={}",
+                    cache.level,
+                    cache.kind.as_str(),
+                    cache.size_bytes,
+                    cache.line_bytes,
+                    optional_count(cache.instances),
+                    optional_count(cache.shared_logical_processors),
+                );
+            }
+        }
+        Some(Err(error)) => println!("cache-hierarchy: failed ({error})"),
+        None => println!("cache-hierarchy: unprobed"),
+    }
     println!(
         "HOST     GUEST    ISA      ABI            FORMAT    PRIORITY  STATUS     EXECUTION                 ISOLATION"
     );
@@ -174,6 +198,60 @@ fn processor_topology_json(hardware: &platform::HardwareCapabilities) -> Value {
     Value::Object(object)
 }
 
+fn cache_hierarchy_json(hardware: &platform::HardwareCapabilities) -> Value {
+    let mut object = Map::new();
+    object.insert("state".to_owned(), string("unprobed"));
+    object.insert("max_data_line_bytes".to_owned(), Value::Null);
+    object.insert("geometries".to_owned(), Value::Array(Vec::new()));
+    object.insert("error_kind".to_owned(), Value::Null);
+    object.insert("error_detail".to_owned(), Value::Null);
+    match hardware.cache_hierarchy.as_ref() {
+        Some(Ok(hierarchy)) => {
+            object.insert("state".to_owned(), string("available"));
+            object.insert(
+                "max_data_line_bytes".to_owned(),
+                hierarchy.max_data_line_bytes().map_or(Value::Null, |line| {
+                    Value::Number(Number::PosInt(u64::from(line.get())))
+                }),
+            );
+            let geometries = hierarchy
+                .geometries
+                .iter()
+                .map(|cache| {
+                    let mut item = Map::new();
+                    item.insert(
+                        "level".to_owned(),
+                        Value::Number(Number::PosInt(u64::from(cache.level.get()))),
+                    );
+                    item.insert("kind".to_owned(), string(cache.kind.as_str()));
+                    item.insert(
+                        "size_bytes".to_owned(),
+                        Value::Number(Number::PosInt(cache.size_bytes.get())),
+                    );
+                    item.insert(
+                        "line_bytes".to_owned(),
+                        Value::Number(Number::PosInt(u64::from(cache.line_bytes.get()))),
+                    );
+                    item.insert("instances".to_owned(), optional_count_json(cache.instances));
+                    item.insert(
+                        "shared_logical_processors".to_owned(),
+                        optional_count_json(cache.shared_logical_processors),
+                    );
+                    Value::Object(item)
+                })
+                .collect();
+            object.insert("geometries".to_owned(), Value::Array(geometries));
+        }
+        Some(Err(error)) => {
+            object.insert("state".to_owned(), string("failed"));
+            object.insert("error_kind".to_owned(), string(error.kind().as_str()));
+            object.insert("error_detail".to_owned(), string(error.detail()));
+        }
+        None => {}
+    }
+    Value::Object(object)
+}
+
 fn print_json() {
     let hardware = platform::detect_hardware(platform::current_host());
     let routes = HostOs::ALL
@@ -273,6 +351,10 @@ fn print_json() {
         "processor_topology".to_owned(),
         processor_topology_json(&hardware),
     );
+    hardware_json.insert(
+        "cache_hierarchy".to_owned(),
+        cache_hierarchy_json(&hardware),
+    );
     root.insert("hardware".to_owned(), Value::Object(hardware_json));
     root.insert("routes".to_owned(), Value::Array(routes));
     println!("{}", Value::Object(root).to_string_pretty());
@@ -310,5 +392,30 @@ mod tests {
         );
         assert_eq!(hypothetical.get("error_kind"), Some(&Value::Null));
         assert_eq!(hypothetical.get("error_detail"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn cache_json_distinguishes_current_host_from_unprobed_hosts() {
+        let current = platform::detect_hardware(platform::current_host());
+        let Value::Object(current) = cache_hierarchy_json(&current) else {
+            panic!("cache hierarchy must be an object");
+        };
+        assert_eq!(current.get("state"), Some(&string("available")));
+        assert_ne!(current.get("max_data_line_bytes"), Some(&Value::Null));
+        assert!(matches!(
+            current.get("geometries"),
+            Some(Value::Array(items)) if !items.is_empty()
+        ));
+
+        let hypothetical = platform::detect_hardware(None);
+        let Value::Object(hypothetical) = cache_hierarchy_json(&hypothetical) else {
+            panic!("cache hierarchy must be an object");
+        };
+        assert_eq!(hypothetical.get("state"), Some(&string("unprobed")));
+        assert_eq!(hypothetical.get("max_data_line_bytes"), Some(&Value::Null));
+        assert_eq!(
+            hypothetical.get("geometries"),
+            Some(&Value::Array(Vec::new()))
+        );
     }
 }

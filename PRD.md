@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W61、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L34、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M18
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W62、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L35、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M19
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2608,14 +2608,14 @@ TODO-WINDOW
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [done] handler/timer/全门禁
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
-├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 5
+├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 6
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [next] 只读依赖图
 ├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
 ├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 28 unit tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 29 unit tests
 ├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 9 process tests
 ├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
 ├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
@@ -2631,7 +2631,7 @@ TODO-WINDOW
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
-├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；11 tests
+├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；13 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
@@ -2651,6 +2651,7 @@ TODO-WINDOW
 ├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
 ├── W60 宿主原生虚拟化 API 可用性事实                                                 [done] WHPX passive probe
 ├── W61 系统处理器/NUMA 拓扑事实与进程预算分层                                        [done] 8T/4C/1P/1N/1G
+├── W62 CPU cache hierarchy 下沉并驱动 HPC 共享布局                                  [done] L1/L2/L3 + 64-byte line
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3070,8 +3071,15 @@ TODO-LINUX
 ├── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
 ├── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
 ├── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
-└── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
+├── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
+└── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
 ```
+
+`L35` 在 Linux 真机运行 platform `cache-hierarchy` 单元测试、
+`wbox-machine-lab host` 与小规模 `wbox-hpc-lab bench`，交叉核对 cache sysfs 的
+level/type/size/coherency_line_size/shared_cpu_list。必须按共享 CPU 集合去重实例，
+父进程选择的最大 data/unified line size 必须原样传给所有 worker；交叉编译不能替代
+1/2/4/8 多进程 checksum 与布局对齐证据。
 
 `L34` 在 Linux 真机运行 platform `processor-topology` 单元测试与
 `wbox-machine-lab host`，交叉核对 `_SC_NPROCESSORS_ONLN`、在线 CPU 的
@@ -3710,8 +3718,14 @@ TODO-MACOS
 ├── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
 ├── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
 ├── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
-└── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
+├── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
+└── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
 ```
+
+`M19` 在 Intel 与 Apple Silicon 真机运行 platform `cache-hierarchy`、
+`wbox-machine-lab host` 与小规模 HPC 多进程门禁，交叉核对 `hw.cachelinesize`、
+L1I/L1D/L2/L3 sysctl。Apple Silicon 可能报告 128-byte line，禁止继续假设 64；
+sysctl 无法证明实例数或共享宽度时字段必须保持未知。
 
 `M18` 在 Intel 与 Apple Silicon 真机运行 platform `processor-topology` 和
 `wbox-machine-lab host`，交叉核对 `hw.logicalcpu`、`hw.physicalcpu` 与可用的
@@ -3754,10 +3768,10 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`79614389827b8d4f04de621713d24679aa06217f`，关闭 default features，按消费包启用
+`7bc0130756b0fc146158333111ad2d775dfc8e66`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
-`processor-topology`、`virtualization-probe` 与 `storage`。
+`cache-hierarchy`、`processor-topology`、`virtualization-probe` 与 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
@@ -4002,6 +4016,16 @@ Linux 仅在所有在线 CPU 的 package/core sysfs 完整时报告计数，macO
 保持未知；五目标严格 Clippy 与 platform all-features 108 tests 已通过。wbox-machine
 只对真实当前宿主探测并保存成功或失败证据，假设矩阵宿主保持 unprobed；Linux/macOS
 真机验收分别由 L34/M18 跟踪。
+
+`W62` 在 platform 增加独立 `cache-hierarchy` feature，报告 cache level/kind、每实例
+容量、coherency line、同构实例数和每实例共享逻辑 CPU 数。Windows 的 RelationCache
+与 processor topology 共用一套变长记录边界校验；Linux 按 shared_cpu_list 去重 sysfs
+实例；macOS 只报告 sysctl 能证明的 geometry，实例数和共享宽度保持未知。当前 Windows
+实测为 4×32 KiB L1D、4×32 KiB L1I、4×1 MiB L2、1×35.75 MiB L3，所有 data-bearing
+cache line 均为 64 bytes。wbox-hpc-lab 删除硬编码 64，把最大 data/unified line size
+纳入父/子进程协议，并以通用非二次幂 align-up、零值/溢出门禁保持布局安全；小规模
+1/2/4/8 worker 共享映射 checksum 已通过。platform 114 个 all-features tests、六目标
+严格 Clippy 和最小依赖树已通过；Linux/macOS 真机验收分别交接 L35/M19。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

@@ -21,7 +21,8 @@ pub use accelerator::{
     AcceleratorWorkload,
 };
 pub use architecture::{
-    current_isa, detect_hardware, AccelerationApi, AccelerationCapabilities, CpuFeature,
+    current_isa, detect_hardware, AccelerationApi, AccelerationCapabilities, CacheGeometryFacts,
+    CacheHierarchyError, CacheHierarchyErrorKind, CacheHierarchyFacts, CacheKind, CpuFeature,
     HardwareCapabilities, Isa, ProbeState, ProcessorIsa, ProcessorTopologyError,
     ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };

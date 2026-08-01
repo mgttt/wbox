@@ -40,7 +40,7 @@ CPU 执行
 数据路径
 ├── 同一映射直接初始化和读取
 ├── 初始化后 application-level logical copies = 0
-└── 每进程结果使用独立 64-byte cache-line slot
+└── 每进程结果使用宿主探测的独立 cache-line slot（本机 64 bytes）
 ```
 
 整数混合基准在 4,000,000 项、32 rounds、repeat=3 时取得：
@@ -92,7 +92,8 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- parallel
 ├── worker 数必须扫描物理核与 SMT 区间
 ├── 共享内存消除 application copy，不消除 cache/page traffic
 ├── 多进程测量要说明是否包含 spawn 和 IPC 成本
-└── cache-line 隔离、NUMA placement 和 memory bandwidth 会决定扩展上限
+├── cache-line 必须来自宿主事实并作为父/子进程布局协议的一部分
+└── cache hierarchy、NUMA placement 和 memory bandwidth 会决定扩展上限
 
 能力声明
 ├── API 存在 != 硬件存在

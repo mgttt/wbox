@@ -1,5 +1,9 @@
 use crate::route::HostOs;
 
+pub use agenterm_platform::cache_hierarchy::{
+    CacheGeometryFacts, CacheHierarchyError, CacheHierarchyErrorKind, CacheHierarchyFacts,
+    CacheKind,
+};
 pub use agenterm_platform::processor_topology::{
     ProcessorTopologyError, ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };
@@ -208,6 +212,8 @@ pub struct HardwareCapabilities {
     pub logical_processors: Option<usize>,
     /// System-wide topology for the real current host. Hypothetical hosts are unprobed.
     pub processor_topology: Option<Result<ProcessorTopologyFacts, ProcessorTopologyError>>,
+    /// System-wide CPU cache hierarchy for the real current host.
+    pub cache_hierarchy: Option<Result<CacheHierarchyFacts, CacheHierarchyError>>,
     pub cpu_features: Vec<CpuFeature>,
     pub acceleration: Option<AccelerationCapabilities>,
 }
@@ -255,6 +261,8 @@ pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
             .map(std::num::NonZeroUsize::get),
         processor_topology: (host.is_some() && host == crate::route::current_host())
             .then(agenterm_platform::processor_topology::facts),
+        cache_hierarchy: (host.is_some() && host == crate::route::current_host())
+            .then(agenterm_platform::cache_hierarchy::facts),
         cpu_features: processor
             .features
             .into_iter()
@@ -332,9 +340,11 @@ mod tests {
             if Some(host) == crate::route::current_host() {
                 assert_ne!(acceleration.state(), ProbeState::Unprobed);
                 assert!(hardware.processor_topology.is_some());
+                assert!(hardware.cache_hierarchy.is_some());
             } else {
                 assert_eq!(acceleration.state(), ProbeState::Unprobed);
                 assert!(hardware.processor_topology.is_none());
+                assert!(hardware.cache_hierarchy.is_none());
             }
             assert_eq!(acceleration.api_version(), None);
         }
@@ -396,6 +406,7 @@ mod tests {
         let platform = agenterm_platform::hardware::processor_facts();
         let mapped = detect_hardware(None);
         assert!(mapped.processor_topology.is_none());
+        assert!(mapped.cache_hierarchy.is_none());
         assert_eq!(
             mapped.logical_processors,
             platform.logical_processors.map(std::num::NonZeroUsize::get)
@@ -423,6 +434,20 @@ mod tests {
             if let Some(threads) = topology.uniform_threads_per_core() {
                 assert_eq!(physical.get() * threads.get(), system_logical);
             }
+        }
+    }
+
+    #[test]
+    fn current_host_preserves_cache_hierarchy_evidence() {
+        let hardware = detect_hardware(crate::route::current_host());
+        let caches = hardware
+            .cache_hierarchy
+            .expect("current host cache hierarchy was probed")
+            .expect("current host cache hierarchy query succeeded");
+        assert!(!caches.geometries.is_empty());
+        assert!(caches.max_data_line_bytes().is_some());
+        for cache in caches.geometries {
+            assert!(u64::from(cache.line_bytes.get()) <= cache.size_bytes.get());
         }
     }
 }

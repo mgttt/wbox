@@ -4,7 +4,7 @@
 guest OS, processor ISA, guest ABI, executable format, device/accelerator class,
 execution provider, isolation, and the 3 x 3 x 2 product route matrix without
 owning an OS adapter. Host identity, process-scoped processor facts, system CPU
-topology, and native host memory geometry come from a pinned, lightweight
+topology, cache hierarchy, and native host memory geometry come from a pinned, lightweight
 `agenterm-platform`;
 product routing, guest ISA and
 acceleration availability stay here. The broader processor taxonomy also
@@ -26,7 +26,8 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- check
 
 - `host` distinguishes process-available parallelism from system logical CPUs,
   physical cores, packages, NUMA nodes, processor groups and uniform SMT width.
-  It also reports native ISA, detected CPU features, page size, mapping
+  It reports cache level/kind, per-instance capacity, coherency line size,
+  instance count and sharing width. It also reports native ISA, detected CPU features, page size, mapping
   allocation granularity, physical memory, and the host acceleration API
   candidate. Physical memory is a host fact, not a container,
   cgroup, Job Object, or process budget. An API candidate remains `unprobed`

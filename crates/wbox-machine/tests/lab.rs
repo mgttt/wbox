@@ -24,6 +24,9 @@ fn host_probe_reports_a_real_acceleration_state() {
     assert!(stdout.contains("processor_packages="));
     assert!(stdout.contains("numa_nodes="));
     assert!(stdout.contains("processor_groups="));
+    assert!(stdout.contains("max_data_cache_line_bytes="));
+    assert!(stdout.contains("cache=L1:data"));
+    assert!(stdout.contains("cache=L2:unified"));
     assert!(stdout.contains("page_size="));
     assert!(stdout.contains("allocation_granularity="));
     assert!(stdout.contains("physical_memory_bytes="));

@@ -13,7 +13,6 @@ const DEFAULT_FLOP_ITERATIONS: u64 = 200_000_000;
 const DEFAULT_FLOP_REPEAT: usize = 5;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const FP64_FLOPS_PER_ITERATION: u64 = 64;
-const CACHE_LINE: usize = 64;
 
 fn main() {
     if let Err(error) = run(env::args().skip(1).collect()) {
@@ -190,21 +189,23 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
     let host = current_host();
     let hardware = detect_hardware(host);
     let kernel_support = KernelSupport::from_hardware(&hardware);
+    let cache_line = cache_line_bytes(&hardware)?;
     let logical = hardware.logical_processors.unwrap_or(1);
     let workers = worker_scan(logical);
     println!(
-        "host={} isa={} logical_processors={} items={} rounds={} repeat={} statistic=median",
+        "host={} isa={} logical_processors={} cache_line_bytes={} items={} rounds={} repeat={} statistic=median",
         host.map_or("unknown", HostOs::as_str),
         hardware
             .native_isa
             .map_or("unknown", wbox_machine::Isa::as_str),
         logical,
+        cache_line,
         items,
         rounds,
         repeat,
     );
 
-    let mut dataset = SharedDataset::new(items, *workers.last().unwrap())?;
+    let mut dataset = SharedDataset::new(items, *workers.last().unwrap(), cache_line)?;
     dataset.fill();
 
     let serial = measure_repeated(repeat, || checksum(dataset.data(), rounds));
@@ -267,7 +268,7 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
             millis(processes.elapsed),
             speedup(serial.elapsed, processes.elapsed),
             processes.checksum,
-            CACHE_LINE,
+            dataset.cache_line,
         );
     }
     Ok(())
@@ -634,11 +635,12 @@ struct SharedDataset {
     items: usize,
     max_workers: usize,
     result_offset: usize,
+    cache_line: usize,
 }
 
 impl SharedDataset {
-    fn new(items: usize, max_workers: usize) -> Result<Self, String> {
-        let (result_offset, mapping_size) = mapping_layout(items, max_workers)?;
+    fn new(items: usize, max_workers: usize, cache_line: usize) -> Result<Self, String> {
+        let (result_offset, mapping_size) = mapping_layout(items, max_workers, cache_line)?;
         let name = format!(
             "wbox-hpc-{}-{}",
             std::process::id(),
@@ -654,6 +656,7 @@ impl SharedDataset {
             items,
             max_workers,
             result_offset,
+            cache_line,
         })
     }
 
@@ -678,20 +681,20 @@ impl SharedDataset {
         assert!(workers <= self.max_workers);
         // SAFETY: each result slot is within the mapped result region.
         unsafe {
-            std::ptr::write_bytes(self.result_mut_ptr(0), 0, workers * CACHE_LINE);
+            std::ptr::write_bytes(self.result_mut_ptr(0), 0, workers * self.cache_line);
         }
     }
 
     unsafe fn result_mut_ptr(&mut self, worker: usize) -> *mut u8 {
         self.mapping
             .as_mut_ptr()
-            .add(self.result_offset + worker * CACHE_LINE)
+            .add(self.result_offset + worker * self.cache_line)
     }
 
     unsafe fn result_ptr(&self, worker: usize) -> *const u8 {
         self.mapping
             .as_ptr()
-            .add(self.result_offset + worker * CACHE_LINE)
+            .add(self.result_offset + worker * self.cache_line)
     }
 }
 
@@ -708,6 +711,7 @@ fn process_checksum(dataset: &SharedDataset, rounds: u32, workers: usize) -> Res
                 &rounds.to_string(),
                 &worker.to_string(),
                 &workers.to_string(),
+                &dataset.cache_line.to_string(),
             ])
             .spawn()
             .map_err(|error| format!("spawn worker {worker}: {error}"))?;
@@ -731,9 +735,10 @@ fn process_checksum(dataset: &SharedDataset, rounds: u32, workers: usize) -> Res
 }
 
 fn worker(args: &[String]) -> Result<(), String> {
-    if args.len() != 6 {
+    if args.len() != 7 {
         return Err(
-            "worker requires mapping, items, max-workers, rounds, index, workers".to_owned(),
+            "worker requires mapping, items, max-workers, rounds, index, workers, cache-line"
+                .to_owned(),
         );
     }
     let name = &args[0];
@@ -742,10 +747,11 @@ fn worker(args: &[String]) -> Result<(), String> {
     let rounds = parse::<u32>(&args[3], "rounds")?;
     let worker = parse::<usize>(&args[4], "worker")?;
     let workers = parse::<usize>(&args[5], "workers")?;
+    let cache_line = parse::<usize>(&args[6], "cache-line")?;
     if worker >= workers || workers > max_workers {
         return Err("invalid worker partition".to_owned());
     }
-    let (result_offset, mapping_size) = mapping_layout(items, max_workers)?;
+    let (result_offset, mapping_size) = mapping_layout(items, max_workers, cache_line)?;
     let mut mapping = SharedMemory::open(name, mapping_size).map_err(|error| error.to_string())?;
     // SAFETY: parent initialized the data region before spawning this worker.
     let data = unsafe { std::slice::from_raw_parts(mapping.as_ptr().cast::<u32>(), items) };
@@ -755,7 +761,7 @@ fn worker(args: &[String]) -> Result<(), String> {
     unsafe {
         mapping
             .as_mut_ptr()
-            .add(result_offset + worker * CACHE_LINE)
+            .add(result_offset + worker * cache_line)
             .cast::<u64>()
             .write(partial);
     }
@@ -768,21 +774,42 @@ fn parse<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
-fn mapping_layout(items: usize, workers: usize) -> Result<(usize, usize), String> {
+fn mapping_layout(
+    items: usize,
+    workers: usize,
+    cache_line: usize,
+) -> Result<(usize, usize), String> {
+    if cache_line == 0 || !cache_line.is_multiple_of(std::mem::align_of::<u64>()) {
+        return Err("cache line must preserve u64 alignment".to_owned());
+    }
     let data_bytes = items
         .checked_mul(std::mem::size_of::<u32>())
         .ok_or_else(|| "shared mapping data size overflows usize".to_owned())?;
     let result_offset = data_bytes
-        .checked_add(CACHE_LINE - 1)
-        .map(|size| size & !(CACHE_LINE - 1))
+        .checked_add(cache_line - 1)
+        .and_then(|size| size.checked_div(cache_line))
+        .and_then(|units| units.checked_mul(cache_line))
         .ok_or_else(|| "shared mapping alignment overflows usize".to_owned())?;
     let result_bytes = workers
-        .checked_mul(CACHE_LINE)
+        .checked_mul(cache_line)
         .ok_or_else(|| "shared mapping result size overflows usize".to_owned())?;
     let mapping_size = result_offset
         .checked_add(result_bytes)
         .ok_or_else(|| "shared mapping total size overflows usize".to_owned())?;
     Ok((result_offset, mapping_size))
+}
+
+fn cache_line_bytes(hardware: &HardwareCapabilities) -> Result<usize, String> {
+    let hierarchy = hardware
+        .cache_hierarchy
+        .as_ref()
+        .ok_or_else(|| "current host cache hierarchy was not probed".to_owned())?
+        .as_ref()
+        .map_err(ToString::to_string)?;
+    let line = hierarchy
+        .max_data_line_bytes()
+        .ok_or_else(|| "host reported no data-bearing cache line".to_owned())?;
+    usize::try_from(line.get()).map_err(|_| "cache line does not fit usize".to_owned())
 }
 
 #[cfg(test)]
@@ -873,15 +900,31 @@ mod tests {
 
     #[test]
     fn result_region_is_cache_line_aligned() {
-        for items in [1, 7, 8, 9, 1000] {
-            assert_eq!(mapping_layout(items, 8).unwrap().0 % CACHE_LINE, 0);
+        for cache_line in [64, 128, 192] {
+            for items in [1, 7, 8, 9, 1000] {
+                assert_eq!(
+                    mapping_layout(items, 8, cache_line).unwrap().0 % cache_line,
+                    0
+                );
+            }
         }
+        assert!(mapping_layout(1, 1, 0).is_err());
+        assert!(mapping_layout(1, 1, 10).is_err());
+    }
+
+    #[test]
+    fn detected_cache_line_drives_the_shared_mapping_layout() {
+        let hardware = detect_hardware(current_host());
+        let cache_line = cache_line_bytes(&hardware).unwrap();
+        let (result_offset, _) = mapping_layout(257, 8, cache_line).unwrap();
+        assert_eq!(result_offset % cache_line, 0);
+        assert!(cache_line.is_multiple_of(std::mem::align_of::<u64>()));
     }
 
     #[test]
     fn shared_mapping_layout_rejects_overflow() {
-        assert!(mapping_layout(usize::MAX, 1).is_err());
-        assert!(mapping_layout(1, usize::MAX).is_err());
+        assert!(mapping_layout(usize::MAX, 1, 64).is_err());
+        assert!(mapping_layout(1, usize::MAX, 64).is_err());
     }
 
     #[test]

@@ -6,9 +6,11 @@ scheduler.
 
 On Windows the same paging-file-backed named mapping stores the input for all
 modes. Threads borrow slices from that mapping. Child processes reopen it by
-name and write checksums to separate 64-byte result slots. The benchmark also
+name and write checksums to separate cache-line-sized result slots. The line
+size comes from the current host cache hierarchy and is passed unchanged to
+every child process. The benchmark also
 contains an explicit AVX2 kernel and composes it with scoped threads.
-CPU features and logical processor count are read once from the
+CPU features, logical processor count, and cache geometry are read once from the
 `wbox-machine` hardware snapshot. The lab does not maintain a second runtime
 feature detector: AVX2 checksum requires AVX2, x86-64 FP64 requires AVX2 plus
 FMA, and AArch64 FP64 requires NEON.

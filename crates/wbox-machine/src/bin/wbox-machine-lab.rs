@@ -215,6 +215,29 @@ fn print_host() -> Result<(), String> {
         Some(Err(error)) => println!("processor_topology_error={error}"),
         None => println!("processor_topology=unprobed"),
     }
+    match hardware.cache_hierarchy.as_ref() {
+        Some(Ok(hierarchy)) => {
+            println!(
+                "max_data_cache_line_bytes={}",
+                hierarchy
+                    .max_data_line_bytes()
+                    .map_or_else(|| "unknown".to_owned(), |line| line.to_string())
+            );
+            for cache in &hierarchy.geometries {
+                println!(
+                    "cache=L{}:{} size_bytes={} line_bytes={} instances={} shared_logical_processors={}",
+                    cache.level,
+                    cache.kind.as_str(),
+                    cache.size_bytes,
+                    cache.line_bytes,
+                    optional_count(cache.instances),
+                    optional_count(cache.shared_logical_processors),
+                );
+            }
+        }
+        Some(Err(error)) => println!("cache_hierarchy_error={error}"),
+        None => println!("cache_hierarchy=unprobed"),
+    }
     println!(
         "cpu_features={}",
         hardware

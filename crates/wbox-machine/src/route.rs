@@ -1,6 +1,6 @@
 use crate::{guest_contract, ExecutionProvider, GuestContract, GuestOs, Isa, IsolationModel};
 
-pub const CONTRACT_REVISION: u32 = 5;
+pub const CONTRACT_REVISION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostOs {
