@@ -5,7 +5,9 @@ param(
     [switch]$CleanIncremental,
     [switch]$KeepIncremental,
     [ValidateRange(1, 1048576)]
-    [int]$MaxIncrementalSizeMiB = 512
+    [int]$MaxIncrementalSizeMiB = 512,
+    [ValidateRange(1, 100)]
+    [int]$KeepIncrementalPerCrate = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +43,11 @@ try {
         & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
             -KeepIncremental:$KeepIncremental `
             -CleanIncremental:$CleanIncremental `
-            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB
+            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB `
+            -KeepIncrementalPerCrate $KeepIncrementalPerCrate
+        if ($LASTEXITCODE -ne 0) {
+            throw "target cleanup failed with code $LASTEXITCODE"
+        }
     } catch {
         Write-Error "post-check cleanup failed: $_"
         $exitCode = 1

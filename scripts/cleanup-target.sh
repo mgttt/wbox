@@ -6,7 +6,7 @@ target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
 keep_incremental=${WBOX_KEEP_INCREMENTAL:-0}
 clean_incremental=${WBOX_CLEAN_INCREMENTAL:-0}
 max_incremental_mib=${WBOX_MAX_INCREMENTAL_MIB:-512}
-keep_incremental_per_crate=${WBOX_KEEP_INCREMENTAL_PER_CRATE:-2}
+keep_incremental_per_crate=${WBOX_KEEP_INCREMENTAL_PER_CRATE:-1}
 
 if [ "$keep_incremental" = 1 ] && [ "$clean_incremental" = 1 ]; then
   printf 'target cleanup: WBOX_KEEP_INCREMENTAL and WBOX_CLEAN_INCREMENTAL conflict\n' >&2

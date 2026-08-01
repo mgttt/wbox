@@ -89,13 +89,15 @@ scripts/build.sh --release -p wbox-linux
 ```
 
 wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认在
-`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录及每个 crate 超出两份的
-旧单元；总量超过 512 MiB 时再按最后修改时间回收第二份冷单元。它还会清理 target 根目录
+`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录及每个 crate 的旧
+compilation hash，只保留最新一套；总量超过 512 MiB 时再按最后修改时间回收冷单元。
+它还会清理 target 根目录
 的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。`deps/`、`build/`、
 `.fingerprint/` 以及预算内的热 incremental session 都保留。
 Windows 可传 `-CleanIncremental` 完整释放 debug 增量缓存，Linux 可设置
 `WBOX_CLEAN_INCREMENTAL=1`；`-KeepIncremental` / `WBOX_KEEP_INCREMENTAL=1` 则跳过
-增量目录扫描。两类开关互斥。脚本直调时可通过 `-KeepIncrementalPerCrate` 或
+增量目录扫描。默认每个 crate 只保留最新一套 incremental 编译单元；需要频繁切换
+feature/target 时，可通过 `-KeepIncrementalPerCrate` 或
 `WBOX_KEEP_INCREMENTAL_PER_CRATE` 调整每个 crate 的保留数。
 
 测试不得直接并发修改进程环境。使用 `crate::testenv::EnvGuard`；需要临时 HOME

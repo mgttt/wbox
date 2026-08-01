@@ -7,6 +7,8 @@ param(
     [switch]$CleanIncremental,
     [ValidateRange(1, 1048576)]
     [int]$MaxIncrementalSizeMiB = 512,
+    [ValidateRange(1, 100)]
+    [int]$KeepIncrementalPerCrate = 1,
     [string[]]$ExtraArgs = @()
 )
 
@@ -29,6 +31,7 @@ $cargoArgs += $ExtraArgs
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $buildExit = 0
+$cleanupExit = 0
 Push-Location $repoRoot
 try {
     & cargo @cargoArgs
@@ -38,10 +41,15 @@ try {
         & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
             -KeepIncremental:$KeepIncremental `
             -CleanIncremental:$CleanIncremental `
-            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB
+            -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB `
+            -KeepIncrementalPerCrate $KeepIncrementalPerCrate
+        $cleanupExit = $LASTEXITCODE
     } finally {
         Pop-Location
     }
 }
 
-exit $buildExit
+if ($buildExit -ne 0) {
+    exit $buildExit
+}
+exit $cleanupExit

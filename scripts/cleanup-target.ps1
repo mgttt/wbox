@@ -6,7 +6,7 @@ param(
     [ValidateRange(1, 1048576)]
     [int]$MaxIncrementalSizeMiB = 512,
     [ValidateRange(1, 100)]
-    [int]$KeepIncrementalPerCrate = 2
+    [int]$KeepIncrementalPerCrate = 1
 )
 
 $ErrorActionPreference = "Stop"
