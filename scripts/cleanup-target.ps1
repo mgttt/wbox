@@ -253,3 +253,4 @@ $released = if ($removedBytes -ge 1GB) {
     "{0:N1} KiB" -f ($removedBytes / 1KB)
 }
 Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' }) and $removedFiles temporary file$(if ($removedFiles -eq 1) { '' } else { 's' }); released $released"
+exit 0
