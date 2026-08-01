@@ -11,6 +11,9 @@ mod shared_windows;
 const DEFAULT_ITEMS: usize = 2_000_000;
 const DEFAULT_ROUNDS: u32 = 32;
 const DEFAULT_REPEAT: usize = 3;
+const DEFAULT_FLOP_ITERATIONS: u64 = 200_000_000;
+const DEFAULT_FLOP_REPEAT: usize = 5;
+const FP64_FLOPS_PER_ITERATION: u64 = 64;
 const CACHE_LINE: usize = 64;
 
 fn main() {
@@ -24,8 +27,85 @@ fn run(args: Vec<String>) -> Result<(), String> {
     if args.first().is_some_and(|arg| arg == "worker") {
         return worker(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "flops") {
+        return flops_benchmark(parse_flops_args(&args[1..])?);
+    }
     let config = parse_bench_args(&args)?;
     benchmark(config)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlopsConfig {
+    iterations: u64,
+    repeat: usize,
+}
+
+fn parse_flops_args(args: &[String]) -> Result<FlopsConfig, String> {
+    let mut config = FlopsConfig {
+        iterations: DEFAULT_FLOP_ITERATIONS,
+        repeat: DEFAULT_FLOP_REPEAT,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--iterations" => {
+                config.iterations = value
+                    .parse()
+                    .map_err(|_| format!("invalid iteration count: {value}"))?;
+            }
+            "--repeat" => {
+                config.repeat = value
+                    .parse()
+                    .map_err(|_| format!("invalid repeat count: {value}"))?;
+            }
+            _ => return Err(format!("unknown argument: {flag}")),
+        }
+        index += 2;
+    }
+    if config.iterations == 0 || config.repeat == 0 {
+        return Err("iterations and repeat must be positive".to_owned());
+    }
+    Ok(config)
+}
+
+fn flops_benchmark(config: FlopsConfig) -> Result<(), String> {
+    #[cfg(target_arch = "x86_64")]
+    if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
+        return Err("FP64 throughput lab requires AVX2 and FMA".to_owned());
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    return Err("FP64 throughput lab is not implemented for this ISA".to_owned());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        let hardware = detect_hardware(current_host());
+        let logical = hardware.logical_processors.unwrap_or(1);
+        println!(
+            "metric=fp64-flops kernel=avx2-fma logical_processors={} iterations_per_worker={} flops_per_iteration={} repeat={} statistic=median",
+            logical,
+            config.iterations,
+            FP64_FLOPS_PER_ITERATION,
+            config.repeat,
+        );
+        for workers in worker_scan(logical) {
+            let measurement =
+                measure_float_repeated(config.repeat, || threaded_fma(config.iterations, workers));
+            let operations = fma_operation_count(config.iterations, workers);
+            let gflops = operations as f64 / measurement.elapsed.as_secs_f64() / 1e9;
+            println!(
+                "mode=simd-threads workers={} elapsed_ms={:.3} fp64_gflops={:.3} result={:.9}",
+                workers,
+                millis(measurement.elapsed),
+                gflops,
+                measurement.value,
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +257,11 @@ struct Measurement {
     checksum: u64,
 }
 
+struct FloatMeasurement {
+    elapsed: Duration,
+    value: f64,
+}
+
 fn measure(action: impl FnOnce() -> u64) -> Measurement {
     let start = Instant::now();
     let checksum = black_box(action());
@@ -193,6 +278,22 @@ fn measure_repeated(repeat: usize, mut action: impl FnMut() -> u64) -> Measureme
     results.sort_unstable_by_key(|result| result.elapsed);
     let checksum = results[0].checksum;
     assert!(results.iter().all(|result| result.checksum == checksum));
+    results.swap_remove(results.len() / 2)
+}
+
+fn measure_float_repeated(repeat: usize, mut action: impl FnMut() -> f64) -> FloatMeasurement {
+    let mut results = (0..repeat)
+        .map(|_| {
+            let start = Instant::now();
+            let value = black_box(action());
+            FloatMeasurement {
+                elapsed: start.elapsed(),
+                value,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(results.iter().all(|result| result.value.is_finite()));
+    results.sort_unstable_by_key(|result| result.elapsed);
     results.swap_remove(results.len() / 2)
 }
 
@@ -239,6 +340,10 @@ fn worker_scan(logical: usize) -> Vec<usize> {
         workers.push(logical);
     }
     workers
+}
+
+fn fma_operation_count(iterations: u64, workers: usize) -> u128 {
+    u128::from(iterations) * u128::from(FP64_FLOPS_PER_ITERATION) * workers as u128
 }
 
 fn input_value(index: usize) -> u32 {
@@ -302,6 +407,58 @@ fn threaded_simd_checksum(data: &[u32], rounds: u32, workers: usize) -> Option<u
 #[cfg(not(target_arch = "x86_64"))]
 fn threaded_simd_checksum(_data: &[u32], _rounds: u32, _workers: usize) -> Option<u64> {
     None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn threaded_fma(iterations: u64, workers: usize) -> f64 {
+    std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|worker| {
+                // SAFETY: the command checks AVX2 and FMA before starting workers.
+                scope.spawn(move || unsafe { fp64_fma_kernel(iterations, worker as u64) })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("FMA worker panicked"))
+            .sum()
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fp64_fma_kernel(iterations: u64, seed: u64) -> f64 {
+    use std::arch::x86_64::*;
+
+    let multiplier = _mm256_set1_pd(1.0 + f64::EPSILON);
+    let addend = _mm256_set1_pd(1.0e-12);
+    let base = 1.0 + seed as f64 * 1.0e-6;
+    let mut a0 = _mm256_set1_pd(base + 0.01);
+    let mut a1 = _mm256_set1_pd(base + 0.02);
+    let mut a2 = _mm256_set1_pd(base + 0.03);
+    let mut a3 = _mm256_set1_pd(base + 0.04);
+    let mut a4 = _mm256_set1_pd(base + 0.05);
+    let mut a5 = _mm256_set1_pd(base + 0.06);
+    let mut a6 = _mm256_set1_pd(base + 0.07);
+    let mut a7 = _mm256_set1_pd(base + 0.08);
+    for _ in 0..black_box(iterations) {
+        a0 = _mm256_fmadd_pd(a0, multiplier, addend);
+        a1 = _mm256_fmadd_pd(a1, multiplier, addend);
+        a2 = _mm256_fmadd_pd(a2, multiplier, addend);
+        a3 = _mm256_fmadd_pd(a3, multiplier, addend);
+        a4 = _mm256_fmadd_pd(a4, multiplier, addend);
+        a5 = _mm256_fmadd_pd(a5, multiplier, addend);
+        a6 = _mm256_fmadd_pd(a6, multiplier, addend);
+        a7 = _mm256_fmadd_pd(a7, multiplier, addend);
+    }
+    let mut lanes = [0.0_f64; 4];
+    let total = [a0, a1, a2, a3, a4, a5, a6, a7]
+        .into_iter()
+        .fold(0.0, |total, accumulator| {
+            _mm256_storeu_pd(lanes.as_mut_ptr(), accumulator);
+            total + lanes.iter().sum::<f64>()
+        });
+    black_box(total)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -611,5 +768,36 @@ mod tests {
                 repeat: 5,
             }
         );
+    }
+
+    #[test]
+    fn flops_arguments_are_parsed() {
+        let args = [
+            "--iterations".to_owned(),
+            "123".to_owned(),
+            "--repeat".to_owned(),
+            "7".to_owned(),
+        ];
+        assert_eq!(
+            parse_flops_args(&args).unwrap(),
+            FlopsConfig {
+                iterations: 123,
+                repeat: 7,
+            }
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn fma_kernel_returns_finite_result_when_available() {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            // SAFETY: guarded by runtime AVX2 and FMA detection.
+            assert!(unsafe { fp64_fma_kernel(10, 0) }.is_finite());
+        }
+    }
+
+    #[test]
+    fn fma_operation_accounting_counts_lanes_and_mul_add() {
+        assert_eq!(fma_operation_count(10, 4), 2_560);
     }
 }

@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W33、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W34、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -2591,6 +2591,7 @@ TODO-WINDOW
 ├── W31 Browser/WASI `wasm-machine` 能力矩阵                     [research] 16 路预填
 ├── W32 CPU 并行与 zero-copy 实验矩阵                            [done] 30 路预填 + Windows 实测
 ├── W33 NUMA/RDMA/共享 ring/scatter-gather                       [research] 当前宿主无 RDMA adapter
+├── W34 FP64 FMA 算力计量                                         [done] 143–145 GFLOPS 本机长测
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2604,6 +2605,14 @@ Windows 命名共享映射多进程实验；所有路线校验和相同，进程
 Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装。后续须分别
 取得 NUMA topology、RDMA-capable/enabled adapter、memory registration、peer 与
 真实 transfer 证据，不能把 OS API 或 feature 存在写成 available。
+
+`W34` 使用可审计 kernel 计量，不从 W32 的整数 checksum 推算 FLOPS：每 worker
+每轮 8 条独立 AVX2 FP64 FMA，按 `8 × 4 lanes × 2 operations = 64 FLOP` 计数。
+本机以 200,000,000 iterations/worker、repeat=5 两次长测：1 worker 为
+`37.37–38.82 GFLOPS`，2 worker `70.41–70.47`，4 worker `115.28–115.30`，
+8 worker `143.53–144.51 GFLOPS`。按暴露的 4 cores × 2.5 GHz × 16 FP64
+FLOP/cycle 粗算名义峰值约 160 GFLOPS，微基准约达 90%；频率由虚拟化宿主调度，
+该峰值不是 SLA，实际 workload 还受 memory bandwidth/arithmetic intensity 限制。
 
 **等待 `agenterm-platform` 期间的预判行动树：**
 

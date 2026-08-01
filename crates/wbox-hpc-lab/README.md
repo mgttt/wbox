@@ -12,10 +12,21 @@ contains an explicit AVX2 kernel and composes it with scoped threads.
 ```powershell
 cargo run --release -p wbox-hpc-lab -- bench
 cargo run --release -p wbox-hpc-lab -- bench --items 4000000 --rounds 32 --repeat 3
+cargo run --release -p wbox-hpc-lab -- flops
+cargo run --release -p wbox-hpc-lab -- flops --iterations 200000000 --repeat 5
 ```
 
 The reported time is the median. Process measurements include process startup.
 Every mode must produce the scalar checksum before a result is accepted.
+
+The `flops` command measures compute-bound FP64 AVX2 FMA throughput. One loop
+executes eight independent 256-bit FMA instructions. Each instruction has four
+FP64 lanes and each fused multiply-add counts as two floating-point operations,
+so the audited count is `8 * 4 * 2 = 64 FLOP` per worker iteration. Independent
+register chains expose throughput instead of measuring one dependency chain's
+latency. This is a best-case arithmetic microbenchmark, not an application
+performance promise; memory bandwidth and arithmetic intensity still bound real
+workloads.
 
 `logical_copies=0` has a narrow meaning: after initialization, the benchmark
 does not copy the dataset between application buffers or processes. It does not

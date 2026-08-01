@@ -40,6 +40,14 @@ Report logical copies separately from bytes read and written.
 6. Separate result slots by a cache line before drawing scaling conclusions.
 7. Record unsupported hardware as observed absence, not implementation failure.
 
+For FLOPS, count operations from an auditable kernel. A vector FMA performs two
+operations per lane. Use enough independent register dependency chains to expose
+throughput, prevent dead-code elimination with an observed result, and never
+derive floating-point throughput from an integer benchmark. Report precision,
+ISA, instruction class, worker count, sample statistic, and duration. Keep
+theoretical peak, measured microbenchmark throughput, and application throughput
+as three separate values.
+
 For RDMA, distinguish API availability, installed OS support, RDMA-capable
 adapter discovery, enabled adapter state, peer reachability, registration, and
 successful transfer. Only the final stages justify an available product route.
