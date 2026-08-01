@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W80、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L51、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M36
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W81、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L52、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M37
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2670,6 +2670,7 @@ TODO-WINDOW
 ├── W78 产品无关本地 IPC 与 owned descriptor 下沉并接入 broker                        [done] inherited overlapped HANDLE
 ├── W79 三宿主进程安全身份下沉并删除 broker 重复 token 查询                           [done] handle-bound AppContainer SID
 ├── W80 稳定进程对象引用下沉并删除 broker 重复 HANDLE 生命周期实现                    [done] duplicated HANDLE + exit wait
+├── W81 retained-directory no-follow typed open 下沉并删除 broker NT FFI               [done] rename/replacement identity gate
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3106,7 +3107,8 @@ TODO-LINUX
 ├── L48 已打开文件对象分类 Linux 真机验收                              [next] O_PATH/O_NOFOLLOW symlink + ordinary fd
 ├── L49 owned Unix IPC fd 跨进程继承验收                               [next] private socket + explicit inheritance
 ├── L50 进程安全身份 Linux 真机验收                                    [next] effective uid/gid + denied/exited PID
-└── L51 owned pidfd 进程引用 Linux 真机验收                            [next] exact child exit + PID reuse boundary
+├── L51 owned pidfd 进程引用 Linux 真机验收                            [next] exact child exit + PID reuse boundary
+└── L52 retained-directory `openat` 真机验收                           [next] rename/replacement + symlink canary
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3174,6 +3176,12 @@ euid/egid 推断；需要这些事实时必须另建 typed contract。交叉编�
 打开引用并从 retained pidfd 观察退出，确认引用不会因 PID 数字复用而指向另一进程；零 PID、
 已退出 PID、权限拒绝与内核不支持必须保持可区分错误。交叉编译只证明 syscall/poll ABI 可
 构建，不能替代目标内核的 pidfd 行为；进程树、重启、超时和退出码映射仍归产品层。
+
+`L52` 在非 root Linux 真机只启用 `filesystem-open`，打开可信根目录后将其路径重命名并安装
+攻击者替换目录，确认 `open_existing_child` 仍从 retained fd 读到原对象且看不到替换内容；
+另放目录/file symlink 与树外 canary，确认 `openat(O_NOFOLLOW)` 不穿越。组件必须拒绝空值、
+`.`、`..` 与多段路径；交叉编译不能替代目标 VFS、mount 与权限行为，guest path 解析和授权
+策略仍归 wbox。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3860,7 +3868,8 @@ TODO-MACOS
 ├── M33 已打开文件对象分类 macOS 真机验收                            [next] O_SYMLINK/no-follow + APFS ordinary fd
 ├── M34 owned Unix IPC fd 跨进程继承验收                             [next] APFS private socket + peer uid
 ├── M35 进程安全身份 macOS 真机验收                                  [next] proc_bsdinfo uid/gid + denied/exited PID
-└── M36 owned kqueue 进程引用 macOS 真机验收                          [next] NOTE_EXIT + Intel/Apple Silicon
+├── M36 owned kqueue 进程引用 macOS 真机验收                          [next] NOTE_EXIT + Intel/Apple Silicon
+└── M37 retained-directory `openat` 真机验收                          [next] APFS rename/symlink + 双 ISA
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3917,6 +3926,11 @@ uid、双向帧、CLOEXEC 切换与单一关闭所有权。APFS endpoint/lease �
 kqueue，并验证退出前无事件、退出后收到 `EVFILT_PROC/NOTE_EXIT`、重复查询稳定保持 dead。
 零 PID、注册期间退出、权限拒绝和无效事件必须 fail closed；双 ISA 交叉编译不能替代 kqueue
 生命周期行为，进程树与产品退出策略也不下沉。
+
+`M37` 在 Intel 与 Apple Silicon 真机只启用 `filesystem-open`，复用 L52 的 retained parent、
+路径替换、单组件与树外 symlink canary 门禁，确认 APFS 上 `openat(O_NOFOLLOW)` 和同一 opened
+object 类型验证保持一致。双 ISA Clippy 不能替代 APFS rename、权限和 symlink 行为；sandbox
+授权、guest path 与产品错误映射不下沉。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -4516,6 +4530,21 @@ wbox broker 删除本地 `GetProcessId`、process `DuplicateHandle`、owned HAND
 检查，注册后直接持有 platform `ProcessReference`；Job 成员、AppContainer SID、随机握手、
 文件 HANDLE 注入和只读挂载授权仍由产品层负责。Windows broker 8 tests、根 470 tests
 （467 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 493.5 MiB
+可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
+
+`W81` 新增独立 `filesystem-open`：公共 API 只打开已存在路径或 retained directory object
+下的单个普通组件，并在同一 opened object 上验证目标是普通文件或真实目录。Windows 以
+`OPEN_REPARSE_POINT` 和 root HANDLE 打开，Linux/macOS 使用 `open/openat(O_NOFOLLOW)`；
+空值、`.`、`..` 与多组件子路径在 native open 前拒绝。Windows 行为门禁还先打开原目录，
+再重命名并在旧路径安装攻击者目录，确认后续 child open 仍绑定原对象，且 junction canary
+不被穿越。platform 最小 feature 17 tests、all-features 177 tests、严格 Clippy，以及
+Windows i686/ARM64、Linux x64/ARM64、macOS x64 非宿主目标编译通过；提交为 `c91e51d`，
+Linux/macOS 真机行为分别交接 L52/M37。
+
+wbox broker 删除本地 `CreateFileW`、`NtCreateFile`、NT ABI 结构、访问位和临时 `File`
+分类 helper，改由 platform 返回标准 `File`；guest path 解析、mount ID、只读策略、reparse
+产品错误映射和向目标进程注入 HANDLE 仍留在 wbox。Windows broker 8 tests、根 470 tests
+（467 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 514.2 MiB
 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
