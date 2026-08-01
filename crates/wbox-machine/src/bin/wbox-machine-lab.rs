@@ -205,8 +205,12 @@ fn print_host() -> Result<(), String> {
     );
     println!(
         "acceleration={}/{}",
-        hardware.acceleration_api.map_or("none", |api| api.as_str()),
-        hardware.acceleration_state.as_str()
+        hardware
+            .acceleration
+            .map_or("none", |item| item.api().as_str()),
+        hardware
+            .acceleration
+            .map_or("unprobed", |item| item.state().as_str())
     );
     println!("page_size={}", memory.page_size);
     println!("allocation_granularity={}", memory.allocation_granularity);

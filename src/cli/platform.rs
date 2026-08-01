@@ -49,9 +49,11 @@ fn print_human() {
             &features
         },
         hardware
-            .acceleration_api
-            .map_or("none", platform::AccelerationApi::as_str),
-        hardware.acceleration_state.as_str(),
+            .acceleration
+            .map_or("none", |item| item.api().as_str()),
+        hardware
+            .acceleration
+            .map_or("unprobed", |item| item.state().as_str()),
     );
     println!(
         "HOST     GUEST    ISA      ABI            FORMAT    PRIORITY  STATUS     EXECUTION                 ISOLATION"
@@ -129,13 +131,39 @@ fn print_json() {
         "acceleration_api".to_owned(),
         string(
             hardware
-                .acceleration_api
-                .map_or("none", platform::AccelerationApi::as_str),
+                .acceleration
+                .map_or("none", |item| item.api().as_str()),
         ),
     );
     hardware_json.insert(
         "acceleration_state".to_owned(),
-        string(hardware.acceleration_state.as_str()),
+        string(
+            hardware
+                .acceleration
+                .map_or("unprobed", |item| item.state().as_str()),
+        ),
+    );
+    hardware_json.insert(
+        "acceleration_api_version".to_owned(),
+        hardware
+            .acceleration
+            .and_then(|item| item.api_version())
+            .map_or(Value::Null, |version| {
+                Value::Number(Number::PosInt(u64::from(version)))
+            }),
+    );
+    hardware_json.insert(
+        "acceleration_native_code".to_owned(),
+        hardware
+            .acceleration
+            .and_then(|item| item.native_code())
+            .map_or(Value::Null, |code| {
+                if code >= 0 {
+                    Value::Number(Number::PosInt(code as u64))
+                } else {
+                    Value::Number(Number::NegInt(code))
+                }
+            }),
     );
     hardware_json.insert(
         "cpu_features".to_owned(),

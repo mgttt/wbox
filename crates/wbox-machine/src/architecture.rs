@@ -115,6 +115,9 @@ pub enum ProbeState {
     Unprobed,
     Available,
     Unavailable,
+    AccessDenied,
+    Incompatible,
+    Failed,
 }
 
 impl ProbeState {
@@ -123,7 +126,74 @@ impl ProbeState {
             Self::Unprobed => "unprobed",
             Self::Available => "available",
             Self::Unavailable => "unavailable",
+            Self::AccessDenied => "access-denied",
+            Self::Incompatible => "incompatible",
+            Self::Failed => "failed",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccelerationCapabilities {
+    api: AccelerationApi,
+    state: ProbeState,
+    api_version: Option<u32>,
+    native_code: Option<i64>,
+}
+
+impl AccelerationCapabilities {
+    const fn unprobed(api: AccelerationApi) -> Self {
+        Self {
+            api,
+            state: ProbeState::Unprobed,
+            api_version: None,
+            native_code: None,
+        }
+    }
+
+    fn from_native_facts(
+        facts: agenterm_platform::contract::native_virtualization::NativeVirtualizationFacts,
+    ) -> Option<Self> {
+        use agenterm_platform::contract::native_virtualization::{
+            NativeVirtualizationBackend, VirtualizationProbeState,
+        };
+
+        let api = match facts.backend() {
+            NativeVirtualizationBackend::WindowsHypervisorPlatform => AccelerationApi::Whpx,
+            NativeVirtualizationBackend::Kvm => AccelerationApi::Kvm,
+            NativeVirtualizationBackend::HypervisorFramework => AccelerationApi::Hvf,
+            _ => return None,
+        };
+        let state = match facts.state() {
+            VirtualizationProbeState::Available => ProbeState::Available,
+            VirtualizationProbeState::Unavailable => ProbeState::Unavailable,
+            VirtualizationProbeState::AccessDenied => ProbeState::AccessDenied,
+            VirtualizationProbeState::Incompatible => ProbeState::Incompatible,
+            VirtualizationProbeState::Failed => ProbeState::Failed,
+            _ => return None,
+        };
+        Some(Self {
+            api,
+            state,
+            api_version: facts.api_version(),
+            native_code: facts.native_code(),
+        })
+    }
+
+    pub const fn api(self) -> AccelerationApi {
+        self.api
+    }
+
+    pub const fn state(self) -> ProbeState {
+        self.state
+    }
+
+    pub const fn api_version(self) -> Option<u32> {
+        self.api_version
+    }
+
+    pub const fn native_code(self) -> Option<i64> {
+        self.native_code
     }
 }
 
@@ -132,13 +202,27 @@ pub struct HardwareCapabilities {
     pub native_isa: Option<Isa>,
     pub logical_processors: Option<usize>,
     pub cpu_features: Vec<CpuFeature>,
-    pub acceleration_api: Option<AccelerationApi>,
-    pub acceleration_state: ProbeState,
+    pub acceleration: Option<AccelerationCapabilities>,
 }
 
 impl HardwareCapabilities {
     pub fn supports_cpu_feature(&self, feature: CpuFeature) -> bool {
         self.cpu_features.contains(&feature)
+    }
+
+    pub fn apply_native_virtualization(
+        &mut self,
+        facts: agenterm_platform::contract::native_virtualization::NativeVirtualizationFacts,
+    ) -> Result<(), agenterm_platform::contract::native_virtualization::NativeVirtualizationFacts>
+    {
+        let Some(mapped) = AccelerationCapabilities::from_native_facts(facts) else {
+            return Err(facts);
+        };
+        if self.acceleration.map(AccelerationCapabilities::api) != Some(mapped.api) {
+            return Err(facts);
+        }
+        self.acceleration = Some(mapped);
+        Ok(())
     }
 }
 
@@ -167,9 +251,10 @@ pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
             .into_iter()
             .filter_map(map_cpu_feature)
             .collect(),
-        acceleration_api: host.map(host_acceleration_api),
         // Selecting the host API is not a permission/device/firmware probe.
-        acceleration_state: ProbeState::Unprobed,
+        acceleration: host
+            .map(host_acceleration_api)
+            .map(AccelerationCapabilities::unprobed),
     }
 }
 
@@ -221,9 +306,51 @@ mod tests {
     fn hardware_detection_does_not_claim_unprobed_acceleration() {
         for host in HostOs::ALL {
             let hardware = detect_hardware(Some(host));
-            assert!(hardware.acceleration_api.is_some());
-            assert_eq!(hardware.acceleration_state, ProbeState::Unprobed);
+            let acceleration = hardware.acceleration.expect("host acceleration candidate");
+            assert_eq!(acceleration.api(), host_acceleration_api(host));
+            assert_eq!(acceleration.state(), ProbeState::Unprobed);
+            assert_eq!(acceleration.api_version(), None);
+            assert_eq!(acceleration.native_code(), None);
         }
+    }
+
+    #[test]
+    fn native_virtualization_facts_preserve_evidence_and_reject_wrong_host() {
+        use agenterm_platform::contract::native_virtualization::{
+            NativeVirtualizationBackend, NativeVirtualizationFacts,
+        };
+
+        let mut linux = detect_hardware(Some(HostOs::Linux));
+        linux
+            .apply_native_virtualization(NativeVirtualizationFacts::available(
+                NativeVirtualizationBackend::Kvm,
+                Some(12),
+            ))
+            .unwrap();
+        assert_eq!(
+            linux.acceleration,
+            Some(AccelerationCapabilities {
+                api: AccelerationApi::Kvm,
+                state: ProbeState::Available,
+                api_version: Some(12),
+                native_code: None,
+            })
+        );
+
+        let whpx_denied = NativeVirtualizationFacts::access_denied(
+            NativeVirtualizationBackend::WindowsHypervisorPlatform,
+            5,
+        );
+        assert_eq!(
+            linux.apply_native_virtualization(whpx_denied),
+            Err(whpx_denied)
+        );
+        assert_eq!(linux.acceleration.unwrap().api(), AccelerationApi::Kvm);
+
+        let mut unknown = detect_hardware(None);
+        let kvm = NativeVirtualizationFacts::unavailable(NativeVirtualizationBackend::Kvm);
+        assert_eq!(unknown.apply_native_virtualization(kvm), Err(kvm));
+        assert_eq!(unknown.acceleration, None);
     }
 
     #[test]

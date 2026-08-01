@@ -2649,7 +2649,7 @@ TODO-WINDOW
 ├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
 ├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
 ├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
-├── W60 宿主原生虚拟化 API 可用性事实                                                 [next] WHPX 四态真机探测
+├── W60 宿主原生虚拟化 API 可用性事实                                                 [in-progress] contract/mapping done
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3965,6 +3965,10 @@ SID/ACL/IPC 真机测试、all-features 和五目标严格 Clippy 已通过，Li
 启动。wbox-machine 负责把 WHPX/KVM/HVF 事实解释为加速路线，guest ISA、fallback、
 provider 生命周期和验收策略不得下沉。Windows 真机门禁至少覆盖当前机器的稳定状态、
 禁用或缺失组件的可解释结果，以及最小 feature 依赖树。
+第一阶段已在 platform 冻结五态事实契约（额外区分 ABI incompatible），并在
+wbox-machine 将 API、状态、API version 和 native code 收成单一能力对象；未知 backend
+或与预选宿主不匹配的事实会被拒绝，不得污染路线状态。原生三宿主 adapter 尚未完成，
+因此产品输出仍保持 `unprobed`。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
