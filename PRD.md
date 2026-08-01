@@ -3959,7 +3959,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`2b20ebe3db823f37619f15f5e9a086d05888b6bb`，关闭 default features，按消费包启用
+`59dc327a66fcd75f9690f7c82bca022078cd88ce`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
@@ -4448,7 +4448,10 @@ WP.1-WP.27 与固定 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
 并提供 owned handle/fd 的转出与重新接管，使显式子进程继承后仍由同一 adapter 保持 Windows
 overlapped I/O、Unix peer uid 和单一关闭所有权。platform IPC 最小 feature 19 tests 加真实
 bind/connect/accept/owned-transfer round-trip，all-features 161 tests、严格 Clippy 与 Windows
-i686、Linux ARM64、macOS 双 ISA IPC 编译通过；实现分两笔提交 `fbfac15`/`2b20ebe`。
+i686、Linux ARM64、macOS 双 ISA IPC 编译通过；实现提交为 `fbfac15`/`2b20ebe`，随后
+`59dc327` 把 target-specific owned descriptor 方法收敛到 adapter 导出的 `NativeStreamExt`，
+避免中立 facade 持有平台条件方法，运行机制与所有权契约不变；wbox 升级该 pin 后 broker
+真机 8 tests、严格 Clippy 与四 portable targets 通过。
 
 wbox broker 删除本地 SDDL、`CreateNamedPipeW/CreateFileW/ConnectNamedPipe`、同步
 `ReadFile/WriteFile` 传输循环与 disconnect 清理，改由 platform 建立随机 owner-only 预连接流；

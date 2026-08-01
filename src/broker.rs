@@ -928,6 +928,8 @@ mod tests {
 
     #[test]
     fn broker_child_probe() {
+        use agenterm_platform::ipc::NativeStreamExt as _;
+
         let Ok(raw_handle) = std::env::var("WBOX_TEST_BROKER_HANDLE") else {
             return;
         };
