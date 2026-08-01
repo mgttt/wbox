@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W48、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L26、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M9
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W49、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L27、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M10
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2608,6 +2608,7 @@ TODO-WINDOW
 ├── W46 Windows guest runner 超时工具语义探测                            [done] 正式套件 15/6/1
 ├── W47 单 PID CPU/RSS 观测下沉并删除 stats `/proc` 解析                   [done] 三宿主契约 + Windows 实测
 ├── W48 命名共享内存下沉并展开跨宿主多进程 zero-copy                       [done] Win32 FFI 删除 + 1/2/4/8 workers
+├── W49 单 PID executable path 下沉并删除 top Win32 查询                     [done] PathBuf + fallback 门禁
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3015,8 +3016,13 @@ TODO-LINUX
 ├── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
 ├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
 ├── L25 AArch64 Linux seccomp syscall 表可移植性              [next] mknod/uselib 不能引用缺失常量
-└── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
+├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
+└── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
 ```
+
+`L27` 在 Linux 真机运行 platform `process-image` 单元测试，并覆盖子进程存活、退出后
+`NotFound` 与受限 `/proc` 的类型化失败。Linux `top` 继续读取完整 cmdline 和 PPID 来
+建立容器成员树，不应为了复用 basename 接口丢失参数；共享层只承接 `/proc/<pid>/exe`。
 
 `L26` 在 Linux 真机运行 platform `shared-memory` 的单元/跨进程测试，再运行小规模
 `wbox-hpc-lab bench`，证明排他 create、peer open、共享写可见、creator unlink、已开
@@ -3606,7 +3612,8 @@ TODO-MACOS
 ├── M6 macOS 上第一方 Rust Win32 runtime 产品路径          [planned]
 ├── M7 对标 QEMU/VMware/Parallels 的第一方 Rust VM SPI     [research]
 ├── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
-└── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
+├── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
+└── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
 ```
 
 `M1` 只冻结产品语义，不声称 macOS 已可用。`crates/wbox-machine` 把宿主、来宾、执行
@@ -3616,9 +3623,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`912656c2b80087ae4b889925729d69dfb9f9b5c2`，关闭 default features，按消费包启用
+`38126e1449039ccecb6611b849841a88044108fe`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`shared-memory` 与零依赖 `hardware`。
+`process-image`、`shared-memory` 与零依赖 `hardware`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
@@ -3739,6 +3746,17 @@ page-file mapping 或 POSIX shm，create 排他，view/handle 由 RAII 回收；
 `0x0000c3d6956bd5d1` 一致且 logical copies 为 0；Windows i686、Linux 双 ISA、macOS
 双 ISA HPC all-targets 严格 Clippy 通过。映射布局改用 checked size/alignment 计算并
 以极值测试拒绝溢出，避免小映射上构造超长 slice；Unix 真机交接为 L26/M9。
+
+`W49` 在 platform 增加独立 `process-image` feature，返回保留宿主编码的 `PathBuf`：
+Windows 使用受限查询 handle，Linux 读取 `/proc/<pid>/exe`，macOS 使用
+`proc_pidpath`；PID 0、越界、not-found、open/query 与无效数据保持类型化。platform
+的 Linux/macOS 完整 process inventory 已删除各自重复路径读取并复用该接口，Windows
+ToolHelp basename 快照保留其低成本语义。wbox `top` 删除本地
+`OpenProcess/QueryFullProcessImageNameW` 和固定 UTF-16 buffer，只拥有 basename 与
+失败显示 `-` 的产品策略；Linux `top` 的 cmdline/PPID 树不改变。Windows 真机 lookup、
+缺失 PID fallback、feature 隔离测试及完整 WP.1–WP.27 通过，其中 WP.19 证明只列 Job
+guest 且不泄露 supervisor。Windows i686、Linux 双 ISA、macOS 双 ISA 严格编译通过；
+Unix 原生验收交接为 L27/M10。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

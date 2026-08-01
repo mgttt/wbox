@@ -47,39 +47,20 @@ fn platform_rows(name: &str, _dir: &std::path::Path) -> Result<Vec<ProcessRow>> 
         .into_iter()
         .map(|pid| ProcessRow {
             pid,
-            command: windows_process_name(pid),
+            command: process_image_name(pid),
         })
         .collect())
 }
 
 #[cfg(windows)]
-fn windows_process_name(pid: u32) -> String {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            return "-".to_string();
-        }
-        let mut path = vec![0u16; 32768];
-        let mut len = path.len() as u32;
-        let ok =
-            QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, path.as_mut_ptr(), &mut len);
-        CloseHandle(process);
-        if ok == 0 {
-            return "-".to_string();
-        }
-        let full = String::from_utf16_lossy(&path[..len as usize]);
-        std::path::Path::new(&full)
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or(&full)
-            .to_string()
-    }
+fn process_image_name(pid: u32) -> String {
+    agenterm_platform::process_image::executable_path(pid)
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 #[cfg(target_os = "linux")]
@@ -267,5 +248,12 @@ mod tests {
         let (ppid, command) = linux_process(std::process::id()).unwrap();
         assert!(ppid > 0);
         assert!(!command.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_image_name_uses_platform_lookup_and_product_fallback() {
+        assert_ne!(process_image_name(std::process::id()), "-");
+        assert_eq!(process_image_name(u32::MAX), "-");
     }
 }
