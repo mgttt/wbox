@@ -281,6 +281,8 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
 
 pub(crate) struct Measurement {
     pub(crate) elapsed: Duration,
+    pub(crate) min_elapsed: Duration,
+    pub(crate) max_elapsed: Duration,
     pub(crate) checksum: u64,
 }
 
@@ -293,8 +295,11 @@ struct FloatMeasurement {
 pub(crate) fn measure(action: impl FnOnce() -> u64) -> Measurement {
     let start = Instant::now();
     let checksum = black_box(action());
+    let elapsed = start.elapsed();
     Measurement {
-        elapsed: start.elapsed(),
+        elapsed,
+        min_elapsed: elapsed,
+        max_elapsed: elapsed,
         checksum,
     }
 }
@@ -306,7 +311,12 @@ pub(crate) fn measure_repeated(repeat: usize, mut action: impl FnMut() -> u64) -
     results.sort_unstable_by_key(|result| result.elapsed);
     let checksum = results[0].checksum;
     assert!(results.iter().all(|result| result.checksum == checksum));
-    results.swap_remove(results.len() / 2)
+    let min_elapsed = results.first().unwrap().elapsed;
+    let max_elapsed = results.last().unwrap().elapsed;
+    let mut median = results.swap_remove(results.len() / 2);
+    median.min_elapsed = min_elapsed;
+    median.max_elapsed = max_elapsed;
+    median
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -329,8 +339,11 @@ fn measure_float_repeated(repeat: usize, mut action: impl FnMut() -> f64) -> Flo
 fn measure_result(action: impl FnOnce() -> Result<u64, String>) -> Result<Measurement, String> {
     let start = Instant::now();
     let checksum = black_box(action()?);
+    let elapsed = start.elapsed();
     Ok(Measurement {
-        elapsed: start.elapsed(),
+        elapsed,
+        min_elapsed: elapsed,
+        max_elapsed: elapsed,
         checksum,
     })
 }
@@ -347,7 +360,12 @@ fn measure_result_repeated(
     if !results.iter().all(|result| result.checksum == checksum) {
         return Err("repeated benchmark checksums differ".to_owned());
     }
-    Ok(results.swap_remove(results.len() / 2))
+    let min_elapsed = results.first().unwrap().elapsed;
+    let max_elapsed = results.last().unwrap().elapsed;
+    let mut median = results.swap_remove(results.len() / 2);
+    median.min_elapsed = min_elapsed;
+    median.max_elapsed = max_elapsed;
+    Ok(median)
 }
 
 pub(crate) fn millis(duration: Duration) -> f64 {
@@ -358,7 +376,7 @@ fn speedup(serial: Duration, parallel: Duration) -> f64 {
     serial.as_secs_f64() / parallel.as_secs_f64()
 }
 
-fn worker_scan(logical: usize) -> Vec<usize> {
+pub(crate) fn worker_scan(logical: usize) -> Vec<usize> {
     let mut workers = vec![1];
     let mut count = 2;
     while count < logical {
@@ -621,7 +639,7 @@ unsafe fn checksum_avx2(data: &[u32], rounds: u32) -> u64 {
     })
 }
 
-fn partition(items: usize, worker: usize, workers: usize) -> (usize, usize) {
+pub(crate) fn partition(items: usize, worker: usize, workers: usize) -> (usize, usize) {
     (items * worker / workers, items * (worker + 1) / workers)
 }
 
@@ -867,6 +885,17 @@ mod tests {
         assert_eq!(worker_scan(1), vec![1]);
         assert_eq!(worker_scan(6), vec![1, 2, 4, 6]);
         assert_eq!(worker_scan(8), vec![1, 2, 4, 8]);
+    }
+
+    #[test]
+    fn repeated_measurement_preserves_min_median_max_order() {
+        let measurement = measure_repeated(3, || {
+            std::thread::sleep(Duration::from_millis(1));
+            7
+        });
+        assert_eq!(measurement.checksum, 7);
+        assert!(measurement.min_elapsed <= measurement.elapsed);
+        assert!(measurement.elapsed <= measurement.max_elapsed);
     }
 
     #[test]

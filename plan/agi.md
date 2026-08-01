@@ -82,6 +82,14 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- parallel
 约 10.15 GiB/s。数据集约为 35.75 MiB L3 的 3.6 倍，因此不把结果冒充 cache-only
 带宽；页触碰差异也只说明当前 VM 的首次提交/缺页成本，不等同于裸机 DRAM 延迟。
 
+把采样提高到 median=7 并独立运行两次后，read 在 4 workers 为
+17.87–18.38 GiB/s、8 workers 为 14.63–16.58；write 分别为
+11.05–11.52 / 9.65–12.51 GiB/s；copy 最小逻辑 read+write 流量分别为
+25.15–26.68 / 22.99–29.46 GiB/s。较短 median=3 曾出现 8-worker read
+28.68 GiB/s 的离群结果，因此只能说 4 个物理核是当前 VM 较稳定的拐点，不能说
+SMT 必然增益或必然退化。实验不固定 affinity，数字包含线程创建与调度噪声；下一步
+应先保留重复分布并探索可选 placement，不能把任何一次 8-thread 峰值写成宿主常量。
+
 ## 3. 已获得的方法经验
 
 ```text

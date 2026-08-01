@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W63、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L36、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M20
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W64、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L37、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M21
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2631,7 +2631,7 @@ TODO-WINDOW
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
-├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；16 tests
+├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；18 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
@@ -2653,6 +2653,7 @@ TODO-WINDOW
 ├── W61 系统处理器/NUMA 拓扑事实与进程预算分层                                        [done] 8T/4C/1P/1N/1G
 ├── W62 CPU cache hierarchy 下沉并驱动 HPC 共享布局                                  [done] L1/L2/L3 + 64-byte line
 ├── W63 shared mapping memory bandwidth/page-touch 真机实验                          [done] 128 MiB + cold/warm/read/write/copy
+├── W64 shared mapping threaded memory scaling                                     [done] 1/2/4/8 workers + repeat=7×2
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3074,8 +3075,14 @@ TODO-LINUX
 ├── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
 ├── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
 ├── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
-└── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + fault 口径决策
+├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + fault 口径决策
+└── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
 ```
+
+`L37` 复用 L36 数据规模，保存所有 `read-threads`/`write-threads`/`copy-threads`
+结果，交叉核对 system physical cores、process available CPUs 和 cgroup/affinity 限制。
+checksum 与全区域验证必须逐 worker 通过；不能把 Windows 的 4-worker 饱和点设成 Linux
+阈值，也不能在尚未控制 placement 时宣称 NUMA 带宽。
 
 `L36` 运行 release `wbox-hpc-lab memory --mib 128 --passes 3 --repeat 3`，记录
 cold/warm page-touch 与 read/write/copy，并核对 POSIX shm 清理。不要拿 Windows VM
@@ -3728,8 +3735,13 @@ TODO-MACOS
 ├── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
 ├── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
 ├── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
-└── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
+├── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
+└── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
 ```
+
+`M21` 在 Intel 与 Apple Silicon 分别记录 process-available worker 扫描，比较物理核与
+SMT/效率核区间，但不从逻辑 CPU 编号猜造 cluster placement。所有 worker 档位保持稳定
+checksum；吞吐和 speedup 只作为同机观测，不设跨 ISA 门槛。
 
 `M20` 在 Intel 与 Apple Silicon 分别运行 release `wbox-hpc-lab memory`，裁决
 POSIX shm、page-touch、checksum 和 payload/traffic 双口径。吞吐只做同机复测，不设
@@ -4050,6 +4062,18 @@ passes 和流量计数均做 checked arithmetic。当前 Windows VM 用 128 MiB 
 GiB/s，copy payload/traffic 约 5.08/10.15 GiB/s。数据集超过 35.75 MiB L3，结果仍
 只是当前虚拟机观测，不是裸机 DRAM 指标或产品 SLA；page-fault 计数 API 是否下沉，
 要等 Linux/macOS 同口径实验后再决定。
+
+`W64` 在相同 mapping 上按 process-available worker scan 执行分区 threaded
+read/write/copy；每个线程只持有互不重叠的 destination slice，read checksum 必须与
+串行一致，write/copy 也统一为全局 checksum，并在计时区外逐字节验证完整区域。线程
+创建计入时间，未设置 affinity；每行报告 min/median/max，不能用 median 隐藏抖动。
+128 MiB、3 passes、median=7 的两次独立 Windows
+运行中，4-worker read 稳定在 17.87–18.38 GiB/s，8-worker 为 14.63–16.58；write
+在 4/8 workers 分别为 11.05–11.52 / 9.65–12.51，copy 最小逻辑 traffic 分别为
+25.15–26.68 / 22.99–29.46 GiB/s。较短 median=3 曾出现 8-worker read 28.68 GiB/s
+离群值，证明当前 VM 调度噪声足以扭曲“峰值”。因此 4 个物理核只是当前较稳定的
+拐点，SMT 收益不稳定，不能形成硬编码 worker 策略。Linux/macOS 真机分别由 L37/
+M21 验收后，才评估 process affinity/placement 是否值得形成跨产品契约。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

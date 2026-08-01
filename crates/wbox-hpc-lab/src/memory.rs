@@ -3,7 +3,10 @@ use std::time::Duration;
 use agenterm_platform::shared_memory::SharedMemory;
 use wbox_machine::{current_host, detect_hardware, detect_host_memory};
 
-use crate::{cache_line_bytes, input_value, measure, measure_repeated, millis, Measurement};
+use crate::{
+    cache_line_bytes, input_value, measure, measure_repeated, millis, partition, worker_scan,
+    Measurement,
+};
 
 const DEFAULT_MIB: usize = 128;
 const DEFAULT_PASSES: usize = 3;
@@ -65,15 +68,19 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 fn benchmark(config: Config) -> Result<(), String> {
     let memory = detect_host_memory().map_err(|error| error.to_string())?;
     let page_size = memory.page_size.get();
-    let cache_line = cache_line_bytes(&detect_hardware(current_host()))?;
+    let hardware = detect_hardware(current_host());
+    let cache_line = cache_line_bytes(&hardware)?;
+    let logical = hardware.logical_processors.unwrap_or(1);
+    let worker_counts = worker_scan(logical);
     let mut dataset = Dataset::new(config.bytes)?;
     println!(
-        "metric=memory-bandwidth memory=shared-mapping dataset_bytes={} mapping_bytes={} page_size={} cache_line_bytes={} physical_memory_bytes={} passes={} repeat={} statistic=median",
+        "metric=memory-bandwidth memory=shared-mapping dataset_bytes={} mapping_bytes={} page_size={} cache_line_bytes={} physical_memory_bytes={} logical_processors={} passes={} repeat={} statistic=median",
         config.bytes,
         dataset.mapping_bytes(),
         page_size,
         cache_line,
         memory.physical_bytes,
+        logical,
         config.passes,
         config.repeat,
     );
@@ -98,21 +105,95 @@ fn benchmark(config: Config) -> Result<(), String> {
 
     dataset.initialize_source();
     let read = measure_repeated(config.repeat, || dataset.read(config.passes));
-    print_bandwidth("read", read, config.bytes, config.passes, 1)?;
+    print_bandwidth(
+        "read",
+        1,
+        &read,
+        read.elapsed,
+        config.bytes,
+        config.passes,
+        1,
+    )?;
 
     let write = measure_repeated(config.repeat, || dataset.write(config.passes));
-    print_bandwidth("write", write, config.bytes, config.passes, 1)?;
+    print_bandwidth(
+        "write",
+        1,
+        &write,
+        write.elapsed,
+        config.bytes,
+        config.passes,
+        1,
+    )?;
     dataset.verify_write(config.passes)?;
 
     let copy = measure_repeated(config.repeat, || dataset.copy(config.passes));
-    print_bandwidth("copy", copy, config.bytes, config.passes, 2)?;
+    print_bandwidth(
+        "copy",
+        1,
+        &copy,
+        copy.elapsed,
+        config.bytes,
+        config.passes,
+        2,
+    )?;
     dataset.verify_copy()?;
+
+    for workers in worker_counts {
+        let threaded_read = measure_repeated(config.repeat, || {
+            dataset.threaded_read(config.passes, workers)
+        });
+        if threaded_read.checksum != read.checksum {
+            return Err(format!(
+                "threaded read checksum mismatch with {workers} workers"
+            ));
+        }
+        print_bandwidth(
+            "read-threads",
+            workers,
+            &threaded_read,
+            read.elapsed,
+            config.bytes,
+            config.passes,
+            1,
+        )?;
+
+        let threaded_write = measure_repeated(config.repeat, || {
+            dataset.threaded_write(config.passes, workers)
+        });
+        dataset.verify_write(config.passes)?;
+        print_bandwidth(
+            "write-threads",
+            workers,
+            &threaded_write,
+            write.elapsed,
+            config.bytes,
+            config.passes,
+            1,
+        )?;
+
+        let threaded_copy = measure_repeated(config.repeat, || {
+            dataset.threaded_copy(config.passes, workers)
+        });
+        dataset.verify_copy()?;
+        print_bandwidth(
+            "copy-threads",
+            workers,
+            &threaded_copy,
+            copy.elapsed,
+            config.bytes,
+            config.passes,
+            2,
+        )?;
+    }
     Ok(())
 }
 
 fn print_bandwidth(
     mode: &str,
-    measurement: Measurement,
+    workers: usize,
+    measurement: &Measurement,
+    baseline: Duration,
     bytes: usize,
     passes: usize,
     traffic_factor: usize,
@@ -124,9 +205,13 @@ fn print_bandwidth(
         .checked_mul(traffic_factor)
         .ok_or_else(|| "memory traffic byte count overflows usize".to_owned())?;
     println!(
-        "mode={} elapsed_ms={:.3} payload_gib_s={:.3} traffic_gib_s={:.3} payload_bytes={} traffic_bytes={} checksum={:#018x}",
+        "mode={} workers={} elapsed_ms={:.3} min_ms={:.3} max_ms={:.3} speedup={:.3} payload_gib_s={:.3} traffic_gib_s={:.3} payload_bytes={} traffic_bytes={} checksum={:#018x}",
         mode,
+        workers,
         millis(measurement.elapsed),
+        millis(measurement.min_elapsed),
+        millis(measurement.max_elapsed),
+        baseline.as_secs_f64() / measurement.elapsed.as_secs_f64(),
         gib_per_second(payload_bytes, measurement.elapsed),
         gib_per_second(traffic_bytes, measurement.elapsed),
         payload_bytes,
@@ -209,31 +294,73 @@ impl Dataset {
     }
 
     fn read(&self, passes: usize) -> u64 {
-        let source = std::hint::black_box(self.source());
-        let mut checksum = 0_u64;
-        for _ in 0..passes {
-            checksum = source.iter().copied().fold(checksum, u64::wrapping_add);
-        }
-        std::hint::black_box(checksum)
+        read_values(self.source(), passes)
     }
 
     fn write(&mut self, passes: usize) -> u64 {
-        let destination = self.destination_mut();
-        for pass in 0..passes {
-            let byte = 0x31_u8.wrapping_add(pass as u8);
-            // The black-box barrier makes each complete write pass observable.
-            std::hint::black_box(&mut *destination).fill(byte);
-        }
-        memory_sample(destination)
+        write_bytes(self.destination_mut(), passes)
     }
 
     fn copy(&mut self, passes: usize) -> u64 {
         let split = self.bytes;
         let (source, destination) = self.mapping_mut().split_at_mut(split);
-        for _ in 0..passes {
-            destination.copy_from_slice(source);
-            std::hint::black_box(&mut *destination);
-        }
+        copy_bytes(source, destination, passes)
+    }
+
+    fn threaded_read(&self, passes: usize, workers: usize) -> u64 {
+        let source = self.source();
+        assert!(workers > 0 && workers <= source.len());
+        std::thread::scope(|scope| {
+            let handles = (0..workers)
+                .map(|worker| {
+                    let (start, end) = partition(source.len(), worker, workers);
+                    scope.spawn(move || read_values(&source[start..end], passes))
+                })
+                .collect::<Vec<_>>();
+            handles.into_iter().fold(0_u64, |sum, handle| {
+                sum.wrapping_add(handle.join().expect("memory read worker panicked"))
+            })
+        })
+    }
+
+    fn threaded_write(&mut self, passes: usize, workers: usize) -> u64 {
+        let bytes = self.bytes;
+        let destination = self.destination_mut();
+        assert!(workers > 0 && workers <= destination.len());
+        std::thread::scope(|scope| {
+            let mut remaining = &mut *destination;
+            let mut handles = Vec::with_capacity(workers);
+            for worker in 0..workers {
+                let (start, end) = partition(bytes, worker, workers);
+                let (chunk, rest) = remaining.split_at_mut(end - start);
+                remaining = rest;
+                handles.push(scope.spawn(move || write_kernel(chunk, passes)));
+            }
+            for handle in handles {
+                handle.join().expect("memory write worker panicked");
+            }
+        });
+        memory_sample(destination)
+    }
+
+    fn threaded_copy(&mut self, passes: usize, workers: usize) -> u64 {
+        let bytes = self.bytes;
+        let (source, destination) = self.mapping_mut().split_at_mut(bytes);
+        assert!(workers > 0 && workers <= bytes);
+        std::thread::scope(|scope| {
+            let mut remaining = &mut *destination;
+            let mut handles = Vec::with_capacity(workers);
+            for worker in 0..workers {
+                let (start, end) = partition(bytes, worker, workers);
+                let (chunk, rest) = remaining.split_at_mut(end - start);
+                remaining = rest;
+                let source = &source[start..end];
+                handles.push(scope.spawn(move || copy_kernel(source, chunk, passes)));
+            }
+            for handle in handles {
+                handle.join().expect("memory copy worker panicked");
+            }
+        });
         memory_sample(destination)
     }
 
@@ -287,6 +414,40 @@ impl Dataset {
     fn mapping(&self) -> &[u8] {
         // SAFETY: the mapping remains alive for the returned shared view.
         unsafe { std::slice::from_raw_parts(self.mapping.as_ptr(), self.mapping_bytes()) }
+    }
+}
+
+fn read_values(source: &[u64], passes: usize) -> u64 {
+    let source = std::hint::black_box(source);
+    let mut checksum = 0_u64;
+    for _ in 0..passes {
+        checksum = source.iter().copied().fold(checksum, u64::wrapping_add);
+    }
+    std::hint::black_box(checksum)
+}
+
+fn write_bytes(destination: &mut [u8], passes: usize) -> u64 {
+    write_kernel(destination, passes);
+    memory_sample(destination)
+}
+
+fn write_kernel(destination: &mut [u8], passes: usize) {
+    for pass in 0..passes {
+        let byte = 0x31_u8.wrapping_add(pass as u8);
+        // The black-box barrier makes each complete write pass observable.
+        std::hint::black_box(&mut *destination).fill(byte);
+    }
+}
+
+fn copy_bytes(source: &[u8], destination: &mut [u8], passes: usize) -> u64 {
+    copy_kernel(source, destination, passes);
+    memory_sample(destination)
+}
+
+fn copy_kernel(source: &[u8], destination: &mut [u8], passes: usize) {
+    for _ in 0..passes {
+        destination.copy_from_slice(source);
+        std::hint::black_box(&mut *destination);
     }
 }
 
@@ -349,5 +510,21 @@ mod tests {
         assert_ne!(copied, 0);
         assert_ne!(copied, write);
         dataset.verify_copy().unwrap();
+    }
+
+    #[test]
+    fn threaded_kernels_partition_and_verify_the_entire_mapping() {
+        let mut dataset = Dataset::new(8192).unwrap();
+        dataset.initialize_source();
+        let expected = dataset.read(3);
+        let expected_write = dataset.write(3);
+        let expected_copy = dataset.copy(3);
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(dataset.threaded_read(3, workers), expected);
+            assert_eq!(dataset.threaded_write(3, workers), expected_write);
+            dataset.verify_write(3).unwrap();
+            assert_eq!(dataset.threaded_copy(3, workers), expected_copy);
+            dataset.verify_copy().unwrap();
+        }
     }
 }

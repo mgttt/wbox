@@ -47,6 +47,15 @@ outside the timed interval. The default 128 MiB region exceeds the current Windo
 host's last-level cache, while the complete mapping occupies 256 MiB. Results
 are host observations rather than a hardware or cloud SLA.
 
+After each scalar mode, `memory` scans the process-available worker counts and
+partitions the same mapping into disjoint thread-owned ranges. Thread timings
+include scoped-thread creation. Read checksums must equal the scalar result;
+write and copy keep the same global checksum and full-region verification at
+every worker count. This exposes the physical-core saturation point and whether
+SMT still adds bandwidth without introducing an affinity policy. Each bandwidth
+row reports sample `min_ms`, median `elapsed_ms`, and `max_ms` so scheduler noise
+is visible rather than hidden behind one aggregate.
+
 `logical_copies=0` has a narrow meaning: after initialization, the benchmark
 does not copy the dataset between application buffers or processes. It does not
 mean zero memory traffic, zero page faults, or that CPU caches remain coherent
@@ -58,6 +67,7 @@ Current experiments establish:
 - named shared-memory execution across Windows processes;
 - cache-line-separated result slots to avoid intentional false sharing;
 - cold/warm page-touch and read/write/copy memory-path measurements;
+- threaded read/write/copy scaling over process-available CPU counts;
 - worker-count scans that expose physical-core, SMT, startup, and scheduler
   effects.
 
