@@ -77,6 +77,7 @@ pub enum CpuFeature {
     X86Sse2,
     X86Avx,
     X86Avx2,
+    X86Fma,
     ArmNeon,
 }
 
@@ -86,6 +87,7 @@ impl CpuFeature {
             Self::X86Sse2 => "x86.sse2",
             Self::X86Avx => "x86.avx",
             Self::X86Avx2 => "x86.avx2",
+            Self::X86Fma => "x86.fma",
             Self::ArmNeon => "arm.neon",
         }
     }
@@ -141,25 +143,45 @@ impl HardwareCapabilities {
 }
 
 pub const fn current_isa() -> Option<Isa> {
-    if cfg!(target_arch = "x86_64") {
-        Some(Isa::X86_64)
-    } else if cfg!(target_arch = "aarch64") {
-        Some(Isa::Aarch64)
-    } else {
-        None
+    use agenterm_platform::hardware::ProcessorArchitecture;
+    match agenterm_platform::hardware::current_architecture() {
+        ProcessorArchitecture::X86_64 => Some(Isa::X86_64),
+        ProcessorArchitecture::Aarch64 => Some(Isa::Aarch64),
+        _ => None,
     }
 }
 
 pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
+    let processor = agenterm_platform::hardware::processor_facts();
     HardwareCapabilities {
-        native_isa: current_isa(),
-        logical_processors: std::thread::available_parallelism()
-            .ok()
+        native_isa: match processor.architecture {
+            agenterm_platform::hardware::ProcessorArchitecture::X86_64 => Some(Isa::X86_64),
+            agenterm_platform::hardware::ProcessorArchitecture::Aarch64 => Some(Isa::Aarch64),
+            _ => None,
+        },
+        logical_processors: processor
+            .logical_processors
             .map(std::num::NonZeroUsize::get),
-        cpu_features: detected_cpu_features(),
+        cpu_features: processor
+            .features
+            .into_iter()
+            .filter_map(map_cpu_feature)
+            .collect(),
         acceleration_api: host.map(host_acceleration_api),
         // Selecting the host API is not a permission/device/firmware probe.
         acceleration_state: ProbeState::Unprobed,
+    }
+}
+
+fn map_cpu_feature(feature: agenterm_platform::hardware::ProcessorFeature) -> Option<CpuFeature> {
+    use agenterm_platform::hardware::ProcessorFeature;
+    match feature {
+        ProcessorFeature::X86Sse2 => Some(CpuFeature::X86Sse2),
+        ProcessorFeature::X86Avx => Some(CpuFeature::X86Avx),
+        ProcessorFeature::X86Avx2 => Some(CpuFeature::X86Avx2),
+        ProcessorFeature::X86Fma => Some(CpuFeature::X86Fma),
+        ProcessorFeature::ArmNeon => Some(CpuFeature::ArmNeon),
+        _ => None,
     }
 }
 
@@ -169,29 +191,6 @@ const fn host_acceleration_api(host: HostOs) -> AccelerationApi {
         HostOs::Linux => AccelerationApi::Kvm,
         HostOs::Macos => AccelerationApi::Hvf,
     }
-}
-
-fn detected_cpu_features() -> Vec<CpuFeature> {
-    let mut features = Vec::new();
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("sse2") {
-            features.push(CpuFeature::X86Sse2);
-        }
-        if std::is_x86_feature_detected!("avx") {
-            features.push(CpuFeature::X86Avx);
-        }
-        if std::is_x86_feature_detected!("avx2") {
-            features.push(CpuFeature::X86Avx2);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("neon") {
-            features.push(CpuFeature::ArmNeon);
-        }
-    }
-    features
 }
 
 #[cfg(test)]
@@ -233,5 +232,24 @@ mod tests {
         assert_eq!(current_isa(), Some(Isa::X86_64));
         #[cfg(target_arch = "aarch64")]
         assert_eq!(current_isa(), Some(Isa::Aarch64));
+    }
+
+    #[test]
+    fn hardware_facts_come_from_the_lightweight_platform_feature() {
+        assert_eq!(
+            agenterm_platform::capability_status(agenterm_platform::Capability::Hardware),
+            agenterm_platform::CapabilityStatus::Available
+        );
+        let platform = agenterm_platform::hardware::processor_facts();
+        let mapped = detect_hardware(None);
+        assert_eq!(
+            mapped.logical_processors,
+            platform.logical_processors.map(std::num::NonZeroUsize::get)
+        );
+        for feature in platform.features {
+            if let Some(feature) = map_cpu_feature(feature) {
+                assert!(mapped.supports_cpu_feature(feature));
+            }
+        }
     }
 }

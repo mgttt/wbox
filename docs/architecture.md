@@ -51,8 +51,12 @@ provider 选择和能力状态仍由 wbox 持有。契约实际按 Host × Guest
 18 条；未验收的平台组合必须显式 planned 或
 research；尤其不能把所有 `not(windows)` 都当成 Linux。
 
-首批实际接入面是宿主身份与轻量文件系统约定：`wbox-machine::current_host()` 把
-`agenterm_platform::platform_kind()` 映射为 wbox `HostOs`，`EmuBackend` 用
+首批实际接入面是宿主身份、处理器事实与轻量文件系统约定：
+`wbox-machine::current_host()` 把 `agenterm_platform::platform_kind()` 映射为 wbox
+`HostOs`；`hardware` feature 提供 architecture、pointer width、逻辑处理器数与
+SSE2/AVX/AVX2/FMA/NEON 事实，wbox 再映射为桌面 guest `Isa` 与 `CpuFeature`。
+该 feature 不引入原生依赖，也不声称 WHPX/KVM/HVF 可用；加速 API 探测、guest ABI
+和产品路线继续归 wbox。`EmuBackend` 用
 `filesystem-conventions` 统一宿主可执行文件后缀与同目录定位。依赖固定到不可变
 Git SHA；`filesystem` 承载宿主约定、私有目录 ACL/mode 与私有原子文件发布，
 `locking` 承载 OCI pull 提交锁与状态 owner guard。状态 marker、liveness 分类、

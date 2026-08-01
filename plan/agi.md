@@ -148,6 +148,9 @@ AGI-COMPUTE
 
 成熟且脱离 wbox 产品语义仍成立的宿主探测、进程、文件、设备访问能力，可反馈并
 下沉到 `agenterm-platform`；wbox 继续持有计算路线、guest ABI 和产品验收语义。
+当前第一批处理器事实已经按此边界落地：上游零依赖报告 architecture、pointer width、
+逻辑处理器数和 CPU feature，`wbox-machine` 负责将其解释为计算、guest 与加速路线；
+FMA feature 可用于选择实验内核，但不能替代吞吐计量或加速后端可用性门禁。
 
 ## 6. 阶段判据
 

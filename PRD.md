@@ -2585,7 +2585,7 @@ TODO-WINDOW
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 24 unit tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 25 unit tests
 ├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 9 process tests
 ├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
 ├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
@@ -2600,6 +2600,7 @@ TODO-WINDOW
 ├── W38 私有状态目录与配置原子发布下沉                               [done] 0700/0600 + protected DACL
 ├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
+├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3576,8 +3577,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`13b203ec75044e429ac0a4cded7b7682421e18b2`，关闭 default features，启用
-`filesystem`、`locking` 与轻量 `process-control`。`platform_kind()` 驱动
+`9f3f9de49d21ed2697e7f0ed6dd2ab24d5964c8f`，关闭 default features，启用
+`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
+`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
 cross-check 已随本阶段同步通过。macOS 原生运行与三宿主真机 smoke 尚未由 wbox
@@ -3614,6 +3616,13 @@ wbox 只启用轻量面且有 capability 门禁证明进程清单、Job、pipe/c
 三宿主在进入原生 API 前统一拒绝 PID 0，防止 Unix 把“单 PID”误解释成当前进程组。
 `stop` 超时、Windows 命名 Job 终止、Linux supervisor/PDEATHSIG、容器成员枚举和
 进程树所有权仍是 wbox 产品/隔离后端语义，不下沉为“杀一个 PID”等于“杀容器”。
+
+`W41` 把 architecture、pointer width、逻辑处理器数和
+SSE2/AVX/AVX2/FMA/NEON 检测下沉到零依赖 `hardware` feature；`wbox-machine` 删除
+重复的 cfg/feature probe，只映射为自身桌面 `Isa` 与 `CpuFeature`。Windows x64
+实测为 8 逻辑处理器并报告 SSE2/AVX/AVX2/FMA；x86_64 Linux、x86_64 macOS、
+AArch64 macOS 与 i686 Windows 只提供严格交叉编译证据。WHPX/KVM/HVF 是否真正
+可用仍为 `Unprobed`，guest ISA、设备 ISA、加速策略和验收语义没有下沉。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
