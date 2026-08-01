@@ -2,16 +2,25 @@
 
 本文只描述长期有效的实现边界。产品范围和当前进度见 `../PRD.md`。
 
+wbox 是独立基础设施工具箱，Agenterm 是可能消费它的上层终端与控制面。允许的
+依赖方向是 `Agenterm -> wbox -> agenterm-platform/宿主 ABI`；wbox 不依赖 Agenterm
+应用层。集成面优先使用版本化 CLI/JSON contract，成熟且需要进程内复用的能力再
+公开为稳定 Rust API。
+
+开发反馈方向可以相反：wbox 作为高强度下游消费者，把通用宿主机制的失败复现、
+契约测试和修复建议反馈给 `agenterm-platform`。上游只接收脱离 wbox 仍成立的进程、
+文件、锁、路径和宿主能力；OCI、guest ABI、MachineCore 与产品路由留在 wbox。
+
 ## 1. 总体分层
 
 ```text
 CLI (`src/cli`)
 ├── run 参数 -> RunSpec
 ├── image pull/list/show/rm
-└── platform -> 三宿主 × 三来宾能力矩阵
+└── platform -> 三宿主 × 三来宾 × 双 ISA 能力矩阵
         |
 产品平台契约 (`src/platform.rs`)
-├── HostOs / GuestOs
+├── HostOs / GuestOs / Isa（x86-64、AArch64）
 ├── ExecutionProvider / IsolationModel / Priority
 └── available / legacy / planned / research
         |
@@ -34,8 +43,9 @@ CLI 只负责解析和分派；`RunSpec` 表达后端无关意图；后端负责
 泄漏到公共层。
 
 `src/platform.rs` 是 wbox 的产品语义，不是操作系统 FFI 集合。未来可由
-`agenterm-platform` 提供进程树、原子文件和跨进程锁等机制，但九格路由、执行
-provider 选择和能力状态仍由 wbox 持有。未验收的平台组合必须显式 planned 或
+`agenterm-platform` 提供进程树、原子文件和跨进程锁等机制，但产品路线、执行
+provider 选择和能力状态仍由 wbox 持有。契约实际按 Host × Guest × ISA 展开为
+18 条；未验收的平台组合必须显式 planned 或
 research；尤其不能把所有 `not(windows)` 都当成 Linux。
 
 计划中的 provider 层分成三段，依赖只能向下：
@@ -126,15 +136,18 @@ guest 数字直接回退为同号宿主 fd，也不得重复翻译已转换的 f
 复制解释器：
 
 ```text
-第一方 Rust x86-64 CPU core
+第一方 Rust MachineCore
+├── x86-64 CPU core（已有，继续解耦）
+├── AArch64 CPU core（规划）
 ├── ELF loader + Linux syscall/VFS personality  -> Linux OCI
 └── PE loader + NT/Win32 ABI personality         -> Windows CLI
 ```
 
 当前 `crates/wbox-linux` 仍把 CPU、ELF 与 Linux syscall 放在同一 crate。抽取时先
-冻结寄存器、内存、异常、中断/投递点和 task scheduler 接口，再移动代码；不能为了
-形式拆 crate 而制造双向依赖。Apple Silicon 首版可继续解释 x86-64 guest，ARM64
-guest 是独立后续能力，OCI manifest 选择必须如实反映 runtime 支持的 ISA。
+冻结 ISA 无关的地址空间、异常、中断/投递点和 task scheduler 接口，再把寄存器与
+指令语义留在各 ISA core；不能为了形式拆 crate 而制造双向依赖。Apple Silicon 可先
+解释 x86-64 guest，但 AArch64 从 contract revision 3 起已经拥有独立预填路线，OCI
+manifest 选择必须如实反映 runtime 支持的 ISA。
 
 ## 3. Linux 后端
 

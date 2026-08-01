@@ -19,6 +19,7 @@ PRD
 │   ├── 2.1 目标   2.2 核心价值   2.3 非目标
 │   ├── 2.2.1 Rust-only 架构硬约束（两档口径 + 三条棘轮）
 │   ├── 2.2.2 自实现密码学的安全声明（wbox-tls 的性质与边界）
+│   ├── 2.2.3 与 Agenterm 的依赖边界和双向开发反馈
 │   ├── 2.4 对标基线 ★ 四象限状态 + 长期横向矩阵
 │   │   ├── 2.4   有什么     —— Q1/Q2/Q3/Q4 四张状态表
 │   │   ├── 2.4.1 怎么跑的   —— 两条隔离链路 × 两种程序格式
@@ -121,14 +122,16 @@ wbox
     └── Windows 程序 -> macOS 外层隔离 + 第一方 Rust Win32 兼容运行时
 ```
 
-长期产品面是“三宿主 × 三来宾”，但路线状态不能靠愿景推断。唯一机器可读事实源
-是 `src/platform.rs`；`wbox platform [--json]` 输出九格各自的 priority、execution
+长期产品面是“三宿主 × 三来宾 × 双 ISA（x86-64/AArch64）”，共 18 条路线，但状态
+不能靠愿景推断。唯一机器可读事实源是 `src/platform.rs`；`wbox platform [--json]`
+输出每条路线的 ISA、priority、execution
 provider、isolation model 与 `available/legacy/planned/research` 状态。当前符合 Rust-only
-要求的三格可标 `available`；Linux -> Windows 的系统 Wine 路径是待删除的 legacy，
-不能再算合规能力。macOS 三格在真机门禁建立前保持 planned，Windows/Linux 承载
-macOS 来宾则保持 research。
+要求的三条 x86-64 路线可标 `available`；Linux -> Windows 的 x86-64 系统 Wine
+路径是待删除的 legacy，
+不能再算合规能力。macOS 宿主的六条路线在真机门禁建立前保持 planned，
+Windows/Linux 承载 macOS 来宾的四条路线则保持 research。
 
-**近期优先级不是平均推进九格，而是三宿主 × 两类核心工作负载：**
+**近期优先级不是平均推进 18 条路线，而是三宿主 × 两类核心工作负载 × 双 ISA：**
 
 | 宿主 | Linux OCI 镜像 | Windows CLI/PE |
 |---|---|---|
@@ -136,9 +139,19 @@ macOS 来宾则保持 research。
 | Linux | rootless namespace/cgroup，已有产品路径 | 第一方 Rust Win32 runtime；系统 Wine 仅 legacy |
 | macOS | macOS 外层隔离 + `wbox-linux`，首批 macOS 主线 | macOS 外层隔离 + 同一第一方 Rust Win32 runtime |
 
-这六格达到产品门禁后，wbox 才算形成“跨三宿主的 Docker/Podman 核心能力 + 少量
-Windows 终端程序沙箱能力”。macOS 来宾、完整 GUI、通用整机 VM 和其它九格能力均
-保留长期目标，但不抢占这六格的 CPU、ABI、隔离与测试工作。
+六个 OS 组合、十二条 ISA 路线达到产品门禁后，wbox 才算形成“跨三宿主的
+Docker/Podman 核心能力 + 少量 Windows 终端程序沙箱能力”。macOS 来宾、完整 GUI、
+通用整机 VM 等六条 deferred 路线保留长期目标，但不抢占主线的 CPU、ABI、隔离与
+测试工作。
+
+18 条路线的预填状态如下；`x64/a64` 分别代表 x86-64 与 AArch64，机器可读详情和
+原因仍以 `wbox platform --json` 为准：
+
+| 宿主 \ 来宾 | Windows | Linux | macOS |
+|---|---|---|---|
+| Windows | x64 available / a64 planned | x64 available / a64 planned | x64 research / a64 research |
+| Linux | x64 legacy / a64 planned | x64 available / a64 planned | x64 research / a64 research |
+| macOS | x64 planned / a64 planned | x64 planned / a64 planned | x64 planned / a64 planned |
 
 ### 2.2 核心价值
 
@@ -238,6 +251,30 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 完整取舍见 `docs/rust-rewrite.md` §5。
 
+### 2.2.3 与 Agenterm 的产品关系
+
+Agenterm 是 agent 工作使用的终端与控制面；wbox 是向下深入宿主操作系统、ISA、
+虚拟硬件、guest ABI、隔离与镜像生命周期的基础设施工具箱。wbox 保持独立仓库、
+独立 CLI、独立发布和独立门禁，未来可以作为 Agenterm 下的独立工具或 Rust 库使用，
+但不能反向依赖 Agenterm 应用层。
+
+```text
+Agenterm（终端 / agent 控制面）
+    -> wbox CLI、JSON contract 或稳定 Rust API
+        -> wbox execution/isolation/machine/ABI
+            -> agenterm-platform 的共享宿主机制 + 操作系统/硬件 ABI
+```
+
+`agenterm-platform` 可提供进程树、原子文件、锁、路径和宿主信息等通用机制；wbox
+继续拥有 3×3×2 产品路由、CPU/内存/设备模型、guest personality、OCI/PE/ELF/Mach-O
+语义及隔离强度。任何集成都必须保持这个单向依赖，避免 Agenterm UI/会话状态渗入
+wbox 的可移植核心。
+
+开发反馈是双向的：wbox 在三宿主、双 ISA、隔离和长生命周期压力下持续使用并测试
+`agenterm-platform`，发现通用机制缺口时应携带最小复现、跨平台契约和门禁回馈上游，
+刺激 platform crate 演进；上游改进再由 wbox 真机产品门禁验收。只有可脱离 wbox
+独立成立的机制才能上移，OCI、guest ABI、路由优先级等产品语义必须留在 wbox。
+
 ### 2.3 非目标
 
 范围随 §2.4 的对标基线做过一次调整：原先列为 `[out]` 的**文件系统重定向、
@@ -258,7 +295,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 ### 2.4 对标基线
 
-现有四个象限各有明确参照物，长期九格状态由 `wbox platform` 报告。
+现有四个 x86-64 象限各有明确参照物，长期 3×3×2 状态由 `wbox platform` 报告。
 **列参照物不等于承诺功能对等**——每格逐条列出参照物的
 特征能力与 wbox 的实际状态，能力上限受 §2.3 约束时如实标注。
 
@@ -541,7 +578,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 ---
 
 **现有四格合起来看，wbox 的默认路径仍是一条线**：不装驱动、不要求虚拟化、
-不起常驻守护进程，在这个前提下把各象限能兑现的部分做到位。长期九格不会抹掉
+不起常驻守护进程，在这个前提下把各象限能兑现的部分做到位。长期 3×3×2 不会抹掉
 这条 portable 路径；完整内核、跨 OS 与跨 ISA 能力也由第一方 Rust provider 补齐。
 宿主硬件虚拟化 ABI 可以作为加速后端，但第三方虚拟化产品不是 provider。
 
@@ -3448,7 +3485,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 
 ```text
 TODO-MACOS
-├── M1 三宿主 × 三来宾产品契约与 `wbox platform`        [done] Windows 侧纯逻辑门禁
+├── M1 三宿主 × 三来宾 × 双 ISA 产品契约与 `wbox platform` [done] 18 路线纯逻辑门禁
 ├── M2 接入独立 `agenterm-platform` 的最小机制面         [planned] 等上游 crate/commit
 ├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [planned]
 ├── M4 macOS 原生程序沙箱与资源限制取证                  [planned]
@@ -3462,7 +3499,7 @@ TODO-MACOS
 provider 与外层隔离分开建模，避免再用 `cfg!(windows) { ... } else { linux }`
 这种二元判断；此前 `image_backend_kind()` 正是因此会把未来 macOS 构建错误分派到
 Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能反向拥有
-wbox 的九格路由与能力状态。
+wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
@@ -3492,8 +3529,9 @@ wbox 的九格路由与能力状态。
 
 ### N3 兼容性
 
-- Windows 10/11/Server 和 Linux x86-64 为目标宿主。
-- Linux guest 目标是常见 x86-64 CLI，不承诺完整内核 ABI。
+- Windows 10/11/Server、Linux 与 macOS 是目标宿主；x86-64 为当前门禁架构，
+  AArch64 已进入 3×3×2 规划但尚无 available 路线。
+- Linux guest 近期目标是常见 x86-64/AArch64 CLI，不承诺完整内核 ABI。
 - CLI 以 Docker/Podman 的常用基础命令为迁移入口，精确范围以 F1.7 为准；
   未列出的命令和选项不构成兼容承诺。
 - GUI、驱动、内核模块和依赖硬件特性的程序不在兼容范围。

@@ -1,11 +1,11 @@
 //! wbox product-level host/guest execution contract.
 //!
 //! This layer answers which execution and isolation model wbox promises for a
-//! host/guest pair. Native mechanics (process trees, durable files, locks) may
+//! host/guest/ISA tuple. Native mechanics (process trees, durable files, locks) may
 //! later come from `agenterm-platform`; those mechanics must not own this
 //! product routing policy.
 
-pub const CONTRACT_REVISION: u32 = 2;
+pub const CONTRACT_REVISION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOs {
@@ -41,6 +41,23 @@ impl GuestOs {
             Self::Windows => "windows",
             Self::Linux => "linux",
             Self::Macos => "macos",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isa {
+    X86_64,
+    Aarch64,
+}
+
+impl Isa {
+    pub const ALL: [Self; 2] = [Self::X86_64, Self::Aarch64];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86-64",
+            Self::Aarch64 => "aarch64",
         }
     }
 }
@@ -119,6 +136,7 @@ impl Priority {
 pub struct Route {
     pub host: HostOs,
     pub guest: GuestOs,
+    pub isa: Isa,
     pub priority: Priority,
     pub provider: ExecutionProvider,
     pub isolation: IsolationModel,
@@ -126,13 +144,14 @@ pub struct Route {
     pub reason: &'static str,
 }
 
-pub const fn route(host: HostOs, guest: GuestOs) -> Route {
+pub const fn route(host: HostOs, guest: GuestOs, isa: Isa) -> Route {
     use Availability::{Available, Legacy, Planned, Research};
     use ExecutionProvider::{
         CompatibilityRuntime, FullSystemVirtualizer, NativeKernel, UserModeEmulator,
     };
     use GuestOs::{Linux as LinuxGuest, Macos as MacosGuest, Windows as WindowsGuest};
     use HostOs::{Linux, Macos, Windows};
+    use Isa::{Aarch64, X86_64};
     use IsolationModel::{AppContainerJob, LinuxNamespaces, ProviderBoundary};
     use Priority::{Core, Deferred};
 
@@ -141,65 +160,93 @@ pub const fn route(host: HostOs, guest: GuestOs) -> Route {
         MacosGuest => Deferred,
     };
 
-    let (provider, isolation, availability, reason) = match (host, guest) {
-        (Windows, WindowsGuest) => (
+    let isolation = match (host, guest) {
+        (Windows, WindowsGuest | LinuxGuest) => AppContainerJob,
+        (Linux, WindowsGuest | LinuxGuest) => LinuxNamespaces,
+        _ => ProviderBoundary,
+    };
+
+    let (provider, availability, reason) = match (host, guest, isa) {
+        (Windows, WindowsGuest, X86_64) => (
             NativeKernel,
-            AppContainerJob,
             Available,
             "AppContainer token plus Job Object",
         ),
-        (Windows, LinuxGuest) => (
-            UserModeEmulator,
-            AppContainerJob,
-            Available,
-            "wbox-linux inside AppContainer plus Job Object",
+        (Windows, WindowsGuest, Aarch64) => (
+            NativeKernel,
+            Planned,
+            "Windows AArch64 build and AppContainer product gate are not established",
         ),
-        (Windows, MacosGuest) => (
+        (Windows, LinuxGuest, X86_64) => (
+            UserModeEmulator,
+            Available,
+            "x86-64 wbox-linux inside AppContainer plus Job Object",
+        ),
+        (Windows, LinuxGuest, Aarch64) => (
+            UserModeEmulator,
+            Planned,
+            "first-party AArch64 CPU core and Linux personality are not implemented",
+        ),
+        (Windows, MacosGuest, _) => (
             FullSystemVirtualizer,
-            ProviderBoundary,
             Research,
             "first-party Rust Darwin runtime is not implemented",
         ),
-        (Linux, LinuxGuest) => (
+        (Linux, LinuxGuest, X86_64) => (
             NativeKernel,
-            LinuxNamespaces,
             Available,
-            "rootless namespaces plus cgroup or explicit limit fallback",
+            "x86-64 rootless namespaces plus cgroup or explicit limit fallback",
         ),
-        (Linux, WindowsGuest) => (
+        (Linux, LinuxGuest, Aarch64) => (
+            NativeKernel,
+            Planned,
+            "Linux AArch64 build and native product gate are not established",
+        ),
+        (Linux, WindowsGuest, X86_64) => (
             CompatibilityRuntime,
-            LinuxNamespaces,
             Legacy,
             "system Wine path is legacy; the first-party Rust Win32 runtime is not implemented",
         ),
-        (Linux, MacosGuest) => (
+        (Linux, WindowsGuest, Aarch64) => (
+            CompatibilityRuntime,
+            Planned,
+            "first-party AArch64 PE/Win32 runtime is not implemented",
+        ),
+        (Linux, MacosGuest, _) => (
             FullSystemVirtualizer,
-            ProviderBoundary,
             Research,
             "first-party Rust Darwin runtime is not implemented",
         ),
-        (Macos, MacosGuest) => (
+        (Macos, MacosGuest, _) => (
             NativeKernel,
-            ProviderBoundary,
             Planned,
             "native macOS sandbox adapter is not implemented",
         ),
-        (Macos, LinuxGuest) => (
+        (Macos, LinuxGuest, X86_64) => (
             UserModeEmulator,
-            ProviderBoundary,
             Planned,
-            "port and qualify wbox-linux plus a macOS outer sandbox",
+            "port x86-64 wbox-linux and qualify a macOS outer sandbox",
         ),
-        (Macos, WindowsGuest) => (
-            CompatibilityRuntime,
-            ProviderBoundary,
+        (Macos, LinuxGuest, Aarch64) => (
+            UserModeEmulator,
             Planned,
-            "implement a first-party Rust Win32 runtime plus a macOS outer sandbox",
+            "implement the AArch64 Linux personality and qualify a macOS outer sandbox",
+        ),
+        (Macos, WindowsGuest, X86_64) => (
+            CompatibilityRuntime,
+            Planned,
+            "port the first-party x86-64 Win32 runtime and qualify a macOS outer sandbox",
+        ),
+        (Macos, WindowsGuest, Aarch64) => (
+            CompatibilityRuntime,
+            Planned,
+            "implement the AArch64 Win32 runtime and qualify a macOS outer sandbox",
         ),
     };
     Route {
         host,
         guest,
+        isa,
         priority,
         provider,
         isolation,
@@ -220,36 +267,58 @@ pub const fn current_host() -> Option<HostOs> {
     }
 }
 
+pub const fn current_isa() -> Option<Isa> {
+    if cfg!(target_arch = "x86_64") {
+        Some(Isa::X86_64)
+    } else if cfg!(target_arch = "aarch64") {
+        Some(Isa::Aarch64)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn matrix_is_complete_and_unique() {
-        let mut pairs = Vec::new();
+        let mut tuples = Vec::new();
         for host in HostOs::ALL {
             for guest in GuestOs::ALL {
-                let item = route(host, guest);
-                assert_eq!(item.host, host);
-                assert_eq!(item.guest, guest);
-                pairs.push((item.host.as_str(), item.guest.as_str()));
+                for isa in Isa::ALL {
+                    let item = route(host, guest, isa);
+                    assert_eq!(item.host, host);
+                    assert_eq!(item.guest, guest);
+                    assert_eq!(item.isa, isa);
+                    tuples.push((item.host.as_str(), item.guest.as_str(), item.isa.as_str()));
+                }
             }
         }
-        pairs.sort_unstable();
-        pairs.dedup();
-        assert_eq!(pairs.len(), 9);
+        tuples.sort_unstable();
+        tuples.dedup();
+        assert_eq!(tuples.len(), 18);
     }
 
     #[test]
     fn three_hosts_by_two_primary_guests_are_core() {
         let core = HostOs::ALL
             .into_iter()
-            .flat_map(|host| GuestOs::ALL.map(|guest| route(host, guest)))
+            .flat_map(|host| {
+                GuestOs::ALL
+                    .into_iter()
+                    .flat_map(move |guest| Isa::ALL.map(move |isa| route(host, guest, isa)))
+            })
             .filter(|item| item.priority == Priority::Core)
             .count();
-        assert_eq!(core, 6);
+        assert_eq!(core, 12);
         for host in HostOs::ALL {
-            assert_eq!(route(host, GuestOs::Macos).priority, Priority::Deferred);
+            for isa in Isa::ALL {
+                assert_eq!(
+                    route(host, GuestOs::Macos, isa).priority,
+                    Priority::Deferred
+                );
+            }
         }
     }
 
@@ -257,23 +326,27 @@ mod tests {
     fn only_rust_only_qualified_routes_are_available() {
         let available = HostOs::ALL
             .into_iter()
-            .flat_map(|host| GuestOs::ALL.map(|guest| route(host, guest)))
+            .flat_map(|host| {
+                GuestOs::ALL
+                    .into_iter()
+                    .flat_map(move |guest| Isa::ALL.map(move |isa| route(host, guest, isa)))
+            })
             .filter(|item| item.availability == Availability::Available)
-            .map(|item| (item.host, item.guest))
+            .map(|item| (item.host, item.guest, item.isa))
             .collect::<Vec<_>>();
         assert_eq!(
             available,
             vec![
-                (HostOs::Windows, GuestOs::Windows),
-                (HostOs::Windows, GuestOs::Linux),
-                (HostOs::Linux, GuestOs::Linux),
+                (HostOs::Windows, GuestOs::Windows, Isa::X86_64),
+                (HostOs::Windows, GuestOs::Linux, Isa::X86_64),
+                (HostOs::Linux, GuestOs::Linux, Isa::X86_64),
             ]
         );
     }
 
     #[test]
     fn external_wine_route_is_visible_but_not_rust_only_available() {
-        let item = route(HostOs::Linux, GuestOs::Windows);
+        let item = route(HostOs::Linux, GuestOs::Windows, Isa::X86_64);
         assert_eq!(item.availability, Availability::Legacy);
         assert_eq!(item.provider, ExecutionProvider::CompatibilityRuntime);
     }
@@ -281,10 +354,12 @@ mod tests {
     #[test]
     fn macos_routes_do_not_claim_unimplemented_isolation() {
         for guest in GuestOs::ALL {
-            assert_ne!(
-                route(HostOs::Macos, guest).availability,
-                Availability::Available
-            );
+            for isa in Isa::ALL {
+                assert_ne!(
+                    route(HostOs::Macos, guest, isa).availability,
+                    Availability::Available
+                );
+            }
         }
     }
 }
