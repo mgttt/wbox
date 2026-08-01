@@ -3641,7 +3641,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`58ea7f38ecac52213b0dbedbade9f33322ff620d`，关闭 default features，按消费包启用
+`b85dc538e14fde0f02ef6f28d938fcecd0ad281f`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory`、零依赖 `hardware` 与独立 `host-memory`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -3799,7 +3799,8 @@ available、cgroup、Job Object 或进程预算。wbox-machine 直接重导出�
 不保留第二份探测。本 Windows 机器实测为 page 4096、allocation granularity 65536、
 physical 68718866432 bytes；上游五目标严格 Clippy、Windows 原生单测及 wbox-machine
 26 单测/9 进程测试、wbox Quick 301 项及完整 workspace Rust 门禁通过，Unix 真机
-交接见 L28/M11。
+交接见 L28/M11。后续 revision 又把三宿主原始数值统一送入公共校验，纯测试覆盖零值、
+非整页 allocation granularity、物理容量小于一页与页数乘法溢出。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

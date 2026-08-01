@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agenterm-platform"
 version = "0.1.11"
-source = "git+https://github.com/mgttt/agenterm.git?rev=58ea7f38ecac52213b0dbedbade9f33322ff620d#58ea7f38ecac52213b0dbedbade9f33322ff620d"
+source = "git+https://github.com/mgttt/agenterm.git?rev=b85dc538e14fde0f02ef6f28d938fcecd0ad281f#b85dc538e14fde0f02ef6f28d938fcecd0ad281f"
 dependencies = [
  "libc",
  "windows-sys",
