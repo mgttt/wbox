@@ -45,6 +45,8 @@ scripts/check.ps1 -Quick -WindowsTarget
 不获取 Cargo 构建锁，适合后台只读观察者调用。`-Mode Rust` 运行 rustfmt 与 host
 Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 不会编译 `cfg(windows)` 模块，所以跨宿主修改共享/Windows 代码时双目标都是门槛。
+四个非宿主目标统一由 `scripts/check-portable-targets.ps1` 执行；可用 `-Target`
+只检查其中一个目标，CI 则以四个独立矩阵项持续执行并纳入 release 门禁。
 工作树空白检查同时覆盖未暂存与已暂存 diff，避免 `git add` 后反而漏过错误。
 
 验证按成本递增：先 `lint.ps1 -Mode Static`，再 `check.ps1 -Quick`，然后运行改动
@@ -52,8 +54,8 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
 证据仍由下述唯一 owning gate 产出。`check.ps1` 和构建 wrapper 默认清理 Cargo
 遗留的孤立 incremental session 锁、空目录与测试临时目录。完整增量单元采用两级
-有界 LRU：无论总量是否超预算，每个 crate 默认最多保留最近两个单元；超过 512 MiB
-后继续回收各 crate 的第二份冷单元，同时至少保留最新一份。Windows 可用
+有界 LRU：无论总量是否超预算，每个 crate 默认只保留最新单元；超过 512 MiB
+后继续回收可再生的冷单元，同时至少保留最新一份。Windows 可用
 `-MaxIncrementalSizeMiB` 调整预算，Linux/macOS 使用
 `WBOX_MAX_INCREMENTAL_MIB`；需要完整释放 debug 增量缓存时显式传
 `-CleanIncremental`，需要跳过增量目录扫描时传 `-KeepIncremental`。
@@ -68,6 +70,13 @@ macOS 编译契约用两个 target 的 workspace all-targets 严格 Clippy 固�
 ```powershell
 cargo clippy --locked --workspace --all-targets --target x86_64-apple-darwin -- -D warnings
 cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+日常可直接运行统一门禁：
+
+```powershell
+scripts/check-portable-targets.ps1
+scripts/check-portable-targets.ps1 -Target aarch64-unknown-linux-gnu
 ```
 
 Windows 上该门禁只做类型检查与 lint，不链接或运行 Darwin 产物；它不能替代 macOS

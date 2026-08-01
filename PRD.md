@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W50、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W51、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L27、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M10
 ├── 5  非功能需求 N1–N4
@@ -2612,6 +2612,7 @@ TODO-WINDOW
 ├── W48 命名共享内存下沉并展开跨宿主多进程 zero-copy                       [done] Win32 FFI 删除 + 1/2/4/8 workers
 ├── W49 单 PID executable path 下沉并删除 top Win32 查询                     [done] PathBuf + fallback 门禁
 ├── W50 共享映射长度失配 fail-closed                                          [done] oversized open 无指针暴露
+├── W51 三宿主双 ISA 非宿主目标持续编译门禁                                    [done] 四目标 all-targets Clippy
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3771,6 +3772,13 @@ Unix 原生验收交接为 L27/M10。
 回归，Windows 真机返回 `Map`，Linux/macOS 编译期固定 `SizeMismatch` 分支；POSIX
 原生行为继续在 L26/M9 验收。同期把 process-image missing-PID 测试改用 `pid_t`
 范围内的 `i32::MAX`，避免把 macOS 正确的 `IdOutOfRange` 误判成 `NotFound` 回归。
+
+`W51` 把此前依赖人工执行的四个非宿主编译目标收敛为
+`scripts/check-portable-targets.ps1`：i686 Windows、AArch64 Linux 及 x86-64/AArch64
+macOS 均执行 workspace all-targets Clippy 并以 warning 为错误。脚本先验证 rustup
+目标已安装、关闭 incremental 避免交叉目标缓存膨胀，并在退出时恢复调用者环境；CI
+以四个独立矩阵项运行，`fail-fast: false` 保留全部失败证据，且成为 release 的第十个
+前置门禁。该门禁证明类型与 lint 契约，不替代对应宿主的真机运行证据。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

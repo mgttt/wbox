@@ -18,9 +18,10 @@ env:
   CARGO_TERM_COLOR: always
 
 # 发布门禁说明（详见 docs/testing.md §发布门禁）：
-#   tag v* 的 release job needs 全部九个门禁 job——
+#   tag v* 的 release job needs 全部十个门禁 job——
 #   test-linux（Rust 单测）+ test-windows（同一套单测在 windows 上跑，
 #   覆盖 cfg(windows) 模块）+ check-windows-msvc（Win32 编译门禁）+
+#   check-portable-targets（非宿主双 ISA/三 OS 严格编译门禁）+
 #   smoke-windows（真机冒烟）+ build-wbox-linux（真机验收矩阵）+
 #   guest-tests（guest 测试，前置缺失也按失败处理）+
 #   test-windows-product（最终双 exe 的公开 CLI 产品路径）+
@@ -102,6 +103,35 @@ jobs:
         run: cargo clippy --all-targets --locked --workspace -- -D warnings
       - name: clippy —— windows-msvc 目标（-D warnings）
         run: cargo clippy --all-targets --locked --workspace --target x86_64-pc-windows-msvc -- -D warnings
+
+  # ②b 非宿主可移植性：持续编译 3×2 矩阵中 host CI 看不到的四个目标。
+  #     只做类型/lint 契约，不把交叉编译误报成对应宿主的真机运行证据。
+  check-portable-targets:
+    needs: preflight
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - i686-pc-windows-msvc
+          - aarch64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: portable-${{ matrix.target }}
+      - name: workspace all-targets Clippy (${{ matrix.target }})
+        shell: pwsh
+        run: scripts/check-portable-targets.ps1 -Target '${{ matrix.target }}'
 
   # ③ Windows 真机：build + 冒烟（GitHub windows runner 支持 AppContainer，无需管理员）
   smoke-windows:
@@ -489,12 +519,12 @@ jobs:
           WBOX_WINE_REQUIRE: '1'
         run: scripts/test-linux-backend.sh target/debug/wbox ./busybox
 
-  # ⑦ tag 发布门禁：needs 全部六个门禁 job 全绿才创建 Release；
+  # ⑦ tag 发布门禁：needs 全部十个门禁 job 全绿才创建 Release；
   #    打包 portable 双 exe（wbox.exe + wbox-linux.exe）+ SHA256SUMS.txt
   release:
     timeout-minutes: 30  # 构建 release + 打包 + 上传
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test-linux, test-windows, check-windows-msvc, smoke-windows, build-wbox-linux, guest-tests, test-windows-product, test-linux-backend, test-wine-backend]
+    needs: [test-linux, test-windows, check-windows-msvc, check-portable-targets, smoke-windows, build-wbox-linux, guest-tests, test-windows-product, test-linux-backend, test-wine-backend]
     runs-on: windows-latest
     permissions:
       contents: write
