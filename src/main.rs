@@ -22,6 +22,7 @@ mod build;
 mod disk_usage;
 mod layers;
 mod oci;
+mod paths;
 mod platform;
 mod volume;
 // capability 面裁剪（PRD F9.8）。解析与求解是纯逻辑，跨平台可测；

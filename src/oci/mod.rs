@@ -175,11 +175,9 @@ impl ImageRef {
 
 /// 本地缓存根目录：Windows 用 %USERPROFILE%，其余用 $HOME。
 pub fn cache_root() -> crate::error::Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
-        .ok_or_else(|| WboxError::registry("无法确定用户主目录（USERPROFILE/HOME 均未设置）"))?;
-    Ok(PathBuf::from(home).join(".wbox").join("images"))
+    let root = crate::paths::root()
+        .map_err(|error| WboxError::registry(format!("无法确定用户主目录：{error}")))?;
+    Ok(root.join("images"))
 }
 
 /// 缓存目录路径段的净化。

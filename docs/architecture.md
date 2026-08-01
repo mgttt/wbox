@@ -77,6 +77,9 @@ guest mode/umask、stat ABI 与 VFS 仍由 `wbox-linux` 持有。该对象身份
 单宿主 PID 的 graceful/forceful 终止通过轻量 `process-control` feature；完整 process
 inventory、Job/process-group guard 与 pipe API 保持关闭。wbox 继续拥有容器进程树
 归属、stop/kill 超时和 Windows Job/Linux namespace 收尾策略。
+用户主目录也来自零原生依赖的 `filesystem-conventions`：Windows 只读
+`USERPROFILE`，Linux/macOS 只读 `HOME`。wbox 的 `paths::root()` 再追加产品专属
+`.wbox`，images/run/volumes/buildcache 不各自解释环境变量；目录名和迁移策略不下沉。
 workspace 统一持有 `windows-sys` 版本，各 package 只声明自身最小 feature，避免未来
 启用通用原生机制时出现两套 Windows ABI 依赖。
 OCI 默认架构也必须消费这一宿主身份：Linux 原生 provider 跟随 target ISA，

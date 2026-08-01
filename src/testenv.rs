@@ -106,8 +106,16 @@ impl TempHome {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut env = crate::testenv::EnvGuard::new();
-        env.set("HOME", &dir);
-        env.remove("USERPROFILE");
+        #[cfg(windows)]
+        {
+            env.set("USERPROFILE", &dir);
+            env.remove("HOME");
+        }
+        #[cfg(not(windows))]
+        {
+            env.set("HOME", &dir);
+            env.remove("USERPROFILE");
+        }
         Self { dir, env }
     }
 

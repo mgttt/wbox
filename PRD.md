@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W53、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L29、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M12
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W54、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L30、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M13
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2637,6 +2637,7 @@ TODO-WINDOW
 ├── W51 三宿主双 ISA 非宿主目标持续编译门禁                                    [done] 四目标 all-targets Clippy
 ├── W52 宿主内存几何与物理容量下沉                                               [done] 4 KiB/64 KiB/64 GiB 实测
 ├── W53 宿主卷容量下沉与 `system df` Windows 验收                                  [done] 11 images/2.5 GiB + 4 KiB unit
+├── W54 用户主目录约定下沉与 `.wbox` 根路径收敛                                    [done] USERPROFILE only + 456 tests
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3048,8 +3049,14 @@ TODO-LINUX
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
 ├── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
 ├── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
-└── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
+├── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
+└── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
 ```
+
+`L30` 在 Linux 真机运行 `filesystem-conventions` 与 wbox 全套测试，确认只读取非空
+`HOME`、忽略 `USERPROFILE`，并让 images/run/volumes/buildcache 四棵树都从同一个
+`$HOME/.wbox` 派生。XDG_CONFIG_HOME/XDG_DATA_HOME 仍只影响通用 config/data roots，
+不能迁移 wbox 既有存储布局。
 
 `L29` 在 Linux 真机运行 platform `storage` 单元测试和 `wbox system df`，以 `df`/
 `statvfs` 交叉核对总容量、当前用户可用量和 fragment size；再造 active/exited 容器、
@@ -3658,8 +3665,13 @@ TODO-MACOS
 ├── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
 ├── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
 ├── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
-└── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
+├── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
+└── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
 ```
+
+`M13` 在 Intel 与 Apple Silicon 真机确认 `HOME` 为唯一用户主目录输入、空值 fail closed，
+并运行 wbox 根路径用例；`Library/Application Support` 仍是通用 config/data convention，
+不替代兼容既有镜像与容器状态所需的 `$HOME/.wbox`。
 
 `M12` 在 Intel 与 Apple Silicon 真机运行 platform `storage` 单元测试及
 `wbox system df`，核对 APFS 容量、当前用户可用量和 allocation unit，并验证空 HOME
@@ -3676,7 +3688,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`c2e521ba0ccd501ee2c6bfeb176fb26a930e844d`，关闭 default features，按消费包启用
+`a8de7f25733d73155dbc728c01e45da4af17cb5c`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory` 与 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -3848,6 +3860,14 @@ physical 68718866432 bytes；上游五目标严格 Clippy、Windows 原生单测
 卷总量 250.0 GiB、当前用户可用 44.3 GiB、allocation unit 4096 bytes；wbox 454 项
 测试中 451 通过/3 个需外部网络环境的门禁保持 ignored，host 严格 Clippy 通过。
 platform 五目标严格 Clippy 通过，Linux/macOS 真机验收交接见 L29/M12。
+
+`W54` 给零原生依赖的 `filesystem-conventions` 增加 `user_home_directory()`：Windows
+只接受非空 `USERPROFILE`，Linux/macOS 只接受非空 `HOME`，禁止跨 OS fallback。
+wbox 新增唯一 `paths::root()`，保留产品名 `.wbox`，images、run、volumes、buildcache
+四个子系统删除各自环境解析；此前两份接受空值、Linux 也优先读 USERPROFILE 的漂移
+由此消失。Windows `TempHome` 改为设置 USERPROFILE 并清除 HOME，456 项测试中 453
+通过、3 个外部网络门禁 ignored；platform conventions 4 项测试与五目标严格 Clippy
+通过，Linux/macOS 运行交接见 L30/M13。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

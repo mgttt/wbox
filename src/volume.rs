@@ -25,11 +25,9 @@ use std::path::PathBuf;
 /// 卷根目录：`~/.wbox/volumes`。与镜像缓存、运行状态同在 `~/.wbox` 下，
 /// 便于统一清理。
 pub fn volumes_root() -> Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
-        .ok_or_else(|| WboxError::args("无法确定用户主目录（USERPROFILE/HOME 均未设置）"))?;
-    Ok(PathBuf::from(home).join(".wbox").join("volumes"))
+    let root = crate::paths::root()
+        .map_err(|error| WboxError::args(format!("无法确定用户主目录：{error}")))?;
+    Ok(root.join("volumes"))
 }
 
 /// 这个源串是不是**卷名**（而不是宿主路径）。

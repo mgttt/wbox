@@ -82,10 +82,8 @@ fn collect_report() -> Result<SystemDf> {
     let build_root = crate::build::cache_root()?;
     let build_entries = child_directories(&build_root)?;
 
-    let managed_root = crate::oci::cache_root()?
-        .parent()
-        .ok_or_else(|| WboxError::args("镜像缓存目录缺少 .wbox 父目录"))?
-        .to_path_buf();
+    let managed_root = crate::paths::root()
+        .map_err(|error| WboxError::args(format!("无法确定用户主目录：{error}")))?;
     let backing_path = closest_existing_directory(&managed_root)?;
     let volume = agenterm_platform::storage::volume_space(&backing_path)
         .map_err(|error| WboxError::args(format!("查询存储卷失败：{error}")))?;

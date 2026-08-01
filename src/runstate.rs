@@ -44,10 +44,9 @@ const OPERATION_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 状态根目录：`~/.wbox/run`（与镜像缓存同在 `~/.wbox` 下，便于统一清理）。
 pub fn run_root() -> Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| WboxError::args("无法确定用户主目录（USERPROFILE/HOME 均未设置）"))?;
-    Ok(PathBuf::from(home).join(".wbox").join("run"))
+    let root = crate::paths::root()
+        .map_err(|error| WboxError::args(format!("无法确定用户主目录：{error}")))?;
+    Ok(root.join("run"))
 }
 
 /// 容器名 → 状态目录。名字已由 `validate_container_name` 校验过长度，

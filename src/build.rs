@@ -866,10 +866,9 @@ pub(crate) fn merge_overlay_upper(_upper: &Path, _target: &Path) -> Result<()> {
 
 /// 构建缓存的根目录。与镜像缓存并列，用户清理时一处就够。
 pub(crate) fn cache_root() -> Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .ok_or_else(|| WboxError::args("无法确定用户主目录"))?;
-    Ok(PathBuf::from(home).join(".wbox").join("buildcache"))
+    let root = crate::paths::root()
+        .map_err(|error| WboxError::args(format!("无法确定用户主目录：{error}")))?;
+    Ok(root.join("buildcache"))
 }
 
 /// 逐步累进的缓存键。
