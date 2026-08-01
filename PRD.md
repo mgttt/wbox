@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W59、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L32、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M16
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W60、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L33、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M17
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2649,6 +2649,7 @@ TODO-WINDOW
 ├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
 ├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
 ├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
+├── W60 宿主原生虚拟化 API 可用性事实                                                 [next] WHPX 四态真机探测
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3065,13 +3066,18 @@ TODO-LINUX
 ├── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
 ├── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
 ├── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
-└── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
+├── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
+└── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
 ```
 
 `L32` 在 Linux 真机运行 identity-only platform 测试，交叉核对 real/effective uid/gid；
 随后复跑 rootless user namespace 的 uid_map/gid_map、overlay 探测和无 cgroup 时
 RLIMIT_NPROC 行为。非 root 必须可降级，effective uid 0 必须继续 fail closed；只通过
 AArch64 Clippy 或只打印身份值都不算完成。
+
+`L33` 在 Linux 真机通过打开 `/dev/kvm` 并执行 `KVM_GET_API_VERSION` 区分设备缺失、
+权限拒绝、ABI 不兼容和可用状态；成功时必须校验内核 KVM API version，而不是只检查
+路径存在。分别以有权限和无权限用户运行，严格 Clippy 不能替代真机 ioctl 门禁。
 
 `L31` 在 Linux 真机运行 platform process-control 测试，确认子进程真实进入 stopped
 状态并可恢复；随后复跑 wbox PZ.1–PZ.3，以宿主可见计数冻结/恢复证明共享原语接入没有
@@ -3693,12 +3699,17 @@ TODO-MACOS
 ├── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
 ├── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
 ├── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
-└── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
+├── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
+└── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
 ```
 
 `M16` 在 Intel 与 Apple Silicon 真机只启用 `user-identity`，把 real/effective uid/gid
 与系统调用结果交叉核对，并确认稳定身份使用 effective uid。该事实契约不代表 macOS
 容器 user namespace 已存在，也不授予任何管理员/授权语义。
+
+`M17` 在 Intel 与 Apple Silicon 真机读取系统 Hypervisor.framework 支持事实，区分
+不支持、权限拒绝和探测失败；不得把 CPU virtualization flag 或 API 符号存在等同于
+当前进程可创建 VM。后续若增加最小 create/destroy smoke，应作为独立机制门禁。
 
 `M15` 在 Intel 与 Apple Silicon 真机只启用 platform `file-identity`，验证文件与目录
 identity、hard-link count 及 rename 后对象稳定性，并确认依赖树不含 ACL/Authorization/
@@ -3946,6 +3957,14 @@ SID/ACL/IPC 真机测试、all-features 和五目标严格 Clippy 已通过，Li
 `OpenProcessToken + TokenUser` 查询，改用 platform 已校验并复制的当前用户 SID；wbox
 只在 SDDL 转换边界创建满足 Win32 指针对齐的临时缓冲。目标 AppContainer 进程的 token
 查询、SID 匹配、注册握手和访问授权仍属于 broker 产品策略，不下沉到 platform。
+
+`W60` 在 platform 增加最小 `virtualization-probe` feature，只报告当前宿主原生
+虚拟化 ABI 的事实，不创建 VM。统一状态至少区分 `available`、`unavailable`、
+`access-denied`、`failed`，并保留原生错误码；Windows 动态发现
+`WinHvPlatform.dll/WHvGetCapability`，避免静态导入让缺少组件的系统在探测前就无法
+启动。wbox-machine 负责把 WHPX/KVM/HVF 事实解释为加速路线，guest ISA、fallback、
+provider 生命周期和验收策略不得下沉。Windows 真机门禁至少覆盖当前机器的稳定状态、
+禁用或缺失组件的可解释结果，以及最小 feature 依赖树。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
