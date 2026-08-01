@@ -9,10 +9,10 @@ license = "MIT OR Apache-2.0"
 #   - 第一档「没有 C/C++」：crates/wbox-linux 取代了 vendor/blink；
 #   - 第二档「承载产品语义的实现必须第一方」：codec / http / tls 三个 crate
 #     取代了 serde_json、sha2、base64、flate2、tar、anyhow、ureq、rustls。
-# 整棵构建图只剩六个 wbox 包，外加 libc / windows-sys（平台 ABI 声明）。
+# 整棵构建图只剩七个 wbox 包，外加 libc / windows-sys（平台 ABI 声明）。
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
-members = [".", "crates/wbox-codec", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-machine", "crates/wbox-tls"]
+members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-machine", "crates/wbox-tls"]
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。

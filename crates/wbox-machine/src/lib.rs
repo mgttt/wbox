@@ -9,6 +9,7 @@ mod architecture;
 mod artifact;
 mod device;
 mod guest;
+mod parallel;
 mod provider;
 mod route;
 mod topology;
@@ -25,6 +26,9 @@ pub use architecture::{
 pub use artifact::{inspect_artifact, ArtifactError, ArtifactIdentity};
 pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, FirmwareEnvironment};
 pub use guest::{guest_contract, BinaryFormat, GuestAbi, GuestContract, GuestOs};
+pub use parallel::{
+    parallel_routes, DataPath, ParallelExecution, ParallelRoute, ParallelRouteStatus,
+};
 pub use provider::{ExecutionProvider, IsolationModel, ProviderCapabilities};
 pub use route::{current_host, route, Availability, HostOs, Priority, Route, CONTRACT_REVISION};
 pub use topology::{

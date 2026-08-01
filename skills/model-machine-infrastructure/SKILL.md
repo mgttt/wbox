@@ -47,6 +47,7 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- matrix
 cargo run -p wbox-machine --bin wbox-machine-lab -- devices
 cargo run -p wbox-machine --bin wbox-machine-lab -- accelerators
 cargo run -p wbox-machine --bin wbox-machine-lab -- topology
+cargo run -p wbox-machine --bin wbox-machine-lab -- parallel
 cargo run -p wbox-machine --bin wbox-machine-lab -- wasm
 cargo run -p wbox-machine --bin wbox-machine-lab -- inspect <artifact>
 cargo run -p wbox-machine --bin wbox-machine-lab -- check
@@ -65,3 +66,6 @@ Treat lab output as contract evidence, not full product acceptance. Run host-spe
 - Preserve structured failure reasons and stable TODO identifiers.
 
 Read [references/capability-model.md](references/capability-model.md) when deriving a new matrix, topology, WASM-machine boundary, or lessons from an external emulator.
+
+Read [references/parallel-compute.md](references/parallel-compute.md) when working
+on SIMD, multicore, shared memory, zero-copy, NUMA, RDMA, or benchmark evidence.

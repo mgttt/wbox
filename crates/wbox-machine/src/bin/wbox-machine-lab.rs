@@ -5,7 +5,8 @@ use std::path::Path;
 
 use wbox_machine::{
     accelerator_routes, current_host, detect_hardware, esp32_routes, inspect_artifact,
-    prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs, Isa, Priority,
+    parallel_routes, prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs,
+    Isa, ParallelRouteStatus, Priority,
 };
 
 const HEADER_READ_LIMIT: u64 = 1024 * 1024;
@@ -24,6 +25,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         [command] if command == "devices" => print_devices(),
         [command] if command == "accelerators" => print_accelerators(),
         [command] if command == "topology" => print_topology(),
+        [command] if command == "parallel" => print_parallel(),
         [command] if command == "wasm" => print_wasm(),
         [command, path] if command == "inspect" => inspect_path(Path::new(path)),
         [command] if command == "check" => check_contract(),
@@ -34,7 +36,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         _ => {
             print_help();
             Err(
-                "expected host, matrix, devices, accelerators, topology, wasm, inspect <file>, or check"
+                "expected host, matrix, devices, accelerators, topology, parallel, wasm, inspect <file>, or check"
                     .to_owned(),
             )
         }
@@ -47,9 +49,33 @@ fn print_help() {
     println!("wbox-machine-lab devices");
     println!("wbox-machine-lab accelerators");
     println!("wbox-machine-lab topology");
+    println!("wbox-machine-lab parallel");
     println!("wbox-machine-lab wasm");
     println!("wbox-machine-lab inspect <executable>");
     println!("wbox-machine-lab check");
+}
+
+fn print_parallel() -> Result<(), String> {
+    let routes = parallel_routes();
+    let declared = routes
+        .iter()
+        .filter(|route| route.status == ParallelRouteStatus::Declared)
+        .count();
+    for item in &routes {
+        println!(
+            "{}/{} copies={} status={} todo={}",
+            item.execution.as_str(),
+            item.data_path.as_str(),
+            item.data_path.logical_data_copies(),
+            item.status.as_str(),
+            item.todo.unwrap_or("none"),
+        );
+    }
+    println!(
+        "summary parallel_routes={} declared={declared}",
+        routes.len()
+    );
+    Ok(())
 }
 
 fn print_wasm() -> Result<(), String> {

@@ -289,6 +289,7 @@ mod tests {
         for manifest in [
             root.join("Cargo.toml"),
             root.join("crates/wbox-codec/Cargo.toml"),
+            root.join("crates/wbox-hpc-lab/Cargo.toml"),
             root.join("crates/wbox-http/Cargo.toml"),
             root.join("crates/wbox-linux/Cargo.toml"),
             root.join("crates/wbox-machine/Cargo.toml"),

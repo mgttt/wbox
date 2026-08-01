@@ -73,6 +73,14 @@ Xtensa32/RISC-V32 × bare-metal/FreeRTOS 形成独立设备矩阵，不混入桌
 当前尚未桥接的 ELF32/PE32 与 Mach-O universal 明确拒绝，扩展入口分别由
 `WM-ARTIFACT-32` / `WM-ARTIFACT-FAT` 跟踪。
 
+CPU 并行与数据移动按正交维度建模：scalar/SIMD/thread/process 允许组合，数据路径
+区分 private copy、borrowed shared、named shared mapping、ring 与 scatter/gather。
+`wbox-hpc-lab` 把其中已声明路线变成可重复实验；Windows 当前以同一命名共享映射
+驱动 scalar、AVX2、多线程和多进程，并以 scalar checksum 作 oracle。这里的
+`logical_copies=0` 仅表示初始化后不在应用 buffer/进程之间复制数据，不代表没有
+page fault、cache coherence 或内存流量。NUMA/RDMA 必须经过拓扑/adapter 探测和
+真实传输门禁，不能从 API 存在推断可用。
+
 GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩阵表达，
 工作负载分别预填为 parallel/tensor/language compute。当前九格全部是 research；
 设备发现与宿主 API 归 `agenterm-platform`，内存、队列、调度、隔离和执行 provider

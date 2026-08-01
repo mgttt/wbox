@@ -55,6 +55,16 @@ fn topology_prints_and_validates_point_line_plane_fabric() {
 }
 
 #[test]
+fn parallel_prefills_execution_and_data_path_combinations() {
+    let output = lab().arg("parallel").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("simd-threads/borrowed-shared copies=0 status=declared"));
+    assert!(stdout.contains("simd-processes/shared-mapping copies=0 status=planned"));
+    assert!(stdout.contains("parallel_routes=30 declared=5"));
+}
+
+#[test]
 fn wasm_prefills_browser_and_wasi_machine_capabilities() {
     let output = lab().arg("wasm").output().unwrap();
     assert!(output.status.success());

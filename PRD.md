@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W31、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W33、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -204,10 +204,10 @@ PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全�
 | `ureq` | `crates/wbox-http` |
 | `rustls` / `rustls-rustcrypto` / `webpki-roots` | `crates/wbox-tls` |
 
-改完之后，**整棵构建图**（`Cargo.lock` 共 16 条，此前 119 条）只剩：
+改完之后，**整棵构建图**（`Cargo.lock` 当前共 18 条，此前 119 条）只剩：
 
-- 六个第一方 crate：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、`wbox-linux`、
-  `wbox-machine`；
+- 七个第一方 workspace 包：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、
+  `wbox-linux`、`wbox-machine` 与实验包 `wbox-hpc-lab`；
 - `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
   声明，不编译任何第三方实现代码，属第一档明确允许的那类。
 
@@ -667,7 +667,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
 | R6 `[部分]` | Ubuntu 24.04 已进入 Windows 产品门禁（WU.1/WU.2）；Alpine 仍只有手工跑通证据 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
-| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS，构建图只剩六个 wbox 包 + 平台 ABI；但系统 Wine legacy 仍阻塞全产品第二档 |
+| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS，构建图只剩七个 wbox 包 + 平台 ABI；但系统 Wine legacy 仍阻塞全产品第二档 |
 
 **F9.37 的 `guest_workdir` 已经放进 `RunSpec`**，Q2 的镜像路径在 R4 落地时读它
 即可，不必再改结构——这是 Q3 的实现顺带给 Q2 铺的路，也是四格共用一套
@@ -2583,14 +2583,27 @@ TODO-WINDOW
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 21 unit tests
-├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 8 process tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 23 unit tests
+├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 9 process tests
 ├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
 ├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
 ├── W30 点/线/面/体基础设施拓扑与引用校验                         [active] 6/5/2/1 骨架
 ├── W31 Browser/WASI `wasm-machine` 能力矩阵                     [research] 16 路预填
+├── W32 CPU 并行与 zero-copy 实验矩阵                            [done] 30 路预填 + Windows 实测
+├── W33 NUMA/RDMA/共享 ring/scatter-gather                       [research] 当前宿主无 RDMA adapter
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+`W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
+Windows 命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
+中位数。本机 4C/8T 实测（4,000,000 项、32 rounds、repeat=3）为 AVX2 `3.89x`、
+4-thread AVX2 `13.55x`、8-thread AVX2 `10.34x`、8-process shared mapping
+`3.02x`。该结果是当前虚拟机取证，不是跨机器性能承诺。
+
+`W33` 当前只允许 research：Windows `Get-NetAdapterRdma` 未发现 adapter，VirtIO
+Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装。后续须分别
+取得 NUMA topology、RDMA-capable/enabled adapter、memory registration、peer 与
+真实 transfer 证据，不能把 OS API 或 feature 存在写成 available。
 
 **等待 `agenterm-platform` 期间的预判行动树：**
 
@@ -3639,7 +3652,7 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
 ├── 纯 Rust Linux ELF/OCI runtime 替换**完成**：vendor/blink 删除，
 │   引擎换成 crates/wbox-linux（第一档达成）
 ├── 第二档收紧：serde_json/sha2/base64/flate2/tar/anyhow/ureq/rustls
-│   全部换成第一方，含自实现 TLS 1.3；随后增加零依赖 `wbox-machine`，当前 17 个 crate
+│   全部换成第一方，含自实现 TLS 1.3；随后增加 `wbox-machine`/HPC lab，Cargo.lock 当前 18 项
 └── 安全收口：归档解包符号链接越界（L7）、guest VFS 宿主符号链接逃逸（L12）、
     卷挂载点跟随符号链接、`-v :ro` 未递归到子挂载
 ```

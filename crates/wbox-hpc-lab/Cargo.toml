@@ -1,0 +1,17 @@
+[package]
+name = "wbox-hpc-lab"
+version = "1.0.0-rc2"
+edition = "2021"
+description = "CPU parallelism and zero-copy experiments driven by wbox-machine contracts"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+wbox-machine = { path = "../wbox-machine" }
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Memory",
+]

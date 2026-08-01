@@ -25,6 +25,14 @@ name = "wbox-codec"
 version = "1.0.0-rc2"
 
 [[package]]
+name = "wbox-hpc-lab"
+version = "1.0.0-rc2"
+dependencies = [
+ "wbox-machine",
+ "windows-sys",
+]
+
+[[package]]
 name = "wbox-http"
 version = "1.0.0-rc2"
 dependencies = [

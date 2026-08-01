@@ -68,6 +68,7 @@ pub enum TransportClass {
     AcceleratorInterconnect,
     Peripheral,
     Network,
+    RemoteDma,
 }
 
 impl TransportClass {
@@ -78,6 +79,7 @@ impl TransportClass {
             Self::AcceleratorInterconnect => "accelerator-interconnect",
             Self::Peripheral => "peripheral",
             Self::Network => "network",
+            Self::RemoteDma => "remote-dma",
         }
     }
 }
