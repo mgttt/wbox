@@ -276,8 +276,9 @@ where
         .iter()
         .map(|handle| unsafe { BorrowedHandle::borrow_raw(*handle as RawHandle) })
         .collect::<Vec<_>>();
-    let spawn_result =
-        agenterm_platform::process_spawn::with_inheritable_handles(&borrowed_handles, || unsafe {
+    let spawn_result = agenterm_platform::process_spawn::with_inheritable_handles(
+        borrowed_handles.as_slice(),
+        || unsafe {
             let ok = CreateProcessW(
                 std::ptr::null(), // 从命令行解析程序名
                 cmd_wide.as_mut_ptr(),
@@ -295,7 +296,8 @@ where
             // error in its own API boundary instead of reading it after restoration.
             let error = if ok == 0 { GetLastError() } else { 0 };
             (ok, error)
-        });
+        },
+    );
     let (ok, create_error) = match spawn_result {
         Ok(result) => result,
         Err(error) => {

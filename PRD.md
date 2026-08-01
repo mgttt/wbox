@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W83、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W84、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2673,6 +2673,7 @@ TODO-WINDOW
 ├── W81 retained-directory no-follow typed open 下沉并删除 broker NT FFI               [done] rename/replacement identity gate
 ├── W82 exact process bounded/indefinite wait 下沉并删除 sandbox 直接 WaitForSingleObject [done] handle-bound wait
 ├── W83 显式 HANDLE 继承事务下沉并删除 sandbox 本地 flag guard                         [done] restore/unwind + orphan reap
+├── W84 retained process 远端 HANDLE 交付凭据下沉并删除 broker DuplicateHandle          [done] commit/rollback receipt
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4593,6 +4594,30 @@ HANDLE flag 的 Win32 调用覆盖。若创建回调已经返回 suspended proce
 sandbox 定向 36 tests（33 passed、3 ignored）、根 469 tests（466 passed、3 ignored）、
 Quick 306 项和四 portable targets 通过，Quick 释放 646.6 MiB 可再生缓存；release 产品门禁
 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
+
+`W84` 扩展 `process-reference` 为 Windows target-process HANDLE delivery receipt：从当前
+进程的借用 HANDLE 复制到已保留的精确目标进程对象，返回的 `RemoteHandleTransfer` 在显式
+`into_raw_handle` 前保持可回滚；若调用方在 IPC 交付失败后直接 drop，adapter 以
+`DUPLICATE_CLOSE_SOURCE` 撤销目标 HANDLE，并关闭仅用于撤销的本地副本。该类型不是本地
+可用 HANDLE，也不会把目标内的数值误包装成 `OwnedHandle`。操作要求 retained HANDLE 已有
+`PROCESS_DUP_HANDLE`；由创建句柄复制出的引用保留该权限，而仅查询/等待用途的 `open(pid)`
+不会为便利提高权限或按 PID 重开，因而可以明确返回权限错误。真实子进程门禁先验证未提交
+值已失效，再提交当前进程对象 HANDLE，由子进程 `GetProcessId` 回传精确身份。提交为
+`057487c`。
+
+同轮还把 W83 的显式继承事务改为 `HandleInheritanceSet` 泛型扩展边界：公共函数签名不出现
+`BorrowedHandle`，Windows adapter 为借用 HANDLE slice 实现，Linux/macOS 不伪造不同语义的
+fd 实现；wbox 因此可随上游 main 升级而不复制 flag guard。process-reference 定向 8 tests、
+process-spawn 定向 12 tests、all-features 184 tests、严格 Clippy，以及 Windows i686/ARM64、
+Linux x64/ARM64、macOS x64 非宿主目标编译通过；兼容提交为 `969bfcd`。
+
+wbox broker 删除生产路径的 `DuplicateHandle`、`DUPLICATE_SAME_ACCESS` 和
+`GetCurrentProcess`，先用 receipt 中的目标 HANDLE 数值写完整 broker response，写成功后才
+提交；响应失败会自动撤销，不再泄漏未交付的 guest HANDLE。mount/path normalization、只读
+策略、响应协议与 AppContainer/Job/SID 鉴权继续留在产品层。Windows broker 8 tests、sandbox
+36 tests（33 passed、3 ignored）、根 469 tests（466 passed、3 ignored）、Quick 306 项和四
+portable targets 通过，Quick 释放 491.5 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与
+固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

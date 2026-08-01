@@ -6,12 +6,11 @@
 use crate::error::{Result, WboxError};
 use crate::token;
 use std::io::Write as _;
-use std::os::windows::io::{AsRawHandle as _, BorrowedHandle, RawHandle};
+use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, RawHandle};
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE,
-};
+use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+#[cfg(test)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const MAGIC: u32 = 0x5742_4f58; // "WBOX"
@@ -458,22 +457,15 @@ impl BrokerSession {
                 );
             }
         };
-        let mut remote = std::ptr::null_mut();
-        if unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                opened.as_raw_handle() as HANDLE,
-                self.process.as_raw_handle() as HANDLE,
-                &mut remote,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == 0
-        {
-            return Err(last_error("DuplicateHandle(broker OPEN)"));
-        }
-        let payload = (remote as usize as u64).to_le_bytes().to_vec();
+        let remote = self
+            .process
+            .duplicate_handle_into(opened.as_handle())
+            .map_err(|error| {
+                WboxError::spawn(format!("向 broker 目标进程复制文件 HANDLE 失败：{error}"))
+            })?;
+        let payload = (remote.as_raw_handle() as usize as u64)
+            .to_le_bytes()
+            .to_vec();
         write_response(
             &mut self.pipe,
             &Response {
@@ -482,7 +474,11 @@ impl BrokerSession {
                 status: STATUS_OK,
                 payload,
             },
-        )
+        )?;
+        // The target owns the HANDLE only after its numeric value was delivered.
+        // A failed response write drops `remote` and rolls the target HANDLE back.
+        let _remote = remote.into_raw_handle();
+        Ok(())
     }
 }
 
