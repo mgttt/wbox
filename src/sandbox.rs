@@ -16,11 +16,10 @@ use std::os::windows::io::{BorrowedHandle, RawHandle};
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
+    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
+    TerminateProcess, UpdateProcThreadAttribute, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
 };
 
 use crate::error::Result;
@@ -360,17 +359,10 @@ where
 
     // ---- 等待退出并转发退出码 ----
     wait_for_process_exit(process.raw())?;
-    let mut code: u32 = 0;
-    // # Safety: 进程句柄有效且进程已退出，code 为有效输出指针。
-    let ok = unsafe { GetExitCodeProcess(process.raw(), &mut code) };
-    if ok == 0 {
-        let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!(
-            "GetExitCodeProcess 失败，GetLastError={}",
-            err
-        )));
-    }
-    Ok(code)
+    let process = unsafe { BorrowedHandle::borrow_raw(process.raw() as RawHandle) };
+    agenterm_platform::process_reference::exit_code_handle(process).map_err(|error| {
+        crate::error::WboxError::spawn(format!("读取 sandbox 退出码失败：{error}"))
+    })
 }
 
 fn wait_for_process_exit(process: HANDLE) -> Result<()> {

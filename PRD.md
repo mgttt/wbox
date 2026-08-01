@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W85、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W86、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2675,6 +2675,7 @@ TODO-WINDOW
 ├── W83 显式 HANDLE 继承事务下沉并删除 sandbox 本地 flag guard                         [done] restore/unwind + orphan reap
 ├── W84 retained process 远端 HANDLE 交付凭据下沉并删除 broker DuplicateHandle          [done] commit/rollback receipt
 ├── W85 精确进程 containment membership 下沉并删除 broker IsProcessInJob                [done] retained object + Job handle
+├── W86 已打开进程对象原始退出码下沉并删除 sandbox GetExitCodeProcess                    [done] handle-bound u32 fact
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4637,6 +4638,22 @@ wbox `Job` 实现标准 `AsHandle` 借用，broker 注册改为先从 `CreatePro
 8 tests、根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets 通过，
 Quick 释放 492.0 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest
 的 WU.1/WU.2 通过。
+
+`W86` 在 `process-reference` 增加 `ProcessExitCodeHandle` 与 `exit_code_handle`：从调用方已经
+打开的原生进程对象读取未经归一化的 `u32` 退出码，不按 PID 重开，也不把数值 259 猜成进程
+仍存活。调用方必须先建立退出事实，再决定数值如何进入产品状态。Windows adapter 对借用
+process HANDLE 调用 `GetExitCodeProcess`；任意 Linux pidfd 及 macOS kqueue 并不都能提供同等
+退出状态，因此两宿主不添加伪实现。Windows 真机以 retained HANDLE 在子进程 `exit 37` 并被
+回收后仍读回 37；process-reference 定向 11 tests、all-features 187 tests、严格 Clippy，
+以及 Windows i686/ARM64、Linux x64/ARM64、macOS x64 非宿主目标编译通过；提交为
+`721a18c`。
+
+wbox sandbox 在 exact-object 无限等待成功后把同一个 Owned HANDLE 借给 platform 读取退出码，
+删除生产路径的 `GetExitCodeProcess` 与本地 Win32 错误处理；guest/native 退出码原样转发策略
+仍留在产品层。Windows sandbox 36 tests（33 passed、3 ignored）、根 469 tests（466 passed、
+3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 492.2 MiB 可再生缓存；
+release 产品门禁 WP.1-WP.27（含 WP.7B/WP.14 非零退出码）与固定 Ubuntu 24.04 digest 的
+WU.1/WU.2（WU.2 `rc=37`）通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
