@@ -47,6 +47,23 @@ pub use native::NativeBackend;
 use crate::error::Result;
 use std::path::PathBuf;
 
+const CHILD_EXIT_UNAVAILABLE: u32 = 4;
+
+/// Convert host termination facts into wbox's public exit-code convention.
+///
+/// Native classification belongs to `agenterm-platform`; choosing exit code 4
+/// when the host cannot expose an outcome remains a wbox product policy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn child_exit_code(status: &std::process::ExitStatus) -> u32 {
+    child_exit_code_from_fact(agenterm_platform::process_spawn::classify_exit_status(
+        status,
+    ))
+}
+
+fn child_exit_code_from_fact(exit: agenterm_platform::process_spawn::ProcessExit) -> u32 {
+    exit.conventional_code().unwrap_or(CHILD_EXIT_UNAVAILABLE)
+}
+
 /// 资源限额（跨平台描述；Windows 侧映射到 JobLimits）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Limits {
@@ -425,6 +442,25 @@ mod drive_path_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn child_exit_facts_use_shell_convention_and_product_fallback() {
+        use agenterm_platform::process_spawn::ProcessExit;
+
+        assert_eq!(super::child_exit_code_from_fact(ProcessExit::Code(37)), 37);
+        assert_eq!(
+            super::child_exit_code_from_fact(ProcessExit::Signal(15)),
+            143
+        );
+        assert_eq!(
+            super::child_exit_code_from_fact(ProcessExit::Unavailable),
+            super::CHILD_EXIT_UNAVAILABLE
+        );
+        assert_eq!(
+            super::child_exit_code_from_fact(ProcessExit::Signal(u32::MAX)),
+            super::CHILD_EXIT_UNAVAILABLE
+        );
+    }
+
     // ---- 宿主分派（docs/architecture.md §3）----
     #[test]
     fn image_backend_follows_host() {

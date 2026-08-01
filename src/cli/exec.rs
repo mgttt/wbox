@@ -252,14 +252,7 @@ fn exec_in_namespaces_with(pid: u32, cmd: &[&str], quiet: bool) -> Result<u32> {
     let status = child
         .wait()
         .map_err(|e| WboxError::spawn(format!("等待 exec 进程失败：{}", e)))?;
-    // 退出码语义与 run 一致：原样转发，信号终止用 128+sig
-    Ok(match status.code() {
-        Some(c) => c as u32,
-        None => {
-            use std::os::unix::process::ExitStatusExt;
-            128 + status.signal().unwrap_or(0) as u32
-        }
-    })
+    Ok(crate::backend::child_exit_code(&status))
 }
 
 #[cfg(test)]

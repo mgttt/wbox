@@ -597,15 +597,7 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
     for d in &cgroup_cleanup {
         let _ = std::fs::remove_dir(d);
     }
-    // 退出码语义与 Windows 侧一致：子进程码原样转发；被信号杀死时用 128+sig
-    // （shell 惯例），避免"信号终止"被误报成正常退出。
-    Ok(match status.code() {
-        Some(c) => c as u32,
-        None => {
-            use std::os::unix::process::ExitStatusExt;
-            128 + status.signal().unwrap_or(0) as u32
-        }
-    })
+    Ok(crate::backend::child_exit_code(&status))
 }
 
 /// 组装 `unshare(2)` 的标志位。
