@@ -12,9 +12,6 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows_sys::Win32::Security::Cryptography::{
-    BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-};
 use windows_sys::Win32::Security::{
     GetTokenInformation, TokenAppContainerSid, TokenUser, PSECURITY_DESCRIPTOR,
     SECURITY_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY, TOKEN_USER,
@@ -426,21 +423,9 @@ impl BrokerEndpoint {
         if ids.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(WboxError::args("broker mount id 不能重复"));
         }
-        let mut random = [0u8; 32];
-        let status = unsafe {
-            BCryptGenRandom(
-                std::ptr::null_mut(),
-                random.as_mut_ptr(),
-                random.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        };
-        if status < 0 {
-            return Err(WboxError::spawn(format!(
-                "BCryptGenRandom(broker endpoint) 失败，NTSTATUS=0x{:08X}",
-                status as u32
-            )));
-        }
+        let random = agenterm_platform::entropy::secure_random_array::<32>().map_err(|error| {
+            WboxError::spawn(format!("生成 broker endpoint 随机身份失败：{error}"))
+        })?;
         let generation = u64::from_le_bytes(random[0..8].try_into().unwrap());
         let nonce: [u8; 16] = random[8..24].try_into().unwrap();
         let suffix = hex(&random[24..32]);

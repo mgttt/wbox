@@ -140,30 +140,11 @@ pub fn setup(mem: &mut Mem, loaded: &Loaded, argv: &[Vec<u8>], envp: &[Vec<u8>])
 
 /// AT_RANDOM 的 16 字节种子。
 ///
-/// 不引第三方 crate：用宿主的单调时钟、进程 id 和一个栈地址做混合。
-/// 这不是密码学强度的随机——guest 只用它做 canary 与指针混淆，
-/// 目的是每次运行不同，而不是不可预测。真需要随机的 guest 会走
-/// `getrandom` 系统调用，那条路由宿主的 CSPRNG 提供。
+/// glibc 用它生成 stack canary 与指针保护值，因此必须与 guest `getrandom`
+/// 一样来自宿主 CSPRNG。熵源失败时拒绝启动 guest，绝不退化到时间戳/PID。
 fn random_bytes() -> [u8; 16] {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9e37_79b9_7f4a_7c15);
-    let pid = std::process::id() as u64;
-    let stack_marker = &nanos as *const u64 as u64;
-    let mut out = [0u8; 16];
-    let mut s = nanos ^ (pid << 32) ^ stack_marker;
-    for chunk in out.chunks_mut(8) {
-        // splitmix64
-        s = s.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = s;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^= z >> 31;
-        chunk.copy_from_slice(&z.to_le_bytes());
-    }
-    out
+    agenterm_platform::entropy::secure_random_array()
+        .expect("宿主 CSPRNG 不可用，拒绝用可预测的 AT_RANDOM 启动 guest")
 }
 
 #[cfg(test)]

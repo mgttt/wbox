@@ -8,15 +8,8 @@ license = "MIT OR Apache-2.0"
 # 零第三方依赖——这是本 crate 存在的全部理由。密码学原语（SHA-2、AES-GCM、
 # X25519、RSA、ECDSA）、X.509 链校验、TLS 1.3 握手全部第一方实现。
 #
-# 只依赖同仓的 wbox-codec（复用它的 SHA-256 与 base64），以及各平台的
-# CSPRNG（Linux 走 getrandom syscall，Windows 走 BCryptGenRandom）——
-# 后者是 OS ABI，不是第三方实现。
+# 只依赖同仓的 wbox-codec（复用它的 SHA-256 与 base64），以及第一方
+# agenterm-platform 的宿主 CSPRNG 契约；密码学和 TLS 策略仍全部在本 crate。
 [dependencies]
 wbox-codec = { path = "../wbox-codec" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dependencies.windows-sys]
-workspace = true
-features = ["Win32_Foundation", "Win32_Security_Cryptography"]
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "b98a59326677eb353bca795c1adc87e058dece09", default-features = false, features = ["entropy"] }

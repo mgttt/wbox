@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W42、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W43、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
@@ -208,7 +208,7 @@ PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全�
 
 - 七个第一方 workspace 包：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、
   `wbox-linux`、`wbox-machine` 与实验包 `wbox-hpc-lab`；
-- 固定到不可变 Git SHA、按需启用 `filesystem`/`locking` 的第一方
+- 固定到不可变 Git SHA、按需启用 `entropy`/`filesystem`/`locking` 等 feature 的第一方
   `agenterm-platform`；
 - `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
   声明，不编译任何第三方实现代码，属第一档明确允许的那类。
@@ -2602,6 +2602,7 @@ TODO-WINDOW
 ├── W40 单进程终止机制轻量下沉                                       [done] process-control；完整 process 关闭
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
 ├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；11 tests
+├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3578,8 +3579,8 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`9f3f9de49d21ed2697e7f0ed6dd2ab24d5964c8f`，关闭 default features，启用
-`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
+`b98a59326677eb353bca795c1adc87e058dece09`，关闭 default features，按消费包启用
+`entropy`、`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
 `platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
@@ -3588,7 +3589,8 @@ cross-check 已随本阶段同步通过。macOS 原生运行与三宿主真机 s
 
 `M3` 已建立 `x86_64-apple-darwin` 与 `aarch64-apple-darwin` 的 workspace
 all-targets Clippy `-D warnings` 交叉门禁。TLS 随机源在 Apple target 使用系统
-`arc4random_buf`；Linux overlay whiteout/xattr 合并不再误编译到 Darwin；尚无
+platform `entropy` 内部的 `arc4random_buf`；Linux overlay whiteout/xattr 合并不再
+误编译到 Darwin；尚无
 macOS provider 的 `top` 返回明确 unsupported，不能伪装成空进程列表。AArch64
 门禁同时补齐可审计的 NEON FP64 FMA 内核。交叉门禁不链接、不运行，也不证明
 Seatbelt/HVF/Virtualization.framework、签名或 CLI 行为；这些仍需 M4/M5/M8 的
@@ -3631,6 +3633,17 @@ FP64 内核只接受 AVX2+FMA；AArch64 FP64 内核只接受 NEON。ISA 与 feat
 或者缺少任一事实时保持 unsupported。共享层只报告处理器事实，内核组合、FLOP
 计数、worker 扫描和性能验收继续归 wbox；Windows 实机 11 项测试及小规模
 checksum/FMA 行为通过，Linux/macOS 仅以交叉编译证明契约可编译。
+
+`W43` 在 `agenterm-platform` 增加最小 `entropy` feature：Windows 使用系统首选
+BCrypt RNG，Linux 处理 `getrandom(2)` 的 EINTR/短读/零进展，Apple 使用
+`arc4random_buf`；失败没有伪随机降级。wbox 删除 TLS、Windows broker 和 Linux
+guest 的三套宿主 FFI，并让 guest `getrandom`、`/dev/{u,}random` 统一映射失败为
+`EIO`。此前 `AT_RANDOM` 使用时间戳/PID/栈地址的 SplitMix64，不具密码学强度，现改为
+同一宿主 CSPRNG，失败时拒绝启动 guest。TLS 仍决定 fail-closed panic，broker 仍映射
+产品错误，guest errno/ABI 仍归 `wbox-linux`。Windows 实机已通过 platform entropy
+5 tests、TLS 97 tests、guest 178 tests、broker 8 tests，以及 busybox
+`head -c 16 /dev/urandom` 行为和完整 Windows WP.1-WP.27 产品门禁；Ubuntu 24.04
+fixture 本机缺失，WU.2 本阶段未重跑。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

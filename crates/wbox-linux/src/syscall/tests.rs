@@ -431,11 +431,7 @@ fn getrandom_returns_requested_bytes() {
     let mut m = mach();
     let at = scratch(&mut m);
     let n = sys_getrandom(&mut m, at, 32, 0);
-    // 平台没接 CSPRNG 时允许 ENOSYS（宁可报错也不给假随机），
-    // 但接上了就必须真填满请求长度。
-    if n == -ENOSYS {
-        return;
-    }
+    // 三宿主都必须接 fail-closed CSPRNG；不得把缺 adapter 当成可选能力跳过。
     assert_eq!(n, 32, "getrandom 应返回写入字节数");
     let mut buf = [0u8; 32];
     m.mem.read(at, &mut buf).unwrap();

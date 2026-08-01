@@ -12,70 +12,15 @@
 
 /// 填满 `buf`。失败即 panic（见模块注释）。
 pub fn fill(buf: &mut [u8]) {
-    if let Err(e) = try_fill(buf) {
+    if let Err(e) = agenterm_platform::entropy::fill_secure_random(buf) {
         panic!("无法从宿主获取随机数，拒绝用弱随机继续：{e}");
     }
 }
 
 /// 生成 N 字节随机数组。
 pub fn bytes<const N: usize>() -> [u8; N] {
-    let mut b = [0u8; N];
-    fill(&mut b);
-    b
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn try_fill(buf: &mut [u8]) -> Result<(), String> {
-    // getrandom(2)。分段读是因为内核对单次请求有上限（Linux 是 32 MiB，
-    // 但被信号打断时也可能返回短读）。
-    let mut off = 0usize;
-    while off < buf.len() {
-        let n = unsafe {
-            libc::getrandom(
-                buf[off..].as_mut_ptr() as *mut libc::c_void,
-                buf.len() - off,
-                0,
-            )
-        };
-        if n < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(err.to_string());
-        }
-        off += n as usize;
-    }
-    Ok(())
-}
-
-#[cfg(target_vendor = "apple")]
-fn try_fill(buf: &mut [u8]) -> Result<(), String> {
-    // arc4random_buf is the Apple/BSD system CSPRNG and has no failure return.
-    // It is safe for arbitrary lengths, including an empty slice.
-    unsafe {
-        libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len());
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn try_fill(buf: &mut [u8]) -> Result<(), String> {
-    use windows_sys::Win32::Security::Cryptography::{
-        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-    };
-    let status = unsafe {
-        BCryptGenRandom(
-            std::ptr::null_mut(),
-            buf.as_mut_ptr(),
-            buf.len() as u32,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    };
-    if status != 0 {
-        return Err(format!("BCryptGenRandom 失败：NTSTATUS 0x{status:08x}"));
-    }
-    Ok(())
+    agenterm_platform::entropy::secure_random_array()
+        .unwrap_or_else(|error| panic!("无法从宿主获取随机数，拒绝用弱随机继续：{error}"))
 }
 
 #[cfg(test)]

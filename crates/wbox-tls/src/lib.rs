@@ -60,19 +60,12 @@ pub use stream::TlsStream;
 
 #[cfg(test)]
 mod ratchet {
-    /// 依赖棘轮：本 crate 只允许依赖同仓的 `wbox-codec` 与平台 ABI 声明
-    /// （`libc` / `windows-sys`）。多出任何第三方 crate，"第一方实现"
-    /// 这句话就不成立了。
+    /// 依赖棘轮：本 crate 只允许依赖同仓 `wbox-codec` 与第一方
+    /// `agenterm-platform` 的 entropy feature。多出任何第三方实现，
+    /// "第一方 TLS" 这句话就不成立了。
     #[test]
     fn only_first_party_and_platform_abi_dependencies() {
-        const ALLOWED: &[&str] = &[
-            "wbox-codec",
-            "libc",
-            "windows-sys",
-            "workspace",
-            "version",
-            "features",
-        ];
+        const ALLOWED: &[&str] = &["wbox-codec", "agenterm-platform"];
         let toml = include_str!("../Cargo.toml");
         let mut in_deps = false;
         for line in toml.lines() {
@@ -95,5 +88,11 @@ mod ratchet {
                 "wbox-tls 不得引入第三方依赖，但看到：{name}"
             );
         }
+        let platform = toml
+            .lines()
+            .find(|line| line.starts_with("agenterm-platform ="))
+            .expect("wbox-tls must consume shared host entropy");
+        assert!(platform.contains("default-features = false"));
+        assert!(platform.contains("features = [\"entropy\"]"));
     }
 }

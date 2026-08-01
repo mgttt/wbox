@@ -61,6 +61,9 @@ SSE2/AVX/AVX2/FMA/NEON 事实，wbox 再映射为桌面 guest `Isa` 与 `CpuFeat
 Git SHA；`filesystem` 承载宿主约定、私有目录 ACL/mode 与私有原子文件发布，
 `locking` 承载 OCI pull 提交锁与状态 owner guard。状态 marker、liveness 分类、
 产品超时、目录用途和路由仍由 wbox 持有；未启用 process/UI。
+`entropy` 只提供 fail-closed 宿主 CSPRNG 字节填充；TLS 是否 panic、broker 错误类型、
+guest `EIO` 与 `AT_RANDOM` 生命周期仍由各消费层决定。禁止在消费层再实现
+BCrypt/getrandom/arc4random 接线或退化到时间戳/PID 伪随机。
 restart config、reservation token、meta、READY/ERROR、exit-code 与 Linux container
 PID 等小状态文件统一经 platform 私有原子发布；wbox 在调用前升级旧状态目录的
 private contract，但继续拥有文件 schema、生命周期、错误分类和 best-effort 策略。

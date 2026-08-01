@@ -2741,41 +2741,9 @@ fn sys_getrandom(m: &mut Machine, buf: u64, len: u64, _flags: u32) -> i64 {
     n as i64
 }
 
-/// 用宿主 CSPRNG 填满 `out`。失败时返回 `-errno`。
-#[cfg(unix)]
+/// 用宿主 CSPRNG 填满 `out`。guest ABI 将宿主熵源失败统一映射为 `EIO`。
 fn host_random(out: &mut [u8]) -> Result<(), i64> {
-    // `/dev/urandom` 在所有 Unix 上都可用，不需要 libc 的 getrandom 包装。
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(out))
-        .map_err(|e| host_err(&e))
-}
-
-#[cfg(windows)]
-fn host_random(out: &mut [u8]) -> Result<(), i64> {
-    use windows_sys::Win32::Security::Cryptography::{
-        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-    };
-    // hAlgorithm = null + BCRYPT_USE_SYSTEM_PREFERRED_RNG 表示用系统首选 RNG，
-    // 不需要先 BCryptOpenAlgorithmProvider。
-    // SAFETY：out 是有效可写切片，长度按字节传给 API。
-    let status = unsafe {
-        BCryptGenRandom(
-            std::ptr::null_mut(),
-            out.as_mut_ptr(),
-            out.len() as u32,
-            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-        )
-    };
-    if status == 0 {
-        Ok(())
-    } else {
-        Err(-EIO)
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn host_random(_out: &mut [u8]) -> Result<(), i64> {
-    Err(-ENOSYS)
+    agenterm_platform::entropy::fill_secure_random(out).map_err(|_| -EIO)
 }
 
 #[cfg(test)]

@@ -5,20 +5,16 @@ edition = "2021"
 description = "x86-64 Linux 用户态模拟器（纯 Rust，替代 vendor/blink）"
 license = "MIT OR Apache-2.0"
 
-# 零第三方依赖。宿主 syscall 一律经 std；需要 std 未暴露的原语时用
-# 目标限定的 libc/windows-sys FFI（两者都只是 OS ABI 声明，不编译 C 代码）。
+# 零第三方实现依赖。宿主 CSPRNG 复用第一方 agenterm-platform；其余宿主 syscall
+# 一律经 std，需要 std 未暴露的 Windows 原语时只使用 windows-sys ABI 声明。
 [dependencies]
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "b98a59326677eb353bca795c1adc87e058dece09", default-features = false, features = ["entropy"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-# Windows 侧只用来接系统 CSPRNG（guest 的 getrandom）。windows-sys 是纯
-# FFI 声明，不编译任何 C 代码，与根包用的是同一个版本。
+# Windows 文件属性查询使用 windows-sys；CSPRNG 已统一由 agenterm-platform 接线。
 [target.'cfg(windows)'.dependencies.windows-sys]
 workspace = true
 features = [
     "Win32_Foundation",
-    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
 ]
 

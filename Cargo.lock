@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agenterm-platform"
 version = "0.1.11"
-source = "git+https://github.com/mgttt/agenterm.git?rev=9f3f9de49d21ed2697e7f0ed6dd2ab24d5964c8f#9f3f9de49d21ed2697e7f0ed6dd2ab24d5964c8f"
+source = "git+https://github.com/mgttt/agenterm.git?rev=b98a59326677eb353bca795c1adc87e058dece09#b98a59326677eb353bca795c1adc87e058dece09"
 dependencies = [
  "libc",
  "windows-sys",
@@ -54,7 +54,7 @@ dependencies = [
 name = "wbox-linux"
 version = "1.0.0-rc2"
 dependencies = [
- "libc",
+ "agenterm-platform",
  "windows-sys",
 ]
 
@@ -69,9 +69,8 @@ dependencies = [
 name = "wbox-tls"
 version = "1.0.0-rc2"
 dependencies = [
- "libc",
+ "agenterm-platform",
  "wbox-codec",
- "windows-sys",
 ]
 
 [[package]]
