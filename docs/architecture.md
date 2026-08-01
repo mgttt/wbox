@@ -64,8 +64,11 @@ Git SHA；`filesystem` 承载宿主约定、私有目录 ACL/mode 与私有原�
 `entropy` 只提供 fail-closed 宿主 CSPRNG 字节填充；TLS 是否 panic、broker 错误类型、
 guest `EIO` 与 `AT_RANDOM` 生命周期仍由各消费层决定。禁止在消费层再实现
 BCrypt/getrandom/arc4random 接线或退化到时间戳/PID 伪随机。
-restart config、reservation token、meta、READY/ERROR、exit-code 与 Linux container
-PID 等小状态文件统一经 platform 私有原子发布；wbox 在调用前升级旧状态目录的
+detached reservation token 是 wbox 产品协议：它消费 32-byte 宿主 CSPRNG、编码为
+64 位小写十六进制，并在任何状态变更前 fail closed；格式、传递、一次性领取和回滚
+不下沉到 platform。restart config、reservation token、meta、READY/ERROR、
+exit-code 与 Linux container PID 等小状态文件统一经 platform 私有原子发布；
+wbox 在调用前升级旧状态目录的
 private contract，但继续拥有文件 schema、生命周期、错误分类和 best-effort 策略。
 单宿主 PID 的 graceful/forceful 终止通过轻量 `process-control` feature；完整 process
 inventory、Job/process-group guard 与 pipe API 保持关闭。wbox 继续拥有容器进程树

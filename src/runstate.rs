@@ -405,10 +405,14 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
             Liveness::Exited => purge_dir(&dir),
         }
     }
+    let token = next_reservation_token()?;
     create_private_directory(&dir)?;
-    let token = next_reservation_token();
-    write_private_state(&dir.join(DETACHED_RESERVATION), token.as_bytes())
-        .map_err(|e| WboxError::args(format!("写入 detached 预留令牌失败：{}", e)))?;
+    if let Err(error) = write_private_state(&dir.join(DETACHED_RESERVATION), token.as_bytes()) {
+        purge_dir(&dir);
+        return Err(WboxError::args(format!(
+            "写入 detached 预留令牌失败：{error}"
+        )));
+    }
     Ok(DetachedReservation {
         dir,
         token,
@@ -417,15 +421,16 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
     })
 }
 
-fn next_reservation_token() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_RESERVATION: AtomicU64 = AtomicU64::new(1);
-    format!(
-        "{}-{}-{}",
-        std::process::id(),
-        now_unix(),
-        NEXT_RESERVATION.fetch_add(1, Ordering::Relaxed)
-    )
+fn next_reservation_token() -> Result<String> {
+    use std::fmt::Write;
+
+    let random = agenterm_platform::entropy::secure_random_array::<32>()
+        .map_err(|error| WboxError::spawn(format!("生成 detached 预留令牌失败：{error}")))?;
+    let mut token = String::with_capacity(random.len() * 2);
+    for byte in random {
+        write!(&mut token, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(token)
 }
 
 /// 保存一个尚未运行的容器配置。配置文件只对当前用户可见；显式 `-e` 值会像
@@ -568,8 +573,8 @@ pub fn activate_created(name: &str) -> Result<(Vec<String>, DetachedReservation)
     }
     let mut args = read_create_args(&dir)?;
     replace_saved_name(&mut args, name);
+    let token = next_reservation_token()?;
     restore_created_dir(&dir);
-    let token = next_reservation_token();
     write_private_state(&dir.join(DETACHED_RESERVATION), token.as_bytes())
         .map_err(|e| WboxError::args(format!("写 start 预留令牌失败：{}", e)))?;
     Ok((
@@ -1371,6 +1376,19 @@ mod tests {
         // 所以文案不该提它。
         assert!(m.contains("换个 --name"), "报错要给出可行解法：{}", m);
         assert!(!m.contains("wbox rm"), "不该建议一条必然被拒的命令：{}", m);
+    }
+
+    #[test]
+    fn detached_reservation_tokens_are_full_width_host_entropy() {
+        let first = next_reservation_token().unwrap();
+        let second = next_reservation_token().unwrap();
+        for token in [&first, &second] {
+            assert_eq!(token.len(), 64);
+            assert!(token
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        }
+        assert_ne!(first, second);
     }
 
     #[test]

@@ -41,8 +41,8 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W43、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W44、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L22、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -2603,6 +2603,7 @@ TODO-WINDOW
 ├── W41 宿主处理器事实零依赖下沉                                     [done] hardware；五目标编译 + Windows 实测
 ├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；11 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
+├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3005,8 +3006,14 @@ TODO-LINUX
 ├── L18 mount(2) 与 MS_RDONLY                             [done] t_mount_ro 13/0，E 组整组清空
 ├── L19 signalfd 与挂起信号集合                           [done] t_signalfd 75/0，C 组整组清空
 ├── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
-└── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
+├── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
+└── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
 ```
+
+`L22` 验收 W44 的共享 runstate 路径，不重写随机源：在 Linux 真机分别跑首次
+`run -d`、create 后两轮 start、错误 workload 回滚和并发错误令牌拒绝，确认状态目录
+最终可复用或可删除。Windows 行为与跨目标 Clippy 已通过，但不能替代 Linux 的
+namespace/supervisor 进程模型；验收后把命令、退出码和残留状态证据写回本节。
 
 `L21` 把信号的另一半做完：在 guest 栈上按 x86-64 内核的真实布局构
 `rt_sigframe`（`pretcode` + `ucontext` + `siginfo`），把 rip 改到 handler，
@@ -3645,6 +3652,17 @@ guest 的三套宿主 FFI，并让 guest `getrandom`、`/dev/{u,}random` 统一�
 5 tests、TLS 97 tests、guest 178 tests、broker 8 tests，以及 busybox
 `head -c 16 /dev/urandom` 行为和完整 Windows WP.1-WP.27 产品门禁；Ubuntu 24.04
 fixture 本机缺失，WU.2 本阶段未重跑。
+
+`W44` 把 detached 父进程交给 supervisor 的接管令牌从
+`PID + 秒级时间戳 + 进程内计数器` 改为 32-byte 宿主 CSPRNG，并编码为固定 64 位
+小写十六进制。令牌格式、环境传递、私有原子文件、一次性领取、错误分类和
+run/create/start/restart 生命周期仍由 wbox 拥有；共享层只提供失败即返回错误的随机
+字节。首次 `run -d` 在取熵成功后才创建状态目录，令牌发布失败则删除新目录；
+`start` 在清理旧运行产物前先取熵，因此失败仍保持 created 配置可重试，不退化到
+时间/PID fallback。Windows 已通过 20 项 runstate 定向测试、Quick 双目标 Clippy
+与 300 项库测试、WP.1-WP.27 完整产品门禁；i686 Windows、x86-64 Linux 及双 macOS
+ISA 严格 Clippy 通过。Linux/macOS 交叉编译不等于真机运行，Linux 交接见 L22，
+macOS 继续由 M2/M3 验收。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
