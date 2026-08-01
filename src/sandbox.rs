@@ -156,12 +156,7 @@ where
     // HANDLE_FLAG_INHERIT is process-global. Serialize the short mutation
     // window so concurrent container launches cannot expose a broker/directory
     // handle to the wrong child.
-    let inherit_lock = (!inherited_handles.is_empty()).then(inherit_handle_lock);
-    let _inherit_guards = inherited_handles
-        .iter()
-        .copied()
-        .map(InheritHandleGuard::enable)
-        .collect::<Result<Vec<_>>>()?;
+    let inherit_scope = InheritHandleScope::enable(&inherited_handles)?;
 
     // ---- capability 属性数组（借用，生命周期覆盖整个创建过程）----
     let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
@@ -300,8 +295,7 @@ where
     // The attribute list has already been consumed by CreateProcessW. Restore
     // every source handle immediately instead of leaving it inheritable while
     // the child runs.
-    drop(_inherit_guards);
-    drop(inherit_lock);
+    drop(inherit_scope);
     if ok == 0 {
         let err = unsafe { GetLastError() };
         let hint = match err {
@@ -361,13 +355,36 @@ where
     Ok(code)
 }
 
-fn inherit_handle_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
+struct InheritHandleScope {
+    guards: Vec<InheritHandleGuard>,
+    lock: Option<agenterm_platform::process_spawn::HandleInheritanceLock>,
+}
 
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+impl InheritHandleScope {
+    fn enable(handles: &[HANDLE]) -> Result<Option<Self>> {
+        if handles.is_empty() {
+            return Ok(None);
+        }
+        let lock = agenterm_platform::process_spawn::lock_handle_inheritance();
+        let guards = handles
+            .iter()
+            .copied()
+            .map(InheritHandleGuard::enable)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Some(Self {
+            guards,
+            lock: Some(lock),
+        }))
+    }
+}
+
+impl Drop for InheritHandleScope {
+    fn drop(&mut self) {
+        // Restore every source flag while the process-wide mutation lock is
+        // still held. Field drop order must not decide this safety property.
+        self.guards.clear();
+        self.lock.take();
+    }
 }
 
 struct InheritHandleGuard {
@@ -509,6 +526,47 @@ pub fn build_cmdline(cmd: &[String]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_handle_scope_shares_the_platform_spawn_lock() {
+        use windows_sys::Win32::System::Threading::CreateEventW;
+
+        let event = OwnedHandle(unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) });
+        assert!(!event.0.is_null(), "CreateEventW fixture failed");
+        let flags = |handle| {
+            let mut flags = 0_u32;
+            assert_ne!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
+            flags
+        };
+        assert_eq!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
+        let scope = InheritHandleScope::enable(&[event.raw()])
+            .unwrap()
+            .expect("nonempty handle list must create a scope");
+        assert_ne!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let contender = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _platform_scope = agenterm_platform::process_spawn::lock_handle_inheritance();
+            acquired_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("platform lock contender did not start");
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "platform spawn lock did not observe the wbox mutation scope"
+        );
+
+        drop(scope);
+        assert_eq!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("platform lock contender did not resume");
+        contender.join().unwrap();
+    }
 
     // ---- build_cmdline：程序名总是加引号，其余参数按需加引号 ----
 

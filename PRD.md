@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W70、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W71、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L42、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M27
 ├── 5  非功能需求 N1–N4
@@ -2660,6 +2660,7 @@ TODO-WINDOW
 ├── W68 受限权限目录树清理下沉并删除本地 fsutil                                      [done] readonly + junction + WP.18
 ├── W69 子进程退出事实下沉并统一 wbox 产品退出码                                      [done] code/signal/unavailable
 ├── W70 逻辑目录占用下沉并阻止 Windows junction 越界统计                              [done] 64 KiB outside canary
+├── W71 统一 raw CreateProcess 与 platform spawn 的 HANDLE inheritance mutation lock [done] shared RAII scope
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3864,7 +3865,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`36077dcf22f7c338d284c68951005d3a387d05c6`，关闭 default features，按消费包启用
+`7f4b7c731376667b06321582660517f36c4291b4`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-spawn`、`filesystem-cleanup`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
@@ -4231,6 +4232,23 @@ feature 13 tests、all-features 141 tests 与五目标 strict Clippy 通过；Un
 hard-link 行为交接 L42/M27。wbox 根测试 459 passed / 3 environment ignored，Quick、四个
 portable targets 与完整 WP.1–WP.27 产品门禁通过；本机 `system df` 正常报告 11 个镜像约
 2.5 GiB logical bytes。
+
+`W71` 修复两套互不协调的 Windows 句柄继承锁。platform detached spawn 会在
+`CreateProcessW` 前临时清除 ambient standard HANDLE 的 `HANDLE_FLAG_INHERIT`；wbox
+AppContainer spawn 则临时为 broker/volume HANDLE 打开该 flag，并用
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 精确传递。两者操作的是同一进程级状态，原先却各持
+一把 crate-local mutex，并发时仍可能让错误的创建窗口观察到临时 flag。platform 现在公开
+不含 HANDLE 的 `HandleInheritanceLock`，内部 spawn 与 wbox raw launcher 共同持有；选择
+哪些 HANDLE、attribute list、AppContainer、Job 和失败回滚仍完全归 wbox。wbox 将本地锁
+与 flag guards 收成 RAII scope，drop 明确先恢复全部 flag、再释放共享锁，不依赖字段析构
+顺序。真实 Event HANDLE + 双线程门禁证明 platform contender 在 wbox scope 释放前不能
+进入；platform 最小 process-spawn 18 tests、all-features 142 tests 与五目标 strict Clippy
+通过。Unix/macOS 没有 `HANDLE_FLAG_INHERIT` mutation，公共 guard 只保持可编译的协作式
+序列化契约，不新增伪宿主能力或 TODO 真机验收。wbox 根测试 460 passed / 3 environment
+ignored，Quick lint/分层门禁通过并释放 394.5 MiB 可再生产物，i686 Windows、AArch64
+Linux 与双 ISA macOS portable targets 通过，完整 WP.1-WP.27 产品门禁通过；固定 digest
+Ubuntu 24.04 完整镜像重新 pull 后实跑得到 `ubuntu:24.04`、`x86_64`、`apt 2.8.3`、
+`amd64` 与 `64`。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
