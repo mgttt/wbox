@@ -10,6 +10,7 @@ use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
 use agenterm_platform::filesystem_publish::{publish_directory, DirectoryPublishErrorKind};
 use agenterm_platform::locking::{LockErrorKind, PathLock};
+use agenterm_platform::process_metrics::{self, ProcessMetricsErrorKind};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -31,6 +32,7 @@ pub struct PullSummary {
 }
 
 static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+const STAGING_OWNER_MARKER: &str = ".wbox-owner.lock";
 
 fn sibling_path(dest: &Path, role: &str, unique: bool) -> crate::fault::Result<PathBuf> {
     let parent = dest
@@ -56,6 +58,7 @@ fn sibling_path(dest: &Path, role: &str, unique: bool) -> crate::fault::Result<P
 
 struct StagingDir {
     path: PathBuf,
+    owner: Option<PathLock>,
     armed: bool,
 }
 
@@ -67,7 +70,36 @@ impl StagingDir {
         std::fs::create_dir_all(parent)?;
         let path = sibling_path(dest, "staging", true)?;
         std::fs::create_dir(&path)?;
-        Ok(Self { path, armed: true })
+        let owner_path = path.join(STAGING_OWNER_MARKER);
+        let owner = match PathLock::try_acquire(&owner_path) {
+            Ok(owner) => owner,
+            Err(error) => {
+                agenterm_platform::filesystem_cleanup::remove_tree(&path).ok();
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&owner_path)
+        {
+            drop(owner);
+            agenterm_platform::filesystem_cleanup::remove_tree(&path).ok();
+            return Err(error.into());
+        }
+        Ok(Self {
+            path,
+            owner: Some(owner),
+            armed: true,
+        })
+    }
+
+    /// Relinquish the download receipt while the destination commit lock is held.
+    fn prepare_commit(&mut self) -> crate::fault::Result<()> {
+        self.owner.take();
+        std::fs::remove_file(self.path.join(STAGING_OWNER_MARKER))?;
+        Ok(())
     }
 
     fn disarm(&mut self) {
@@ -78,8 +110,9 @@ impl StagingDir {
 impl Drop for StagingDir {
     fn drop(&mut self) {
         if self.armed {
-            std::fs::remove_dir_all(&self.path).ok();
+            agenterm_platform::filesystem_cleanup::remove_tree(&self.path).ok();
         }
+        self.owner.take();
     }
 }
 
@@ -107,6 +140,174 @@ impl PullCommitLock {
             }
         }
     }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct CacheRecoveryReport {
+    restored_backup: bool,
+    removed_backups: usize,
+    removed_staging: usize,
+    skipped_active: usize,
+    skipped_uncertain: usize,
+}
+
+fn artifact_prefix(dest: &Path, role: &str, owner: &str) -> crate::fault::Result<String> {
+    let name = dest
+        .file_name()
+        .ok_or_else(|| crate::fail!("镜像缓存路径缺少目录名：{}", dest.display()))?
+        .to_string_lossy();
+    Ok(format!(".{}.{owner}-{role}-", name))
+}
+
+fn matching_artifacts(dest: &Path, prefix: &str) -> crate::fault::Result<Vec<PathBuf>> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| crate::fail!("镜像缓存路径缺少父目录：{}", dest.display()))?;
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(prefix) {
+            matches.push(entry.path());
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn require_real_directory(path: &Path, role: &str) -> crate::fault::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    crate::ensure!(
+        is_real_directory(&metadata),
+        "拒绝处理不是普通目录的镜像缓存 {}：{}",
+        role,
+        path.display()
+    );
+    Ok(true)
+}
+
+fn legacy_staging_pid(path: &Path, prefix: &str) -> Option<u32> {
+    let name = path.file_name()?.to_string_lossy();
+    let suffix = name.strip_prefix(prefix)?;
+    let (pid, serial) = suffix.split_once('-')?;
+    if serial.is_empty() || serial.parse::<u64>().is_err() {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// Recover artifacts for one destination. The caller must hold its commit lock.
+fn recover_cache_artifacts(
+    dest: &Path,
+    current_staging: Option<&Path>,
+) -> crate::fault::Result<CacheRecoveryReport> {
+    let staging_prefix = artifact_prefix(dest, "staging", "wbox")?;
+    let backup_prefix = artifact_prefix(dest, "backup", "platform")?;
+    let staging = matching_artifacts(dest, &staging_prefix)?;
+    let backup_candidates = matching_artifacts(dest, &backup_prefix)?;
+    let mut report = CacheRecoveryReport::default();
+
+    let mut backups = Vec::new();
+    for backup in backup_candidates {
+        if require_real_directory(&backup, "backup")? {
+            backups.push(backup);
+        }
+    }
+    let destination_exists = match std::fs::symlink_metadata(dest) {
+        Ok(metadata) => {
+            crate::ensure!(
+                is_real_directory(&metadata),
+                "镜像缓存目标不是普通目录：{}",
+                dest.display()
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if destination_exists {
+        for backup in backups {
+            agenterm_platform::filesystem_cleanup::remove_tree(&backup)?;
+            report.removed_backups += 1;
+        }
+    } else {
+        match backups.as_slice() {
+            [] => {}
+            [backup] => {
+                std::fs::rename(backup, dest)?;
+                report.restored_backup = true;
+            }
+            _ => crate::bail!(
+                "镜像缓存目标缺失且存在 {} 份 backup，无法判断应恢复哪一份：{}",
+                backups.len(),
+                dest.display()
+            ),
+        }
+    }
+
+    for candidate in staging {
+        if current_staging == Some(candidate.as_path()) {
+            continue;
+        }
+        if !require_real_directory(&candidate, "staging")? {
+            continue;
+        }
+        let owner_path = candidate.join(STAGING_OWNER_MARKER);
+        match std::fs::symlink_metadata(&owner_path) {
+            Ok(metadata) => {
+                crate::ensure!(
+                    metadata.is_file() && !metadata.file_type().is_symlink(),
+                    "staging owner receipt 不是普通文件：{}",
+                    owner_path.display()
+                );
+                match PathLock::try_acquire(&owner_path) {
+                    Ok(_owner) => {
+                        agenterm_platform::filesystem_cleanup::remove_tree(&candidate)?;
+                        report.removed_staging += 1;
+                    }
+                    Err(error) if error.kind() == LockErrorKind::Contended => {
+                        report.skipped_active += 1;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(pid) = legacy_staging_pid(&candidate, &staging_prefix) else {
+                    report.skipped_uncertain += 1;
+                    continue;
+                };
+                match process_metrics::metrics(pid) {
+                    Err(error) if error.kind() == ProcessMetricsErrorKind::NotFound => {
+                        agenterm_platform::filesystem_cleanup::remove_tree(&candidate)?;
+                        report.removed_staging += 1;
+                    }
+                    Ok(_) | Err(_) => report.skipped_uncertain += 1,
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(report)
 }
 
 fn replace_cache_dir(staging: &Path, dest: &Path) -> crate::fault::Result<()> {
@@ -274,6 +475,29 @@ pub fn pull_image(
     // ---- 6. 同卷提交：同一目标串行交换，失败恢复旧缓存 ----
     let _commit_lock = PullCommitLock::acquire(dest, Duration::from_secs(300))
         .context("获取镜像缓存提交锁失败")
+        .ctx(ErrKind::Registry)?;
+    let recovery = recover_cache_artifacts(dest, Some(&staging.path))
+        .context("恢复镜像缓存提交残留失败")
+        .ctx(ErrKind::Registry)?;
+    if verbose
+        && (recovery.restored_backup
+            || recovery.removed_backups != 0
+            || recovery.removed_staging != 0
+            || recovery.skipped_active != 0
+            || recovery.skipped_uncertain != 0)
+    {
+        println!(
+            "wbox: 缓存恢复 restored_backup={} removed_backup={} removed_staging={} active_staging={} uncertain_staging={}",
+            recovery.restored_backup,
+            recovery.removed_backups,
+            recovery.removed_staging,
+            recovery.skipped_active,
+            recovery.skipped_uncertain
+        );
+    }
+    staging
+        .prepare_commit()
+        .context("释放镜像 staging owner receipt 失败")
         .ctx(ErrKind::Registry)?;
     replace_cache_dir(&staging.path, dest)
         .context("替换镜像缓存失败")
@@ -843,6 +1067,11 @@ fn unpack_layer_with_state(
 mod tests {
     use super::*;
 
+    const OWNER_PROBE_DEST: &str = "WBOX_TEST_STAGING_OWNER_DEST";
+    const OWNER_PROBE_READY: &str = "WBOX_TEST_STAGING_OWNER_READY";
+    const OWNER_PROBE_RELEASE: &str = "WBOX_TEST_STAGING_OWNER_RELEASE";
+    const OWNER_PROBE_CRASH: &str = "WBOX_TEST_STAGING_OWNER_CRASH";
+
     /// 构造一个内存 tar（未压缩），条目为 (路径, 内容)。
     fn make_tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut b = wbox_codec::tar::Builder::new(Vec::new());
@@ -907,6 +1136,13 @@ mod tests {
         std::fs::write(staging.path.join("manifest.json"), b"{}").unwrap();
         let staging_path = staging.path.clone();
 
+        let _commit = PullCommitLock::acquire(&dest, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            recover_cache_artifacts(&dest, Some(&staging.path)).unwrap(),
+            CacheRecoveryReport::default(),
+            "恢复器不得把本次 pull 自己的 staging 当作活跃竞争者"
+        );
+        staging.prepare_commit().unwrap();
         replace_cache_dir(&staging.path, &dest).unwrap();
         staging.disarm();
         assert!(!staging_path.exists(), "staging 应已成为正式缓存");
@@ -922,6 +1158,158 @@ mod tests {
                 .contains("platform-backup")),
             "成功发布后不应残留 backup"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn staging_owner_probe() {
+        let Ok(dest) = std::env::var(OWNER_PROBE_DEST) else {
+            return;
+        };
+        let ready = PathBuf::from(std::env::var_os(OWNER_PROBE_READY).unwrap());
+        let release = PathBuf::from(std::env::var_os(OWNER_PROBE_RELEASE).unwrap());
+        let staging = StagingDir::create(Path::new(&dest)).unwrap();
+        std::fs::write(&ready, staging.path.to_string_lossy().as_bytes()).unwrap();
+        if std::env::var_os(OWNER_PROBE_CRASH).is_some() {
+            std::process::exit(0);
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !release.exists() {
+            assert!(Instant::now() < deadline, "owner probe release timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(staging);
+    }
+
+    fn spawn_owner_probe(
+        dir: &Path,
+        dest: &Path,
+        crash: bool,
+    ) -> (std::process::Child, PathBuf, PathBuf) {
+        let ready = dir.join("owner-ready");
+        let release = dir.join("owner-release");
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "oci::image::tests::staging_owner_probe",
+                "--nocapture",
+            ])
+            .env(OWNER_PROBE_DEST, dest)
+            .env(OWNER_PROBE_READY, &ready)
+            .env(OWNER_PROBE_RELEASE, &release)
+            .stdout(std::process::Stdio::null());
+        if crash {
+            command.env(OWNER_PROBE_CRASH, "1");
+        }
+        let mut child = command.spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("owner probe exited before ready: {status}");
+            }
+            assert!(Instant::now() < deadline, "owner probe ready timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        (child, ready, release)
+    }
+
+    #[test]
+    fn recovery_does_not_remove_cross_process_active_staging() {
+        let dir = tmpdir("pull-active-owner");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut child, ready, release) = spawn_owner_probe(&dir, &dest, false);
+        let staging = PathBuf::from(std::fs::read_to_string(ready).unwrap());
+
+        let _commit = PullCommitLock::acquire(&dest, Duration::from_secs(1)).unwrap();
+        let report = recover_cache_artifacts(&dest, None).unwrap();
+        let remained = staging.exists();
+        std::fs::write(release, b"release").unwrap();
+        let status = child.wait().unwrap();
+
+        assert!(status.success());
+        assert!(remained, "活跃 writer 的 staging 被误删");
+        assert_eq!(report.skipped_active, 1);
+        assert_eq!(report.removed_staging, 0);
+        assert!(!staging.exists(), "writer 正常退出后应自行清理 staging");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_removes_staging_left_by_crashed_process() {
+        let dir = tmpdir("pull-crashed-owner");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut child, ready, _release) = spawn_owner_probe(&dir, &dest, true);
+        let staging = PathBuf::from(std::fs::read_to_string(ready).unwrap());
+        assert!(child.wait().unwrap().success());
+        assert!(staging.exists(), "崩溃探针必须绕过 Drop 留下 staging");
+
+        let _commit = PullCommitLock::acquire(&dest, Duration::from_secs(1)).unwrap();
+        let report = recover_cache_artifacts(&dest, None).unwrap();
+        assert_eq!(report.removed_staging, 1);
+        assert!(!staging.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_removes_only_provably_dead_legacy_staging() {
+        let dir = tmpdir("pull-legacy-owner");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = artifact_prefix(&dest, "staging", "wbox").unwrap();
+        let dead = dir.join(format!("{prefix}{}-0", u32::MAX));
+        let live = dir.join(format!("{prefix}{}-1", std::process::id()));
+        std::fs::create_dir(&dead).unwrap();
+        std::fs::create_dir(&live).unwrap();
+
+        let _commit = PullCommitLock::acquire(&dest, Duration::from_secs(1)).unwrap();
+        let report = recover_cache_artifacts(&dest, None).unwrap();
+        assert!(!dead.exists());
+        assert!(live.exists(), "活跃 PID 的 markerless staging 必须保留");
+        assert_eq!(report.removed_staging, 1);
+        assert_eq!(report.skipped_uncertain, 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_restores_or_removes_unambiguous_backups() {
+        let dir = tmpdir("pull-backup-recovery");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dest).unwrap();
+        let prefix = artifact_prefix(&dest, "backup", "platform").unwrap();
+        let obsolete = dir.join(format!("{prefix}1-0"));
+        std::fs::create_dir(&obsolete).unwrap();
+
+        let report = recover_cache_artifacts(&dest, None).unwrap();
+        assert_eq!(report.removed_backups, 1);
+        assert!(!obsolete.exists());
+
+        agenterm_platform::filesystem_cleanup::remove_tree(&dest).unwrap();
+        let recoverable = dir.join(format!("{prefix}1-1"));
+        std::fs::create_dir(&recoverable).unwrap();
+        std::fs::write(recoverable.join("marker"), b"old-cache").unwrap();
+        let report = recover_cache_artifacts(&dest, None).unwrap();
+        assert!(report.restored_backup);
+        assert_eq!(std::fs::read(dest.join("marker")).unwrap(), b"old-cache");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_rejects_ambiguous_backups() {
+        let dir = tmpdir("pull-backup-ambiguous");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        let prefix = artifact_prefix(&dest, "backup", "platform").unwrap();
+        let first = dir.join(format!("{prefix}1-0"));
+        let second = dir.join(format!("{prefix}2-0"));
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+
+        let error = recover_cache_artifacts(&dest, None).unwrap_err();
+        assert!(error.to_string().contains("2 份 backup"), "{error}");
+        assert!(first.exists() && second.exists(), "歧义 backup 不得被删除");
         std::fs::remove_dir_all(&dir).ok();
     }
 
