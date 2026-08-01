@@ -2593,7 +2593,7 @@ TODO-WINDOW
 ├── W31 Browser/WASI `wasm-machine` 能力矩阵                     [research] 16 路预填
 ├── W32 CPU 并行与 zero-copy 实验矩阵                            [done] 30 路预填 + Windows 实测
 ├── W33 NUMA/RDMA/共享 ring/scatter-gather                       [research] 当前宿主无 RDMA adapter
-├── W34 FP64 FMA 算力计量                                         [done] 143–145 GFLOPS 本机长测
+├── W34 双 ISA FP64 FMA 算力计量                                  [active] x86 实测；AArch64 待真机
 ├── W35 Windows ABI 依赖单点化与 agenterm-platform 版本收敛        [done] windows-sys 0.61 单节点
 ├── W36 OCI pull 提交锁下沉与崩溃释放门禁                           [done] PathLock + 无 Drop 子进程
 ├── W37 状态 liveness marker/owner guard 分层                         [done] PathLock + 跨进程/别名门禁
@@ -2612,9 +2612,11 @@ Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装�
 取得 NUMA topology、RDMA-capable/enabled adapter、memory registration、peer 与
 真实 transfer 证据，不能把 OS API 或 feature 存在写成 available。
 
-`W34` 使用可审计 kernel 计量，不从 W32 的整数 checksum 推算 FLOPS：每 worker
-每轮 8 条独立 AVX2 FP64 FMA，按 `8 × 4 lanes × 2 operations = 64 FLOP` 计数。
-本机以 200,000,000 iterations/worker、repeat=5 两次长测：1 worker 为
+`W34` 使用可审计 kernel 计量，不从 W32 的整数 checksum 推算 FLOPS。x86-64 每
+worker 每轮执行 8 条独立 AVX2 FP64 FMA，AArch64 执行 16 条独立 NEON FP64 FMA；
+两者分别按 `8 × 4 × 2` 和 `16 × 2 × 2` 计为 64 FLOP。AArch64 内核已通过
+`aarch64-apple-darwin` all-targets 严格 Clippy，但未在真机计时，所以 W34 保持
+active。本机 x86-64 以 200,000,000 iterations/worker、repeat=5 两次长测：1 worker 为
 `37.37–38.82 GFLOPS`，2 worker `70.41–70.47`，4 worker `115.28–115.30`，
 8 worker `143.53–144.51 GFLOPS`。按暴露的 4 cores × 2.5 GHz × 16 FP64
 FLOP/cycle 粗算名义峰值约 160 GFLOPS，微基准约达 90%；频率由虚拟化宿主调度，
@@ -3556,7 +3558,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 TODO-MACOS
 ├── M1 三宿主 × 三来宾 × 双 ISA 产品契约与 `wbox platform` [done] 18 路线纯逻辑门禁
 ├── M2 接入独立 `agenterm-platform` 的最小机制面         [active] host identity 已接，macOS 待验
-├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [planned]
+├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [active] 双 ISA 编译通过，真机待验
 ├── M4 macOS 原生程序沙箱与资源限制取证                  [planned]
 ├── M5 macOS 上 `wbox-linux` + Linux OCI 产品路径         [planned]
 ├── M6 macOS 上第一方 Rust Win32 runtime 产品路径          [planned]
@@ -3575,8 +3577,16 @@ wbox 的 3×3×2 路由、优先级与能力状态。
 `filesystem` 与 `locking`。`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
-cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke 尚未由 wbox 门禁
-证明，因此保持 active。
+cross-check 已随本阶段同步通过。macOS 原生运行与三宿主真机 smoke 尚未由 wbox
+门禁证明，因此保持 active。
+
+`M3` 已建立 `x86_64-apple-darwin` 与 `aarch64-apple-darwin` 的 workspace
+all-targets Clippy `-D warnings` 交叉门禁。TLS 随机源在 Apple target 使用系统
+`arc4random_buf`；Linux overlay whiteout/xattr 合并不再误编译到 Darwin；尚无
+macOS provider 的 `top` 返回明确 unsupported，不能伪装成空进程列表。AArch64
+门禁同时补齐可审计的 NEON FP64 FMA 内核。交叉门禁不链接、不运行，也不证明
+Seatbelt/HVF/Virtualization.framework、签名或 CLI 行为；这些仍需 M4/M5/M8 的
+Apple 真机 owning gate，所以 M3 尚不能标 done。
 
 此前 review 发现的两个上游阻塞已修复并有行为门禁：`PathLock` 现在规范化路径
 别名并由真实子进程验证互斥与释放；Windows `protect_private_directory()` 现在

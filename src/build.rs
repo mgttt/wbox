@@ -784,7 +784,7 @@ pub(crate) fn link_tree(src: &Path, dst: &Path) -> Result<()> {
 /// rootless overlay 用它表示"下层的这个条目被删了"，**文件和目录都是这个形态**
 /// （目录要挂载时带 `userxattr` 才行，见 F9.12）。注意它与 tar 层的 `.wh.`
 /// 前缀**不是**一套，两处判别不能互相套用。
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn is_whiteout(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::MetadataExt;
@@ -795,7 +795,7 @@ fn is_whiteout(meta: &std::fs::Metadata) -> bool {
 ///
 /// `userxattr` 模式下标记写在 `user.overlay.opaque`。不认这个标记的话，
 /// "删掉整个目录再重建"会变成"新旧内容混在一起"。
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn is_opaque(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -820,7 +820,7 @@ fn is_opaque(path: &Path) -> bool {
 /// - whiteout（字符设备 0:0）→ 删掉 staging 里的同名条目；
 /// - 目录 → staging 建同名目录后递归；带 opaque 标记的先清空；
 /// - 其余 → **先 unlink 再落盘**，只对改动过的文件断开硬链接。
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub(crate) fn merge_overlay_upper(upper: &Path, target: &Path) -> Result<()> {
     let fail = |what: &str, p: &Path, e: std::io::Error| {
         WboxError::args(format!("{} '{}' 失败：{}", what, p.display(), e))
@@ -857,6 +857,11 @@ pub(crate) fn merge_overlay_upper(upper: &Path, target: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn merge_overlay_upper(_upper: &Path, _target: &Path) -> Result<()> {
+    Err(WboxError::spawn("overlay upper 合并目前只支持 Linux 宿主"))
 }
 
 /// 构建缓存的根目录。与镜像缓存并列，用户清理时一处就够。
@@ -1112,7 +1117,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 // 只占一份。前提是此后没有任何就地改写——`COPY` 与 overlay
                 // 合并都先 unlink，`RUN` 的写入落在 overlay upper 里。
                 // 三个条件缺一不可，任一不满足就退回按字节整份复制。
-                #[cfg(not(windows))]
+                #[cfg(target_os = "linux")]
                 {
                     linked_base = std::env::var_os("WBOX_NO_OVERLAY").is_none()
                         && crate::backend::rootless_overlay_available();
@@ -1254,7 +1259,7 @@ pub fn run_build(opts: &BuildOptions) -> Result<u32> {
                 // 静默失败，`.wbox-step-*` 会留在镜像缓存旁边。
                 crate::fsutil::remove_tree(&layer);
                 run_step_with(&rootfs, cmd, &cfg, Some(&layer))?;
-                #[cfg(not(windows))]
+                #[cfg(target_os = "linux")]
                 merge_overlay_upper(&layer.join("upper"), &rootfs)?;
                 crate::fsutil::remove_tree(&layer);
             }

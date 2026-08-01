@@ -189,6 +189,9 @@ pub struct RunSpec {
 }
 
 impl RunSpec {
+    // The protocol is host-neutral, but only Linux and Windows have a spawn
+    // backend that can publish it until the macOS backend is implemented.
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub(crate) fn notify_started(&self) -> Result<()> {
         if self.startup_notify {
             crate::runstate::record_startup_ready(&self.name)?;

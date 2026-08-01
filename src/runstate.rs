@@ -631,6 +631,7 @@ pub fn startup_is_ready(dir: &Path) -> bool {
 
 /// workload 已成功创建并恢复后发布 READY。先写同目录临时文件再 rename，父进程
 /// 不会观察到半条消息。
+#[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 pub fn record_startup_ready(name: &str) -> Result<()> {
     let dir = dir_for(name)?;
     let ready = startup_ready_path(&dir);

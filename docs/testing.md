@@ -60,6 +60,16 @@ CI 固定 Rust 1.97.1。升级编译器是独立变更：先跑 Quick 和双目�
 精确 channel 的 `rust-toolchain.toml`：只有 `stable` 别名的离线机器会为同版本
 再次联网安装并卡住；提供离线工具链镜像后再统一本地 pin。
 
+macOS 编译契约用两个 target 的 workspace all-targets 严格 Clippy 固定：
+
+```powershell
+cargo clippy --locked --workspace --all-targets --target x86_64-apple-darwin -- -D warnings
+cargo clippy --locked --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+```
+
+Windows 上该门禁只做类型检查与 lint，不链接或运行 Darwin 产物；它不能替代 macOS
+真机 CLI、sandbox、签名和运行门禁。
+
 日常构建使用仓库 wrapper，而不是长期直接调用 `cargo build`：
 
 ```powershell

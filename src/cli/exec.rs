@@ -30,7 +30,10 @@
 //! 同一命名 Job。OCI/模拟器缺少可靠的 rootfs/env 重建语义，明确拒绝。
 
 use crate::error::{Result, WboxError};
-use crate::runstate::{self, Liveness};
+#[cfg(any(target_os = "linux", windows, test))]
+use crate::runstate;
+#[cfg(any(target_os = "linux", windows))]
+use crate::runstate::Liveness;
 
 struct ExecOptions<'a> {
     name: &'a str,

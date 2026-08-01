@@ -19,14 +19,15 @@ cargo run --release -p wbox-hpc-lab -- flops --iterations 200000000 --repeat 5
 The reported time is the median. Process measurements include process startup.
 Every mode must produce the scalar checksum before a result is accepted.
 
-The `flops` command measures compute-bound FP64 AVX2 FMA throughput. One loop
-executes eight independent 256-bit FMA instructions. Each instruction has four
-FP64 lanes and each fused multiply-add counts as two floating-point operations,
-so the audited count is `8 * 4 * 2 = 64 FLOP` per worker iteration. Independent
-register chains expose throughput instead of measuring one dependency chain's
-latency. This is a best-case arithmetic microbenchmark, not an application
-performance promise; memory bandwidth and arithmetic intensity still bound real
-workloads.
+The `flops` command measures compute-bound FP64 SIMD FMA throughput. On x86-64,
+one loop executes eight independent 256-bit AVX2 FMA instructions; on AArch64 it
+executes sixteen independent 128-bit NEON FMA instructions. The audited counts
+are respectively `8 * 4 * 2` and `16 * 2 * 2`, both 64 FLOP per worker
+iteration. Independent register chains expose throughput instead of measuring
+one dependency chain's latency. The AArch64 kernel has a cross-compilation gate
+but still needs native measurements. This is a best-case arithmetic
+microbenchmark, not an application performance promise; memory bandwidth and
+arithmetic intensity still bound real workloads.
 
 `logical_copies=0` has a narrow meaning: after initialization, the benchmark
 does not copy the dataset between application buffers or processes. It does not

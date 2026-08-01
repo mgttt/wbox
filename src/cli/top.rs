@@ -89,6 +89,11 @@ fn platform_rows(_name: &str, dir: &std::path::Path) -> Result<Vec<ProcessRow>> 
     Ok(linux_process_tree(root))
 }
 
+#[cfg(not(any(target_os = "linux", windows)))]
+fn platform_rows(_name: &str, _dir: &std::path::Path) -> Result<Vec<ProcessRow>> {
+    Err(WboxError::spawn("top 尚未实现当前宿主的进程枚举后端"))
+}
+
 /// 容器内进程的宿主 PID 清单（含 root 本身）。
 ///
 /// `top` 与 `pause`/`unpause` 共用同一份枚举：一处按 PPID 闭包展开、

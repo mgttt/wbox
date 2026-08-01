@@ -24,7 +24,7 @@ pub fn bytes<const N: usize>() -> [u8; N] {
     b
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn try_fill(buf: &mut [u8]) -> Result<(), String> {
     // getrandom(2)。分段读是因为内核对单次请求有上限（Linux 是 32 MiB，
     // 但被信号打断时也可能返回短读）。
@@ -45,6 +45,16 @@ fn try_fill(buf: &mut [u8]) -> Result<(), String> {
             return Err(err.to_string());
         }
         off += n as usize;
+    }
+    Ok(())
+}
+
+#[cfg(target_vendor = "apple")]
+fn try_fill(buf: &mut [u8]) -> Result<(), String> {
+    // arc4random_buf is the Apple/BSD system CSPRNG and has no failure return.
+    // It is safe for arbitrary lengths, including an empty slice.
+    unsafe {
+        libc::arc4random_buf(buf.as_mut_ptr().cast(), buf.len());
     }
     Ok(())
 }

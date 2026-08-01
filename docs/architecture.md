@@ -93,9 +93,10 @@ CPU 并行与数据移动按正交维度建模：scalar/SIMD/thread/process 允�
 page fault、cache coherence 或内存流量。NUMA/RDMA 必须经过拓扑/adapter 探测和
 真实传输门禁，不能从 API 存在推断可用。
 
-FLOPS 只由可审计的浮点 kernel 计算。当前 FP64 lab 每轮执行 8 条独立 AVX2 FMA，
-按 `8 instructions × 4 lanes × 2 operations = 64 FLOP` 计数；理论峰值、FMA
-微基准实测值和受内存/分支/同步约束的业务吞吐必须分别报告。
+FLOPS 只由可审计的浮点 kernel 计算。FP64 lab 在 x86-64 每轮执行 8 条独立 AVX2
+FMA，在 AArch64 每轮执行 16 条独立 NEON FMA，分别按 `8 × 4 × 2` 与
+`16 × 2 × 2` 计为 64 FLOP。理论峰值、FMA 微基准实测值和受内存/分支/同步约束
+的业务吞吐必须分别报告；交叉编译通过的 AArch64 内核在取得真机计时前不是性能证据。
 
 GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩阵表达，
 工作负载分别预填为 parallel/tensor/language compute。当前九格全部是 research；

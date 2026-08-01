@@ -14,6 +14,7 @@ const DEFAULT_ROUNDS: u32 = 32;
 const DEFAULT_REPEAT: usize = 3;
 const DEFAULT_FLOP_ITERATIONS: u64 = 200_000_000;
 const DEFAULT_FLOP_REPEAT: usize = 5;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const FP64_FLOPS_PER_ITERATION: u64 = 64;
 #[cfg(windows)]
 const CACHE_LINE: usize = 64;
@@ -74,40 +75,52 @@ fn parse_flops_args(args: &[String]) -> Result<FlopsConfig, String> {
     Ok(config)
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn flops_benchmark(config: FlopsConfig) -> Result<(), String> {
-    #[cfg(target_arch = "x86_64")]
-    if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
-        return Err("FP64 throughput lab requires AVX2 and FMA".to_owned());
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    return Err("FP64 throughput lab is not implemented for this ISA".to_owned());
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        let hardware = detect_hardware(current_host());
-        let logical = hardware.logical_processors.unwrap_or(1);
+    let kernel = fp64_kernel_name()?;
+    let hardware = detect_hardware(current_host());
+    let logical = hardware.logical_processors.unwrap_or(1);
+    println!(
+        "metric=fp64-flops kernel={} logical_processors={} iterations_per_worker={} flops_per_iteration={} repeat={} statistic=median",
+        kernel,
+        logical,
+        config.iterations,
+        FP64_FLOPS_PER_ITERATION,
+        config.repeat,
+    );
+    for workers in worker_scan(logical) {
+        let measurement =
+            measure_float_repeated(config.repeat, || threaded_fma(config.iterations, workers));
+        let operations = fma_operation_count(config.iterations, workers);
+        let gflops = operations as f64 / measurement.elapsed.as_secs_f64() / 1e9;
         println!(
-            "metric=fp64-flops kernel=avx2-fma logical_processors={} iterations_per_worker={} flops_per_iteration={} repeat={} statistic=median",
-            logical,
-            config.iterations,
-            FP64_FLOPS_PER_ITERATION,
-            config.repeat,
+            "mode=simd-threads workers={} elapsed_ms={:.3} fp64_gflops={:.3} result={:.9}",
+            workers,
+            millis(measurement.elapsed),
+            gflops,
+            measurement.value,
         );
-        for workers in worker_scan(logical) {
-            let measurement =
-                measure_float_repeated(config.repeat, || threaded_fma(config.iterations, workers));
-            let operations = fma_operation_count(config.iterations, workers);
-            let gflops = operations as f64 / measurement.elapsed.as_secs_f64() / 1e9;
-            println!(
-                "mode=simd-threads workers={} elapsed_ms={:.3} fp64_gflops={:.3} result={:.9}",
-                workers,
-                millis(measurement.elapsed),
-                gflops,
-                measurement.value,
-            );
-        }
-        Ok(())
     }
+    Ok(())
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn flops_benchmark(_config: FlopsConfig) -> Result<(), String> {
+    Err("FP64 throughput lab is not implemented for this ISA".to_owned())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn fp64_kernel_name() -> Result<&'static str, String> {
+    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+        Ok("avx2-fma")
+    } else {
+        Err("FP64 throughput lab requires AVX2 and FMA".to_owned())
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn fp64_kernel_name() -> Result<&'static str, String> {
+    Ok("neon-fma")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -259,6 +272,7 @@ struct Measurement {
     checksum: u64,
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 struct FloatMeasurement {
     elapsed: Duration,
     value: f64,
@@ -283,6 +297,7 @@ fn measure_repeated(repeat: usize, mut action: impl FnMut() -> u64) -> Measureme
     results.swap_remove(results.len() / 2)
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn measure_float_repeated(repeat: usize, mut action: impl FnMut() -> f64) -> FloatMeasurement {
     let mut results = (0..repeat)
         .map(|_| {
@@ -346,6 +361,7 @@ fn worker_scan(logical: usize) -> Vec<usize> {
     workers
 }
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 fn fma_operation_count(iterations: u64, workers: usize) -> u128 {
     u128::from(iterations) * u128::from(FP64_FLOPS_PER_ITERATION) * workers as u128
 }
@@ -429,6 +445,23 @@ fn threaded_fma(iterations: u64, workers: usize) -> f64 {
     })
 }
 
+#[cfg(target_arch = "aarch64")]
+fn threaded_fma(iterations: u64, workers: usize) -> f64 {
+    std::thread::scope(|scope| {
+        let handles = (0..workers)
+            .map(|worker| {
+                // SAFETY: Advanced SIMD and FP64 FMA are part of the AArch64
+                // execution environment represented by Rust's aarch64 target.
+                scope.spawn(move || unsafe { fp64_fma_kernel(iterations, worker as u64) })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("FMA worker panicked"))
+            .sum()
+    })
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn fp64_fma_kernel(iterations: u64, seed: u64) -> f64 {
@@ -462,6 +495,60 @@ unsafe fn fp64_fma_kernel(iterations: u64, seed: u64) -> f64 {
             _mm256_storeu_pd(lanes.as_mut_ptr(), accumulator);
             total + lanes.iter().sum::<f64>()
         });
+    black_box(total)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn fp64_fma_kernel(iterations: u64, seed: u64) -> f64 {
+    use std::arch::aarch64::*;
+
+    let multiplier = vdupq_n_f64(1.0 + f64::EPSILON);
+    let addend = vdupq_n_f64(1.0e-12);
+    let base = 1.0 + seed as f64 * 1.0e-6;
+    let mut a0 = vdupq_n_f64(base + 0.01);
+    let mut a1 = vdupq_n_f64(base + 0.02);
+    let mut a2 = vdupq_n_f64(base + 0.03);
+    let mut a3 = vdupq_n_f64(base + 0.04);
+    let mut a4 = vdupq_n_f64(base + 0.05);
+    let mut a5 = vdupq_n_f64(base + 0.06);
+    let mut a6 = vdupq_n_f64(base + 0.07);
+    let mut a7 = vdupq_n_f64(base + 0.08);
+    let mut a8 = vdupq_n_f64(base + 0.09);
+    let mut a9 = vdupq_n_f64(base + 0.10);
+    let mut a10 = vdupq_n_f64(base + 0.11);
+    let mut a11 = vdupq_n_f64(base + 0.12);
+    let mut a12 = vdupq_n_f64(base + 0.13);
+    let mut a13 = vdupq_n_f64(base + 0.14);
+    let mut a14 = vdupq_n_f64(base + 0.15);
+    let mut a15 = vdupq_n_f64(base + 0.16);
+    for _ in 0..black_box(iterations) {
+        a0 = vfmaq_f64(addend, a0, multiplier);
+        a1 = vfmaq_f64(addend, a1, multiplier);
+        a2 = vfmaq_f64(addend, a2, multiplier);
+        a3 = vfmaq_f64(addend, a3, multiplier);
+        a4 = vfmaq_f64(addend, a4, multiplier);
+        a5 = vfmaq_f64(addend, a5, multiplier);
+        a6 = vfmaq_f64(addend, a6, multiplier);
+        a7 = vfmaq_f64(addend, a7, multiplier);
+        a8 = vfmaq_f64(addend, a8, multiplier);
+        a9 = vfmaq_f64(addend, a9, multiplier);
+        a10 = vfmaq_f64(addend, a10, multiplier);
+        a11 = vfmaq_f64(addend, a11, multiplier);
+        a12 = vfmaq_f64(addend, a12, multiplier);
+        a13 = vfmaq_f64(addend, a13, multiplier);
+        a14 = vfmaq_f64(addend, a14, multiplier);
+        a15 = vfmaq_f64(addend, a15, multiplier);
+    }
+    let mut lanes = [0.0_f64; 2];
+    let total = [
+        a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15,
+    ]
+    .into_iter()
+    .fold(0.0, |total, accumulator| {
+        vst1q_f64(lanes.as_mut_ptr(), accumulator);
+        total + lanes.iter().sum::<f64>()
+    });
     black_box(total)
 }
 
@@ -805,6 +892,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "aarch64")]
+    fn neon_fma_kernel_returns_finite_result() {
+        // SAFETY: Advanced SIMD is part of the supported AArch64 target contract.
+        assert!(unsafe { fp64_fma_kernel(10, 0) }.is_finite());
+    }
+
+    #[test]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     fn fma_operation_accounting_counts_lanes_and_mul_add() {
         assert_eq!(fma_operation_count(10, 4), 2_560);
     }

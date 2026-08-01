@@ -62,6 +62,11 @@ FP64 AVX2 FMA 长测使用 200,000,000 iterations/worker、repeat=5：
 名义峰值粗算为 `4 cores × 2.5 GHz × 16 FP64 FLOP/cycle = 160 GFLOPS`；
 FMA 微基准约达到 90%。该值是寄存器密集型峰值取证，不是实际 workload SLA。
 
+AArch64 路径使用 16 条独立 128-bit NEON FP64 FMA 链，按
+`16 instructions × 2 lanes × 2 operations = 64 FLOP/iteration` 与 x86-64 保持
+相同计数口径。它已通过 `aarch64-apple-darwin` 严格交叉编译，但当前 Windows
+虚拟机不能提供 Apple Silicon 运行证据；不得从 x86 数值外推 AArch64 GFLOPS。
+
 复现入口：
 
 ```powershell
