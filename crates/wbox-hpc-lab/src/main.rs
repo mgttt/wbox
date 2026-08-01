@@ -1,13 +1,10 @@
 use std::env;
 use std::hint::black_box;
-#[cfg(windows)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use agenterm_platform::shared_memory::SharedMemory;
 use wbox_machine::{current_host, detect_hardware, CpuFeature, HardwareCapabilities, HostOs, Isa};
-
-#[cfg(windows)]
-mod shared_windows;
 
 const DEFAULT_ITEMS: usize = 2_000_000;
 const DEFAULT_ROUNDS: u32 = 32;
@@ -16,7 +13,6 @@ const DEFAULT_FLOP_ITERATIONS: u64 = 200_000_000;
 const DEFAULT_FLOP_REPEAT: usize = 5;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const FP64_FLOPS_PER_ITERATION: u64 = 64;
-#[cfg(windows)]
 const CACHE_LINE: usize = 64;
 
 fn main() {
@@ -208,10 +204,7 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
         repeat,
     );
 
-    #[cfg(windows)]
-    let mut dataset = WindowsDataset::new(items, *workers.last().unwrap())?;
-    #[cfg(not(windows))]
-    let mut dataset = PortableDataset::new(items);
+    let mut dataset = SharedDataset::new(items, *workers.last().unwrap())?;
     dataset.fill();
 
     let serial = measure_repeated(repeat, || checksum(dataset.data(), rounds));
@@ -263,26 +256,18 @@ fn benchmark(config: BenchConfig) -> Result<(), String> {
             );
         }
 
-        #[cfg(windows)]
-        {
-            let processes = measure_result_repeated(repeat, || {
-                dataset.clear_results(count);
-                process_checksum(&dataset, rounds, count)
-            })?;
-            ensure_checksum(serial.checksum, processes.checksum, "processes")?;
-            println!(
-                "mode=processes workers={} memory=shared-mapping elapsed_ms={:.3} speedup={:.3} checksum={:#018x} logical_copies=0 cache_line_slots={}",
-                count,
-                millis(processes.elapsed),
-                speedup(serial.elapsed, processes.elapsed),
-                processes.checksum,
-                CACHE_LINE,
-            );
-        }
-        #[cfg(not(windows))]
+        let processes = measure_result_repeated(repeat, || {
+            dataset.clear_results(count);
+            process_checksum(&dataset, rounds, count)
+        })?;
+        ensure_checksum(serial.checksum, processes.checksum, "processes")?;
         println!(
-            "mode=processes workers={} status=unsupported reason=native-shared-mapping-adapter-not-implemented",
-            count
+            "mode=processes workers={} memory=shared-mapping elapsed_ms={:.3} speedup={:.3} checksum={:#018x} logical_copies=0 cache_line_slots={}",
+            count,
+            millis(processes.elapsed),
+            speedup(serial.elapsed, processes.elapsed),
+            processes.checksum,
+            CACHE_LINE,
         );
     }
     Ok(())
@@ -335,7 +320,6 @@ fn measure_float_repeated(repeat: usize, mut action: impl FnMut() -> f64) -> Flo
     results.swap_remove(results.len() / 2)
 }
 
-#[cfg(windows)]
 fn measure_result(action: impl FnOnce() -> Result<u64, String>) -> Result<Measurement, String> {
     let start = Instant::now();
     let checksum = black_box(action()?);
@@ -345,7 +329,6 @@ fn measure_result(action: impl FnOnce() -> Result<u64, String>) -> Result<Measur
     })
 }
 
-#[cfg(windows)]
 fn measure_result_repeated(
     repeat: usize,
     mut action: impl FnMut() -> Result<u64, String>,
@@ -646,18 +629,18 @@ fn ensure_checksum(expected: u64, actual: u64, mode: &str) -> Result<(), String>
     }
 }
 
-#[cfg(windows)]
-struct WindowsDataset {
-    mapping: shared_windows::SharedMapping,
+struct SharedDataset {
+    mapping: SharedMemory,
     items: usize,
     max_workers: usize,
+    result_offset: usize,
 }
 
-#[cfg(windows)]
-impl WindowsDataset {
+impl SharedDataset {
     fn new(items: usize, max_workers: usize) -> Result<Self, String> {
+        let (result_offset, mapping_size) = mapping_layout(items, max_workers)?;
         let name = format!(
-            "Local\\wbox-hpc-{}-{}",
+            "wbox-hpc-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -665,11 +648,12 @@ impl WindowsDataset {
                 .as_nanos()
         );
         let mapping =
-            shared_windows::SharedMapping::create(&name, mapping_size(items, max_workers))?;
+            SharedMemory::create(&name, mapping_size).map_err(|error| error.to_string())?;
         Ok(Self {
             mapping,
             items,
             max_workers,
+            result_offset,
         })
     }
 
@@ -694,43 +678,24 @@ impl WindowsDataset {
         assert!(workers <= self.max_workers);
         // SAFETY: each result slot is within the mapped result region.
         unsafe {
-            std::ptr::write_bytes(self.result_ptr(0), 0, workers * CACHE_LINE);
+            std::ptr::write_bytes(self.result_mut_ptr(0), 0, workers * CACHE_LINE);
         }
     }
 
-    unsafe fn result_ptr(&self, worker: usize) -> *mut u8 {
+    unsafe fn result_mut_ptr(&mut self, worker: usize) -> *mut u8 {
         self.mapping
             .as_mut_ptr()
-            .add(result_offset(self.items) + worker * CACHE_LINE)
+            .add(self.result_offset + worker * CACHE_LINE)
+    }
+
+    unsafe fn result_ptr(&self, worker: usize) -> *const u8 {
+        self.mapping
+            .as_ptr()
+            .add(self.result_offset + worker * CACHE_LINE)
     }
 }
 
-#[cfg(not(windows))]
-struct PortableDataset {
-    data: Vec<u32>,
-}
-
-#[cfg(not(windows))]
-impl PortableDataset {
-    fn new(items: usize) -> Self {
-        Self {
-            data: vec![0; items],
-        }
-    }
-
-    fn fill(&mut self) {
-        for (index, value) in self.data.iter_mut().enumerate() {
-            *value = input_value(index);
-        }
-    }
-
-    fn data(&self) -> &[u32] {
-        &self.data
-    }
-}
-
-#[cfg(windows)]
-fn process_checksum(dataset: &WindowsDataset, rounds: u32, workers: usize) -> Result<u64, String> {
+fn process_checksum(dataset: &SharedDataset, rounds: u32, workers: usize) -> Result<u64, String> {
     let executable = env::current_exe().map_err(|error| error.to_string())?;
     let mut children = Vec::with_capacity(workers);
     for worker in 0..workers {
@@ -765,7 +730,6 @@ fn process_checksum(dataset: &WindowsDataset, rounds: u32, workers: usize) -> Re
     Ok(sum)
 }
 
-#[cfg(windows)]
 fn worker(args: &[String]) -> Result<(), String> {
     if args.len() != 6 {
         return Err(
@@ -781,7 +745,8 @@ fn worker(args: &[String]) -> Result<(), String> {
     if worker >= workers || workers > max_workers {
         return Err("invalid worker partition".to_owned());
     }
-    let mapping = shared_windows::SharedMapping::open(name, mapping_size(items, max_workers))?;
+    let (result_offset, mapping_size) = mapping_layout(items, max_workers)?;
+    let mut mapping = SharedMemory::open(name, mapping_size).map_err(|error| error.to_string())?;
     // SAFETY: parent initialized the data region before spawning this worker.
     let data = unsafe { std::slice::from_raw_parts(mapping.as_ptr().cast::<u32>(), items) };
     let (start, end) = partition(items, worker, workers);
@@ -790,33 +755,34 @@ fn worker(args: &[String]) -> Result<(), String> {
     unsafe {
         mapping
             .as_mut_ptr()
-            .add(result_offset(items) + worker * CACHE_LINE)
+            .add(result_offset + worker * CACHE_LINE)
             .cast::<u64>()
             .write(partial);
     }
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn worker(_args: &[String]) -> Result<(), String> {
-    Err("shared-mapping workers are currently implemented only on Windows".to_owned())
-}
-
-#[cfg(windows)]
 fn parse<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
     value
         .parse()
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
-#[cfg(windows)]
-fn result_offset(items: usize) -> usize {
-    (items * std::mem::size_of::<u32>() + CACHE_LINE - 1) & !(CACHE_LINE - 1)
-}
-
-#[cfg(windows)]
-fn mapping_size(items: usize, workers: usize) -> usize {
-    result_offset(items) + workers * CACHE_LINE
+fn mapping_layout(items: usize, workers: usize) -> Result<(usize, usize), String> {
+    let data_bytes = items
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or_else(|| "shared mapping data size overflows usize".to_owned())?;
+    let result_offset = data_bytes
+        .checked_add(CACHE_LINE - 1)
+        .map(|size| size & !(CACHE_LINE - 1))
+        .ok_or_else(|| "shared mapping alignment overflows usize".to_owned())?;
+    let result_bytes = workers
+        .checked_mul(CACHE_LINE)
+        .ok_or_else(|| "shared mapping result size overflows usize".to_owned())?;
+    let mapping_size = result_offset
+        .checked_add(result_bytes)
+        .ok_or_else(|| "shared mapping total size overflows usize".to_owned())?;
+    Ok((result_offset, mapping_size))
 }
 
 #[cfg(test)]
@@ -906,11 +872,16 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn result_region_is_cache_line_aligned() {
         for items in [1, 7, 8, 9, 1000] {
-            assert_eq!(result_offset(items) % CACHE_LINE, 0);
+            assert_eq!(mapping_layout(items, 8).unwrap().0 % CACHE_LINE, 0);
         }
+    }
+
+    #[test]
+    fn shared_mapping_layout_rejects_overflow() {
+        assert!(mapping_layout(usize::MAX, 1).is_err());
+        assert!(mapping_layout(1, usize::MAX).is_err());
     }
 
     #[test]

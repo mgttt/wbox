@@ -7,11 +7,4 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 wbox-machine = { path = "../wbox-machine" }
-
-[target.'cfg(windows)'.dependencies.windows-sys]
-workspace = true
-features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Memory",
-]
+agenterm-platform = { workspace = true, features = ["shared-memory"] }

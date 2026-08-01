@@ -18,7 +18,7 @@ members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", 
 # 单点冻结 Windows ABI 声明版本，各 package 仍只启用自身需要的 feature。
 windows-sys = { version = "0.61", default-features = false }
 # 单点冻结共享宿主机制，各 package 只启用自身消费的最小 feature。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "3078edd97c9064a58b1530de7e58f8b5d5b7d6de", default-features = false }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "912656c2b80087ae4b889925729d69dfb9f9b5c2", default-features = false }
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。

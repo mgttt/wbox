@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W47、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L25、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W48、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L26、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M9
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2607,11 +2607,12 @@ TODO-WINDOW
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
 ├── W46 Windows guest runner 超时工具语义探测                            [done] 正式套件 15/6/1
 ├── W47 单 PID CPU/RSS 观测下沉并删除 stats `/proc` 解析                   [done] 三宿主契约 + Windows 实测
+├── W48 命名共享内存下沉并展开跨宿主多进程 zero-copy                       [done] Win32 FFI 删除 + 1/2/4/8 workers
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
-Windows 命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
+三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
 中位数。本机 4C/8T 实测（4,000,000 项、32 rounds、repeat=3）为 AVX2 `3.89x`、
 4-thread AVX2 `13.55x`、8-thread AVX2 `10.34x`、8-process shared mapping
 `3.02x`。该结果是当前虚拟机取证，不是跨机器性能承诺。
@@ -3013,8 +3014,14 @@ TODO-LINUX
 ├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
 ├── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
 ├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
-└── L25 AArch64 Linux seccomp syscall 表可移植性              [next] mknod/uselib 不能引用缺失常量
+├── L25 AArch64 Linux seccomp syscall 表可移植性              [next] mknod/uselib 不能引用缺失常量
+└── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
 ```
+
+`L26` 在 Linux 真机运行 platform `shared-memory` 的单元/跨进程测试，再运行小规模
+`wbox-hpc-lab bench`，证明排他 create、peer open、共享写可见、creator unlink、已开
+view 存活以及 1/2/4/8 worker checksum。映射名称与 RAII 归 platform；数据布局、同步、
+cache-line 槽、worker 划分和性能口径归 wbox。双 Linux ISA 交叉编译不能替代真机。
 
 `L25` 来自本阶段新增的 AArch64 Linux workspace 门禁：`src/seccomp.rs` 无条件引用
 x86 有而 AArch64 `libc` 不提供的 `SYS_mknod`、`SYS_uselib`，导致 bin/all-targets 编译
@@ -3598,7 +3605,8 @@ TODO-MACOS
 ├── M5 macOS 上 `wbox-linux` + Linux OCI 产品路径         [planned]
 ├── M6 macOS 上第一方 Rust Win32 runtime 产品路径          [planned]
 ├── M7 对标 QEMU/VMware/Parallels 的第一方 Rust VM SPI     [research]
-└── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
+├── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
+└── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
 ```
 
 `M1` 只冻结产品语义，不声称 macOS 已可用。`crates/wbox-machine` 把宿主、来宾、执行
@@ -3608,13 +3616,14 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`3078edd97c9064a58b1530de7e58f8b5d5b7d6de`，关闭 default features，按消费包启用
-`entropy`、`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
+`912656c2b80087ae4b889925729d69dfb9f9b5c2`，关闭 default features，按消费包启用
+`entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
+`shared-memory` 与零依赖 `hardware`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
-Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，三个子 crate 只继承并
-追加 `entropy`/`hardware`；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
+Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，消费 crate 只继承并
+追加自身最小 feature；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
 platform package，且未启用 `full/process/window/ipc/pty`。Quick 300 项库测试与双
 Windows Clippy、i686 Windows、x86-64 Linux 和双 macOS ISA workspace Clippy 已通过。
 `platform_kind()` 驱动
@@ -3719,6 +3728,17 @@ page size 和字段偏移解析，只保留容器成员选择、逐 PID 退出�
 Windows 真机测试，并通过 Windows i686、Linux x64/AArch64、macOS x64/AArch64
 严格编译；wbox workspace 通过 Windows、Linux x64 与双 macOS ISA，AArch64 Linux
 library 通过但 bin 被既有 seccomp 常量阻塞（L25）。Linux 产品验收交接为 L24。
+
+`W48` 在 platform 增加独立 `shared-memory` feature：可移植名称映射到 Windows
+page-file mapping 或 POSIX shm，create 排他，view/handle 由 RAII 回收；POSIX creator
+负责 unlink，Windows 名称随最后 handle 消失。`wbox-hpc-lab` 删除 117 行 Win32 FFI
+和直接 `windows-sys` 依赖，所有宿主统一使用 `SharedDataset`，Linux/macOS 不再降级为
+`Vec` 并报告 processes unsupported。映射机制与名称校验归 platform；输入/result
+布局、同步时序、cache-line 隔离、worker 协议和 checksum 仍归 wbox。Windows 真机
+以 100,000 items、4 rounds、repeat=1 验证 1/2/4/8 进程均与 serial checksum
+`0x0000c3d6956bd5d1` 一致且 logical copies 为 0；Windows i686、Linux 双 ISA、macOS
+双 ISA HPC all-targets 严格 Clippy 通过。映射布局改用 checked size/alignment 计算并
+以极值测试拒绝溢出，避免小映射上构造超长 slice；Unix 真机交接为 L26/M9。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

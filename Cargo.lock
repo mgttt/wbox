@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "agenterm-platform"
 version = "0.1.11"
-source = "git+https://github.com/mgttt/agenterm.git?rev=3078edd97c9064a58b1530de7e58f8b5d5b7d6de#3078edd97c9064a58b1530de7e58f8b5d5b7d6de"
+source = "git+https://github.com/mgttt/agenterm.git?rev=912656c2b80087ae4b889925729d69dfb9f9b5c2#912656c2b80087ae4b889925729d69dfb9f9b5c2"
 dependencies = [
  "libc",
  "windows-sys",
@@ -38,8 +38,8 @@ version = "1.0.0-rc2"
 name = "wbox-hpc-lab"
 version = "1.0.0-rc2"
 dependencies = [
+ "agenterm-platform",
  "wbox-machine",
- "windows-sys",
 ]
 
 [[package]]
