@@ -11,6 +11,8 @@ mod device;
 mod guest;
 mod provider;
 mod route;
+mod topology;
+mod wasm;
 
 pub use accelerator::{
     accelerator_routes, AcceleratorClass, AcceleratorRoute, AcceleratorRouteStatus,
@@ -25,3 +27,11 @@ pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, Fir
 pub use guest::{guest_contract, BinaryFormat, GuestAbi, GuestContract, GuestOs};
 pub use provider::{ExecutionProvider, IsolationModel, ProviderCapabilities};
 pub use route::{current_host, route, Availability, HostOs, Priority, Route, CONTRACT_REVISION};
+pub use topology::{
+    prefilled_topology, ComputeFabric, CoordinationModel, DistributionModel, ExecutionDomain,
+    InfrastructureTopology, LinkDirection, ResourceKind, ResourceLink, ResourceNode, TopologyError,
+    TopologyState, TransportClass,
+};
+pub use wasm::{
+    wasm_machine_routes, WasmHostSurface, WasmMachineCapability, WasmMachineRoute, WasmRouteStatus,
+};

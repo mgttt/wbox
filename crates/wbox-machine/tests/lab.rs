@@ -43,6 +43,29 @@ fn accelerators_prefills_gpu_npu_lpu_on_every_host() {
 }
 
 #[test]
+fn topology_prints_and_validates_point_line_plane_fabric() {
+    let output = lab().arg("topology").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("point/cpu kind=cpu"));
+    assert!(stdout.contains("line/cpu-esp32"));
+    assert!(stdout.contains("plane/local-compute"));
+    assert!(stdout.contains("fabric/wbox-fabric"));
+    assert!(stdout.contains("validation=ok"));
+}
+
+#[test]
+fn wasm_prefills_browser_and_wasi_machine_capabilities() {
+    let output = lab().arg("wasm").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("browser/cpu-interpreter"));
+    assert!(stdout.contains("browser/hot-region-translation"));
+    assert!(stdout.contains("wasi/device-bus"));
+    assert!(stdout.contains("wasm_routes=16 available=0"));
+}
+
+#[test]
 fn inspect_maps_a_pe_header_to_the_current_route() {
     let mut bytes = vec![0; 0x80];
     bytes[..2].copy_from_slice(b"MZ");

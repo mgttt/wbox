@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Machine Infrastructure"
+  short_description: "Model hardware and runtimes as tested capability contracts"
+  default_prompt: "Model this infrastructure capability as explicit matrices, topology contracts, TODOs, and executable gates."

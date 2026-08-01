@@ -4,8 +4,8 @@ use std::io::Read;
 use std::path::Path;
 
 use wbox_machine::{
-    accelerator_routes, current_host, detect_hardware, esp32_routes, inspect_artifact, route,
-    Availability, GuestOs, HostOs, Isa, Priority,
+    accelerator_routes, current_host, detect_hardware, esp32_routes, inspect_artifact,
+    prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs, Isa, Priority,
 };
 
 const HEADER_READ_LIMIT: u64 = 1024 * 1024;
@@ -23,6 +23,8 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         [command] if command == "matrix" => print_matrix(),
         [command] if command == "devices" => print_devices(),
         [command] if command == "accelerators" => print_accelerators(),
+        [command] if command == "topology" => print_topology(),
+        [command] if command == "wasm" => print_wasm(),
         [command, path] if command == "inspect" => inspect_path(Path::new(path)),
         [command] if command == "check" => check_contract(),
         [command] if command == "help" || command == "-h" || command == "--help" => {
@@ -31,7 +33,10 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
         }
         _ => {
             print_help();
-            Err("expected host, matrix, devices, accelerators, inspect <file>, or check".to_owned())
+            Err(
+                "expected host, matrix, devices, accelerators, topology, wasm, inspect <file>, or check"
+                    .to_owned(),
+            )
         }
     }
 }
@@ -41,8 +46,79 @@ fn print_help() {
     println!("wbox-machine-lab matrix");
     println!("wbox-machine-lab devices");
     println!("wbox-machine-lab accelerators");
+    println!("wbox-machine-lab topology");
+    println!("wbox-machine-lab wasm");
     println!("wbox-machine-lab inspect <executable>");
     println!("wbox-machine-lab check");
+}
+
+fn print_wasm() -> Result<(), String> {
+    let routes = wasm_machine_routes();
+    for item in &routes {
+        println!(
+            "{}/{} status={} todo={}",
+            item.surface.as_str(),
+            item.capability.as_str(),
+            item.status.as_str(),
+            item.todo,
+        );
+    }
+    println!("summary wasm_routes={} available=0", routes.len());
+    Ok(())
+}
+
+fn print_topology() -> Result<(), String> {
+    let topology = prefilled_topology();
+    topology.validate().map_err(|error| error.to_string())?;
+    for node in &topology.nodes {
+        println!(
+            "point/{} kind={} state={} todo={}",
+            node.id,
+            node.kind.as_str(),
+            node.state.as_str(),
+            node.todo.as_deref().unwrap_or("none"),
+        );
+    }
+    for link in &topology.links {
+        println!(
+            "line/{} {}->{} transport={} direction={} state={} todo={}",
+            link.id,
+            link.from,
+            link.to,
+            link.transport.as_str(),
+            link.direction.as_str(),
+            link.state.as_str(),
+            link.todo.as_deref().unwrap_or("none"),
+        );
+    }
+    for domain in &topology.domains {
+        println!(
+            "plane/{} members={} distribution={} state={} todo={}",
+            domain.id,
+            domain.members.join(","),
+            domain.distribution.as_str(),
+            domain.state.as_str(),
+            domain.todo.as_deref().unwrap_or("none"),
+        );
+    }
+    for fabric in &topology.fabrics {
+        println!(
+            "fabric/{} domains={} coordination={} state={} todo={}",
+            fabric.id,
+            fabric.domains.join(","),
+            fabric.coordination.as_str(),
+            fabric.state.as_str(),
+            fabric.todo.as_deref().unwrap_or("none"),
+        );
+    }
+    println!(
+        "summary points={} lines={} planes={} fabrics={} validation=ok",
+        topology.nodes.len(),
+        topology.links.len(),
+        topology.domains.len(),
+        topology.fabrics.len(),
+    );
+    Ok(())
 }
 
 fn print_accelerators() -> Result<(), String> {

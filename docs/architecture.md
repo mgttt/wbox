@@ -78,6 +78,18 @@ GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩�
 设备发现与宿主 API 归 `agenterm-platform`，内存、队列、调度、隔离和执行 provider
 契约归 `wbox-machine`，未取得运行证据前不得转为 available。
 
+点/线/面/体是分布式执行的共同拓扑：资源节点是点，带方向与 transport 的连接是线，
+调度/流水线/数据并行/task graph 是面，跨执行域的 placement、协调、一致性和故障
+策略组成 compute fabric。`wbox-machine` 的引用校验必须拒绝重复 ID、悬空端点、重复
+成员和悬空 domain；预填的 6 点/5 线/2 面/1 fabric 全部是概念骨架，不是本机探测。
+
+浏览器/WASM 是部署 provider，不是第四宿主 OS。受 v86 的方法启发，未来独立
+`wasm-machine` 至少要同时覆盖解释器、热区 x-to-WASM 翻译、线性内存分页、设备总线、
+块存储、网络、快照和多实例；Browser 与 WASI 的宿主接口分开建模，形成 16 格研究
+矩阵。v86 的价值在于解释器 + 热页翻译与完整 PC 设备模型的纵深，不意味着复制其
+代码、依赖或仅限 32 位 x86。技术参考：<https://github.com/copy/v86>、
+<https://gist.github.com/copy/ecc99bac5ca0101e024525ddaf620731>。
+
 ## 2. Windows 后端
 
 ### 2.1 原生程序
