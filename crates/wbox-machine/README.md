@@ -3,7 +3,8 @@
 `wbox-machine` is wbox's infrastructure contract crate. It models host OS,
 guest OS, processor ISA, guest ABI, executable format, device/accelerator class,
 execution provider, isolation, and the 3 x 3 x 2 product route matrix without
-depending on an OS adapter. The broader processor taxonomy also reserves
+owning an OS adapter. Host identity comes from a pinned, zero-feature
+`agenterm-platform`; product routing and availability stay here. The broader processor taxonomy also reserves
 x86-32, ARM32, RISC-V32, and Xtensa32 outside that desktop route matrix.
 
 The experimental `wbox-machine-lab` binary exercises those contracts without

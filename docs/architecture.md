@@ -51,6 +51,11 @@ provider 选择和能力状态仍由 wbox 持有。契约实际按 Host × Guest
 18 条；未验收的平台组合必须显式 planned 或
 research；尤其不能把所有 `not(windows)` 都当成 Linux。
 
+首个实际接入面仅为宿主身份：`wbox-machine::current_host()` 把零 feature 的
+`agenterm_platform::platform_kind()` 映射为 wbox `HostOs`。依赖固定到不可变 Git
+SHA；未启用 filesystem/process/locking/UI 等 feature。这样先验证跨仓版本、三宿主
+选择器和依赖棘轮，不改变执行、隔离或状态生命周期语义。
+
 计划中的 provider 层分成三段，依赖只能向下：
 
 ```text

@@ -204,10 +204,11 @@ PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全�
 | `ureq` | `crates/wbox-http` |
 | `rustls` / `rustls-rustcrypto` / `webpki-roots` | `crates/wbox-tls` |
 
-改完之后，**整棵构建图**（`Cargo.lock` 当前共 18 条，此前 119 条）只剩：
+改完之后，**整棵构建图**（`Cargo.lock` 当前共 19 条，此前 119 条）只剩：
 
 - 七个第一方 workspace 包：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、
   `wbox-linux`、`wbox-machine` 与实验包 `wbox-hpc-lab`；
+- 固定到不可变 Git SHA、零 feature 的第一方 `agenterm-platform`；
 - `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
   声明，不编译任何第三方实现代码，属第一档明确允许的那类。
 
@@ -667,7 +668,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
 | R6 `[部分]` | Ubuntu 24.04 已进入 Windows 产品门禁（WU.1/WU.2）；Alpine 仍只有手工跑通证据 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
-| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS，构建图只剩七个 wbox 包 + 平台 ABI；但系统 Wine legacy 仍阻塞全产品第二档 |
+| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS；构建图只剩七个 wbox 包、零 feature `agenterm-platform` + 平台 ABI，但系统 Wine legacy 仍阻塞全产品第二档 |
 
 **F9.37 的 `guest_workdir` 已经放进 `RunSpec`**，Q2 的镜像路径在 R4 落地时读它
 即可，不必再改结构——这是 Q3 的实现顺带给 Q2 铺的路，也是四格共用一套
@@ -2583,7 +2584,7 @@ TODO-WINDOW
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 23 unit tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 24 unit tests
 ├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 9 process tests
 ├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
 ├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
@@ -2614,7 +2615,7 @@ Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装�
 FLOP/cycle 粗算名义峰值约 160 GFLOPS，微基准约达 90%；频率由虚拟化宿主调度，
 该峰值不是 SLA，实际 workload 还受 memory bandwidth/arithmetic intensity 限制。
 
-**等待 `agenterm-platform` 期间的预判行动树：**
+**`agenterm-platform` 首批接入前后的预判行动树：**
 
 ```text
 PRE-PLATFORM
@@ -2635,8 +2636,8 @@ PRE-PLATFORM
 
 执行约束：W20 仍是 CPU 热路径抽取的前置；W26 已先冻结不接触热路径的机器级产品
 契约，不能据此宣称 W21 的 `MachineCore` 接口完成。W22 完成前不移动
-`crates/wbox-linux` 的 CPU/内存热路径。`agenterm-platform` 没有稳定 commit/API 前
-不写临时适配层。W25 的能力只有在脱离 OCI、guest ABI 和路由策略后仍独立成立，
+`crates/wbox-linux` 的 CPU/内存热路径。`agenterm-platform` 只按不可变 commit 和
+最小 feature 面接入，不写临时源码复制层。W25 的能力只有在脱离 OCI、guest ABI 和路由策略后仍独立成立，
 才可下沉；下沉后 wbox 必须直接引用并删除原实现，不长期复制两份。
 
 `W16` 来自 Windows `guest-tests` 的基线外回归：
@@ -3548,7 +3549,7 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 ```text
 TODO-MACOS
 ├── M1 三宿主 × 三来宾 × 双 ISA 产品契约与 `wbox platform` [done] 18 路线纯逻辑门禁
-├── M2 接入独立 `agenterm-platform` 的最小机制面         [planned] 等上游 crate/commit
+├── M2 接入独立 `agenterm-platform` 的最小机制面         [active] host identity 已接，macOS 待验
 ├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [planned]
 ├── M4 macOS 原生程序沙箱与资源限制取证                  [planned]
 ├── M5 macOS 上 `wbox-linux` + Linux OCI 产品路径         [planned]
@@ -3562,6 +3563,16 @@ provider 与外层隔离分开建模，避免再用 `cfg!(windows) { ... } else 
 这种二元判断；此前 `image_backend_kind()` 正是因此会把未来 macOS 构建错误分派到
 Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能反向拥有
 wbox 的 3×3×2 路由、优先级与能力状态。
+
+`M2` 首批固定 `agenterm-platform` commit `341ae5231c5514eb28f8db876ccfc44b12afe907`，
+关闭 default features，仅用 `platform_kind()` 驱动 `wbox-machine::current_host()`。
+Windows 本机依赖图只有 `wbox-machine -> agenterm-platform`，没有传递 crate；
+`x86_64-unknown-linux-gnu` cross-check 同步通过。macOS 编译与三宿主真机 smoke 尚未
+由 wbox 门禁证明，因此保持 active。review 同时发现后续
+机制不能直接批量替换：Windows `PathLock` 对未 canonicalize/case-fold 的路径做
+lossy hash，同一对象的路径别名可能绕开互斥；`protect_private_directory()` 在
+Windows 是 no-op，只能保留调用者已有 ACL。上游修复并有跨进程/ACL 行为门禁前，
+不得替换 wbox 的生命周期锁或安全关键目录授权。
 
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
@@ -3661,7 +3672,7 @@ Windows Linux guest 的发布门禁只接受 `crates/wbox-linux` 产出的纯 Ru
 ├── 纯 Rust Linux ELF/OCI runtime 替换**完成**：vendor/blink 删除，
 │   引擎换成 crates/wbox-linux（第一档达成）
 ├── 第二档收紧：serde_json/sha2/base64/flate2/tar/anyhow/ureq/rustls
-│   全部换成第一方，含自实现 TLS 1.3；随后增加 `wbox-machine`/HPC lab，Cargo.lock 当前 18 项
+│   全部换成第一方，含自实现 TLS 1.3；随后接入 machine/HPC/platform，Cargo.lock 当前 19 项
 └── 安全收口：归档解包符号链接越界（L7）、guest VFS 宿主符号链接逃逸（L12）、
     卷挂载点跟随符号链接、`-v :ro` 未递归到子挂载
 ```

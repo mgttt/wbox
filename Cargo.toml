@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 #   - 第一档「没有 C/C++」：crates/wbox-linux 取代了 vendor/blink；
 #   - 第二档「承载产品语义的实现必须第一方」：codec / http / tls 三个 crate
 #     取代了 serde_json、sha2、base64、flate2、tar、anyhow、ureq、rustls。
-# 整棵构建图只剩七个 wbox 包，外加 libc / windows-sys（平台 ABI 声明）。
+# 整棵构建图只剩七个 wbox 包、agenterm-platform，外加平台 ABI 声明。
 # 一条 `cargo build` 出齐 portable 分发的两个 exe。
 [workspace]
 members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", "crates/wbox-linux", "crates/wbox-machine", "crates/wbox-tls"]
@@ -29,7 +29,7 @@ wbox-http = { path = "crates/wbox-http" }
 wbox-linux = { path = "crates/wbox-linux" }
 
 # ISA、宿主硬件、guest ABI 与执行 provider 的产品级契约。它不调用平台 API，
-# 后续可在下层接入 agenterm-platform 提供的通用宿主机制。
+# 宿主身份已由零 feature agenterm-platform 提供；其余机制按门禁逐项接入。
 wbox-machine = { path = "crates/wbox-machine" }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：

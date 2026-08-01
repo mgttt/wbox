@@ -243,7 +243,10 @@ mod tests {
                 continue;
             };
             let name = name.trim_end_matches('"');
-            if name.starts_with("wbox") || PLATFORM_ABI.contains(&name) {
+            if name.starts_with("wbox")
+                || name == "agenterm-platform"
+                || PLATFORM_ABI.contains(&name)
+            {
                 continue;
             }
             unexpected.push(name.to_string());

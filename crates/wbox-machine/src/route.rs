@@ -179,20 +179,28 @@ pub const fn route(host: HostOs, guest: GuestOs, isa: Isa) -> Route {
 }
 
 pub const fn current_host() -> Option<HostOs> {
-    if cfg!(windows) {
-        Some(HostOs::Windows)
-    } else if cfg!(target_os = "linux") {
-        Some(HostOs::Linux)
-    } else if cfg!(target_os = "macos") {
-        Some(HostOs::Macos)
-    } else {
-        None
+    match agenterm_platform::platform_kind() {
+        agenterm_platform::PlatformKind::Windows => Some(HostOs::Windows),
+        agenterm_platform::PlatformKind::Linux => Some(HostOs::Linux),
+        agenterm_platform::PlatformKind::Macos => Some(HostOs::Macos),
+        _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_identity_comes_from_agenterm_platform() {
+        let expected = match agenterm_platform::platform_kind() {
+            agenterm_platform::PlatformKind::Windows => HostOs::Windows,
+            agenterm_platform::PlatformKind::Linux => HostOs::Linux,
+            agenterm_platform::PlatformKind::Macos => HostOs::Macos,
+            _ => panic!("agenterm-platform returned an unknown host"),
+        };
+        assert_eq!(current_host(), Some(expected));
+    }
 
     #[test]
     fn matrix_is_complete_unique_and_abi_bound() {
