@@ -7,8 +7,9 @@
 //! `linux_limits.rs`），没设限额就没有可冻的组。让 `pause` 时灵时不灵，
 //! 比换一种实现更糟。
 //!
-//! 所以这里对容器内**每个**进程发 `SIGSTOP`（`unpause` 发 `SIGCONT`），
-//! 进程清单复用 `top` 的同一份枚举——一处另写一份的话，迟早出现
+//! 所以这里通过 `agenterm-platform` 对容器内**每个**进程执行 Unix suspend
+//! （`unpause` 执行 resume），底层语义仍是 `SIGSTOP/SIGCONT`。进程清单复用
+//! `top` 的同一份枚举——一处另写一份的话，迟早出现
 //! "top 看得见的进程 pause 漏了"这种最难查的偏差。
 //!
 //! **代价必须直说**：`SIGSTOP` 与 freezer 不等价。
@@ -113,15 +114,16 @@ fn apply(name: &str, dir: &std::path::Path, action: Action) -> Result<u32> {
             action.verb()
         ))
     })?;
-    let sig = match action {
-        Action::Pause => libc::SIGSTOP,
-        Action::Unpause => libc::SIGCONT,
-    };
     let pids = super::top::container_pids(root);
     let mut hit = 0usize;
     for pid in &pids {
-        // SAFETY: 只是给已枚举到的 pid 发信号；失败（进程刚退出）不致命。
-        if unsafe { libc::kill(*pid as libc::pid_t, sig) } == 0 {
+        // platform 只控制一个宿主 PID；树所有权和退出竞态仍由 wbox 负责。
+        let controlled = match action {
+            Action::Pause => agenterm_platform::process_control::suspend(*pid),
+            Action::Unpause => agenterm_platform::process_control::resume(*pid),
+        };
+        // 枚举后刚退出的进程不致命，但至少一个 PID 必须成功。
+        if controlled.is_ok() {
             hit += 1;
         }
     }
@@ -189,5 +191,26 @@ mod tests {
         .unwrap();
         let m = format!("{}", cmd_pause(&["dead".to_string()]).unwrap_err());
         assert!(m.contains("退出"), "{}", m);
+    }
+
+    #[test]
+    fn platform_control_never_treats_zero_as_one_process() {
+        let suspend = agenterm_platform::process_control::suspend(0).unwrap_err();
+        assert_eq!(
+            suspend.kind(),
+            agenterm_platform::process_control::ProcessControlErrorKind::InvalidId
+        );
+        let resume = agenterm_platform::process_control::resume(0).unwrap_err();
+        assert_eq!(
+            resume.kind(),
+            agenterm_platform::process_control::ProcessControlErrorKind::InvalidId
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn product_pause_remains_explicitly_linux_only() {
+        let error = apply("box", std::path::Path::new("."), Action::Pause).unwrap_err();
+        assert!(format!("{error}").contains("只在 Linux 宿主可用"));
     }
 }

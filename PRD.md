@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W55、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L30、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M13
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W56、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L31、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M14
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2058,9 +2058,15 @@ OVB.1 直接对基础镜像 rootfs 取全文件 sha256 摘要，构建前后必�
 **用信号而不是 cgroup freezer，理由是可用性**：容器的 cgroup 只在设了
 `--memory`/`--cpu-pct`/`--max-procs` 时才存在（见 `linux_limits.rs`），
 没设限额就没有可冻的组。让 `pause` 时灵时不灵，比换一种实现更糟。
-所以对容器内**每个**进程发 `SIGSTOP`，`unpause` 发 `SIGCONT`；进程清单
-复用 `top` 的同一份枚举（`container_pids`）——一处另写一份的话，迟早出现
+所以通过 `agenterm-platform` 的单 PID `suspend/resume` 对容器内**每个**进程
+执行 `SIGSTOP/SIGCONT`；进程清单复用 `top` 的同一份枚举（`container_pids`）——
+一处另写一份的话，迟早出现
 "top 看得见的进程 pause 漏了"这种最难查的偏差。
+
+共享层只承诺控制**一个宿主 PID**，不枚举后代、不声称容器/进程树所有权，也不记录
+paused 状态；这些产品语义与“枚举后进程刚退出可容忍、至少一个 PID 必须命中”的判据
+继续由 wbox 持有。Windows adapter 明确返回 Unsupported，不用不可靠的逐线程 suspend
+冒充通用进程暂停。
 
 **代价直说，不假装等价**：
 
@@ -2639,6 +2645,7 @@ TODO-WINDOW
 ├── W53 宿主卷容量下沉与 `system df` Windows 验收                                  [done] 11 images/2.5 GiB + 4 KiB unit
 ├── W54 用户主目录约定下沉与 `.wbox` 根路径收敛                                    [done] USERPROFILE only + 456 tests
 ├── W55 构建结束后回收不可恢复的 incremental working session                       [done] wrapper + fixture
+├── W56 单 PID suspend/resume 下沉并删除 pause 直接 libc 调用                        [done] Win Unsupported + 5 tests
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3053,8 +3060,13 @@ TODO-LINUX
 ├── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
 ├── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
 ├── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
-└── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
+├── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
+└── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
 ```
+
+`L31` 在 Linux 真机运行 platform process-control 测试，确认子进程真实进入 stopped
+状态并可恢复；随后复跑 wbox PZ.1–PZ.3，以宿主可见计数冻结/恢复证明共享原语接入没有
+改变容器树枚举和部分退出竞态语义。只验证返回码或只通过跨目标 Clippy 均不算完成。
 
 `L30` 在 Linux 真机运行 `filesystem-conventions` 与 wbox 全套测试，确认只读取非空
 `HOME`、忽略 `USERPROFILE`，并让 images/run/volumes/buildcache 四棵树都从同一个
@@ -3669,8 +3681,14 @@ TODO-MACOS
 ├── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
 ├── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
 ├── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
-└── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
+├── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
+└── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
 ```
+
+`M14` 在 Intel 与 Apple Silicon 真机运行 platform process-control 测试，确认目标 PID
+真实进入 stopped 状态并在 resume 后可继续调度。该机制验收不等于 wbox 已在 macOS
+提供容器 `pause`：产品命令仍明确 Linux-only，直到 macOS guest provider 和进程树所有权
+契约成立。
 
 `M13` 在 Intel 与 Apple Silicon 真机确认 `HOME` 为唯一用户主目录输入、空值 fail closed，
 并运行 wbox 根路径用例；`Library/Application Support` 仍是通用 config/data convention，
@@ -3877,6 +3895,13 @@ wbox 新增唯一 `paths::root()`，保留产品名 `.wbox`，images、run、vol
 清理回收配套状态；直接调用 cleanup 时仍保留 working session，避免误伤可能并发使用
 同一 target 的 Cargo。Windows 合成 fixture 已验证两种模式，真实小包构建后
 incremental 保留 166.5 MiB 完整热缓存且 working session 为 0。
+
+`W56` 将产品无关的单宿主 PID suspend/resume 下沉到 `agenterm-platform` revision
+`e7207406ed8487ae29506acc35bf11136bc18303`：Unix adapter 使用 SIGSTOP/SIGCONT，
+Windows 因缺少可靠的通用单进程原语而显式 Unsupported。wbox `pause` 删除直接
+`libc::kill`，但继续持有容器进程树枚举、退出竞态容忍、至少一次成功和 paused 状态
+判据。Windows 定向 5 项通过，platform 五目标严格 Clippy 通过；Linux/macOS 真机
+运行验收分别交接 L31/M14。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
