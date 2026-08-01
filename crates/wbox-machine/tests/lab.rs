@@ -24,6 +24,11 @@ fn host_probe_reports_a_real_acceleration_state() {
     assert!(stdout.contains("processor_packages="));
     assert!(stdout.contains("numa_nodes="));
     assert!(stdout.contains("processor_groups="));
+    assert!(stdout.contains("processor_affinity_state="));
+    assert!(
+        stdout.contains("processor_affinity_semantics=")
+            || stdout.contains("processor_affinity_error_kind=unsupported")
+    );
     assert!(stdout.contains("max_data_cache_line_bytes="));
     assert!(stdout.contains("cache=L1:data"));
     assert!(stdout.contains("cache=L2:unified"));
@@ -32,6 +37,7 @@ fn host_probe_reports_a_real_acceleration_state() {
     assert!(stdout.contains("physical_memory_bytes="));
     assert!(stdout.contains("acceleration="));
     assert!(!stdout.contains("/unprobed"));
+    assert!(!stdout.contains("processor_affinity_state=unprobed"));
 }
 
 #[test]

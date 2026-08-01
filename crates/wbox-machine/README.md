@@ -26,6 +26,9 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- check
 
 - `host` distinguishes process-available parallelism from system logical CPUs,
   physical cores, packages, NUMA nodes, processor groups and uniform SMT width.
+  It also reports the current process affinity set with explicit native
+  semantics; this is evidence for future placement policy, not a request to pin
+  workers.
   It reports cache level/kind, per-instance capacity, coherency line size,
   instance count and sharing width. It also reports native ISA, detected CPU features, page size, mapping
   allocation granularity, physical memory, and the host acceleration API

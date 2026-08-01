@@ -7,4 +7,4 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-agenterm-platform = { workspace = true, features = ["cache-hierarchy", "hardware", "host-memory", "processor-topology", "virtualization-probe"] }
+agenterm-platform = { workspace = true, features = ["cache-hierarchy", "hardware", "host-memory", "processor-affinity", "processor-topology", "virtualization-probe"] }

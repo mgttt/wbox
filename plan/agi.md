@@ -96,6 +96,13 @@ read/write 也为 0。threaded 模式则随 worker/repeat 出现额外 faults，
 runtime 首次触页，不能归因成数据集缺页。指标查询位于计时区外，但 delta 的归因边界
 仍是整个进程区间；这条经验应保留到未来 affinity、NUMA 和 page-fault lab。
 
+processor affinity 也必须把“数量、身份、语义”拆开。本 Windows VM 的
+`available_parallelism=8`，系统 topology 为 8T/4C/1N/1G，而单 group process affinity
+明确列出 `0:0` 到 `0:7`；三者此刻一致不代表永远等价。Linux 的 scheduler allowed mask
+可被 taskset/cpuset 收窄，Windows CPU Sets/thread policy 可能比 process mask 更窄，
+macOS affinity tag 又只是 advisory。后续 placement lab 必须消费带语义的身份集合，
+不能从一个 worker count 反推 CPU ID，更不能在探测阶段自动改变调度策略。
+
 ## 3. 已获得的方法经验
 
 ```text

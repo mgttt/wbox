@@ -23,8 +23,9 @@ pub use accelerator::{
 pub use architecture::{
     current_isa, detect_hardware, AccelerationApi, AccelerationCapabilities, CacheGeometryFacts,
     CacheHierarchyError, CacheHierarchyErrorKind, CacheHierarchyFacts, CacheKind, CpuFeature,
-    HardwareCapabilities, Isa, ProbeState, ProcessorIsa, ProcessorTopologyError,
-    ProcessorTopologyErrorKind, ProcessorTopologyFacts,
+    HardwareCapabilities, Isa, LogicalProcessorLocation, ProbeState, ProcessorAffinityError,
+    ProcessorAffinityErrorKind, ProcessorAffinityFacts, ProcessorIsa, ProcessorSetSemantics,
+    ProcessorTopologyError, ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };
 pub use artifact::{inspect_artifact, ArtifactError, ArtifactIdentity};
 pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, FirmwareEnvironment};

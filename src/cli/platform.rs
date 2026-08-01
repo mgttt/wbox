@@ -68,6 +68,26 @@ fn print_human() {
         Some(Err(error)) => println!("system-topology: failed ({error})"),
         None => println!("system-topology: unprobed"),
     }
+    match hardware.processor_affinity.as_ref() {
+        Some(Ok(affinity)) => println!(
+            "process-affinity: semantics={} count={} processors={}",
+            affinity.semantics().as_str(),
+            affinity.count(),
+            affinity
+                .processors()
+                .iter()
+                .map(|processor| format!("{}:{}", processor.group, processor.index))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Some(Err(error)) => println!(
+            "process-affinity: {} kind={} detail={}",
+            affinity_error_state(error.kind()),
+            error.kind().as_str(),
+            error.detail()
+        ),
+        None => println!("process-affinity: unprobed"),
+    }
     match hardware.cache_hierarchy.as_ref() {
         Some(Ok(hierarchy)) => {
             println!(
@@ -191,6 +211,68 @@ fn processor_topology_json(hardware: &platform::HardwareCapabilities) -> Value {
                     _ => "unknown",
                 }),
             );
+            object.insert("error_detail".to_owned(), string(error.detail()));
+        }
+        None => {}
+    }
+    Value::Object(object)
+}
+
+fn affinity_error_state(kind: platform::ProcessorAffinityErrorKind) -> &'static str {
+    if kind == platform::ProcessorAffinityErrorKind::Unsupported {
+        "unsupported"
+    } else {
+        "failed"
+    }
+}
+
+fn processor_affinity_json(hardware: &platform::HardwareCapabilities) -> Value {
+    let mut object = Map::new();
+    object.insert("state".to_owned(), string("unprobed"));
+    object.insert("semantics".to_owned(), Value::Null);
+    object.insert("count".to_owned(), Value::Null);
+    object.insert("processors".to_owned(), Value::Array(Vec::new()));
+    object.insert("error_kind".to_owned(), Value::Null);
+    object.insert("error_detail".to_owned(), Value::Null);
+    match hardware.processor_affinity.as_ref() {
+        Some(Ok(affinity)) => {
+            object.insert("state".to_owned(), string("available"));
+            object.insert(
+                "semantics".to_owned(),
+                string(affinity.semantics().as_str()),
+            );
+            object.insert(
+                "count".to_owned(),
+                Value::Number(Number::PosInt(affinity.count().get() as u64)),
+            );
+            object.insert(
+                "processors".to_owned(),
+                Value::Array(
+                    affinity
+                        .processors()
+                        .iter()
+                        .map(|processor| {
+                            let mut item = Map::new();
+                            item.insert(
+                                "group".to_owned(),
+                                Value::Number(Number::PosInt(u64::from(processor.group))),
+                            );
+                            item.insert(
+                                "index".to_owned(),
+                                Value::Number(Number::PosInt(u64::from(processor.index))),
+                            );
+                            Value::Object(item)
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        Some(Err(error)) => {
+            object.insert(
+                "state".to_owned(),
+                string(affinity_error_state(error.kind())),
+            );
+            object.insert("error_kind".to_owned(), string(error.kind().as_str()));
             object.insert("error_detail".to_owned(), string(error.detail()));
         }
         None => {}
@@ -352,6 +434,10 @@ fn print_json() {
         processor_topology_json(&hardware),
     );
     hardware_json.insert(
+        "processor_affinity".to_owned(),
+        processor_affinity_json(&hardware),
+    );
+    hardware_json.insert(
         "cache_hierarchy".to_owned(),
         cache_hierarchy_json(&hardware),
     );
@@ -415,6 +501,36 @@ mod tests {
         assert_eq!(hypothetical.get("max_data_line_bytes"), Some(&Value::Null));
         assert_eq!(
             hypothetical.get("geometries"),
+            Some(&Value::Array(Vec::new()))
+        );
+    }
+
+    #[test]
+    fn affinity_json_distinguishes_current_host_from_unprobed_hosts() {
+        let current = platform::detect_hardware(platform::current_host());
+        let Value::Object(current) = processor_affinity_json(&current) else {
+            panic!("processor affinity must be an object");
+        };
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(current.get("state"), Some(&string("available")));
+            assert_ne!(current.get("semantics"), Some(&Value::Null));
+            assert!(matches!(
+                current.get("processors"),
+                Some(Value::Array(items)) if !items.is_empty()
+            ));
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(current.get("state"), Some(&string("unsupported")));
+
+        let hypothetical = platform::detect_hardware(None);
+        let Value::Object(hypothetical) = processor_affinity_json(&hypothetical) else {
+            panic!("processor affinity must be an object");
+        };
+        assert_eq!(hypothetical.get("state"), Some(&string("unprobed")));
+        assert_eq!(hypothetical.get("semantics"), Some(&Value::Null));
+        assert_eq!(
+            hypothetical.get("processors"),
             Some(&Value::Array(Vec::new()))
         );
     }

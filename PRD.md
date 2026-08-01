@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W65、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L37、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M22
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W66、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L38、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M23
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2608,7 +2608,7 @@ TODO-WINDOW
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [done] handler/timer/全门禁
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
-├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 6
+├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [next] 只读依赖图
 ├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
 ├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
@@ -2655,6 +2655,7 @@ TODO-WINDOW
 ├── W63 shared mapping memory bandwidth/page-touch 真机实验                          [done] 128 MiB + cold/warm/read/write/copy
 ├── W64 shared mapping threaded memory scaling                                     [done] 1/2/4/8 workers + repeat=7×2
 ├── W65 单 PID page-fault 事实下沉并接入 memory lab                                [done] cold 8209 / warm 0
+├── W66 当前进程 processor-affinity 事实下沉并接入 machine snapshot                  [done] group 0 / CPU 0–7
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3077,8 +3078,15 @@ TODO-LINUX
 ├── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
 ├── L35 CPU cache hierarchy Linux 真机验收                            [next] cache sysfs + HPC workers
 ├── L36 shared mapping memory/page-touch Linux 真机验收                [next] memory + minor/major delta
-└── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
+├── L37 threaded memory scaling Linux 真机验收                         [next] physical cores / SMT / cgroup
+└── L38 processor-affinity Linux 真机验收                              [next] sched_getaffinity + cpuset/taskset
 ```
+
+`L38` 在裸进程、`taskset` 收窄和可用的 cgroup cpuset 三种环境运行 platform
+`processor-affinity` 与 `wbox-machine-lab host`，交叉核对 `/proc/self/status` 的
+`Cpus_allowed_list`。返回语义必须是 `scheduler-allowed`，CPU ID 不要求连续，也不能用
+`available_parallelism` 的数量反推出身份。动态 affinity buffer 必须覆盖高于 1023 的
+CPU ID 或明确失败，不能静默截断；交叉编译不能替代 Linux 真机行为。
 
 `L37` 复用 L36 数据规模，保存所有 `read-threads`/`write-threads`/`copy-threads`
 结果，交叉核对 system physical cores、process available CPUs 和 cgroup/affinity 限制。
@@ -3739,8 +3747,14 @@ TODO-MACOS
 ├── M19 CPU cache hierarchy macOS 真机验收                          [next] Intel/Apple Silicon
 ├── M20 shared mapping memory/page-touch macOS 真机验收              [next] Intel/Apple Silicon
 ├── M21 threaded memory scaling macOS 真机验收                       [next] Intel/Apple Silicon
-└── M22 单 PID CPU/RSS/page-fault macOS 真机验收                     [next] total + page-ins
+├── M22 单 PID CPU/RSS/page-fault macOS 真机验收                     [next] total + page-ins
+└── M23 processor-affinity macOS 真机验收                            [next] advisory 必须 Unsupported
 ```
+
+`M23` 在 Intel 与 Apple Silicon 验证 platform `processor-affinity` 明确返回
+`Unsupported`，因为 macOS affinity tag 是调度提示而不是严格 allowed-CPU 集合。不得把
+`hw.logicalcpu`、效率核/性能核数量或 `available_parallelism` 展开成伪 CPU 身份；将来若
+新增 advisory placement，必须用不同契约与语义标签。
 
 `M22` 在 Intel 与 Apple Silicon 运行 platform `process-metrics` 行为门禁，交叉核对
 `PROC_PIDTASKINFO` 的 total faults 与 actual page-ins。soft 保持 unknown；不能用
@@ -3800,13 +3814,14 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`5504ceae3efadf24f23f813d281e015a76bbf3fd`，关闭 default features，按消费包启用
+`6352ddb1573aab8afbb6cdc6f4b9f74011df0acc`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
-`cache-hierarchy`、`processor-topology`、`virtualization-probe` 与 `storage`。
+`cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
+`storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
-并增加跨 rename/hardlink 稳定的文件对象身份、共享内存、处理器/缓存事实以及累计
-CPU/RSS/page-fault 进程指标；wbox 只依赖公共契约，不引用 adapter 内部模块。
+并增加跨 rename/hardlink 稳定的文件对象身份、共享内存、处理器/缓存/affinity 事实
+以及累计 CPU/RSS/page-fault 进程指标；wbox 只依赖公共契约，不引用 adapter 内部模块。
 Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，消费 crate 只继承并
 追加自身最小 feature；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
 platform package，且未启用 `full/process/window/ipc/pty`。Quick 300 项库测试与双
@@ -4085,7 +4100,7 @@ M21 验收后，才评估 process affinity/placement 是否值得形成跨产品
 checked delta：Windows `PROCESS_MEMORY_COUNTERS.PageFaultCount` 只证明 total，
 soft/hard 保持 unknown；Linux `/proc/<pid>/stat` 分别证明 minor/major；macOS
 `PROC_PIDTASKINFO` 证明 total faults 与 actual page-ins，不能用相减猜造 soft。字段必须
-满足分类值不大于 total、已知分类和不大于 total；回绕、负值或前后分类形状变化均
+满足分类值不大于 total、已知分类之和不大于 total；回绕、负值或前后分类形状变化均
 失败。查询位于计时区外，但 delta 覆盖整个进程区间，thread stack/runtime 首次触页也
 会计入。Windows release 以 16 MiB source + 16 MiB destination（8192 个 4 KiB 页）
 实测 cold touch 8209 faults、紧接 warm touch 0，已驻留串行 read/write 也为 0；threaded
@@ -4093,6 +4108,20 @@ soft/hard 保持 unknown；Linux `/proc/<pid>/stat` 分别证明 minor/major；m
 platform all-features 118 tests、Windows 行为门禁与 Windows i686、Linux AArch64、
 macOS 双 ISA 严格编译已通过；wbox-hpc-lab 19 tests 通过，Linux/macOS 真机由 L24/L36
 和 M20/M22 接续验收。
+
+`W66` 在 platform 增加独立 `processor-affinity` feature，与系统 topology 和
+`available_parallelism` 分层。Linux 通过动态增长 buffer 的 `sched_getaffinity` 返回
+`scheduler-allowed` 集合；Windows 仅在进程属于单 Processor Group 时返回
+`process-affinity-mask`，多 group 明确 Unsupported，且文档注明 CPU Sets 与 thread
+policy 仍可能进一步收窄；macOS affinity tag 只是 advisory，因此不伪造严格集合。
+`wbox-machine::HardwareCapabilities` 只为真实当前宿主探测，假想矩阵保持 unprobed；
+`wbox-machine-lab host` 与 `wbox platform --json` 直接转发稳定 semantics/error 名称和
+`(group,index)`。本 Windows VM 实测 group 0 的 CPU 0–7、count 8，与 process available
+8、system 8T/4C/1P/1N/1G 一致；这只是 placement 证据，不会自动 pin HPC worker。
+新增硬件 snapshot/JSON 字段使 machine contract revision 从 6 提升为 7；路线矩阵本身
+不变。
+platform Windows 真机、all-features 与 Windows i686、Linux 双 ISA、macOS 双 ISA 严格
+编译通过；Linux/macOS 原生行为分别交接 L38/M23。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

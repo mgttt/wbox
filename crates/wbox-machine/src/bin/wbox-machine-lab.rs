@@ -215,6 +215,38 @@ fn print_host() -> Result<(), String> {
         Some(Err(error)) => println!("processor_topology_error={error}"),
         None => println!("processor_topology=unprobed"),
     }
+    match hardware.processor_affinity.as_ref() {
+        Some(Ok(affinity)) => {
+            println!("processor_affinity_state=available");
+            println!(
+                "processor_affinity_semantics={}",
+                affinity.semantics().as_str()
+            );
+            println!("processor_affinity_count={}", affinity.count());
+            println!(
+                "processor_affinity_locations={}",
+                affinity
+                    .processors()
+                    .iter()
+                    .map(|processor| format!("{}:{}", processor.group, processor.index))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        }
+        Some(Err(error)) => {
+            println!(
+                "processor_affinity_state={}",
+                if error.kind() == wbox_machine::ProcessorAffinityErrorKind::Unsupported {
+                    "unsupported"
+                } else {
+                    "failed"
+                }
+            );
+            println!("processor_affinity_error_kind={}", error.kind().as_str());
+            println!("processor_affinity_error_detail={}", error.detail());
+        }
+        None => println!("processor_affinity_state=unprobed"),
+    }
     match hardware.cache_hierarchy.as_ref() {
         Some(Ok(hierarchy)) => {
             println!(

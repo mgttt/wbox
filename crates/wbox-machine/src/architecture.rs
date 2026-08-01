@@ -4,6 +4,10 @@ pub use agenterm_platform::cache_hierarchy::{
     CacheGeometryFacts, CacheHierarchyError, CacheHierarchyErrorKind, CacheHierarchyFacts,
     CacheKind,
 };
+pub use agenterm_platform::processor_affinity::{
+    LogicalProcessorLocation, ProcessorAffinityError, ProcessorAffinityErrorKind,
+    ProcessorAffinityFacts, ProcessorSetSemantics,
+};
 pub use agenterm_platform::processor_topology::{
     ProcessorTopologyError, ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };
@@ -212,6 +216,8 @@ pub struct HardwareCapabilities {
     pub logical_processors: Option<usize>,
     /// System-wide topology for the real current host. Hypothetical hosts are unprobed.
     pub processor_topology: Option<Result<ProcessorTopologyFacts, ProcessorTopologyError>>,
+    /// Current-process affinity evidence for the real current host.
+    pub processor_affinity: Option<Result<ProcessorAffinityFacts, ProcessorAffinityError>>,
     /// System-wide CPU cache hierarchy for the real current host.
     pub cache_hierarchy: Option<Result<CacheHierarchyFacts, CacheHierarchyError>>,
     pub cpu_features: Vec<CpuFeature>,
@@ -261,6 +267,8 @@ pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
             .map(std::num::NonZeroUsize::get),
         processor_topology: (host.is_some() && host == crate::route::current_host())
             .then(agenterm_platform::processor_topology::facts),
+        processor_affinity: (host.is_some() && host == crate::route::current_host())
+            .then(agenterm_platform::processor_affinity::current_process),
         cache_hierarchy: (host.is_some() && host == crate::route::current_host())
             .then(agenterm_platform::cache_hierarchy::facts),
         cpu_features: processor
@@ -340,6 +348,7 @@ mod tests {
             if Some(host) == crate::route::current_host() {
                 assert_ne!(acceleration.state(), ProbeState::Unprobed);
                 assert!(hardware.processor_topology.is_some());
+                assert!(hardware.processor_affinity.is_some());
                 assert!(hardware.cache_hierarchy.is_some());
             } else {
                 assert_eq!(acceleration.state(), ProbeState::Unprobed);
@@ -406,6 +415,7 @@ mod tests {
         let platform = agenterm_platform::hardware::processor_facts();
         let mapped = detect_hardware(None);
         assert!(mapped.processor_topology.is_none());
+        assert!(mapped.processor_affinity.is_none());
         assert!(mapped.cache_hierarchy.is_none());
         assert_eq!(
             mapped.logical_processors,
@@ -433,6 +443,34 @@ mod tests {
             assert!(physical.get() <= system_logical);
             if let Some(threads) = topology.uniform_threads_per_core() {
                 assert_eq!(physical.get() * threads.get(), system_logical);
+            }
+        }
+    }
+
+    #[test]
+    fn current_host_preserves_process_affinity_evidence() {
+        let hardware = detect_hardware(crate::route::current_host());
+        let affinity = hardware
+            .processor_affinity
+            .expect("current host affinity was probed");
+        match affinity {
+            Ok(affinity) => {
+                assert!(!affinity.processors().is_empty());
+                assert_eq!(affinity.count().get(), affinity.processors().len());
+                if let Some(Ok(topology)) = hardware.processor_topology {
+                    assert!(affinity.count().get() <= topology.system_logical_processors.get());
+                }
+                if let Some(available) = hardware.logical_processors {
+                    assert!(available <= affinity.count().get());
+                }
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.kind(),
+                    ProcessorAffinityErrorKind::Unsupported,
+                    "current-host affinity query failed unexpectedly: {error}"
+                );
+                assert_eq!(crate::route::current_host(), Some(HostOs::Macos));
             }
         }
     }
