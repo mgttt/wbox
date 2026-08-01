@@ -76,7 +76,7 @@ fn list(args: &[String]) -> Result<u32> {
 /// 卷占用的磁盘，人读形式。取不到（权限等）时给 `-`，不猜也不报错——
 /// 这一列是参考信息，不该让整条 `ls` 失败。
 fn dir_size(dir: &std::path::Path) -> String {
-    match crate::disk_usage::logical_size(dir) {
+    match agenterm_platform::filesystem_usage::logical_tree_size(dir) {
         Ok(n) => super::stats::human_bytes(n),
         Err(_) => "-".to_string(),
     }

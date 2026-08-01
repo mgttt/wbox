@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W69、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L41、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M26
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W70、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L42、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M27
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2659,6 +2659,7 @@ TODO-WINDOW
 ├── W67 detached child 启动下沉并删除 supervisor 平台重复实现                        [done] WP.1–WP.27 + WU.1/WU.2
 ├── W68 受限权限目录树清理下沉并删除本地 fsutil                                      [done] readonly + junction + WP.18
 ├── W69 子进程退出事实下沉并统一 wbox 产品退出码                                      [done] code/signal/unavailable
+├── W70 逻辑目录占用下沉并阻止 Windows junction 越界统计                              [done] 64 KiB outside canary
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3085,7 +3086,8 @@ TODO-LINUX
 ├── L38 processor-affinity Linux 真机验收                              [next] sched_getaffinity + cpuset/taskset
 ├── L39 detached child/session Linux 真机验收                          [next] setsid + READY/ERROR + 生命周期
 ├── L40 受限权限目录树清理 Linux 真机验收                              [next] mode-000 + symlink canary
-└── L41 detached 兼容启动回收与退出事实 Linux 真机验收                  [next] ESRCH + SIGTERM=143
+├── L41 detached 兼容启动回收与退出事实 Linux 真机验收                  [next] ESRCH + SIGTERM=143
+└── L42 逻辑目录占用 Linux 真机验收                                     [next] symlink leaf + hard-link entries
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3098,6 +3100,11 @@ TODO-LINUX
 子进程发布 PID 后最终必须由 `kill(pid, 0)` 得到 `ESRCH`。另让子进程以 SIGTERM 退出，
 确认平台报告 `ProcessExit::Signal(15)`，wbox 产品转换为 143；交叉编译不能替代 procfs/
 wait 行为。
+
+`L42` 在非 root Linux 真机创建普通文件、hard-link 别名和指向树外大文件目录的 symlink，
+确认普通文件与 hard-link 按目录项分别计数、symlink 只计自身 metadata length、树外内容不
+进入结果。缺失根为 0，权限与遍历错误必须传播；不得把逻辑字节外推为 block allocation
+或删除后物理回收量。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3774,7 +3781,8 @@ TODO-MACOS
 ├── M23 processor-affinity macOS 真机验收                            [next] advisory 必须 Unsupported
 ├── M24 detached child/session macOS 真机验收                        [next] setsid + Intel/Apple Silicon
 ├── M25 受限权限目录树清理 macOS 真机验收                            [next] mode-000 + symlink canary
-└── M26 detached 兼容启动回收与退出事实 macOS 真机验收                [next] ESRCH + SIGTERM=143
+├── M26 detached 兼容启动回收与退出事实 macOS 真机验收                [next] ESRCH + SIGTERM=143
+└── M27 逻辑目录占用 macOS 真机验收                                   [next] symlink leaf + hard-link entries
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3784,6 +3792,10 @@ Linux 实测或 macOS 交叉编译代替；主动对抗并发 path replacement �
 `M26` 在 Intel 与 Apple Silicon 分别复用 L41 的 retained/compatibility、SIGTERM=143 与
 PID 消失门禁，确认新 session 和 waiter 回收可以组合但互不替代。平台不得吞掉调用方仍
 持有的 `Child`，wbox 的 unavailable=4 仍是产品策略；双 ISA 交叉编译只证明 API 可构建。
+
+`M27` 在 Intel 与 Apple Silicon 分别复用 L42 的普通文件、hard-link、树外 symlink 与
+缺失根门禁，确认 APFS metadata length 和遍历错误保持契约。双 ISA 交叉编译只能证明
+adapter 可构建，不证明 APFS 行为；allocated/reclaimable bytes 仍须另建宿主事实契约。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3852,9 +3864,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`eeef255425de0af81dfb3c7b2baff9919e05e051`，关闭 default features，按消费包启用
+`36077dcf22f7c338d284c68951005d3a387d05c6`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-spawn`、`filesystem-cleanup`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-spawn`、`filesystem-cleanup`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4204,6 +4216,21 @@ SIGTERM=143 和退出后 ESRCH 分别交接 L41/M26。
 验证与 broker 授权共同构成产品隔离协议；抽成通用 guard 要么丢失进程对象身份，要么把
 裸 HANDLE 暴露为跨 crate 契约。因此当前明确保留在 wbox，只下沉可脱离容器策略成立的
 单进程启动与退出事实。
+
+`W70` 将“不跟随宿主链接的逻辑目录字节统计”拆为零额外依赖的
+`filesystem-usage` feature。缺失根计 0，普通目录只累计后代，文件、Unix symlink 与
+Windows reparse point 按自身 `symlink_metadata` 长度计；hard link 按每个目录项重复计，
+checked addition 溢出返回错误。该契约不声称 allocated bytes、底层压缩/稀疏占用或删除后
+真实可回收空间，也不是抵抗并发 path replacement 的安全遍历原语。原 wbox 实现只判断
+`metadata.is_dir()`，Windows directory junction 可能被当成目录递归，违背“不跟随链接”
+的注释并越出 owned tree。platform 与 wbox 产品
+门禁均创建指向树外 64 KiB canary 的真实 junction，结果只包含本地 3 bytes 与 junction
+自身长度；树外内容未计入。wbox 删除 `src/disk_usage.rs`，`system df` 的错误传播、
+分类与 reclaimable 展示以及 `volume ls` 失败显示 `-` 的策略继续归产品层。platform 最小
+feature 13 tests、all-features 141 tests 与五目标 strict Clippy 通过；Unix 原生 symlink/
+hard-link 行为交接 L42/M27。wbox 根测试 459 passed / 3 environment ignored，Quick、四个
+portable targets 与完整 WP.1–WP.27 产品门禁通过；本机 `system df` 正常报告 11 个镜像约
+2.5 GiB logical bytes。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

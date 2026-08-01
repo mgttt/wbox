@@ -145,9 +145,10 @@ fn row(
 
 fn logical_size_many(paths: &[PathBuf]) -> Result<u64> {
     paths.iter().try_fold(0_u64, |total, path| {
-        let bytes = crate::disk_usage::logical_size(path).map_err(|error| {
-            WboxError::args(format!("统计 '{}' 的磁盘占用失败：{error}", path.display()))
-        })?;
+        let bytes =
+            agenterm_platform::filesystem_usage::logical_tree_size(path).map_err(|error| {
+                WboxError::args(format!("统计 '{}' 的磁盘占用失败：{error}", path.display()))
+            })?;
         total
             .checked_add(bytes)
             .ok_or_else(|| WboxError::args("逻辑磁盘占用总量超过 u64"))
@@ -286,9 +287,12 @@ mod tests {
         let exited_dir = exited.dir().to_path_buf();
         drop(exited);
 
-        let expected_image_reclaim = crate::disk_usage::logical_size(&unused_image).unwrap();
-        let expected_container_reclaim = crate::disk_usage::logical_size(&exited_dir).unwrap();
-        let expected_volume_reclaim = crate::disk_usage::logical_size(&idle_volume).unwrap();
+        let expected_image_reclaim =
+            agenterm_platform::filesystem_usage::logical_tree_size(&unused_image).unwrap();
+        let expected_container_reclaim =
+            agenterm_platform::filesystem_usage::logical_tree_size(&exited_dir).unwrap();
+        let expected_volume_reclaim =
+            agenterm_platform::filesystem_usage::logical_tree_size(&idle_volume).unwrap();
 
         let report = collect_report().unwrap();
         assert_eq!(report.rows[0].total, 2);
@@ -304,8 +308,36 @@ mod tests {
         assert_eq!(report.rows[3].active, 0);
         assert_eq!(report.rows[3].logical_bytes, 5);
         assert_eq!(report.rows[3].reclaimable_bytes, 5);
-        assert!(report.rows[0].logical_bytes >= crate::disk_usage::logical_size(&image).unwrap());
+        assert!(
+            report.rows[0].logical_bytes
+                >= agenterm_platform::filesystem_usage::logical_tree_size(&image).unwrap()
+        );
         assert!(report.volume.total_bytes.get() > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logical_accounting_does_not_cross_a_windows_junction() {
+        let home = TempHome::new("system-df-junction");
+        let root = home.dir.join("owned");
+        let outside = home.dir.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(root.join("local"), b"abc").unwrap();
+        std::fs::write(outside.join("large"), vec![0_u8; 64 * 1024]).unwrap();
+        let junction = root.join("outside-junction");
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J fixture failed: {status}");
+        let junction_bytes = std::fs::symlink_metadata(&junction).unwrap().len();
+
+        assert_eq!(logical_size_many(&[root]).unwrap(), 3 + junction_bytes);
     }
 
     #[test]
