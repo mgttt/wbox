@@ -17,10 +17,9 @@ use windows_sys::Win32::Security::{
     TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileAttributeTagInfo, FlushFileBuffers, GetFileInformationByHandleEx, ReadFile,
-    WriteFile, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Pipes::{
@@ -157,11 +156,11 @@ impl BrokerMount {
             return Err(last_error("打开 broker mount 根目录"));
         }
         let root = OwnedHandle(root);
-        let attributes = file_attributes(root.raw())?;
-        if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        let facts = opened_entry_facts(root.raw())?;
+        if facts.is_link_like() {
             return Err(WboxError::args("broker mount 根目录不能是 reparse point"));
         }
-        if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        if !facts.is_real_directory() {
             return Err(WboxError::args("broker mount 根必须是目录"));
         }
         Ok(Self { id, root })
@@ -173,20 +172,20 @@ impl BrokerMount {
             let root = parent.as_ref().map_or(self.root.raw(), OwnedHandle::raw);
             let final_component = index + 1 == components.len();
             let opened = nt_open_relative(root, component, final_component)?;
-            let attributes = file_attributes(opened.raw())?;
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            let facts = opened_entry_facts(opened.raw())?;
+            if facts.is_link_like() {
                 return Err(WboxError::spawn(format!(
                     "broker 拒绝 reparse path component '{}'",
                     component
                 )));
             }
             if final_component {
-                if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                if !facts.is_real_file() {
                     return Err(WboxError::spawn("broker OPEN 首版只接受普通文件"));
                 }
                 return Ok(opened);
             }
-            if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            if !facts.is_real_directory() {
                 return Err(WboxError::spawn(format!(
                     "broker path component '{}' 不是目录",
                     component
@@ -245,22 +244,16 @@ impl OpenRequest {
     }
 }
 
-fn file_attributes(handle: HANDLE) -> Result<u32> {
-    let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
-    let ok = unsafe {
-        GetFileInformationByHandleEx(
-            handle,
-            FileAttributeTagInfo,
-            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
-            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
-        )
-    };
-    if ok == 0 {
-        return Err(last_error(
-            "GetFileInformationByHandleEx(FileAttributeTagInfo)",
-        ));
-    }
-    Ok(info.FileAttributes)
+fn opened_entry_facts(
+    handle: HANDLE,
+) -> Result<agenterm_platform::filesystem_entry::FilesystemEntryFacts> {
+    use std::mem::ManuallyDrop;
+    use std::os::windows::io::FromRawHandle as _;
+
+    // The broker owns `handle`; this temporary File view must never close it.
+    let file = ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(handle) });
+    agenterm_platform::filesystem_entry::opened_file_entry_facts(&file)
+        .map_err(|error| WboxError::spawn(format!("读取 broker 已打开对象元数据失败：{error}")))
 }
 
 fn nt_open_relative(root: HANDLE, name: &str, final_component: bool) -> Result<OwnedHandle> {
@@ -1011,6 +1004,7 @@ mod tests {
                 .as_nanos()
         );
         let root = std::env::temp_dir().join(format!("wbox_broker_root_{}", tag));
+        let root_link = std::env::temp_dir().join(format!("wbox_broker_root_link_{}", tag));
         let outside = std::env::temp_dir().join(format!("wbox_broker_outside_{}", tag));
         let jump = root.join("jump");
         std::fs::create_dir_all(&root).unwrap();
@@ -1028,6 +1022,23 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&root_link)
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "root mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let error = match BrokerMount::open_readonly(2, &root_link) {
+            Ok(_) => panic!("junction mount root must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("reparse"), "{error}");
+
         let mount = BrokerMount::open_readonly(1, &root).unwrap();
         let err = match mount.open_existing_file(&["jump".to_string(), "canary.txt".to_string()]) {
             Ok(_) => panic!("junction component must be rejected"),
@@ -1040,6 +1051,7 @@ mod tests {
         );
 
         std::fs::remove_dir(&jump).unwrap();
+        std::fs::remove_dir(&root_link).unwrap();
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(outside).unwrap();
     }

@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W76、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L47、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M32
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W77、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L48、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M33
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2666,6 +2666,7 @@ TODO-WINDOW
 ├── W74 link-like 文件系统条目分类下沉并收紧目录发布/清理                              [done] junction root + publish reject
 ├── W75 动态可用物理内存事实下沉并接入 machine lab                                   [done] 34.4/64.0 GiB + typed semantics
 ├── W76 单 PID 存活/启动身份从重型 process 拆分并接入 OCI recovery                    [done] Dead-only cleanup
+├── W77 已打开文件对象分类下沉并删除 broker 重复 Win32 查询                           [done] root/component junction reject
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3098,7 +3099,8 @@ TODO-LINUX
 ├── L44 pull owner/backup 崩溃恢复 Linux 真机验收                       [next] flock + /proc NotFound + crash
 ├── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
 ├── L46 动态可用物理内存 Linux 真机验收                                [next] MemAvailable + pressure/cgroup distinction
-└── L47 轻量进程观察 Linux 真机验收                                    [next] live/dead/zombie/permission + start ticks
+├── L47 轻量进程观察 Linux 真机验收                                    [next] live/dead/zombie/permission + start ticks
+└── L48 已打开文件对象分类 Linux 真机验收                              [next] O_PATH/O_NOFOLLOW symlink + ordinary fd
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3145,6 +3147,12 @@ rename 行为。
 尚未 wait 的真实 zombie 同样为 `Dead`。另在权限受限 PID 可构造时必须返回 `Unknown` 而非
 误判死亡；PID 重用时 start identity 必须变化。该门禁不授权 kill/list/tree ownership，
 交叉编译与纯 parser fixture 均不能替代 procfs 生命周期行为。
+
+`L48` 在非 root Linux 真机只启用 `filesystem-entry`，用 `O_PATH|O_NOFOLLOW` 打开目录
+symlink 本身并转换为 `File`，确认 opened facts 为 link-like 且不是 real directory/file；
+普通目录和普通文件 fd 必须分别正向分类。调用方必须持有 no-follow 打开语义，platform 不得
+重开路径；该 helper 不负责逐组件遍历、权限策略或 mount 边界。交叉编译不能替代真实 fd/VFS
+行为，最小依赖树只能包含标准 target `libc`（若 fixture 需要）而不能带入完整 filesystem。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3827,7 +3835,8 @@ TODO-MACOS
 ├── M29 pull owner/backup 崩溃恢复 macOS 真机验收                     [next] flock + ESRCH + APFS rename
 ├── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
 ├── M31 动态可用物理内存 macOS 真机验收                              [next] Mach free+inactive + pressure distinction
-└── M32 轻量进程观察 macOS 真机验收                                  [next] proc_bsdinfo live/dead/permission + start time
+├── M32 轻量进程观察 macOS 真机验收                                  [next] proc_bsdinfo live/dead/permission + start time
+└── M33 已打开文件对象分类 macOS 真机验收                            [next] O_SYMLINK/no-follow + APFS ordinary fd
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3864,6 +3873,11 @@ metadata 被归为 link-like、普通目录保持 real directory；cleanup/usage
 带 `proc_bsdinfo` start time、已退出 PID 为 `Dead`、权限拒绝为 `Unknown`，并确认 PID 重用
 不能复用旧 start identity。该最小 feature 不应带入 ToolHelp/Job/Pipes/console 等完整 process
 依赖；双 ISA 交叉编译只证明 ABI 可构建，不替代真实 `proc_pidinfo` 错误分类。
+
+`M33` 在 Intel 与 Apple Silicon 真机以 Darwin 可用的 no-follow/symlink-object 打开方式
+取得 APFS symlink 的 `File`，验证 opened facts 不重开路径且保持 link-like；普通目录/文件
+分别为 real directory/file。若标准 `File::metadata` 无法表达已打开 symlink 对象，必须类型化
+记录平台边界而不是回退到路径查询；双 ISA 交叉编译不能替代 APFS 对象行为。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3932,7 +3946,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`1e781cc058050bae5d534126a3ca5499c95a8b81`，关闭 default features，按消费包启用
+`b2af922313f4c2b97ede55b872b2378c7c58305e`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
@@ -4397,6 +4411,23 @@ wbox OCI 的旧版 markerless staging 恢复删除 process-metrics 的语义借�
 分别交接 L47/M32。wbox 根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable
 targets 通过，Quick 释放 456.0 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定
 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
+
+`W77` 扩展零原生依赖的 `filesystem-entry`：`metadata_entry_facts` 与
+`opened_file_entry_facts(&File)` 正向报告 regular file、directory、link-like，并只在类型与
+非 link-like 同时成立时报告 real file/directory。opened API 只查询既有 handle，不重开路径；
+调用方必须先以 `O_NOFOLLOW`、`FILE_FLAG_OPEN_REPARSE_POINT` 等机制取得链接对象。Windows
+真机证明 no-follow junction 虽然 `Metadata::is_dir()` 为 false，仍由 reparse 属性可靠归为
+link-like，因此实现不再用“非目录”反推普通文件。platform 最小 feature 12 tests、
+all-features 159 tests、严格 Clippy 与 Windows i686、Linux ARM64、macOS 双 ISA 编译通过。
+
+wbox broker 删除本地 `GetFileInformationByHandleEx(FileAttributeTagInfo)` 和 attribute bit
+判断，把 `CreateFileW/NtCreateFile` 已打开 HANDLE 以不接管所有权的 `File` 视图交给 platform；
+mount root、每个中间组件和最终普通文件都只接受正向 facts。相对根逐组件 no-follow 打开、
+AppContainer SID/Job 授权、只读范围和错误文案仍归 broker 产品层。Windows 定向 8 tests
+同时证明 mount root junction 与中间 junction 都被拒绝，树外 canary 保持不变；Linux/macOS
+已打开对象真机行为分别交接 L48/M33。wbox 根 470 tests（467 passed、3 ignored）、Quick
+306 项和四 portable targets 通过，Quick 释放 477.6 MiB 可再生缓存；release 产品门禁
+WP.1-WP.27 与固定 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
