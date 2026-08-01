@@ -382,8 +382,9 @@ pub(super) fn spawn_isolated(spec: &RunSpec, prepared: &Prepared, mode: LinuxMod
         LimitPlan::Cgroup { cleanup, .. } => cleanup.clone(),
         _ => Vec::new(),
     };
-    let uid = unsafe { libc::getuid() };
-    let gid = unsafe { libc::getgid() };
+    let credentials = super::super::host_identity::current_posix()?;
+    let uid = credentials.real_user_id;
+    let gid = credentials.real_group_id;
     // `--user`：rootless 下没有 newuidmap/newgidmap 就**只能映射一个 id**，
     // 但那一个映射到容器内的哪个号是自由的。所以 `--user 1000` 的实现不是
     // "先当 root 再 setuid"（那需要额外映射目标 uid），而是直接把宿主这唯一
@@ -736,8 +737,11 @@ fn probe_rootless_overlay(scratch: &std::path::Path) -> bool {
     // 未映射的 userns 里是 overflow uid，过不了 overlayfs 的属主校验。
     // 首次实测正是这么失败的（手工 `unshare -Umr` 探测通过、进程内探测不过，
     // 差的就是 -r 那份映射）。
-    let uid_map = format!("0 {} 1\n", unsafe { libc::getuid() }).into_bytes();
-    let gid_map = format!("0 {} 1\n", unsafe { libc::getgid() }).into_bytes();
+    let Ok(credentials) = super::super::host_identity::current_posix() else {
+        return false;
+    };
+    let uid_map = format!("0 {} 1\n", credentials.real_user_id).into_bytes();
+    let gid_map = format!("0 {} 1\n", credentials.real_group_id).into_bytes();
     let ok = unsafe {
         let pid = libc::fork();
         if pid < 0 {

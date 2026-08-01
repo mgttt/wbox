@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W57、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L31、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M15
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W58、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L32、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M16
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2647,6 +2647,7 @@ TODO-WINDOW
 ├── W55 构建结束后回收不可恢复的 incremental working session                       [done] wrapper + fixture
 ├── W56 单 PID suspend/resume 下沉并删除 pause 直接 libc 调用                        [done] Win Unsupported + 5 tests
 ├── W57 文件对象 identity 从完整 filesystem 拆为最小 feature                         [done] guest 无 ACL/Threading
+├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3062,8 +3063,14 @@ TODO-LINUX
 ├── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
 ├── L29 `system df` 与 statvfs Linux 真机验收                   [next] 容量/配额/分配单元 + 分类
 ├── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
-└── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
+├── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
+└── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
 ```
+
+`L32` 在 Linux 真机运行 identity-only platform 测试，交叉核对 real/effective uid/gid；
+随后复跑 rootless user namespace 的 uid_map/gid_map、overlay 探测和无 cgroup 时
+RLIMIT_NPROC 行为。非 root 必须可降级，effective uid 0 必须继续 fail closed；只通过
+AArch64 Clippy 或只打印身份值都不算完成。
 
 `L31` 在 Linux 真机运行 platform process-control 测试，确认子进程真实进入 stopped
 状态并可恢复；随后复跑 wbox PZ.1–PZ.3，以宿主可见计数冻结/恢复证明共享原语接入没有
@@ -3684,8 +3691,13 @@ TODO-MACOS
 ├── M12 `system df` 与 statvfs macOS 真机验收                [next] Intel/Apple Silicon
 ├── M13 用户主目录约定 macOS 真机验收                         [next] HOME only + 四根路径
 ├── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
-└── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
+├── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
+└── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
 ```
+
+`M16` 在 Intel 与 Apple Silicon 真机只启用 `user-identity`，把 real/effective uid/gid
+与系统调用结果交叉核对，并确认稳定身份使用 effective uid。该事实契约不代表 macOS
+容器 user namespace 已存在，也不授予任何管理员/授权语义。
 
 `M15` 在 Intel 与 Apple Silicon 真机只启用 platform `file-identity`，验证文件与目录
 identity、hard-link count 及 rename 后对象稳定性，并确认依赖树不含 ACL/Authorization/
@@ -3919,6 +3931,15 @@ workspace 根包因真实使用私有目录/原子发布而启用 filesystem 时
 不能用运行时 capability 状态反推 guest 的直接依赖。
 platform identity-only/完整 filesystem Windows 真机测试与五目标严格 Clippy 已通过，
 Linux/macOS 真机运行分别并入 L23/M15。
+
+`W58` 新增最小 `user-identity` feature：Windows 返回边界校验并复制后的当前 token
+user SID，Linux/macOS 返回 real/effective uid/gid，稳定身份字节在 POSIX 上使用
+effective uid。platform 的 Windows 私有目录 ACL 与 IPC trusted identity 删除各自
+token 查询，Unix IPC 的十处 euid 比较也统一使用该事实；wbox Linux namespace 删除
+直接 getuid/getgid，资源限额删除直接 geteuid，但 guest uid 映射和 root 下 fail-closed
+策略仍归产品。固定 revision `2c6dc9ea3678f20c396b7c29082a854bb3c90342`；Windows
+SID/ACL/IPC 真机测试、all-features 和五目标严格 Clippy 已通过，Linux/macOS 运行验收
+见 L32/M16。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

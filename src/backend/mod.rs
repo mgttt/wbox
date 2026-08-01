@@ -17,6 +17,8 @@ mod emu;
 pub mod env;
 // Linux 原生后端（见 PRD.md F5 / docs/architecture.md §3）。
 // prepare 是纯逻辑，任何平台都能编译与单测；spawn 在隔离落地前明确报错。
+#[cfg(target_os = "linux")]
+mod host_identity;
 mod linux;
 /// 台阶③：Linux 上跑 Windows 程序的执行器变体（集成 wine，非新后端）。
 /// 非 Linux 宿主用 `wine_stub` 顶上同名空实现——Windows 上跑 PE 本来就是原生

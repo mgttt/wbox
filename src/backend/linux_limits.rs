@@ -107,7 +107,7 @@ fn build_limit_plan_with_cgroup(
     // 同一条 --max-procs 8 以 uid=1001 跑会 "can't fork"，以 root 跑则 40 个
     // 子进程全部起来。既然限不住，就不能静默接受这个参数——否则用户以为
     // 有进程数上限而实际没有，比直接报错危险得多（PRD F5）。
-    if nproc_wanted && unsafe { libc::geteuid() } == 0 {
+    if nproc_wanted && effective_root()? {
         return Err(WboxError::args(
             "以 root 运行且本宿主无可用 cgroup v2：无法实施 --max-procs——\
              RLIMIT_NPROC 对特权进程不生效（root 会绕过该上限），实测限不住。\
@@ -126,6 +126,10 @@ fn build_limit_plan_with_cgroup(
         as_bytes: (l.memory_mb > 0).then(|| l.memory_mb * 1024 * 1024),
         nproc: (l.max_procs > 0).then(|| u64::from(l.max_procs)),
     })
+}
+
+fn effective_root() -> Result<bool> {
+    Ok(super::super::host_identity::current_posix()?.effective_user_id == 0)
 }
 
 /// 尝试落成 cgroup v2 方案；本宿主用不了就返回 `Ok(None)` 交给 rlimit 兜底。
@@ -469,7 +473,7 @@ mod tests {
             max_procs: 8,
         });
         match build_limit_plan_with_cgroup(&s, None) {
-            Err(e) if unsafe { libc::geteuid() } == 0 => {
+            Err(e) if effective_root().unwrap() => {
                 let m = format!("{}", e);
                 assert!(m.contains("max-procs"), "错误应点明是 --max-procs：{}", m);
             }
@@ -509,7 +513,7 @@ mod tests {
             cpu_pct: 0,
             max_procs: 8,
         });
-        let is_root = unsafe { libc::geteuid() } == 0;
+        let is_root = effective_root().unwrap();
         match build_limit_plan(&s) {
             Ok(LimitPlan::Cgroup { .. }) => {}
             Ok(LimitPlan::Rlimit { as_bytes, nproc }) => {
