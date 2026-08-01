@@ -12,9 +12,8 @@
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
-use windows_sys::Win32::Foundation::{
-    GetHandleInformation, GetLastError, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
-};
+use std::os::windows::io::{BorrowedHandle, RawHandle};
+use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
@@ -153,11 +152,6 @@ where
     let mut inherited_handles = handles.to_vec();
     inherited_handles.sort_unstable_by_key(|handle| *handle as usize);
     inherited_handles.dedup();
-    // HANDLE_FLAG_INHERIT is process-global. Serialize the short mutation
-    // window so concurrent container launches cannot expose a broker/directory
-    // handle to the wrong child.
-    let inherit_scope = InheritHandleScope::enable(&inherited_handles)?;
-
     // ---- capability 属性数组（借用，生命周期覆盖整个创建过程）----
     let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
         .iter()
@@ -237,7 +231,7 @@ where
 
     if !inherited_handles.is_empty() {
         // # Safety: attribute list 容量为 2；数组在 CreateProcessW 返回前保持有效；
-        // 每个句柄均由上方 guard 临时设置为 inheritable。
+        // 每个句柄会由下方 platform transaction 在创建窗口内临时设为 inheritable。
         let ok = unsafe {
             UpdateProcThreadAttribute(
                 attr_list,
@@ -278,26 +272,51 @@ where
     // - si/pi 为有效栈上结构；attribute list 在调用期间有效；
     // - env_wide 为合法的双 NUL 结尾环境块，调用期间存活；
     //   stdout/stdin/stderr 继承。
-    let ok = unsafe {
-        CreateProcessW(
-            std::ptr::null(), // 从命令行解析程序名
-            cmd_wide.as_mut_ptr(),
-            std::ptr::null(), // 进程安全属性（默认）
-            std::ptr::null(), // 线程安全属性（默认）
-            i32::from(!inherited_handles.is_empty()),
-            flags,
-            env_wide.as_ptr() as *const core::ffi::c_void, // 显式环境块
-            workdir_wide.as_ptr(),
-            &si.StartupInfo as *const _,
-            &mut pi,
-        )
+    let borrowed_handles = inherited_handles
+        .iter()
+        .map(|handle| unsafe { BorrowedHandle::borrow_raw(*handle as RawHandle) })
+        .collect::<Vec<_>>();
+    let spawn_result =
+        agenterm_platform::process_spawn::with_inheritable_handles(&borrowed_handles, || unsafe {
+            let ok = CreateProcessW(
+                std::ptr::null(), // 从命令行解析程序名
+                cmd_wide.as_mut_ptr(),
+                std::ptr::null(), // 进程安全属性（默认）
+                std::ptr::null(), // 线程安全属性（默认）
+                i32::from(!inherited_handles.is_empty()),
+                flags,
+                env_wide.as_ptr() as *const core::ffi::c_void, // 显式环境块
+                workdir_wide.as_ptr(),
+                &si.StartupInfo as *const _,
+                &mut pi,
+            );
+            // The transaction restores source HANDLE flags after this callback and those
+            // Win32 calls may replace the thread's last-error value. Capture CreateProcessW's
+            // error in its own API boundary instead of reading it after restoration.
+            let error = if ok == 0 { GetLastError() } else { 0 };
+            (ok, error)
+        });
+    let (ok, create_error) = match spawn_result {
+        Ok(result) => result,
+        Err(error) => {
+            // The callback may have created a suspended child before restoring a source
+            // handle failed. Take ownership of both returned handles and reap that child;
+            // it has not entered the Job yet, so KILL_ON_JOB_CLOSE cannot cover this path.
+            if !pi.hProcess.is_null() {
+                let process = OwnedHandle(pi.hProcess);
+                let _thread = OwnedHandle(pi.hThread);
+                // # Safety: CreateProcessW populated a live process handle and the primary
+                // thread is still suspended, so no guest code has run.
+                unsafe { TerminateProcess(process.raw(), 1) };
+                let _ = wait_for_process_exit(process.raw());
+            }
+            return Err(crate::error::WboxError::spawn(format!(
+                "准备显式继承 HANDLE 失败：{error}"
+            )));
+        }
     };
-    // The attribute list has already been consumed by CreateProcessW. Restore
-    // every source handle immediately instead of leaving it inheritable while
-    // the child runs.
-    drop(inherit_scope);
     if ok == 0 {
-        let err = unsafe { GetLastError() };
+        let err = create_error;
         let hint = match err {
             2 => "（找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
             203 => "（环境变量未找到；请确认传入的环境块格式正确）",
@@ -363,81 +382,6 @@ fn wait_for_process_exit(process: HANDLE) -> Result<()> {
         agenterm_platform::process_reference::ProcessWait::TimedOut => {
             Err(crate::error::WboxError::spawn("sandbox 无限等待意外超时"))
         }
-    }
-}
-
-struct InheritHandleScope {
-    guards: Vec<InheritHandleGuard>,
-    lock: Option<agenterm_platform::process_spawn::HandleInheritanceLock>,
-}
-
-impl InheritHandleScope {
-    fn enable(handles: &[HANDLE]) -> Result<Option<Self>> {
-        if handles.is_empty() {
-            return Ok(None);
-        }
-        let lock = agenterm_platform::process_spawn::lock_handle_inheritance();
-        let guards = handles
-            .iter()
-            .copied()
-            .map(InheritHandleGuard::enable)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Some(Self {
-            guards,
-            lock: Some(lock),
-        }))
-    }
-}
-
-impl Drop for InheritHandleScope {
-    fn drop(&mut self) {
-        // Restore every source flag while the process-wide mutation lock is
-        // still held. Field drop order must not decide this safety property.
-        self.guards.clear();
-        self.lock.take();
-    }
-}
-
-struct InheritHandleGuard {
-    handle: HANDLE,
-    original_flags: u32,
-}
-
-impl InheritHandleGuard {
-    fn enable(handle: HANDLE) -> Result<Self> {
-        let mut original_flags = 0;
-        // # Safety: 调用方提供仍然有效的内核句柄；这里只读取并临时修改继承位。
-        if unsafe { GetHandleInformation(handle, &mut original_flags) } == 0 {
-            let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::spawn(format!(
-                "GetHandleInformation 失败，GetLastError={}",
-                err
-            )));
-        }
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
-            let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::spawn(format!(
-                "SetHandleInformation(HANDLE_FLAG_INHERIT) 失败，GetLastError={}",
-                err
-            )));
-        }
-        Ok(Self {
-            handle,
-            original_flags,
-        })
-    }
-}
-
-impl Drop for InheritHandleGuard {
-    fn drop(&mut self) {
-        // # Safety: 句柄由调用方保证覆盖 CreateProcessW 调用；恢复原继承位。
-        unsafe {
-            SetHandleInformation(
-                self.handle,
-                HANDLE_FLAG_INHERIT,
-                self.original_flags & HANDLE_FLAG_INHERIT,
-            )
-        };
     }
 }
 
@@ -537,47 +481,6 @@ pub fn build_cmdline(cmd: &[String]) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn selected_handle_scope_shares_the_platform_spawn_lock() {
-        use windows_sys::Win32::System::Threading::CreateEventW;
-
-        let event = OwnedHandle(unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) });
-        assert!(!event.0.is_null(), "CreateEventW fixture failed");
-        let flags = |handle| {
-            let mut flags = 0_u32;
-            assert_ne!(unsafe { GetHandleInformation(handle, &mut flags) }, 0);
-            flags
-        };
-        assert_eq!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
-        let scope = InheritHandleScope::enable(&[event.raw()])
-            .unwrap()
-            .expect("nonempty handle list must create a scope");
-        assert_ne!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-        let contender = std::thread::spawn(move || {
-            started_tx.send(()).unwrap();
-            let _platform_scope = agenterm_platform::process_spawn::lock_handle_inheritance();
-            acquired_tx.send(()).unwrap();
-        });
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("platform lock contender did not start");
-        assert!(
-            acquired_rx
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err(),
-            "platform spawn lock did not observe the wbox mutation scope"
-        );
-
-        drop(scope);
-        assert_eq!(flags(event.raw()) & HANDLE_FLAG_INHERIT, 0);
-        acquired_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("platform lock contender did not resume");
-        contender.join().unwrap();
-    }
 
     // ---- build_cmdline：程序名总是加引号，其余参数按需加引号 ----
 

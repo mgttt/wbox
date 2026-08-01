@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W82、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W83、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2672,6 +2672,7 @@ TODO-WINDOW
 ├── W80 稳定进程对象引用下沉并删除 broker 重复 HANDLE 生命周期实现                    [done] duplicated HANDLE + exit wait
 ├── W81 retained-directory no-follow typed open 下沉并删除 broker NT FFI               [done] rename/replacement identity gate
 ├── W82 exact process bounded/indefinite wait 下沉并删除 sandbox 直接 WaitForSingleObject [done] handle-bound wait
+├── W83 显式 HANDLE 继承事务下沉并删除 sandbox 本地 flag guard                         [done] restore/unwind + orphan reap
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4573,6 +4574,25 @@ wbox sandbox 删除生产路径两处直接 `WaitForSingleObject`，在 hook 失
 3 环境型 ignored）、根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable targets
 通过，Quick 释放 573.4 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04
 digest 的 WU.1/WU.2 通过。
+
+`W83` 在 `process-spawn` 增加 Windows target-specific 的显式 HANDLE 继承事务：输入借用句柄，
+在与所有 platform spawn 共用的进程级锁内去重、保存原 flag、临时设置
+`HANDLE_FLAG_INHERIT`，执行一次创建回调，并在正常返回或 unwind 时逐个恢复后才释放锁。
+设置中途失败也会回滚此前已修改的句柄；恢复阶段会尝试所有句柄再报告首个错误。该操作没有
+Unix 同义物：Linux/macOS 的 fd inheritance 应由 close-on-exec/`posix_spawn` 契约表达，因此
+不添加误导性的跨宿主空实现；整个 `process-spawn` feature 仍通过五个目标编译。platform
+定向 20 tests、all-features 179 tests、严格 Clippy，以及 Windows i686/ARM64、Linux
+x64/ARM64、macOS x64 非宿主目标编译通过；提交为 `26f3136`。
+
+wbox sandbox 删除本地 `InheritHandleScope`/`InheritHandleGuard`、直接
+`GetHandleInformation`/`SetHandleInformation` 和重复锁测试，改在 `CreateProcessW` 的最小
+窗口消费共享事务；`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`、AppContainer attributes、Job 和
+产品错误策略仍留在 wbox；`CreateProcessW` 的 last-error 在回调内立即捕获，不受随后恢复
+HANDLE flag 的 Win32 调用覆盖。若创建回调已经返回 suspended process、随后源 HANDLE flag 恢复
+失败，产品层会接管 process/thread HANDLE，终止并等待未入 Job 的子进程，避免孤儿。Windows
+sandbox 定向 36 tests（33 passed、3 ignored）、根 469 tests（466 passed、3 ignored）、
+Quick 306 项和四 portable targets 通过，Quick 释放 646.6 MiB 可再生缓存；release 产品门禁
+WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
