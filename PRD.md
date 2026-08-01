@@ -2596,6 +2596,7 @@ TODO-WINDOW
 ├── W34 FP64 FMA 算力计量                                         [done] 143–145 GFLOPS 本机长测
 ├── W35 Windows ABI 依赖单点化与 agenterm-platform 版本收敛        [done] windows-sys 0.61 单节点
 ├── W36 OCI pull 提交锁下沉与崩溃释放门禁                           [done] PathLock + 无 Drop 子进程
+├── W37 状态 liveness marker/owner guard 分层                         [done] PathLock + 跨进程/别名门禁
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3568,7 +3569,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`a24c6e9f43469f98a1591cdd7b0b23f63594426d`，关闭 default features，启用
+`869cde4bcd665b15d7bad23745bc6a0ca0ecce53`，关闭 default features，启用
 `filesystem-conventions` 与 `locking`。`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
@@ -3577,10 +3578,11 @@ cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke �
 
 此前 review 发现的两个上游阻塞已修复并有行为门禁：`PathLock` 现在规范化路径
 别名并由真实子进程验证互斥与释放；Windows `protect_private_directory()` 现在
-写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox 尚未
-尚未启用完整 `filesystem` feature。`locking` 首批只替换 OCI pull 提交锁：保留
-wbox 的 300 秒产品超时，但不再以崩溃后永久残留的目录作为互斥所有权。workspace
-已将四处 Windows ABI 声明收敛到单点 `windows-sys 0.61`；迁移状态 liveness 锁或
+写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox
+尚未启用完整 `filesystem` feature。`locking` 已替换 OCI pull 提交锁和状态 owner
+guard：前者保留 wbox 的 300 秒产品超时，但不再以崩溃后永久残留的目录作为互斥
+所有权；后者只下沉内核 guard，持久 marker、liveness 分类和生命周期策略仍归
+wbox。workspace 已将四处 Windows ABI 声明收敛到单点 `windows-sys 0.61`；迁移
 安全目录仍须逐项对照现有产品语义并通过产品门禁。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider

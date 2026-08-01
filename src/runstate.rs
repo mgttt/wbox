@@ -21,6 +21,7 @@
 //! windows runner 真实执行，不是我拍脑袋写完就算。
 
 use crate::error::{Result, WboxError};
+use agenterm_platform::locking::{LockErrorKind, PathLock};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -188,39 +189,58 @@ pub enum Liveness {
     Exited,
 }
 
-/// 独占打开一个文件。成功即表示**此刻没有别人持有它**。
+/// wbox-specific state marker plus a cross-process platform guard.
 ///
-/// Linux 用 `flock(LOCK_EX|LOCK_NB)`：锁绑定在 *open file description* 上，
-/// 因此同一进程再打开一次也会冲突——这正是我们要的（单测就在同进程内验证）。
-/// 换成 `fcntl` 记录锁则不行：那是按进程算的，同进程重复加锁会直接成功。
-#[cfg(unix)]
-fn try_lock_exclusive(path: &Path) -> Option<File> {
-    use std::os::unix::io::AsRawFd;
-    let f = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .ok()?;
-    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc == 0 {
-        Some(f)
-    } else {
-        None
+/// The marker persists after a crash so liveness can distinguish "never
+/// registered" from "owner exited". The guard itself is released by the OS.
+struct StateLock {
+    _guard: PathLock,
+}
+
+impl std::fmt::Debug for StateLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("StateLock")
+    }
+}
+
+fn try_lock_exclusive(path: &Path) -> Result<Option<StateLock>> {
+    match PathLock::try_acquire(path) {
+        Ok(guard) => {
+            // Unix PathLock creates the lock path itself; Windows uses a named
+            // mutex, so publish the product-level liveness marker explicitly.
+            File::options()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(|error| {
+                    WboxError::args(format!(
+                        "创建状态锁标记 '{}' 失败：{}",
+                        path.display(),
+                        error
+                    ))
+                })?;
+            Ok(Some(StateLock { _guard: guard }))
+        }
+        Err(error) if error.kind() == LockErrorKind::Contended => Ok(None),
+        Err(error) => Err(WboxError::args(format!(
+            "取得状态锁 '{}' 失败：{}",
+            path.display(),
+            error
+        ))),
     }
 }
 
 /// 串行化状态树的复合变更。单个容器的 `lock` 证明 owner 是否存活，但不能保护
 /// “检查存活状态 → 删除旧目录/创建新目录”这一整段操作；没有根锁时，`rm`
 /// 可以在 `register` 刚取得容器锁后删掉它的目录。
-fn lock_operations(root: &Path) -> Result<File> {
+fn lock_operations(root: &Path) -> Result<StateLock> {
     std::fs::create_dir_all(root)
         .map_err(|e| WboxError::args(format!("创建状态根目录 '{}' 失败：{}", root.display(), e)))?;
     let path = root.join(OPERATION_LOCK);
     let started = Instant::now();
     loop {
-        if let Some(lock) = try_lock_exclusive(&path) {
+        if let Some(lock) = try_lock_exclusive(&path)? {
             return Ok(lock);
         }
         if started.elapsed() >= OPERATION_LOCK_TIMEOUT {
@@ -231,21 +251,6 @@ fn lock_operations(root: &Path) -> Result<File> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-/// Windows：`share_mode(0)` 表示打开期间不允许他人共享访问，
-/// 别的进程再开就会拿到共享冲突——与 flock 等效。
-#[cfg(windows)]
-fn try_lock_exclusive(path: &Path) -> Option<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .share_mode(0)
-        .open(path)
-        .ok()
 }
 
 /// 判定一个状态目录的存活状态。
@@ -264,9 +269,10 @@ pub fn liveness(dir: &Path) -> Liveness {
         return Liveness::Exited;
     }
     match try_lock_exclusive(&lock) {
-        // 能独占 → 没有 owner。拿到后立刻释放（drop File）
-        Some(_) => Liveness::Exited,
-        None => Liveness::Running,
+        // 能独占 → 没有 owner。拿到后立刻释放。
+        Ok(Some(_)) => Liveness::Exited,
+        // 查询接口保持保守：竞争或探测错误都不能把活 owner 误判成已退出。
+        Ok(None) | Err(_) => Liveness::Running,
     }
 }
 
@@ -279,7 +285,7 @@ pub fn liveness(dir: &Path) -> Liveness {
 pub struct Registration {
     dir: PathBuf,
     /// 持有到 drop 为止；这个句柄就是"我还活着"的证据
-    lock: Option<File>,
+    lock: Option<StateLock>,
     /// 退出后**保留**记录与日志（`--detach` 用）。
     ///
     /// 前台容器退出即清理：输出已经打在用户终端上了，留个空目录只是垃圾。
@@ -849,7 +855,7 @@ pub fn register_with_context(
                 name
             )));
         }
-        let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
+        let lock = try_lock_exclusive(&dir.join("lock"))?.ok_or_else(|| {
             WboxError::args(format!("无法独占容器 '{}' 的锁文件（并发的 wbox？）", name))
         })?;
         write_meta(&dir, name, cmd, target, exec_context)?;
@@ -895,7 +901,7 @@ pub fn register_with_context(
     }
     std::fs::create_dir_all(&dir)
         .map_err(|e| WboxError::args(format!("创建状态目录 '{}' 失败：{}", dir.display(), e)))?;
-    let lock = try_lock_exclusive(&dir.join("lock")).ok_or_else(|| {
+    let lock = try_lock_exclusive(&dir.join("lock"))?.ok_or_else(|| {
         WboxError::args(format!(
             "无法独占容器 '{}' 的锁文件（是否有并发的 wbox？）",
             name
@@ -999,7 +1005,7 @@ pub(crate) fn already_exited_for(name: &str, what: &str) -> WboxError {
 pub struct LockedEntry {
     pub dir: PathBuf,
     pub entry: Entry,
-    _operation_lock: File,
+    _operation_lock: StateLock,
 }
 
 impl LockedEntry {
@@ -1196,7 +1202,7 @@ mod tests {
     /// 持有期间判 Running，释放后判 Exited。
     ///
     /// 这条测试**在 Windows CI 上同样执行**（test-windows job），所以
-    /// `share_mode(0)` 那半实现不是"写完就算"，而是真被跑过。
+    /// named mutex 与持久 marker 的组合不是"写完就算"，而是真被跑过。
     #[test]
     fn lock_reflects_owner_liveness() {
         let _home = TempHome::new("lock");
@@ -1208,6 +1214,25 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lock"), b"").unwrap();
         assert_eq!(liveness(&dir), Liveness::Exited, "无人持锁时应判为已退出");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn state_lock_path_aliases_share_one_owner() {
+        let _home = TempHome::new("lock-alias");
+        let root = run_root().unwrap();
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let canonical = root.join("state.lock");
+        let alias = child.join("..").join("STATE.LOCK");
+
+        let first = try_lock_exclusive(&canonical).unwrap().unwrap();
+        assert!(
+            try_lock_exclusive(&alias).unwrap().is_none(),
+            "路径别名不得绕过状态锁 owner"
+        );
+        drop(first);
+        assert!(try_lock_exclusive(&alias).unwrap().is_some());
     }
 
     /// 正常退出后状态目录应当消失，不给 `ps` 留垃圾。
