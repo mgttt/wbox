@@ -99,7 +99,8 @@ scripts/build.sh --release -p wbox-linux
 
 wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认在
 `target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录及每个 crate 的旧
-compilation hash，只保留最新一套；总量超过 512 MiB 时再按最后修改时间回收冷单元。
+compilation hash，只保留最新一套；每套 compilation hash 内也只保留最新完整
+session 及其配套 lock。总量超过 512 MiB 时再按最后修改时间回收冷单元。
 它还会清理 target 根目录
 的 `tmp/`、`review-*`、`*.tmp`、`*.part` 临时状态。`deps/`、`build/`、
 `.fingerprint/` 以及预算内的热 incremental session 都保留。

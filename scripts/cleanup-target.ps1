@@ -72,6 +72,46 @@ function Remove-TargetFile {
     $script:removedFiles++
 }
 
+function Remove-SupersededIncrementalSessions {
+    param([Parameter(Mandatory)][System.IO.DirectoryInfo]$CrateDirectory)
+
+    $lockFiles = @(
+        Get-ChildItem -LiteralPath $CrateDirectory.FullName -File -Filter "s-*.lock" -Force
+    )
+    $sessions = @(
+        foreach ($sessionDirectory in @(
+            Get-ChildItem -LiteralPath $CrateDirectory.FullName -Directory -Force |
+                Where-Object { $_.Name -like "s-*-*" -and $_.Name -notlike "*-working" }
+        )) {
+            $matchingLock = $lockFiles |
+                Where-Object {
+                    $sessionDirectory.Name.StartsWith(
+                        $_.BaseName + "-",
+                        [System.StringComparison]::Ordinal
+                    )
+                } |
+                Sort-Object { $_.BaseName.Length } -Descending |
+                Select-Object -First 1
+            if ($matchingLock) {
+                [pscustomobject]@{
+                    Directory = $sessionDirectory
+                    Lock = $matchingLock
+                }
+            }
+        }
+    )
+
+    $sessions |
+        Sort-Object { $_.Directory.LastWriteTimeUtc } -Descending |
+        Select-Object -Skip 1 |
+        ForEach-Object {
+            Remove-TargetDirectory -Directory $_.Directory
+            if (Test-Path -LiteralPath $_.Lock.FullName -PathType Leaf) {
+                Remove-TargetFile -File $_.Lock
+            }
+        }
+}
+
 if ($KeepIncremental -and $CleanIncremental) {
     throw "-KeepIncremental and -CleanIncremental cannot be used together"
 }
@@ -87,6 +127,7 @@ if (-not $KeepIncremental) {
             # with the lock basename followed by the session metadata hash.
             $crateDirs = @(Get-ChildItem -LiteralPath $incrementalRoot -Directory -Force)
             foreach ($crateDir in $crateDirs) {
+                Remove-SupersededIncrementalSessions -CrateDirectory $crateDir
                 $sessionDirs = @(Get-ChildItem -LiteralPath $crateDir.FullName -Directory -Force)
                 $lockFiles = @(
                     Get-ChildItem -LiteralPath $crateDir.FullName -File -Filter "*.lock" -Force

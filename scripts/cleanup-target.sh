@@ -57,6 +57,45 @@ if [ "$keep_incremental" != 1 ]; then
     else
       for crate_dir in "$incremental_root"/*; do
         [ -d "$crate_dir" ] || continue
+        newest_session=
+        for session_dir in "$crate_dir"/s-*-*; do
+          [ -d "$session_dir" ] || continue
+          case "$session_dir" in
+            *-working) continue ;;
+          esac
+          lock_file=
+          for candidate in "$crate_dir"/s-*.lock; do
+            [ -f "$candidate" ] || continue
+            case "$session_dir" in
+              "${candidate%.lock}-"*) lock_file=$candidate ;;
+            esac
+          done
+          [ -n "$lock_file" ] || continue
+          if [ -z "$newest_session" ] || [ "$session_dir" -nt "$newest_session" ]; then
+            newest_session=$session_dir
+          fi
+        done
+        for session_dir in "$crate_dir"/s-*-*; do
+          [ -d "$session_dir" ] || continue
+          [ "$session_dir" != "$newest_session" ] || continue
+          case "$session_dir" in
+            *-working) continue ;;
+          esac
+          lock_file=
+          for candidate in "$crate_dir"/s-*.lock; do
+            [ -f "$candidate" ] || continue
+            case "$session_dir" in
+              "${candidate%.lock}-"*) lock_file=$candidate ;;
+            esac
+          done
+          [ -n "$lock_file" ] || continue
+          size=$(du -sk "$session_dir" | awk '{print $1}')
+          rm -rf -- "$session_dir"
+          rm -f -- "$lock_file"
+          removed_kib=$((removed_kib + size))
+          removed=$((removed + 1))
+          removed_files=$((removed_files + 1))
+        done
         for lock_file in "$crate_dir"/*.lock; do
           [ -f "$lock_file" ] || continue
           session_prefix=${lock_file%.lock}-

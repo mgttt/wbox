@@ -2726,8 +2726,9 @@ locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核�
 固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
 昂贵 job 只在它通过后启动；Quick 和构建 wrapper 默认清理 incremental 中没有
 对应 session 的孤立锁与空目录，以及 tmp、review、`.tmp/.part` 等可再生残留。
-debug incremental 采用两级有界 LRU：构建结束后每个 crate 默认只保留最新编译单元，
-总量超过 512 MiB 时继续回收可再生的冷单元并至少保留每个 crate 最新一份；
+debug incremental 采用三级有界清理：每个编译单元内只保留最新完整 session 及其
+配套 lock，构建结束后每个 crate 默认只保留最新编译单元，总量超过 512 MiB 时
+继续回收可再生的冷单元并至少保留每个 crate 最新一份；疑似进行中的 working session、
 deps、build、fingerprint 与预算内热缓存继续复用。完整清理 debug 增量缓存需显式
 使用 `-CleanIncremental` / `WBOX_CLEAN_INCREMENTAL=1`。
 本地精确 channel
