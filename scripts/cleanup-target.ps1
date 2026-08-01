@@ -32,6 +32,7 @@ $targetPrefix = $targetRoot.TrimEnd(
 ) + [System.IO.Path]::DirectorySeparatorChar
 $removed = 0
 $removedFiles = 0
+$removedBytes = 0L
 
 function Remove-TargetDirectory {
     param([Parameter(Mandatory)][System.IO.DirectoryInfo]$Directory)
@@ -44,6 +45,11 @@ function Remove-TargetDirectory {
     if (($Directory.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
         Remove-Item -LiteralPath $fullPath -Force
     } else {
+        $bytes = (Get-ChildItem -LiteralPath $fullPath -File -Recurse -Force -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+        if ($null -ne $bytes) {
+            $script:removedBytes += [long]$bytes
+        }
         Remove-Item -LiteralPath $fullPath -Recurse -Force
     }
     $script:removed++
@@ -56,6 +62,7 @@ function Remove-TargetFile {
     if (-not $fullPath.StartsWith($targetPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean file outside Cargo target directory: $fullPath"
     }
+    $script:removedBytes += $File.Length
     Remove-Item -LiteralPath $fullPath -Force
     $script:removedFiles++
 }
@@ -90,4 +97,11 @@ foreach ($file in $temporaryFiles) {
     Remove-TargetFile -File $file
 }
 
-Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' }) and $removedFiles temporary file$(if ($removedFiles -eq 1) { '' } else { 's' })"
+$released = if ($removedBytes -ge 1GB) {
+    "{0:N2} GiB" -f ($removedBytes / 1GB)
+} elseif ($removedBytes -ge 1MB) {
+    "{0:N1} MiB" -f ($removedBytes / 1MB)
+} else {
+    "{0:N1} KiB" -f ($removedBytes / 1KB)
+}
+Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' }) and $removedFiles temporary file$(if ($removedFiles -eq 1) { '' } else { 's' }); released $released"

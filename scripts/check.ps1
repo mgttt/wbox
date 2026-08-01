@@ -2,10 +2,14 @@
 param(
     [switch]$Quick,
     [switch]$WindowsTarget,
-    [switch]$CleanIncremental
+    [switch]$CleanIncremental,
+    [switch]$KeepIncremental
 )
 
 $ErrorActionPreference = "Stop"
+if ($CleanIncremental -and $KeepIncremental) {
+    throw "-CleanIncremental and -KeepIncremental cannot be used together"
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $timer = [System.Diagnostics.Stopwatch]::StartNew()
 $exitCode = 0
@@ -32,7 +36,8 @@ try {
     $exitCode = 1
 } finally {
     try {
-        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:(-not $CleanIncremental)
+        # CleanIncremental remains accepted for compatibility; cleanup is now the default.
+        & (Join-Path $PSScriptRoot "cleanup-target.ps1") -KeepIncremental:$KeepIncremental
     } catch {
         Write-Error "post-check cleanup failed: $_"
         $exitCode = 1

@@ -50,9 +50,9 @@ Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 验证按成本递增：先 `lint.ps1 -Mode Static`，再 `check.ps1 -Quick`，然后运行改动
 所属的 G2/G3 产品门禁；`check.ps1` 和完整 CI 留给提交前。不要同时启动多个 Cargo
 门禁争抢同一个 `target` 构建锁。wrapper 只打印阶段、失败和耗时摘要，详细产品
-证据仍由下述唯一 owning gate 产出。`check.ps1` 默认保留 incremental 热缓存并只
-清理测试临时目录；需要主动回收空间时传 `-CleanIncremental`。构建 wrapper 仍默认
-清 incremental，满足阶段性交付后的磁盘清理要求。
+证据仍由下述唯一 owning gate 产出。`check.ps1` 默认清理 incremental 与测试临时
+目录；需要为连续本地迭代保留热缓存时显式传 `-KeepIncremental`。构建 wrapper
+同样默认清 incremental，满足阶段性交付后的磁盘清理要求。
 
 CI 固定 Rust 1.97.1。升级编译器是独立变更：先跑 Quick 和双目标 Clippy，再观察
 完整 CI，不能让浮动 `stable` 在普通功能提交中突然改变 lint 规则。本地暂不放

@@ -23,7 +23,13 @@ if [ ! -f "$cache_tag" ] || ! grep -q 'created by cargo' "$cache_tag"; then
 fi
 
 removed=0
+removed_kib=0
 if [ "$keep_incremental" != 1 ]; then
+  incremental_kib=$(
+    find "$target_dir" -type d -name incremental -prune -exec du -sk {} + |
+      awk '{ total += $1 } END { print total + 0 }'
+  )
+  removed_kib=$((removed_kib + incremental_kib))
   incremental_count=$(
     find "$target_dir" -type d -name incremental -prune -print |
       wc -l |
@@ -35,6 +41,8 @@ fi
 
 for directory in "$target_dir/tmp" "$target_dir"/review-*; do
   [ -d "$directory" ] || continue
+  size=$(du -sk "$directory" | awk '{print $1}')
+  removed_kib=$((removed_kib + size))
   rm -rf -- "$directory"
   removed=$((removed + 1))
 done
@@ -42,9 +50,12 @@ done
 removed_files=0
 for file in "$target_dir"/*.tmp "$target_dir"/*.part "$target_dir"/review-*; do
   [ -f "$file" ] || continue
+  size=$(du -k "$file" | awk '{print $1}')
+  removed_kib=$((removed_kib + size))
   rm -f -- "$file"
   removed_files=$((removed_files + 1))
 done
 
-printf 'target cleanup: removed %s regenerable directories and %s temporary files\n' \
-  "$removed" "$removed_files"
+released_mib=$((removed_kib / 1024))
+printf 'target cleanup: removed %s regenerable directories and %s temporary files; released %s MiB\n' \
+  "$removed" "$removed_files" "$released_mib"

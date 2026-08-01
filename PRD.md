@@ -2571,7 +2571,7 @@ TODO-WINDOW
 ├── W9 create → rename → start 生命周期损坏               [done] WP.24
 ├── W10 资源限额的**行为**门禁（超限真的发生了吗）        [done] WP.26
 ├── W11 detached 启动 READY/ERROR 握手                     [done] WP.23A/WP.23B
-├── W12 构建后清理增量与临时垃圾、保留 Cargo 缓存           [done] scripts/build.ps1
+├── W12 构建后清理增量与临时垃圾、保留 Cargo 缓存           [done] build/check wrappers + 释放量
 ├── W13 Ubuntu 24.04 Windows 产品门禁                      [done] WU.1/WU.2
 ├── W14 跨宿主提交的 Windows test target 持续门禁           [done] 见下方 W14
 ├── W15 快速 lint、分层验证与后台只读观察工作流              [done] scripts/check.ps1
@@ -2703,9 +2703,9 @@ workspace、Clippy、WP 全套及 WU.1/WU.2 均已复核通过。
 CI 同一 workflow/ref 的旧运行会被新 push 取消，`build-wbox-linux` 也统一使用
 locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核又补齐：CI Rust
 固定为 1.97.1；`preflight` 先跑静态语法、rustfmt 与 host all-targets check，
-昂贵 job 只在它通过后启动；Quick 默认保留 incremental 热缓存，需要回收空间时
-显式 `-CleanIncremental`，构建 wrapper 仍按 W12/L11 清理 incremental、tmp、
-review、`.tmp/.part` 等可再生残留，但保留 `deps/build/.fingerprint` 有效缓存。
+昂贵 job 只在它通过后启动；Quick 现在默认清理 incremental，连续本地迭代可显式
+`-KeepIncremental`。构建 wrapper 仍按 W12/L11 清理 incremental、tmp、review、
+`.tmp/.part` 等可再生残留，但保留 `deps/build/.fingerprint` 有效缓存。
 本地精确 channel
 pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
 
