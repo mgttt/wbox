@@ -6,7 +6,7 @@
 use crate::error::{Result, WboxError};
 use crate::token::{self, OwnedHandle};
 use std::io::Write as _;
-use std::os::windows::io::AsRawHandle as _;
+use std::os::windows::io::{AsRawHandle as _, BorrowedHandle, RawHandle};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::{
     DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
@@ -16,7 +16,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessId};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const MAGIC: u32 = 0x5742_4f58; // "WBOX"
 const VERSION: u16 = 1;
@@ -467,30 +467,13 @@ impl BrokerEndpoint {
                 self.appcontainer_sid, actual_sid
             )));
         }
-        let pid = unsafe { GetProcessId(process) };
-        if pid == 0 {
-            return Err(last_error("GetProcessId(broker register)"));
-        }
-        let mut owned_process = std::ptr::null_mut();
-        let current = unsafe { GetCurrentProcess() };
-        if unsafe {
-            DuplicateHandle(
-                current,
-                process,
-                current,
-                &mut owned_process,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == 0
-        {
-            return Err(last_error("DuplicateHandle(broker process)"));
-        }
+        let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
+        let process =
+            agenterm_platform::process_reference::ProcessReference::duplicate_from(process)
+                .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
         Ok(BrokerSession {
             pipe: self.pipe,
-            process: OwnedHandle(owned_process),
-            pid,
+            process,
             generation: self.generation,
             nonce: self.nonce,
             mounts: self.mounts,
@@ -500,8 +483,7 @@ impl BrokerEndpoint {
 
 pub(crate) struct BrokerSession {
     pipe: agenterm_platform::ipc::NativeStream,
-    process: OwnedHandle,
-    pid: u32,
+    process: agenterm_platform::process_reference::ProcessReference,
     generation: u64,
     nonce: [u8; 16],
     mounts: Vec<BrokerMount>,
@@ -519,7 +501,11 @@ impl BrokerSession {
     fn serve(mut self, expect_open: bool) -> Result<()> {
         // The connected client HANDLE was inherited through HANDLE_LIST only after this exact
         // process passed Job + AppContainer SID registration.
-        if unsafe { GetProcessId(self.process.raw()) } != self.pid {
+        if !self
+            .process
+            .is_alive()
+            .map_err(|error| WboxError::spawn(format!("检查 broker 进程引用失败：{error}")))?
+        {
             return Err(WboxError::spawn("broker 注册进程已失效"));
         }
 
@@ -620,7 +606,7 @@ impl BrokerSession {
             DuplicateHandle(
                 GetCurrentProcess(),
                 opened.raw(),
-                self.process.raw(),
+                self.process.as_raw_handle() as HANDLE,
                 &mut remote,
                 0,
                 0,
@@ -707,8 +693,6 @@ fn write_response(pipe: &mut impl std::io::Write, response: &Response) -> Result
 }
 
 fn process_appcontainer_sid_string(process: HANDLE) -> Result<String> {
-    use std::os::windows::io::{BorrowedHandle, RawHandle};
-
     let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
     let facts = agenterm_platform::process_security::process_handle(process)
         .map_err(|error| WboxError::spawn(format!("读取 broker 进程安全身份失败：{error}")))?;

@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W79、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L50、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M35
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W80、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L51、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M36
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2669,6 +2669,7 @@ TODO-WINDOW
 ├── W77 已打开文件对象分类下沉并删除 broker 重复 Win32 查询                           [done] root/component junction reject
 ├── W78 产品无关本地 IPC 与 owned descriptor 下沉并接入 broker                        [done] inherited overlapped HANDLE
 ├── W79 三宿主进程安全身份下沉并删除 broker 重复 token 查询                           [done] handle-bound AppContainer SID
+├── W80 稳定进程对象引用下沉并删除 broker 重复 HANDLE 生命周期实现                    [done] duplicated HANDLE + exit wait
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3104,7 +3105,8 @@ TODO-LINUX
 ├── L47 轻量进程观察 Linux 真机验收                                    [next] live/dead/zombie/permission + start ticks
 ├── L48 已打开文件对象分类 Linux 真机验收                              [next] O_PATH/O_NOFOLLOW symlink + ordinary fd
 ├── L49 owned Unix IPC fd 跨进程继承验收                               [next] private socket + explicit inheritance
-└── L50 进程安全身份 Linux 真机验收                                    [next] effective uid/gid + denied/exited PID
+├── L50 进程安全身份 Linux 真机验收                                    [next] effective uid/gid + denied/exited PID
+└── L51 owned pidfd 进程引用 Linux 真机验收                            [next] exact child exit + PID reuse boundary
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3167,6 +3169,11 @@ endpoint/lease 的树外 symlink 与其他 uid 拒绝门禁保持开启；产品
 `Uid`/`Gid` 第二列与 `geteuid/getegid`，并用真实子进程验证存活身份、退出后 NotFound 和权限
 拒绝不被伪装成空身份。user namespace 映射、capability、LSM label 与 cgroup membership 均不从
 euid/egid 推断；需要这些事实时必须另建 typed contract。交叉编译不能替代 procfs 权限行为。
+
+`L51` 在支持 pidfd 的非 root Linux 真机只启用 `process-reference`，分别按真实子进程 PID
+打开引用并从 retained pidfd 观察退出，确认引用不会因 PID 数字复用而指向另一进程；零 PID、
+已退出 PID、权限拒绝与内核不支持必须保持可区分错误。交叉编译只证明 syscall/poll ABI 可
+构建，不能替代目标内核的 pidfd 行为；进程树、重启、超时和退出码映射仍归产品层。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3852,7 +3859,8 @@ TODO-MACOS
 ├── M32 轻量进程观察 macOS 真机验收                                  [next] proc_bsdinfo live/dead/permission + start time
 ├── M33 已打开文件对象分类 macOS 真机验收                            [next] O_SYMLINK/no-follow + APFS ordinary fd
 ├── M34 owned Unix IPC fd 跨进程继承验收                             [next] APFS private socket + peer uid
-└── M35 进程安全身份 macOS 真机验收                                  [next] proc_bsdinfo uid/gid + denied/exited PID
+├── M35 进程安全身份 macOS 真机验收                                  [next] proc_bsdinfo uid/gid + denied/exited PID
+└── M36 owned kqueue 进程引用 macOS 真机验收                          [next] NOTE_EXIT + Intel/Apple Silicon
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3904,6 +3912,11 @@ uid、双向帧、CLOEXEC 切换与单一关闭所有权。APFS endpoint/lease �
 `PROC_PIDTBSDINFO` 读取当前与真实子进程有效 uid/gid，验证退出 PID、`EPERM/EACCES` 和越界 PID
 保持可区分错误。sandbox profile、entitlement、audit token 与 code-sign identity 不从 uid/gid
 推断；未来需要时另建 typed facts。双 ISA Clippy 不能替代 libproc 权限与生命周期行为。
+
+`M36` 在 Intel 与 Apple Silicon 真机只启用 `process-reference`，为真实子进程建立专属
+kqueue，并验证退出前无事件、退出后收到 `EVFILT_PROC/NOTE_EXIT`、重复查询稳定保持 dead。
+零 PID、注册期间退出、权限拒绝和无效事件必须 fail closed；双 ISA 交叉编译不能替代 kqueue
+生命周期行为，进程树与产品退出策略也不下沉。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -4491,6 +4504,19 @@ AppContainer、错误 profile SID、非 Job 进程与 HELLO/PING/OPEN，Linux/ma
 交接 L50/M35。wbox 根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable
 targets 通过，Quick 释放 775.0 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定
 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
+
+`W80` 新增独立 `process-reference`：公共 owned reference 保持原生进程对象身份并提供稳定
+PID 与无阻塞退出观察；Windows 持有 duplicated process HANDLE，Linux 持有 pidfd，macOS
+以专属 kqueue 注册 `EVFILT_PROC/NOTE_EXIT`。Windows 还可从调用方已有的
+`BorrowedHandle` 直接复制引用，避免按 PID 重开造成身份竞态。platform 最小 feature 15
+tests、all-features 172 tests、严格 Clippy，以及 Windows i686/ARM64、Linux x64/ARM64、
+macOS x64 非宿主目标编译通过；提交为 `18a681e`，Linux/macOS 真机行为分别交接 L51/M36。
+
+wbox broker 删除本地 `GetProcessId`、process `DuplicateHandle`、owned HANDLE 与 PID 配对
+检查，注册后直接持有 platform `ProcessReference`；Job 成员、AppContainer SID、随机握手、
+文件 HANDLE 注入和只读挂载授权仍由产品层负责。Windows broker 8 tests、根 470 tests
+（467 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 493.5 MiB
+可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
