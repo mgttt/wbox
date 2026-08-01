@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W81、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L52、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M37
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W82、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2671,6 +2671,7 @@ TODO-WINDOW
 ├── W79 三宿主进程安全身份下沉并删除 broker 重复 token 查询                           [done] handle-bound AppContainer SID
 ├── W80 稳定进程对象引用下沉并删除 broker 重复 HANDLE 生命周期实现                    [done] duplicated HANDLE + exit wait
 ├── W81 retained-directory no-follow typed open 下沉并删除 broker NT FFI               [done] rename/replacement identity gate
+├── W82 exact process bounded/indefinite wait 下沉并删除 sandbox 直接 WaitForSingleObject [done] handle-bound wait
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3108,7 +3109,8 @@ TODO-LINUX
 ├── L49 owned Unix IPC fd 跨进程继承验收                               [next] private socket + explicit inheritance
 ├── L50 进程安全身份 Linux 真机验收                                    [next] effective uid/gid + denied/exited PID
 ├── L51 owned pidfd 进程引用 Linux 真机验收                            [next] exact child exit + PID reuse boundary
-└── L52 retained-directory `openat` 真机验收                           [next] rename/replacement + symlink canary
+├── L52 retained-directory `openat` 真机验收                           [next] rename/replacement + symlink canary
+└── L53 pidfd bounded/indefinite wait Linux 真机验收                    [next] timeout + EINTR + repeated exit
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3182,6 +3184,11 @@ euid/egid 推断；需要这些事实时必须另建 typed contract。交叉编�
 另放目录/file symlink 与树外 canary，确认 `openat(O_NOFOLLOW)` 不穿越。组件必须拒绝空值、
 `.`、`..` 与多段路径；交叉编译不能替代目标 VFS、mount 与权限行为，guest path 解析和授权
 策略仍归 wbox。
+
+`L53` 在支持 pidfd 的非 root Linux 真机用真实短命子进程验证零时限/短时限返回 `TimedOut`、
+充分时限和无限等待返回 `Exited`，退出后重复等待仍稳定；等待期间注入可捕获信号，确认
+`poll` 的 `EINTR` 不会提前结束原始单调时限。超过单次 native 毫秒上限的等待必须分块而非
+截短；交叉编译不能替代目标内核调度和 signal 行为。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3869,7 +3876,8 @@ TODO-MACOS
 ├── M34 owned Unix IPC fd 跨进程继承验收                             [next] APFS private socket + peer uid
 ├── M35 进程安全身份 macOS 真机验收                                  [next] proc_bsdinfo uid/gid + denied/exited PID
 ├── M36 owned kqueue 进程引用 macOS 真机验收                          [next] NOTE_EXIT + Intel/Apple Silicon
-└── M37 retained-directory `openat` 真机验收                          [next] APFS rename/symlink + 双 ISA
+├── M37 retained-directory `openat` 真机验收                          [next] APFS rename/symlink + 双 ISA
+└── M38 kqueue bounded/indefinite wait macOS 真机验收                  [next] timeout + EINTR + repeated exit
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3931,6 +3939,10 @@ kqueue，并验证退出前无事件、退出后收到 `EVFILT_PROC/NOTE_EXIT`�
 路径替换、单组件与树外 symlink canary 门禁，确认 APFS 上 `openat(O_NOFOLLOW)` 和同一 opened
 object 类型验证保持一致。双 ISA Clippy 不能替代 APFS rename、权限和 symlink 行为；sandbox
 授权、guest path 与产品错误映射不下沉。
+
+`M38` 在 Intel 与 Apple Silicon 真机复用 L53 的零/短/充分/无限时限与重复退出观察，并在
+`kevent` 等待期间注入可捕获信号验证 `EINTR` 后按单调时钟重算剩余时间。`NOTE_EXIT` 一旦
+消费必须缓存 dead 状态；双 ISA Clippy 不能替代 kqueue timeout、signal 和生命周期行为。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -4546,6 +4558,21 @@ wbox broker 删除本地 `CreateFileW`、`NtCreateFile`、NT ABI 结构、访问
 产品错误映射和向目标进程注入 HANDLE 仍留在 wbox。Windows broker 8 tests、根 470 tests
 （467 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 514.2 MiB
 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
+
+`W82` 扩展 `process-reference` 为 exact-object `wait_for_exit`：`None` 表示无限等待，有限
+时限返回 typed `Exited/TimedOut`，并以单调时钟在 native timeout 分块或 `EINTR` 后重算
+剩余时间。Windows 等待 retained HANDLE，Linux poll pidfd，macOS kevent kqueue；已退出对象
+重复等待保持 `Exited`。已有 Windows `BorrowedHandle` 可通过 `wait_handle` 直接等待，不按 PID
+重开。platform 最小 feature 15 tests、all-features 177 tests、严格 Clippy，以及 Windows
+i686/ARM64、Linux x64/ARM64、macOS x64 非宿主目标编译通过；提交为 `ba3b60c`，Linux/macOS
+真机 timeout/signal 行为分别交接 L53/M38。
+
+wbox sandbox 删除生产路径两处直接 `WaitForSingleObject`，在 hook 失败终止挂起进程和正常
+运行等待两条路径统一消费 platform；AppContainer 创建、Job 分配、`TerminateProcess`、
+`GetExitCodeProcess` 与退出码策略继续留在产品层。Windows sandbox 定向 15 tests（12 passed、
+3 环境型 ignored）、根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable targets
+通过，Quick 释放 573.4 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04
+digest 的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

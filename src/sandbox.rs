@@ -19,9 +19,9 @@ use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
 };
 
 use crate::error::Result;
@@ -322,7 +322,7 @@ where
     if let Err(e) = on_created(process.raw(), job) {
         // 子进程仍挂起；等待终止完成，避免 broker 初始化失败后留下孤儿。
         unsafe { TerminateProcess(process.raw(), 1) };
-        unsafe { WaitForSingleObject(process.raw(), u32::MAX) };
+        let _ = wait_for_process_exit(process.raw());
         return Err(e);
     }
     // # Safety: 线程句柄有效，线程处于挂起状态（CREATE_SUSPENDED）。
@@ -338,10 +338,7 @@ where
     on_started(job);
 
     // ---- 等待退出并转发退出码 ----
-    // # Safety: 进程句柄有效，INFINITE 等待进程退出。
-    unsafe {
-        WaitForSingleObject(process.raw(), u32::MAX /* INFINITE */)
-    };
+    wait_for_process_exit(process.raw())?;
     let mut code: u32 = 0;
     // # Safety: 进程句柄有效且进程已退出，code 为有效输出指针。
     let ok = unsafe { GetExitCodeProcess(process.raw(), &mut code) };
@@ -353,6 +350,20 @@ where
         )));
     }
     Ok(code)
+}
+
+fn wait_for_process_exit(process: HANDLE) -> Result<()> {
+    use std::os::windows::io::{BorrowedHandle, RawHandle};
+
+    let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
+    match agenterm_platform::process_reference::wait_handle(process, None).map_err(|error| {
+        crate::error::WboxError::spawn(format!("等待 sandbox 进程退出失败：{error}"))
+    })? {
+        agenterm_platform::process_reference::ProcessWait::Exited => Ok(()),
+        agenterm_platform::process_reference::ProcessWait::TimedOut => {
+            Err(crate::error::WboxError::spawn("sandbox 无限等待意外超时"))
+        }
+    }
 }
 
 struct InheritHandleScope {
@@ -797,7 +808,9 @@ mod real_windows_tests {
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
         FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentProcess, SetEvent};
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, GetCurrentProcess, SetEvent, WaitForSingleObject,
+    };
 
     fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
         AppContainerProfile::create(name, caps)
