@@ -41,6 +41,7 @@ try {
         & (Join-Path $PSScriptRoot "cleanup-target.ps1") `
             -KeepIncremental:$KeepIncremental `
             -CleanIncremental:$CleanIncremental `
+            -CargoFinished `
             -MaxIncrementalSizeMiB $MaxIncrementalSizeMiB `
             -KeepIncrementalPerCrate $KeepIncrementalPerCrate
         $cleanupExit = $LASTEXITCODE

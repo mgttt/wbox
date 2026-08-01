@@ -7,7 +7,7 @@ build_status=0
 
 cd "$repo_root"
 cargo build --locked "$@" || build_status=$?
-"$script_dir/cleanup-target.sh" || cleanup_status=$?
+WBOX_CARGO_FINISHED=1 "$script_dir/cleanup-target.sh" || cleanup_status=$?
 
 if [ "$build_status" -ne 0 ]; then
   exit "$build_status"

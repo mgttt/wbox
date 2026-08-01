@@ -100,8 +100,9 @@ scripts/build.sh
 scripts/build.sh --release -p wbox-linux
 ```
 
-wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：默认在
-`target/debug/incremental/` 删除孤立 `.lock`、空 crate 目录及每个 crate 的旧
+wrapper 无论构建成功还是失败都会执行 `scripts/cleanup-target.*`：Cargo 退出后先
+删除不可恢复的 `*-working` session，再在 `target/debug/incremental/` 删除孤立
+`.lock`、空 crate 目录及每个 crate 的旧
 compilation hash，只保留最新一套；每套 compilation hash 内也只保留最新完整
 session 及其配套 lock。总量超过 512 MiB 时再按最后修改时间回收冷单元。
 它还会清理 target 根目录
@@ -112,6 +113,9 @@ Windows 可传 `-CleanIncremental` 完整释放 debug 增量缓存，Linux 可�
 增量目录扫描。默认每个 crate 只保留最新一套 incremental 编译单元；需要频繁切换
 feature/target 时，可通过 `-KeepIncrementalPerCrate` 或
 `WBOX_KEEP_INCREMENTAL_PER_CRATE` 调整每个 crate 的保留数。
+直接运行 `cleanup-target.*` 不会删除 `*-working`，避免误伤仍在使用同一 target 的
+并发 Cargo；该清理由 wrapper 通过内部的构建完成标记启用，因此仍须遵守上文“不同时
+启动多个 Cargo 门禁”的约束。
 
 测试不得直接并发修改进程环境。使用 `crate::testenv::EnvGuard`；需要临时 HOME
 时使用 `cli::TempHome`，额外变量经其同一守卫设置，避免重入锁。

@@ -3,6 +3,7 @@ param(
     [string]$TargetDir,
     [switch]$KeepIncremental,
     [switch]$CleanIncremental,
+    [switch]$CargoFinished,
     [ValidateRange(1, 1048576)]
     [int]$MaxIncrementalSizeMiB = 512,
     [ValidateRange(1, 100)]
@@ -112,6 +113,14 @@ function Remove-SupersededIncrementalSessions {
         }
 }
 
+function Remove-AbandonedWorkingSessions {
+    param([Parameter(Mandatory)][System.IO.DirectoryInfo]$CrateDirectory)
+
+    Get-ChildItem -LiteralPath $CrateDirectory.FullName -Directory -Force |
+        Where-Object { $_.Name -like "s-*-working" } |
+        ForEach-Object { Remove-TargetDirectory -Directory $_ }
+}
+
 if ($KeepIncremental -and $CleanIncremental) {
     throw "-KeepIncremental and -CleanIncremental cannot be used together"
 }
@@ -127,6 +136,12 @@ if (-not $KeepIncremental) {
             # with the lock basename followed by the session metadata hash.
             $crateDirs = @(Get-ChildItem -LiteralPath $incrementalRoot -Directory -Force)
             foreach ($crateDir in $crateDirs) {
+                if ($CargoFinished) {
+                    # The owning Cargo invocation has exited, so its unfinished
+                    # sessions cannot be resumed. Standalone cleanup keeps them
+                    # in case another Cargo process is still using this target.
+                    Remove-AbandonedWorkingSessions -CrateDirectory $crateDir
+                }
                 Remove-SupersededIncrementalSessions -CrateDirectory $crateDir
                 $sessionDirs = @(Get-ChildItem -LiteralPath $crateDir.FullName -Directory -Force)
                 $lockFiles = @(

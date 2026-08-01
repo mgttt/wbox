@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W54、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W55、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L30、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M13
 ├── 5  非功能需求 N1–N4
@@ -2638,6 +2638,7 @@ TODO-WINDOW
 ├── W52 宿主内存几何与物理容量下沉                                               [done] 4 KiB/64 KiB/64 GiB 实测
 ├── W53 宿主卷容量下沉与 `system df` Windows 验收                                  [done] 11 images/2.5 GiB + 4 KiB unit
 ├── W54 用户主目录约定下沉与 `.wbox` 根路径收敛                                    [done] USERPROFILE only + 456 tests
+├── W55 构建结束后回收不可恢复的 incremental working session                       [done] wrapper + fixture
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2753,7 +2754,9 @@ locked 依赖和 Rust cache，减少过时构建与重复编译。后续复核�
 debug incremental 采用三级有界清理：每个编译单元内只保留最新完整 session 及其
 配套 lock，构建结束后每个 crate 默认只保留最新编译单元，总量超过 512 MiB 时
 继续回收可再生的冷单元并至少保留每个 crate 最新一份；疑似进行中的 working session、
-deps、build、fingerprint 与预算内热缓存继续复用。完整清理 debug 增量缓存需显式
+deps、build、fingerprint 与预算内热缓存继续复用。wrapper 已确认 Cargo 退出后会
+回收不可恢复的 `*-working` session；该模式遵守本仓门禁串行执行 Cargo 的约束。独立
+cleanup 仍保守跳过它们，避免误伤并发 Cargo。完整清理 debug 增量缓存需显式
 使用 `-CleanIncremental` / `WBOX_CLEAN_INCREMENTAL=1`。
 本地精确 channel
 pin 等离线工具链镜像可用后再加，避免只有 `stable` 别名的机器为同版本联网安装。
@@ -3868,6 +3871,12 @@ wbox 新增唯一 `paths::root()`，保留产品名 `.wbox`，images、run、vol
 由此消失。Windows `TempHome` 改为设置 USERPROFILE 并清除 HOME，456 项测试中 453
 通过、3 个外部网络门禁 ignored；platform conventions 4 项测试与五目标严格 Clippy
 通过，Linux/macOS 运行交接见 L30/M13。
+
+`W55` 收紧构建后增量垃圾回收：`build/check` wrapper 在 Cargo 无论成功或失败退出后，
+显式清除不能继续使用的 `target/debug/incremental/**/s-*-working`，随后由既有孤立 lock
+清理回收配套状态；直接调用 cleanup 时仍保留 working session，避免误伤可能并发使用
+同一 target 的 Cargo。Windows 合成 fixture 已验证两种模式，真实小包构建后
+incremental 保留 166.5 MiB 完整热缓存且 working session 为 0。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

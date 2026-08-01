@@ -5,6 +5,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
 keep_incremental=${WBOX_KEEP_INCREMENTAL:-0}
 clean_incremental=${WBOX_CLEAN_INCREMENTAL:-0}
+cargo_finished=${WBOX_CARGO_FINISHED:-0}
 max_incremental_mib=${WBOX_MAX_INCREMENTAL_MIB:-512}
 keep_incremental_per_crate=${WBOX_KEEP_INCREMENTAL_PER_CRATE:-1}
 
@@ -57,6 +58,17 @@ if [ "$keep_incremental" != 1 ]; then
     else
       for crate_dir in "$incremental_root"/*; do
         [ -d "$crate_dir" ] || continue
+        if [ "$cargo_finished" = 1 ]; then
+          # The wrapper's Cargo process has exited. Its unfinished sessions are
+          # not reusable; standalone cleanup leaves them for concurrent Cargo.
+          for session_dir in "$crate_dir"/s-*-working; do
+            [ -d "$session_dir" ] || continue
+            size=$(du -sk "$session_dir" | awk '{print $1}')
+            rm -rf -- "$session_dir"
+            removed_kib=$((removed_kib + size))
+            removed=$((removed + 1))
+          done
+        fi
         newest_session=
         for session_dir in "$crate_dir"/s-*-*; do
           [ -d "$session_dir" ] || continue
