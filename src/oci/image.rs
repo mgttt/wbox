@@ -174,23 +174,6 @@ fn matching_artifacts(dest: &Path, prefix: &str) -> crate::fault::Result<Vec<Pat
     Ok(matches)
 }
 
-fn is_real_directory(metadata: &std::fs::Metadata) -> bool {
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt as _;
-        if metadata.file_attributes()
-            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
-            != 0
-        {
-            return false;
-        }
-    }
-    true
-}
-
 fn require_real_directory(path: &Path, role: &str) -> crate::fault::Result<bool> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -198,7 +181,7 @@ fn require_real_directory(path: &Path, role: &str) -> crate::fault::Result<bool>
         Err(error) => return Err(error.into()),
     };
     crate::ensure!(
-        is_real_directory(&metadata),
+        agenterm_platform::filesystem_entry::metadata_is_real_directory(&metadata),
         "拒绝处理不是普通目录的镜像缓存 {}：{}",
         role,
         path.display()
@@ -236,7 +219,7 @@ fn recover_cache_artifacts(
     let destination_exists = match std::fs::symlink_metadata(dest) {
         Ok(metadata) => {
             crate::ensure!(
-                is_real_directory(&metadata),
+                agenterm_platform::filesystem_entry::metadata_is_real_directory(&metadata),
                 "镜像缓存目标不是普通目录：{}",
                 dest.display()
             );
@@ -1115,6 +1098,24 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
+    fn host_directory_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn host_directory_link(target: &Path, link: &Path) {
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J fixture failed: {status}");
+    }
+
     fn gzip(data: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut e =
@@ -1311,6 +1312,26 @@ mod tests {
         assert!(error.to_string().contains("2 份 backup"), "{error}");
         assert!(first.exists() && second.exists(), "歧义 backup 不得被删除");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn recovery_rejects_link_like_cache_artifacts() {
+        let dir = tmpdir("pull-link-like-artifact");
+        let outside = tmpdir("pull-link-like-outside");
+        let dest = dir.join("image");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("canary"), b"outside").unwrap();
+        let prefix = artifact_prefix(&dest, "staging", "wbox").unwrap();
+        let candidate = dir.join(format!("{prefix}{}-0", u32::MAX));
+        host_directory_link(&outside, &candidate);
+
+        let _commit = PullCommitLock::acquire(&dest, Duration::from_secs(1)).unwrap();
+        let error = recover_cache_artifacts(&dest, None).unwrap_err();
+        assert!(error.to_string().contains("不是普通目录"), "{error}");
+        assert_eq!(std::fs::read(outside.join("canary")).unwrap(), b"outside");
+        agenterm_platform::filesystem_cleanup::remove_tree(&dir).unwrap();
+        agenterm_platform::filesystem_cleanup::remove_tree(&outside).unwrap();
     }
 
     #[test]

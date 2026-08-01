@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W73、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L44、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M29
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W74、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L45、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M30
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2663,6 +2663,7 @@ TODO-WINDOW
 ├── W71 统一 raw CreateProcess 与 platform spawn 的 HANDLE inheritance mutation lock [done] shared RAII scope
 ├── W72 OCI 缓存目录发布/回滚下沉并删除本地 rename 事务                              [done] typed outcome
 ├── W73 pull 崩溃后废弃 staging/backup 识别与恢复                                     [done] owner receipt + crash probe
+├── W74 link-like 文件系统条目分类下沉并收紧目录发布/清理                              [done] junction root + publish reject
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3092,7 +3093,8 @@ TODO-LINUX
 ├── L41 detached 兼容启动回收与退出事实 Linux 真机验收                  [next] ESRCH + SIGTERM=143
 ├── L42 逻辑目录占用 Linux 真机验收                                     [next] symlink leaf + hard-link entries
 ├── L43 可回滚目录发布 Linux 真机验收                                   [next] rename/rollback/mode-000 cleanup
-└── L44 pull owner/backup 崩溃恢复 Linux 真机验收                       [next] flock + /proc NotFound + crash
+├── L44 pull owner/backup 崩溃恢复 Linux 真机验收                       [next] flock + /proc NotFound + crash
+└── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3122,6 +3124,11 @@ wait 行为。
 旧版本 markerless staging，权限拒绝、仍存活 PID 与无法分类的错误都必须保留；目标缺失且
 唯一 backup 时恢复，多份 backup 时 fail closed。交叉编译不能替代真实 flock/procfs/VFS
 rename 行为。
+
+`L45` 在非 root Linux 真机仅启用 platform `filesystem-entry`，验证普通目录、普通文件与
+目录 symlink 的分类；随后复跑 cleanup、usage、publish 三个最小 feature，确认 symlink
+作为清理根可删除但目标保留、逻辑统计只计链接自身、发布拒绝 link-like staging/destination。
+该事实不授权遍历，也不替代 wbox 对缓存根、owner 与恢复时机的产品裁决。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3801,7 +3808,8 @@ TODO-MACOS
 ├── M26 detached 兼容启动回收与退出事实 macOS 真机验收                [next] ESRCH + SIGTERM=143
 ├── M27 逻辑目录占用 macOS 真机验收                                   [next] symlink leaf + hard-link entries
 ├── M28 可回滚目录发布 macOS 真机验收                                 [next] APFS rename/rollback/cleanup
-└── M29 pull owner/backup 崩溃恢复 macOS 真机验收                     [next] flock + ESRCH + APFS rename
+├── M29 pull owner/backup 崩溃恢复 macOS 真机验收                     [next] flock + ESRCH + APFS rename
+└── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3824,6 +3832,10 @@ adapter 可构建，不证明 APFS 行为；allocated/reclaimable bytes 仍须�
 PID `ESRCH` 分类、唯一 backup 恢复与多 backup 拒绝。必须确认 APFS 上删除仍被进程打开的
 lock receipt 后锁生命周期符合预期；权限错误或无法证明进程消失时保持 fail closed。双 ISA
 Clippy 只能证明契约可编译，不能替代 flock、`proc_pidinfo` 与 APFS rename 的运行证据。
+
+`M30` 在 Intel 与 Apple Silicon 分别复用 L45 的最小 feature 门禁，确认 APFS symlink
+metadata 被归为 link-like、普通目录保持 real directory；cleanup/usage/publish 的行为必须
+与该分类一致。交叉编译只证明同一公共契约可构建，不能替代 APFS 真机对象行为。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3892,9 +3904,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`52e9af321f6ddf57e73a7cc46b9b4128f3d54252`，关闭 default features，按消费包启用
+`8d39af2cc0935484dcc875d79196500ac7c94f54`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-spawn`、`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4310,6 +4322,22 @@ feature 19 tests、all-features 148 tests、strict Clippy 与五目标编译通�
 Ubuntu 24.04 再次 pull，实际清除上述 `52176` 残留并报告 `removed_staging=1`；随后实跑得到
 `ubuntu:24.04`、`x86_64`、`apt 2.8.3`、`amd64`、`64`，缓存父目录 staging/backup 为 0。
 Linux/macOS 原生锁、PID 与文件系统语义分别交接 L44/M29。
+
+`W74` 将 full filesystem 内已有的 link-like 判定拆成零外部依赖的
+`filesystem-entry` feature：Unix symlink 与 Windows 所有 reparse point（包括 junction）
+统一归为 link-like，`metadata_is_real_directory` 只接受普通目录。cleanup、usage、publish
+和 full filesystem 共用该事实；usage 因此删除 Windows/Linux/macOS 四份同形 adapter，
+wbox 的 OCI 恢复器也删除本地 `MetadataExt`/`FILE_ATTRIBUTE_REPARSE_POINT` 判断。路径选择、
+是否删除、缓存 owner、backup 歧义和错误文案仍归 wbox 产品层。
+
+最小 feature 依赖树只有 `agenterm-platform` 自身。Windows 真机门禁证明 junction 作为
+cleanup 根可删除且树外 canary 保留，publish 对 junction staging/destination 均返回
+`InvalidInput`，wbox 恢复器也拒绝 link-like 缓存残留。platform full filesystem 24 tests、
+all-features 153 tests、strict Clippy 与 Windows i686、Linux 双 ISA、macOS 双 ISA 编译通过；
+wbox OCI 定向 46 tests、根 470 tests（467 passed、3 ignored）和 Quick 306 项均通过，
+便携门禁覆盖 Windows i686、Linux ARM64 与 macOS 双 ISA；release 产品门禁 WP.1-WP.27
+及固定 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。Linux/macOS 原生分类与组合行为分别
+交接 L45/M30。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
