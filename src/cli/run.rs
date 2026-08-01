@@ -1052,8 +1052,8 @@ fn ensure_image_cached(opts: &RunOptions, iref: &oci::ImageRef) -> Result<std::p
         oci::pull(
             &iref.repo_tag(),
             "linux",
-            // 跟随宿主架构：Linux 原生后端用真 CPU 执行镜像里的二进制，
-            // 架构选错的表现是容器内 "Exec format error"，很难联想到根因。
+            // 跟随执行 provider：Linux 原生后端跟随真 CPU，模拟器路线则按
+            // 其已实现 ISA 选择，避免宿主 ISA 与 guest runtime 能力混为一谈。
             oci::default_arch(),
             Some(&iref.registry),
             opts.verbose,

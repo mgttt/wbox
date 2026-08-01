@@ -169,8 +169,8 @@ pub(crate) fn cmd_image_show(args: &[String]) -> Result<u32> {
 /// 解析并执行 `image pull <ref> [--os ..] [--arch ..] [--registry ..] [-V]`。
 pub(super) fn cmd_image_pull(args: &[String]) -> Result<u32> {
     let mut image_ref: Option<String> = None;
-    // 默认 os 恒为 linux；arch 见 `oci::default_arch()`——Windows 宿主恒
-    // amd64（模拟器只做 x86-64），Linux 宿主跟随本机架构。
+    // 默认 os 恒为 linux；arch 见 `oci::default_arch()`——Windows/macOS 的
+    // 近期模拟器路线为 amd64，只有 Linux 原生后端跟随本机架构。
     let mut os = "linux".to_string();
     let mut arch = oci::default_arch().to_string();
     let mut registry: Option<String> = None;

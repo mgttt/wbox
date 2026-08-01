@@ -55,6 +55,9 @@ research；尤其不能把所有 `not(windows)` 都当成 Linux。
 `agenterm_platform::platform_kind()` 映射为 wbox `HostOs`。依赖固定到不可变 Git
 SHA；未启用 filesystem/process/locking/UI 等 feature。这样先验证跨仓版本、三宿主
 选择器和依赖棘轮，不改变执行、隔离或状态生命周期语义。
+OCI 默认架构也必须消费这一宿主身份：Linux 原生 provider 跟随 target ISA，
+Windows/macOS 的近期用户态模拟路线保持 `amd64`，不能把宿主 AArch64 误当成
+已实现的 AArch64 guest runtime。
 
 计划中的 provider 层分成三段，依赖只能向下：
 

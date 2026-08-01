@@ -424,16 +424,16 @@ mod tests {
     #[test]
     fn image_backend_follows_host() {
         let k = super::image_backend_kind();
-        if cfg!(windows) {
-            assert_eq!(k, super::ImageBackendKind::Emu, "Windows 宿主必须走模拟器");
-        } else if cfg!(target_os = "linux") {
-            assert_eq!(
+        match crate::platform::current_host() {
+            Some(crate::platform::HostOs::Windows) => {
+                assert_eq!(k, super::ImageBackendKind::Emu, "Windows 宿主必须走模拟器");
+            }
+            Some(crate::platform::HostOs::Linux) => assert_eq!(
                 k,
                 super::ImageBackendKind::LinuxNative,
                 "Linux 宿主应走原生 namespace，而非白白多套一层模拟"
-            );
-        } else {
-            assert_eq!(k, super::ImageBackendKind::Unsupported);
+            ),
+            _ => assert_eq!(k, super::ImageBackendKind::Unsupported),
         }
     }
 
@@ -442,16 +442,16 @@ mod tests {
     #[test]
     fn host_program_backend_follows_host() {
         let k = super::host_program_backend_kind();
-        if cfg!(windows) {
-            assert_eq!(k, super::HostProgramBackendKind::AppContainer);
-        } else if cfg!(target_os = "linux") {
-            assert_eq!(
+        match crate::platform::current_host() {
+            Some(crate::platform::HostOs::Windows) => {
+                assert_eq!(k, super::HostProgramBackendKind::AppContainer);
+            }
+            Some(crate::platform::HostOs::Linux) => assert_eq!(
                 k,
                 super::HostProgramBackendKind::LinuxNamespace,
                 "Linux 宿主必须能沙箱宿主程序（harness 环境控制的基础）"
-            );
-        } else {
-            assert_eq!(k, super::HostProgramBackendKind::Unsupported);
+            ),
+            _ => assert_eq!(k, super::HostProgramBackendKind::Unsupported),
         }
     }
 

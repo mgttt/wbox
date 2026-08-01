@@ -3574,6 +3574,10 @@ lossy hash，同一对象的路径别名可能绕开互斥；`protect_private_di
 Windows 是 no-op，只能保留调用者已有 ACL。上游修复并有跨进程/ACL 行为门禁前，
 不得替换 wbox 的生命周期锁或安全关键目录授权。
 
+第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
+策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
+三宿主与 unknown cell 均有纯逻辑断言，用户显式 `--arch` 行为不变。
+
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
 不得退化成裸 `Command::spawn`。`M7` 同理：第一方 provider 必须报告能力、版本、

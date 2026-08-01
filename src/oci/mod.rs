@@ -36,14 +36,20 @@ use std::path::PathBuf;
 ///   即便将来 wbox 自身编成 arm64 Windows，这一条也不变。
 /// - **Linux 宿主**跟随本机架构。那里走的是原生 namespace 容器，镜像里的
 ///   二进制由**真 CPU** 执行，架构不符就是 `Exec format error`。
+/// - **macOS 宿主**近期路线仍是 x86-64 `wbox-linux`，因此默认 `amd64`；不能因
+///   Apple Silicon 宿主是 AArch64 就谎称 AArch64 guest runtime 已经可用。
 ///
 /// 之前两处都硬编码 `amd64`，在 arm64 Linux 上会拉下一个根本跑不起来的
 /// 镜像，而且报错发生在容器内部，很难联想到是架构选错了。
 pub fn default_arch() -> &'static str {
-    if cfg!(windows) {
+    default_arch_for(crate::platform::current_host(), std::env::consts::ARCH)
+}
+
+fn default_arch_for(host: Option<crate::platform::HostOs>, target_arch: &str) -> &'static str {
+    if host != Some(crate::platform::HostOs::Linux) {
         return "amd64";
     }
-    match std::env::consts::ARCH {
+    match target_arch {
         "x86_64" => "amd64",
         "aarch64" => "arm64",
         "arm" => "arm",
@@ -394,24 +400,18 @@ pub fn list() -> crate::error::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    /// 架构默认值的两条规则各自成立。
+    /// 架构默认值必须跟随 execution provider，而不是笼统跟随宿主 CPU。
     #[test]
-    fn default_arch_follows_host_except_on_windows() {
-        let a = default_arch();
-        if cfg!(windows) {
-            // 模拟器只做 x86-64，拉 arm64 进去一条指令都跑不了。
-            assert_eq!(a, "amd64", "Windows 宿主必须恒为 amd64");
-        } else {
-            // Linux 用真 CPU 跑镜像里的二进制，必须跟随本机。
-            let want = match std::env::consts::ARCH {
-                "x86_64" => "amd64",
-                "aarch64" => "arm64",
-                _ => a, // 其余架构只要求不 panic
-            };
-            assert_eq!(a, want, "Linux 宿主应跟随本机架构");
-        }
-        // 无论哪条路，都必须给出一个非空的 OCI 架构名。
-        assert!(!a.is_empty());
+    fn default_arch_follows_host_execution_route() {
+        use crate::platform::HostOs::{Linux, Macos, Windows};
+
+        assert_eq!(default_arch_for(Some(Windows), "aarch64"), "amd64");
+        assert_eq!(default_arch_for(Some(Macos), "aarch64"), "amd64");
+        assert_eq!(default_arch_for(Some(Linux), "x86_64"), "amd64");
+        assert_eq!(default_arch_for(Some(Linux), "aarch64"), "arm64");
+        assert_eq!(default_arch_for(Some(Linux), "riscv64"), "riscv64");
+        assert_eq!(default_arch_for(None, "aarch64"), "amd64");
+        assert!(!default_arch().is_empty());
     }
 
     use super::*;
