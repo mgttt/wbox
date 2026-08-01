@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W77、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L48、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M33
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W78、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L49、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M34
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2667,6 +2667,7 @@ TODO-WINDOW
 ├── W75 动态可用物理内存事实下沉并接入 machine lab                                   [done] 34.4/64.0 GiB + typed semantics
 ├── W76 单 PID 存活/启动身份从重型 process 拆分并接入 OCI recovery                    [done] Dead-only cleanup
 ├── W77 已打开文件对象分类下沉并删除 broker 重复 Win32 查询                           [done] root/component junction reject
+├── W78 产品无关本地 IPC 与 owned descriptor 下沉并接入 broker                        [done] inherited overlapped HANDLE
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3100,7 +3101,8 @@ TODO-LINUX
 ├── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
 ├── L46 动态可用物理内存 Linux 真机验收                                [next] MemAvailable + pressure/cgroup distinction
 ├── L47 轻量进程观察 Linux 真机验收                                    [next] live/dead/zombie/permission + start ticks
-└── L48 已打开文件对象分类 Linux 真机验收                              [next] O_PATH/O_NOFOLLOW symlink + ordinary fd
+├── L48 已打开文件对象分类 Linux 真机验收                              [next] O_PATH/O_NOFOLLOW symlink + ordinary fd
+└── L49 owned Unix IPC fd 跨进程继承验收                               [next] private socket + explicit inheritance
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3153,6 +3155,11 @@ symlink 本身并转换为 `File`，确认 opened facts 为 link-like 且不是 
 普通目录和普通文件 fd 必须分别正向分类。调用方必须持有 no-follow 打开语义，platform 不得
 重开路径；该 helper 不负责逐组件遍历、权限策略或 mount 边界。交叉编译不能替代真实 fd/VFS
 行为，最小依赖树只能包含标准 target `libc`（若 fixture 需要）而不能带入完整 filesystem。
+
+`L49` 在非 root Linux 真机只启用 `ipc`，以 0700 runtime directory 和 0600 Unix socket
+建立本地流，将 `NativeStream::into_owned_fd` 取得的 fd 通过显式子进程继承后由
+`from_owned_fd` 重新接管，验证双向帧、peer uid、CLOEXEC/继承位边界及父子各自只关闭一次。
+endpoint/lease 的树外 symlink 与其他 uid 拒绝门禁保持开启；产品帧协议和进程授权不下沉。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3836,7 +3843,8 @@ TODO-MACOS
 ├── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
 ├── M31 动态可用物理内存 macOS 真机验收                              [next] Mach free+inactive + pressure distinction
 ├── M32 轻量进程观察 macOS 真机验收                                  [next] proc_bsdinfo live/dead/permission + start time
-└── M33 已打开文件对象分类 macOS 真机验收                            [next] O_SYMLINK/no-follow + APFS ordinary fd
+├── M33 已打开文件对象分类 macOS 真机验收                            [next] O_SYMLINK/no-follow + APFS ordinary fd
+└── M34 owned Unix IPC fd 跨进程继承验收                             [next] APFS private socket + peer uid
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3878,6 +3886,11 @@ metadata 被归为 link-like、普通目录保持 real directory；cleanup/usage
 取得 APFS symlink 的 `File`，验证 opened facts 不重开路径且保持 link-like；普通目录/文件
 分别为 real directory/file。若标准 `File::metadata` 无法表达已打开 symlink 对象，必须类型化
 记录平台边界而不是回退到路径查询；双 ISA 交叉编译不能替代 APFS 对象行为。
+
+`M34` 在 Intel 与 Apple Silicon 真机只启用 `ipc`，于 0700 runtime directory 建立 0600
+Unix socket，把 owned fd 显式继承到子进程后由 `NativeStream::from_owned_fd` 接管，验证 peer
+uid、双向帧、CLOEXEC 切换与单一关闭所有权。APFS endpoint/lease 身份和树外 symlink 拒绝
+必须继续成立；双 ISA Clippy 只能证明 API 可构建，不能替代真实 Unix socket 生命周期。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3946,7 +3959,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`b2af922313f4c2b97ede55b872b2378c7c58305e`，关闭 default features，按消费包启用
+`2b20ebe3db823f37619f15f5e9a086d05888b6bb`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
@@ -4428,6 +4441,24 @@ AppContainer SID/Job 授权、只读范围和错误文案仍归 broker 产品层
 已打开对象真机行为分别交接 L48/M33。wbox 根 470 tests（467 passed、3 ignored）、Quick
 306 项和四 portable targets 通过，Quick 释放 477.6 MiB 可再生缓存；release 产品门禁
 WP.1-WP.27 与固定 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。
+
+`W78` 把 platform `ipc` 从 AgenTerm 私有命名空间修正为产品无关的本地传输：Windows
+只接受 `\\.\pipe\` 下由 ASCII 字母数字、点、横线和下划线组成的单段名称，继续拒绝远程、
+嵌套与路径式名称；DACL 仍只授权当前用户。三宿主 `NativeStream` 实现标准借用 handle/fd，
+并提供 owned handle/fd 的转出与重新接管，使显式子进程继承后仍由同一 adapter 保持 Windows
+overlapped I/O、Unix peer uid 和单一关闭所有权。platform IPC 最小 feature 19 tests 加真实
+bind/connect/accept/owned-transfer round-trip，all-features 161 tests、严格 Clippy 与 Windows
+i686、Linux ARM64、macOS 双 ISA IPC 编译通过；实现分两笔提交 `fbfac15`/`2b20ebe`。
+
+wbox broker 删除本地 SDDL、`CreateNamedPipeW/CreateFileW/ConnectNamedPipe`、同步
+`ReadFile/WriteFile` 传输循环与 disconnect 清理，改由 platform 建立随机 owner-only 预连接流；
+继承列表只借用 client HANDLE，子进程以 owned HANDLE 重建 `NativeStream`。随机 generation/nonce、
+HELLO/PING/OPEN 帧、目标进程 AppContainer SID 与 Job 成员验证、相对根 no-follow 打开和
+`DuplicateHandle` 文件授权仍归 wbox。Windows broker 定向 8 tests 通过，其中真实 AppContainer
+子进程用继承的 overlapped HANDLE 完成 HELLO/PING/OPEN；Unix 真机继承分别交接 L49/M34。
+wbox 根 470 tests（467 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick
+释放 657.8 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 fixture 的
+WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

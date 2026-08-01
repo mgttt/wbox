@@ -1,31 +1,24 @@
 //! Windows OCI filesystem broker transport.
 //!
-//! This module deliberately exposes only HELLO/PING. Filesystem OPEN is added only after
-//! component-wise reparse rejection and fd-backed hostfs have product gates.
+//! The transport exposes authenticated HELLO/PING plus read-only filesystem OPEN after
+//! component-wise reparse rejection and fd-backed hostfs product gates.
 
 use crate::error::{Result, WboxError};
 use crate::token::{self, OwnedHandle};
+use std::io::Write as _;
+use std::os::windows::io::AsRawHandle as _;
+use std::time::Duration;
 use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetLastError, LocalFree, DUPLICATE_SAME_ACCESS, ERROR_PIPE_CONNECTED,
-    GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
-};
-use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::{
-    GetTokenInformation, TokenAppContainerSid, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-    TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
+    GetTokenInformation, TokenAppContainerSid, TOKEN_APPCONTAINER_INFORMATION, TOKEN_QUERY,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FlushFileBuffers, ReadFile, WriteFile, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_MESSAGE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
-};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessId, OpenProcessToken};
 
 const MAGIC: u32 = 0x5742_4f58; // "WBOX"
@@ -33,7 +26,7 @@ const VERSION: u16 = 1;
 const REQUEST_HEADER_LEN: usize = 24;
 const RESPONSE_HEADER_LEN: usize = 24;
 const MAX_PAYLOAD: usize = 4096;
-const PIPE_BUFFER: u32 = 8192;
+const BROKER_IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OP_HELLO: u16 = 1;
 const OP_PING: u16 = 2;
@@ -394,8 +387,8 @@ impl Response {
 }
 
 pub(crate) struct BrokerEndpoint {
-    pipe: OwnedHandle,
-    client: OwnedHandle,
+    pipe: agenterm_platform::ipc::NativeStream,
+    client: agenterm_platform::ipc::NativeStream,
     appcontainer_sid: String,
     generation: u64,
     nonce: [u8; 16],
@@ -423,70 +416,24 @@ impl BrokerEndpoint {
         let nonce: [u8; 16] = random[8..24].try_into().unwrap();
         let suffix = hex(&random[24..32]);
         let name = format!(
-            r"\\.\pipe\LOCAL\wbox.{}.{}.{}",
+            r"\\.\pipe\wbox.{}.{}.{}",
             std::process::id(),
             generation,
             suffix
         );
-
-        let user_sid = current_user_sid_string()?;
-        // Guest never opens this name. The supervisor connects both ends before spawn and
-        // inherits only the connected client HANDLE, so the named object remains owner-only.
-        let sddl = format!("D:P(A;;GA;;;{})", user_sid);
-        let sddl_wide = token::to_wide(&sddl);
-        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-        let ok = unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl_wide.as_ptr(),
-                SDDL_REVISION_1,
-                &mut descriptor,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(last_error("解析 broker 管道安全描述符"));
-        }
-        let descriptor_guard = LocalGuard(descriptor as HLOCAL);
-        let security = SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor,
-            bInheritHandle: 0,
-        };
-        let name_wide = token::to_wide(&name);
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                name_wide.as_ptr(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                1,
-                PIPE_BUFFER,
-                PIPE_BUFFER,
-                0,
-                &security,
-            )
-        };
-        drop(descriptor_guard);
-        if pipe == INVALID_HANDLE_VALUE {
-            return Err(last_error("CreateNamedPipeW(broker)"));
-        }
-        let client = unsafe {
-            CreateFileW(
-                name_wide.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null(),
-                OPEN_EXISTING,
-                0,
-                std::ptr::null_mut(),
-            )
-        };
-        if client == INVALID_HANDLE_VALUE {
-            drop(OwnedHandle(pipe));
-            return Err(last_error("CreateFileW(broker connected client)"));
-        }
+        let endpoint = agenterm_platform::ipc::IpcEndpoint::NamedPipe(name);
+        let mut listener = agenterm_platform::ipc::NativeListener::bind(&endpoint)
+            .map_err(|error| WboxError::spawn(format!("创建 broker 本地 IPC 失败：{error}")))?;
+        // Guest never opens this random owner-only endpoint. The supervisor connects both
+        // ends before spawn and inherits only the connected client HANDLE.
+        let client = agenterm_platform::ipc::NativeStream::connect(&endpoint, BROKER_IO_TIMEOUT)
+            .map_err(|error| WboxError::spawn(format!("连接 broker 本地 IPC 失败：{error}")))?;
+        let pipe = listener
+            .accept(BROKER_IO_TIMEOUT)
+            .map_err(|error| WboxError::spawn(format!("接受 broker 本地 IPC 失败：{error}")))?;
         Ok(Self {
-            pipe: OwnedHandle(pipe),
-            client: OwnedHandle(client),
+            pipe,
+            client,
             appcontainer_sid: appcontainer_sid.to_string(),
             generation,
             nonce,
@@ -495,7 +442,7 @@ impl BrokerEndpoint {
     }
 
     pub(crate) fn client_handle(&self) -> HANDLE {
-        self.client.raw()
+        self.client.as_raw_handle() as HANDLE
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -555,7 +502,7 @@ impl BrokerEndpoint {
 }
 
 pub(crate) struct BrokerSession {
-    pipe: OwnedHandle,
+    pipe: agenterm_platform::ipc::NativeStream,
     process: OwnedHandle,
     pid: u32,
     generation: u64,
@@ -572,24 +519,14 @@ impl BrokerSession {
         self.serve(true)
     }
 
-    fn serve(self, expect_open: bool) -> Result<()> {
-        let connected = unsafe { ConnectNamedPipe(self.pipe.raw(), std::ptr::null_mut()) };
-        if connected == 0 {
-            let err = unsafe { GetLastError() };
-            if err != ERROR_PIPE_CONNECTED {
-                return Err(WboxError::spawn(format!(
-                    "ConnectNamedPipe(broker) 失败，GetLastError={}",
-                    err
-                )));
-            }
-        }
+    fn serve(mut self, expect_open: bool) -> Result<()> {
         // The connected client HANDLE was inherited through HANDLE_LIST only after this exact
         // process passed Job + AppContainer SID registration.
         if unsafe { GetProcessId(self.process.raw()) } != self.pid {
             return Err(WboxError::spawn("broker 注册进程已失效"));
         }
 
-        let hello = read_request(self.pipe.raw())?;
+        let hello = read_request(&mut self.pipe)?;
         let expected_hello = hello_payload(self.generation, self.nonce);
         let hello_status =
             if hello.opcode == OP_HELLO && hello.flags == 0 && hello.payload == expected_hello {
@@ -598,7 +535,7 @@ impl BrokerSession {
                 STATUS_AUTH
             };
         write_response(
-            self.pipe.raw(),
+            &mut self.pipe,
             &Response {
                 opcode: hello.opcode,
                 request_id: hello.request_id,
@@ -610,14 +547,14 @@ impl BrokerSession {
             return Err(WboxError::spawn("broker HELLO 认证失败"));
         }
 
-        let ping = read_request(self.pipe.raw())?;
+        let ping = read_request(&mut self.pipe)?;
         let ping_status = if ping.opcode == OP_PING && ping.flags == 0 && ping.payload.is_empty() {
             STATUS_OK
         } else {
             STATUS_PROTOCOL
         };
         write_response(
-            self.pipe.raw(),
+            &mut self.pipe,
             &Response {
                 opcode: ping.opcode,
                 request_id: ping.request_id,
@@ -628,10 +565,9 @@ impl BrokerSession {
         if ping_status == STATUS_OK && expect_open {
             self.serve_open()?;
         }
-        unsafe {
-            FlushFileBuffers(self.pipe.raw());
-            DisconnectNamedPipe(self.pipe.raw());
-        }
+        self.pipe
+            .flush()
+            .map_err(|error| WboxError::spawn(format!("刷新 broker 本地 IPC 失败：{error}")))?;
         if ping_status == STATUS_OK {
             Ok(())
         } else {
@@ -639,15 +575,15 @@ impl BrokerSession {
         }
     }
 
-    fn serve_open(&self) -> Result<()> {
-        let request = read_request(self.pipe.raw())?;
+    fn serve_open(&mut self) -> Result<()> {
+        let request = read_request(&mut self.pipe)?;
         let request_id = request.request_id;
         let opcode = request.opcode;
         let parsed = match OpenRequest::decode(&request) {
             Ok(parsed) => parsed,
             Err(_) => {
                 return write_response(
-                    self.pipe.raw(),
+                    &mut self.pipe,
                     &Response {
                         opcode,
                         request_id,
@@ -659,7 +595,7 @@ impl BrokerSession {
         };
         let Some(mount) = self.mounts.iter().find(|mount| mount.id == parsed.mount_id) else {
             return write_response(
-                self.pipe.raw(),
+                &mut self.pipe,
                 &Response {
                     opcode,
                     request_id,
@@ -672,7 +608,7 @@ impl BrokerSession {
             Ok(opened) => opened,
             Err(_) => {
                 return write_response(
-                    self.pipe.raw(),
+                    &mut self.pipe,
                     &Response {
                         opcode,
                         request_id,
@@ -699,7 +635,7 @@ impl BrokerSession {
         }
         let payload = (remote as usize as u64).to_le_bytes().to_vec();
         write_response(
-            self.pipe.raw(),
+            &mut self.pipe,
             &Response {
                 opcode,
                 request_id,
@@ -710,9 +646,10 @@ impl BrokerSession {
     }
 }
 
-fn read_request(pipe: HANDLE) -> Result<Request> {
+fn read_request(pipe: &mut impl std::io::Read) -> Result<Request> {
     let mut header = [0u8; REQUEST_HEADER_LEN];
-    read_exact(pipe, &mut header)?;
+    pipe.read_exact(&mut header)
+        .map_err(|error| WboxError::spawn(format!("读取 broker 请求头失败：{error}")))?;
     let payload_len = u32::from_le_bytes(header[16..20].try_into().unwrap()) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(WboxError::spawn(format!(
@@ -722,111 +659,54 @@ fn read_request(pipe: HANDLE) -> Result<Request> {
     }
     let mut payload = vec![0u8; payload_len];
     if payload_len != 0 {
-        read_exact(pipe, &mut payload)?;
+        pipe.read_exact(&mut payload)
+            .map_err(|error| WboxError::spawn(format!("读取 broker 请求体失败：{error}")))?;
     }
     Request::decode(&header, payload)
         .map_err(|e| WboxError::spawn(format!("broker 请求帧无效：{:?}", e)))
 }
 
-fn write_request(pipe: HANDLE, request: &Request) -> Result<()> {
+fn write_request(pipe: &mut impl std::io::Write, request: &Request) -> Result<()> {
     if request.payload.len() > MAX_PAYLOAD {
         return Err(WboxError::spawn("broker 请求 payload 超限"));
     }
-    write_all(pipe, &request.encode_header())?;
+    pipe.write_all(&request.encode_header())
+        .map_err(|error| WboxError::spawn(format!("写入 broker 请求头失败：{error}")))?;
     if !request.payload.is_empty() {
-        write_all(pipe, &request.payload)?;
+        pipe.write_all(&request.payload)
+            .map_err(|error| WboxError::spawn(format!("写入 broker 请求体失败：{error}")))?;
     }
     Ok(())
 }
 
-fn read_response(pipe: HANDLE) -> Result<Response> {
+fn read_response(pipe: &mut impl std::io::Read) -> Result<Response> {
     let mut header = [0u8; RESPONSE_HEADER_LEN];
-    read_exact(pipe, &mut header)?;
+    pipe.read_exact(&mut header)
+        .map_err(|error| WboxError::spawn(format!("读取 broker 响应头失败：{error}")))?;
     let payload_len = u32::from_le_bytes(header[20..24].try_into().unwrap()) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(WboxError::spawn("broker 响应 payload 超限"));
     }
     let mut payload = vec![0u8; payload_len];
     if payload_len != 0 {
-        read_exact(pipe, &mut payload)?;
+        pipe.read_exact(&mut payload)
+            .map_err(|error| WboxError::spawn(format!("读取 broker 响应体失败：{error}")))?;
     }
     Response::decode(&header, payload)
         .map_err(|e| WboxError::spawn(format!("broker 响应帧无效：{:?}", e)))
 }
 
-fn write_response(pipe: HANDLE, response: &Response) -> Result<()> {
+fn write_response(pipe: &mut impl std::io::Write, response: &Response) -> Result<()> {
     if response.payload.len() > MAX_PAYLOAD {
         return Err(WboxError::spawn("broker 响应 payload 超限"));
     }
-    write_all(pipe, &response.encode_header())?;
+    pipe.write_all(&response.encode_header())
+        .map_err(|error| WboxError::spawn(format!("写入 broker 响应头失败：{error}")))?;
     if !response.payload.is_empty() {
-        write_all(pipe, &response.payload)?;
+        pipe.write_all(&response.payload)
+            .map_err(|error| WboxError::spawn(format!("写入 broker 响应体失败：{error}")))?;
     }
     Ok(())
-}
-
-fn read_exact(handle: HANDLE, mut buffer: &mut [u8]) -> Result<()> {
-    while !buffer.is_empty() {
-        let mut read = 0;
-        let ok = unsafe {
-            ReadFile(
-                handle,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-                &mut read,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            let err = unsafe { GetLastError() };
-            return Err(WboxError::spawn(format!(
-                "ReadFile(broker) 失败，GetLastError={}",
-                err
-            )));
-        }
-        if read == 0 {
-            return Err(WboxError::spawn("ReadFile(broker) 提前 EOF"));
-        }
-        buffer = &mut buffer[read as usize..];
-    }
-    Ok(())
-}
-
-fn write_all(handle: HANDLE, mut buffer: &[u8]) -> Result<()> {
-    while !buffer.is_empty() {
-        let mut written = 0;
-        let ok = unsafe {
-            WriteFile(
-                handle,
-                buffer.as_ptr(),
-                buffer.len() as u32,
-                &mut written,
-                std::ptr::null_mut(),
-            )
-        };
-        if ok == 0 {
-            return Err(last_error("WriteFile(broker)"));
-        }
-        if written == 0 {
-            return Err(WboxError::spawn("WriteFile(broker) 未产生进度"));
-        }
-        buffer = &buffer[written as usize..];
-    }
-    Ok(())
-}
-
-fn current_user_sid_string() -> Result<String> {
-    let identity = agenterm_platform::user_identity::current_user_identity()
-        .map_err(|error| WboxError::spawn(format!("读取当前用户 SID 失败：{error}")))?;
-    let sid = identity
-        .windows_sid()
-        .ok_or_else(|| WboxError::spawn("Windows broker 未得到 SID 用户身份"))?;
-    let mut aligned_sid = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
-    unsafe {
-        std::ptr::copy_nonoverlapping(sid.as_ptr(), aligned_sid.as_mut_ptr().cast(), sid.len());
-    }
-    token::sid_to_string(aligned_sid.as_mut_ptr().cast())
-        .map_err(|e| WboxError::spawn(format!("转换当前用户 SID 失败：{}", e)))
 }
 
 fn process_appcontainer_sid_string(process: HANDLE) -> Result<String> {
@@ -892,16 +772,6 @@ fn last_error(context: &str) -> WboxError {
     WboxError::spawn(format!("{} 失败，GetLastError={}", context, unsafe {
         GetLastError()
     }))
-}
-
-struct LocalGuard(HLOCAL);
-
-impl Drop for LocalGuard {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { LocalFree(self.0) };
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1070,9 +940,16 @@ mod tests {
         for (index, byte) in nonce.iter_mut().enumerate() {
             *byte = u8::from_str_radix(&nonce_hex[index * 2..index * 2 + 2], 16).unwrap();
         }
-        let pipe = OwnedHandle(raw_handle.parse::<usize>().unwrap() as HANDLE);
+        use std::os::windows::io::FromRawHandle as _;
+        let owned = unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(
+                raw_handle.parse::<usize>().unwrap() as _
+            )
+        };
+        let mut pipe =
+            agenterm_platform::ipc::NativeStream::from_owned_handle(owned, BROKER_IO_TIMEOUT);
         write_request(
-            pipe.raw(),
+            &mut pipe,
             &Request {
                 opcode: OP_HELLO,
                 request_id: 1,
@@ -1081,12 +958,12 @@ mod tests {
             },
         )
         .unwrap();
-        let hello = read_response(pipe.raw()).unwrap();
+        let hello = read_response(&mut pipe).unwrap();
         assert_eq!(hello.status, STATUS_OK);
         assert_eq!(hello.request_id, 1);
 
         write_request(
-            pipe.raw(),
+            &mut pipe,
             &Request {
                 opcode: OP_PING,
                 request_id: 2,
@@ -1095,13 +972,15 @@ mod tests {
             },
         )
         .unwrap();
-        let ping = read_response(pipe.raw()).unwrap();
+        let ping = read_response(&mut pipe).unwrap();
         assert_eq!(ping.status, STATUS_OK);
         assert_eq!(ping.request_id, 2);
 
         if let Ok(path) = std::env::var("WBOX_TEST_BROKER_OPEN_PATH") {
-            write_request(pipe.raw(), &open_request(path.as_bytes(), 1, 0, 0)).unwrap();
-            let opened = read_response(pipe.raw()).unwrap();
+            use windows_sys::Win32::Storage::FileSystem::ReadFile;
+
+            write_request(&mut pipe, &open_request(path.as_bytes(), 1, 0, 0)).unwrap();
+            let opened = read_response(&mut pipe).unwrap();
             assert_eq!(opened.status, STATUS_OK, "broker OPEN failed");
             assert_eq!(opened.payload.len(), 8);
             let remote = u64::from_le_bytes(opened.payload.try_into().unwrap()) as usize as HANDLE;
