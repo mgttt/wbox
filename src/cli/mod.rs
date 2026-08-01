@@ -21,6 +21,7 @@ pub mod inspect;
 pub mod kill;
 pub mod logs;
 mod pause;
+mod platform;
 mod prune;
 pub mod ps;
 mod rename;
@@ -80,6 +81,7 @@ pub const USAGE: &str = r#"wbox — portable Windows 进程容器（AppContainer
   wbox prune [-f]                                  批量清掉已退出的容器记录（不加 -f 只列清单）
   wbox logs [-f] [--tail N] [--stderr] <NAME>       读取 --detach 容器的输出（-f 持续跟随，见 PRD F9.28）
   wbox exec <NAME> -- <CMD> [ARGS...]              在运行中的容器内执行命令（Win 当前仅原生目标）
+  wbox platform [--json]                           显示三宿主 × 三来宾执行与隔离能力矩阵
   wbox --help | -h
   wbox --version
 
@@ -198,6 +200,7 @@ const VERBS: &[(&str, Scope, Handler)] = &[
     ("load", Scope::Top, image::cmd_image_load),
     ("images", Scope::Top, image::cmd_image_list),
     ("rmi", Scope::Top, image::cmd_image_rm),
+    ("platform", Scope::Top, platform::cmd_platform),
 ];
 
 /// 两个**分组**动词（`image` / `container`）不在表里：它们自己带子命令，

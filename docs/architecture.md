@@ -7,13 +7,20 @@
 ```text
 CLI (`src/cli`)
 ├── run 参数 -> RunSpec
-└── image pull/list/show/rm
+├── image pull/list/show/rm
+└── platform -> 三宿主 × 三来宾能力矩阵
+        |
+产品平台契约 (`src/platform.rs`)
+├── HostOs / GuestOs
+├── ExecutionProvider / IsolationModel
+└── available / planned / research
         |
 目标分类与环境构造 (`src/backend`)
 ├── Windows NativeBackend
 ├── Windows EmuBackend
 ├── Linux LinuxNativeBackend
-└── Linux Wine 执行器
+├── Linux Wine 执行器
+└── macOS adapters（规划）
         |
 平台与数据层
 ├── Win32: token/job/sandbox/acl
@@ -25,6 +32,24 @@ CLI (`src/cli`)
 CLI 只负责解析和分派；`RunSpec` 表达后端无关意图；后端负责把网络、限额、
 工作目录、环境和命令翻译为宿主机制。不可将某个平台的句柄、路径或 fd 语义
 泄漏到公共层。
+
+`src/platform.rs` 是 wbox 的产品语义，不是操作系统 FFI 集合。未来可由
+`agenterm-platform` 提供进程树、原子文件和跨进程锁等机制，但九格路由、执行
+provider 选择和能力状态仍由 wbox 持有。未验收的平台组合必须显式 planned 或
+research；尤其不能把所有 `not(windows)` 都当成 Linux。
+
+计划中的 provider 层分成三段，依赖只能向下：
+
+```text
+wbox 产品策略（host/guest 路由、默认值、能力门禁）
+    -> execution provider SPI（probe/lifecycle/exec/logs/limits/snapshot）
+        -> agenterm-platform 或宿主/第三方 provider 的具体机制
+```
+
+Docker/Podman 风格 CLI 不直接调用 QEMU、VMware、Parallels 等命令。适配器先探测
+版本和能力，再把生命周期映射到 provider；缺失能力返回结构化 unsupported。这样
+默认纯 Rust portable 后端、系统原生后端和可选 VM 后端可以共用上层状态模型，同时
+不会把“已安装第三方程序”误报为“wbox 已验收该九格路线”。
 
 ## 2. Windows 后端
 

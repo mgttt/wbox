@@ -303,15 +303,17 @@ pub enum ImageBackendKind {
     Emu,
     /// 宿主原生执行（Linux namespace）
     LinuxNative,
+    /// 当前宿主尚无经过验收的 Linux 镜像执行与隔离组合
+    Unsupported,
 }
 
 /// 按宿主选择镜像后端。单独成函数是为了可测——分派规则本身能被断言，
 /// 而不是散落在 cli 的 cfg 分支里。
 pub const fn image_backend_kind() -> ImageBackendKind {
-    if cfg!(windows) {
-        ImageBackendKind::Emu
-    } else {
-        ImageBackendKind::LinuxNative
+    match crate::platform::current_host() {
+        Some(crate::platform::HostOs::Windows) => ImageBackendKind::Emu,
+        Some(crate::platform::HostOs::Linux) => ImageBackendKind::LinuxNative,
+        _ => ImageBackendKind::Unsupported,
     }
 }
 
@@ -333,12 +335,10 @@ pub enum HostProgramBackendKind {
 
 /// 按宿主选择宿主程序后端。与 [`image_backend_kind`] 同理单独成函数以便断言。
 pub const fn host_program_backend_kind() -> HostProgramBackendKind {
-    if cfg!(windows) {
-        HostProgramBackendKind::AppContainer
-    } else if cfg!(target_os = "linux") {
-        HostProgramBackendKind::LinuxNamespace
-    } else {
-        HostProgramBackendKind::Unsupported
+    match crate::platform::current_host() {
+        Some(crate::platform::HostOs::Windows) => HostProgramBackendKind::AppContainer,
+        Some(crate::platform::HostOs::Linux) => HostProgramBackendKind::LinuxNamespace,
+        _ => HostProgramBackendKind::Unsupported,
     }
 }
 
@@ -426,12 +426,14 @@ mod tests {
         let k = super::image_backend_kind();
         if cfg!(windows) {
             assert_eq!(k, super::ImageBackendKind::Emu, "Windows 宿主必须走模拟器");
-        } else {
+        } else if cfg!(target_os = "linux") {
             assert_eq!(
                 k,
                 super::ImageBackendKind::LinuxNative,
                 "Linux 宿主应走原生 namespace，而非白白多套一层模拟"
             );
+        } else {
+            assert_eq!(k, super::ImageBackendKind::Unsupported);
         }
     }
 

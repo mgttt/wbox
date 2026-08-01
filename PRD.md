@@ -19,12 +19,13 @@ PRD
 │   ├── 2.1 目标   2.2 核心价值   2.3 非目标
 │   ├── 2.2.1 Rust-only 架构硬约束（两档口径 + 三条棘轮）
 │   ├── 2.2.2 自实现密码学的安全声明（wbox-tls 的性质与边界）
-│   ├── 2.4 对标基线 ★ 四象限成套的五节
+│   ├── 2.4 对标基线 ★ 四象限状态 + 长期横向矩阵
 │   │   ├── 2.4   有什么     —— Q1/Q2/Q3/Q4 四张状态表
 │   │   ├── 2.4.1 怎么跑的   —— 两条隔离链路 × 两种程序格式
 │   │   ├── 2.4.2 对标物怎么做的、差在哪、为什么
 │   │   ├── 2.4.3 下一步     —— 缺口粒度
-│   │   └── 2.4.4 能力路线图 —— 四格拉到同一深度
+│   │   ├── 2.4.4 能力路线图 —— 四格拉到同一深度
+│   │   └── 2.4.5 横向矩阵   —— 容器/沙箱/兼容层/VM
 │   └── 2.5 两条硬天花板（不装驱动 / 无虚拟化）
 ├── 3  用户与场景（3.1 主要用户、3.2 S1–S4 核心场景）
 ├── 4  功能需求树 ★
@@ -40,7 +41,8 @@ PRD
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
 │       ├── 4.9.1 [TODO-WINDOW]   W1–W18、R8
-│       └── 4.9.2 [TODO-LINUX]    L1–L20、W5（历史编号）
+│       ├── 4.9.2 [TODO-LINUX]    L1–L21、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -52,7 +54,7 @@ PRD
 
 | 想知道 | 去哪 |
 |---|---|
-| 某个能力该不该做、落在哪一格 | §2.4 五节成套读，判断法在 §2.4.1 末尾三条 |
+| 某个能力该不该做、落在哪一格 | §2.4.1–§2.4.5 成套读，判断法在 §2.4.1 末尾三条 |
 | 某条能力现在什么状态、门禁是哪几条 | §4 对应 F 条目；跨象限的看 §2.4 的四张表 |
 | 我这台机器该做什么 | §4.9 里与你**能真实验证**的宿主相符的那棵树 |
 | 为什么不做某件事 | §2.3 非目标、§2.5 天花板、§2.4.3 的"不做"列 |
@@ -66,10 +68,11 @@ PRD
 0. **新会话先读 `HANDOFF.md`**：那里有"现在到哪了 / 下一步做什么 / 哪些坑别再踩"
    的交接导航，读完再回来看本文的细节。
 1. 阅读本文，确认产品边界、功能状态和当前工作。要判断「某个能力该不该做、
-   该落在哪一格」，§2.4 的**五节是成套的**：§2.4 说**有什么**、§2.4.1 说 wbox
+   该落在哪一格」，§2.4 是成套的：§2.4 说**有什么**、§2.4.1 说 wbox
    **怎么做的**（两条隔离链路 × 两种程序格式）、§2.4.2 说**对标物怎么做的、
    差在哪、为什么**、§2.4.3 说**接下来往哪走**、§2.4.4 是**四格等深度的能力
-   路线图**（Q1 的条目多数标着「待 Windows 侧确认」，接手前先验证再实现）。
+   路线图**（Q1 的条目多数标着「待 Windows 侧确认」，接手前先验证再实现），
+   §2.4.5 横向比较容器、沙箱、兼容层与 VM provider。
 2. 按任务阅读 `docs/architecture.md`、`docs/testing.md` 或
    `docs/rust-rewrite.md`，不要无差别加载全部历史。
 3. 查看 `git status`、近期提交和相关代码。仓库可能有其他 agent 的并行改动，
@@ -78,7 +81,7 @@ PRD
    冲突由当前 agent 基于双方意图解决。
 5. 功能状态发生变化时更新本文；发布历史写入 `CHANGELOG.md`，不要在多份文档
    复制同一组动态数字。
-6. **先看 §4.9 的 `[TODO-WINDOW]` / `[TODO-LINUX]`**：进入与**你这台机器
+6. **先看 §4.9 的 `[TODO-WINDOW]` / `[TODO-LINUX]` / `[TODO-MACOS]`**：进入与**你这台机器
    能真实验证**的宿主相符的队列；验证不了的不要硬写，把背景、判据和完成标准
    写进另一台宿主的树，交给对应 agent。
 
@@ -94,6 +97,8 @@ PRD
 - `[TODO-WINDOW]`：必须在 Windows 真机完成或最终验收的交接队列，见 §4.9。
 - `[TODO-LINUX]`：必须在 Linux/Wine/overlay 环境完成或最终验收的交接队列，
   见 §4.9。
+- `[TODO-MACOS]`：必须在 Intel/Apple Silicon macOS 真机完成或最终验收的
+  交接队列，见 §4.9；Windows/Linux 上的交叉编译不能替代这棵树的验收。
 
 ## 2. 产品定义
 
@@ -107,10 +112,20 @@ wbox
 ├── Windows 宿主
 │   ├── Windows 程序 -> AppContainer + Job Object
 │   └── Linux ELF/OCI -> AppContainer + Job Object + wbox-linux
-└── Linux 宿主
+├── Linux 宿主
     ├── Linux 程序/OCI -> rootless namespace + cgroup/rlimit
     └── Windows CLI -> 同一 Linux 隔离层 + Wine
+└── macOS 宿主（规划）
+    ├── macOS 程序 -> native sandbox provider
+    ├── Linux ELF/OCI -> macOS 外层隔离 + wbox-linux
+    └── Windows 程序 -> macOS 外层隔离 + Wine
 ```
+
+长期产品面是“三宿主 × 三来宾”，但路线状态不能靠愿景推断。唯一机器可读事实源
+是 `src/platform.rs`；`wbox platform [--json]` 输出九格各自的 execution provider、
+isolation model 与 `available/planned/research` 状态。当前只有既有四格可标
+`available`；macOS 三格在真机门禁建立前保持 planned，Windows/Linux 承载 macOS
+来宾则保持 research。
 
 ### 2.2 核心价值
 
@@ -211,8 +226,11 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 端口映射、镜像构建**已被对标要求拉回范围内（见 §2.4 的差距表），因此从这里
 移出。仍然不做的是：
 
-- `[out]` VM、Hyper-V、Windows Container/Silo 的替代实现——wbox 的前提就是
-  这些都用不了。
+- `[out]` **自行实现** VM monitor、CPU 硬件虚拟化、Hyper-V 或
+  Windows Container/Silo 的替代内核。wbox 的默认路径仍须在这些都不可用时成立。
+- `[research]` 对宿主已经安装的 QEMU、VMware、Parallels、Hyper-V/Virtualization
+  Framework 等提供可选 execution-provider adapter。wbox 统一其镜像、生命周期、
+  限额、日志和能力诊断，但不冒充这些 provider 的实现者，也不让它们成为默认依赖。
 - `[out]` **内核驱动**（含 minifilter）。这条不只是"暂不做"：它划定了
   §2.4 中 Windows 程序沙箱的**能力上限**，见那里的说明。
 - `[out]` GUI/DirectX/COM/Windows 服务工作负载（Wine 下的 GUI 另议）。
@@ -222,7 +240,8 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 ### 2.4 对标基线
 
-四个象限各有明确参照物。**列参照物不等于承诺功能对等**——每格逐条列出参照物的
+现有四个象限各有明确参照物，长期九格状态由 `wbox platform` 报告。
+**列参照物不等于承诺功能对等**——每格逐条列出参照物的
 特征能力与 wbox 的实际状态，能力上限受 §2.3 约束时如实标注。
 
 状态记法：`有` = 已实现且有持续门禁；`部分` = 可用但有明确缺口；
@@ -505,10 +524,10 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 ---
 
-**四格合起来看，wbox 的定位是一条线**：不装驱动、不要虚拟化、不起守护进程，
-在这个前提下把四个象限各自能兑现的部分做到位，兑现不了的**在 PRD 里写明白为什么**。
-这条线也解释了为什么 §2.4.3 的「不做」清单里，判断原则始终是同一条——
-要装驱动 / 要常驻服务 / 要虚拟化的，一律不做。
+**现有四格合起来看，wbox 的默认路径仍是一条线**：不装驱动、不要求虚拟化、
+不起常驻守护进程，在这个前提下把各象限能兑现的部分做到位。长期九格不会抹掉
+这条 portable 路径，但可以在用户显式选择且宿主已有相应软件时，接入 VM provider
+补齐完整内核、跨 OS 与跨 ISA 能力；provider 的安装、许可和隔离边界必须如实暴露。
 
 #### 2.4.3 每格的下一步
 
@@ -531,8 +550,10 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
 | Q4 Wine | GUI / DirectX / .NET | **不做**：§2.3 非目标 | — |
 
-一条判断原则：**凡是要装驱动、要常驻服务、要虚拟化的，都不补**（§2.2/§2.5）。
-补的只有那些在"免安装、无服务、无驱动"前提下真能做成的。
+判断原则：**默认 portable 后端不得要求驱动、常驻服务或硬件虚拟化**（§2.2/§2.5）；
+需要这些前提的能力只能进入显式可选 provider，缺失时不得影响默认后端，也不得
+静默降级到无隔离执行。
+portable 后端只补那些在“免安装、无服务、无驱动”前提下真能做成的。
 
 #### 2.4.4 每格的能力路线图
 
@@ -623,6 +644,63 @@ GUI/DirectX/.NET（§2.3 非目标）。
 
 所以这一格的路线图是**空的，而且是好事**：§2.4.2 已经说清，wbox 在这格补的是
 「Wine 本来就没有的隔离」，那一半已经补完；ABI 翻译那一半交给 Wine，本就不该做。
+
+#### 2.4.5 横向产品与能力矩阵
+
+这张矩阵用于决定“学谁的哪一层”，不是做笼统的强弱排名。容器、应用沙箱、ABI
+兼容层和整机虚拟化解决的是不同问题；wbox 的长期方向是用统一 CLI、镜像、生命周期、
+策略与诊断把这些执行层编排起来，而不是在一个 Rust 进程里重写所有 hypervisor。
+
+| 产品/机制 | 类型 | 主要宿主 -> 来宾 | 最值得对标或复用的能力 | wbox 关系 |
+|---|---|---|---|---|
+| Docker Engine / Desktop | OCI 容器平台 | Linux -> Linux；桌面版经 VM | OCI、build、网络、卷、生命周期与 CLI 习惯 | CLI/OCI 主基线；不照搬 daemon 前提 |
+| Podman | daemonless OCI 容器平台 | Linux -> Linux；桌面版经 machine | rootless、pod、daemonless CLI/API | Linux 默认后端主基线 |
+| Sandboxie Plus | Windows 应用沙箱 | Windows -> Windows | 文件/注册表重定向、强制入盒、恢复、策略 | Windows 原生沙箱上限参照；驱动能力不伪装成已实现 |
+| Bubblewrap | Linux 沙箱构造器 | Linux -> Linux 程序 | 最小 namespace、bind 策略、无特定镜像格式 | Linux 原生程序模式与策略拆分参照 |
+| WSL2 | 托管轻量 VM | Windows -> Linux | 完整 Linux 内核、Windows 集成、低运维 | Windows/Linux 完整 ABI 与性能参照；可选 provider 候选 |
+| Wine / CrossOver | Win32 兼容层 | Linux/macOS -> Windows 程序 | PE loader、Win32 ABI、prefix | 不重写 ABI；wbox 在外层补隔离与生命周期 |
+| QEMU | 用户态模拟器 + 整机模拟/虚拟化 | 多宿主 -> 多 ISA/多 OS | 跨 ISA、设备模型、磁盘格式、无加速回退 | `wbox-linux` 技术参照；system provider 高优先级候选 |
+| VMware | 商业整机虚拟化 | Windows/Linux/macOS -> VM | 成熟设备、快照、网络与企业运维 | 可选 provider；只经稳定 CLI/API 集成 |
+| VirtualBox | 跨平台整机虚拟化 | Windows/Linux/macOS -> VM | `VBoxManage`、快照、网络、可移植 VM | 开源/免费场景的可选 provider 候选 |
+| Parallels Desktop | macOS 整机虚拟化 | macOS -> Windows/Linux/macOS VM | Apple Silicon 集成、`prlctl`、快照 | macOS provider 高优先级候选 |
+| Apple Virtualization.framework | 系统虚拟化 API | macOS -> Linux/macOS VM | 原生 VM 生命周期、Virtio、Rosetta Linux | macOS 原生 VM provider 首选机制 |
+| gVisor | 用户态内核沙箱 | Linux -> Linux workload | syscall 拦截、OCI 接入、多租户攻击面 | 安全模型研究基线，不列首批依赖 |
+| Firecracker | KVM microVM | Linux -> Linux microVM | 极简设备模型、快速生命周期、microVM 隔离 | provider 生命周期研究基线，不列首批依赖 |
+
+能力记法：`主` = 产品主能力；`有` = 直接支持；`借` = 依赖外部 VM/兼容层；
+`限` = 有明确平台或语义限制；`—` = 不是该产品的目标。wbox 一栏写的是**长期产品面**，
+当前可用状态仍只能以 `wbox platform --json` 和对应宿主门禁为准。
+
+| 产品/机制 | OCI 镜像 | 单程序沙箱 | 完整来宾内核 | 跨 ISA | Windows 来宾 | Linux 来宾 | macOS 来宾 | 快照/回滚 | 统一 CLI 可接入 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wbox（长期） | 主 | 主 | 借 | 主 | 主 | 主 | 限 | 借 | 主 |
+| Docker / Podman | 主 | 有 | — | 借 | 限 | 主 | — | 镜像层 | 有 |
+| Sandboxie Plus | — | 主 | — | — | 主 | — | — | 有 | 限 |
+| Bubblewrap | — | 主 | — | — | — | 主 | — | — | 有 |
+| WSL2 | 限 | — | 主 | 限 | — | 主 | — | 限 | 有 |
+| Wine / CrossOver | — | — | — | 限 | 主 | — | — | prefix | 有 |
+| QEMU | — | 限 | 主 | 主 | 有 | 有 | 限 | 有 | 主 |
+| VMware / VirtualBox | — | — | 主 | 限 | 有 | 有 | 限 | 主 | 有 |
+| Parallels | — | — | 主 | 限 | 有 | 有 | 有 | 主 | 主 |
+| Apple Virtualization.framework | — | — | 主 | 限 | — | 有 | 有 | 限 | API |
+| gVisor | 主 | 主 | 限 | — | — | 主 | — | — | API |
+| Firecracker | 限 | — | 主 | — | — | 主 | — | 限 | API |
+
+首批 provider SPI 只统一可验证的公共交集：`probe/version`、`create/start/stop/kill`、
+`exec/logs/inspect`、资源限额、网络/共享目录声明、快照能力和清理。某 provider 不支持
+某项时返回结构化 `unsupported`，不能用空成功模拟。UTM 等主要作为 QEMU 或 Apple
+Virtualization.framework 的产品前端，暂不单列底层 provider；Hyper-V/KVM/HVF/WHPX
+作为加速机制挂在 WSL2/QEMU/系统 provider 下，不与用户直接选择的产品适配器混为一层。
+
+技术事实优先查上游资料：[Docker security](https://docs.docker.com/engine/security/)、
+[Podman 文档](https://docs.podman.io/)、[QEMU 两种执行模式](https://www.qemu.org/docs/master/about/)、
+[WSL 版本架构](https://learn.microsoft.com/windows/wsl/compare-versions)、
+[Apple Virtualization](https://developer.apple.com/documentation/virtualization)、
+[Parallels CLI](https://docs.parallels.com/landing/parallels-desktop-developers-guide/command-line-interface-utility)、
+[VirtualBox CLI](https://docs.oracle.com/en/virtualization/virtualbox/7.2/user/vboxmanage.html)、
+[Bubblewrap](https://github.com/containers/bubblewrap) 与
+[Sandboxie Plus](https://github.com/sandboxie-plus/Sandboxie)。产品版本变化时更新矩阵，
+但不得据文档存在某功能就把 wbox 路由标成 `available`。
 
 ### 2.5 两条硬天花板
 
@@ -3338,6 +3416,31 @@ Q3 靠 network namespace（容器有独立网络栈，默认空 netns）；Q2 �
 保持现状（Windows 上 `-p` 明确报错）是对的，但报错文案已按这个结论修正：
 不是"Windows 没有对应原语"，而是"guest 端口即宿主端口，没有可映射的东西"。
 说错原因会让人以为换个实现就能做。
+
+#### 4.9.3 [TODO-MACOS]
+
+```text
+TODO-MACOS
+├── M1 三宿主 × 三来宾产品契约与 `wbox platform`        [done] Windows 侧纯逻辑门禁
+├── M2 接入独立 `agenterm-platform` 的最小机制面         [planned] 等上游 crate/commit
+├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [planned]
+├── M4 macOS 原生程序沙箱与资源限制取证                  [planned]
+├── M5 macOS 上 `wbox-linux` + Linux OCI 产品路径         [planned]
+├── M6 macOS 上 Wine + Windows 程序产品路径               [planned]
+├── M7 QEMU/VMware/Parallels 等可选 provider SPI          [research]
+└── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
+```
+
+`M1` 只冻结产品语义，不声称 macOS 已可用。`src/platform.rs` 把宿主、来宾、执行
+provider 与外层隔离分开建模，避免再用 `cfg!(windows) { ... } else { linux }`
+这种二元判断；此前 `image_backend_kind()` 正是因此会把未来 macOS 构建错误分派到
+Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能反向拥有
+wbox 的九格路由与能力状态。
+
+`M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
+网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
+不得退化成裸 `Command::spawn`。`M7` 同理：provider adapter 必须报告可用性、版本、
+隔离责任和失败原因；“能找到某个 exe”不等于该 provider 已验收。
 
 ## 5. 非功能需求
 

@@ -32,7 +32,7 @@ wbox-linux = { path = "crates/wbox-linux" }
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。
 # libc 是零传递依赖的标准 FFI crate，与依赖红线（不加 tokio/clap/rustls）不冲突；
 # 且用 target 限定，Windows 构建完全不引入。
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # windows-sys 只启用用到的 feature，保持编译快、二进制小。

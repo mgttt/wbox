@@ -1028,13 +1028,15 @@ fn run_native(opts: &RunOptions, cmd: Vec<String>) -> Result<u32> {
             let prepared = backend.prepare(&spec)?;
             spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET, opts.auto_remove)
         }
-        // Unsupported 也走 NativeBackend：它的 spawn 已经会给出明确的
-        // "只能在 Windows 宿主上执行"错误，不必再重复一份文案。
-        _ => {
+        backend::HostProgramBackendKind::AppContainer => {
             let backend = backend::NativeBackend;
             let prepared = backend.prepare(&spec)?;
             spawn_with_state(&backend, &spec, &prepared, NATIVE_TARGET, opts.auto_remove)
         }
+        backend::HostProgramBackendKind::Unsupported => Err(WboxError::args(format!(
+            "当前宿主 '{}' 尚无经过验收的原生程序沙箱后端；用 `wbox platform` 查看能力矩阵",
+            crate::platform::current_host().map_or("unknown", crate::platform::HostOs::as_str)
+        ))),
     }
 }
 
@@ -1154,6 +1156,10 @@ fn run_image(opts: &RunOptions, iref: oci::ImageRef) -> Result<u32> {
                 opts.auto_remove,
             )
         }
+        backend::ImageBackendKind::Unsupported => Err(WboxError::args(format!(
+            "当前宿主 '{}' 尚无经过验收的 Linux 镜像执行后端；用 `wbox platform` 查看能力矩阵",
+            crate::platform::current_host().map_or("unknown", crate::platform::HostOs::as_str)
+        ))),
     }
 }
 
