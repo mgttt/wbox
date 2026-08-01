@@ -3587,8 +3587,14 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`b98a59326677eb353bca795c1adc87e058dece09`，关闭 default features，按消费包启用
+`34d3ac1b56069dd578e5c0fb7d1ba92f02bc0552`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
+该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
+不改变 fail-closed API；wbox 只依赖公共契约，不引用 adapter 内部模块。
+Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，三个子 crate 只继承并
+追加 `entropy`/`hardware`；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
+platform package，且未启用 `full/process/window/ipc/pty`。Quick 300 项库测试与双
+Windows Clippy、i686 Windows、x86-64 Linux 和双 macOS ISA workspace Clippy 已通过。
 `platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`

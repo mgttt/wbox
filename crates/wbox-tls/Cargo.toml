@@ -12,4 +12,4 @@ license = "MIT OR Apache-2.0"
 # agenterm-platform 的宿主 CSPRNG 契约；密码学和 TLS 策略仍全部在本 crate。
 [dependencies]
 wbox-codec = { path = "../wbox-codec" }
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "b98a59326677eb353bca795c1adc87e058dece09", default-features = false, features = ["entropy"] }
+agenterm-platform = { workspace = true, features = ["entropy"] }

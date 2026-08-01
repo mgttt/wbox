@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 # 零第三方实现依赖。宿主 CSPRNG 复用第一方 agenterm-platform；其余宿主 syscall
 # 一律经 std，需要 std 未暴露的 Windows 原语时只使用 windows-sys ABI 声明。
 [dependencies]
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "b98a59326677eb353bca795c1adc87e058dece09", default-features = false, features = ["entropy"] }
+agenterm-platform = { workspace = true, features = ["entropy"] }
 
 # Windows 文件属性查询使用 windows-sys；CSPRNG 已统一由 agenterm-platform 接线。
 [target.'cfg(windows)'.dependencies.windows-sys]

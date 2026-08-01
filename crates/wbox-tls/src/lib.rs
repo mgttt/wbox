@@ -92,7 +92,17 @@ mod ratchet {
             .lines()
             .find(|line| line.starts_with("agenterm-platform ="))
             .expect("wbox-tls must consume shared host entropy");
-        assert!(platform.contains("default-features = false"));
+        assert!(platform.contains("workspace = true"));
         assert!(platform.contains("features = [\"entropy\"]"));
+        assert!(!platform.contains("git ="));
+        assert!(!platform.contains("rev ="));
+
+        let workspace = include_str!("../../../Cargo.toml");
+        let shared_platform = workspace
+            .lines()
+            .find(|line| line.starts_with("agenterm-platform =") && line.contains("git ="))
+            .expect("workspace must pin agenterm-platform once");
+        assert!(shared_platform.contains("rev ="));
+        assert!(shared_platform.contains("default-features = false"));
     }
 }
