@@ -15,8 +15,8 @@ use super::{Backend, Prepared, RunSpec};
 use crate::error::{Result, WboxError};
 use std::path::{Path, PathBuf};
 
-/// Linux 模拟器二进制文件名。
-pub const LINUX_EXE_NAME: &str = "wbox-linux.exe";
+/// Linux 模拟器二进制基础名；宿主后缀由 `agenterm-platform` 提供。
+pub const LINUX_EXE_BASE: &str = "wbox-linux";
 /// 显式指定 wbox-linux.exe 路径的环境变量。
 pub const LINUX_EXE_ENV: &str = "WBOX_LINUX";
 /// VFS 根前缀（guest `/` 映射到的宿主目录），必须设置，
@@ -44,27 +44,27 @@ fn locate_linux_exe() -> Result<(PathBuf, &'static str)> {
             p.display()
         )));
     }
-    // wbox.exe 同目录（portable 分发形态：两个 exe 放在一起）
+    // wbox 同目录（portable 分发形态：两个可执行文件放在一起）
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join(LINUX_EXE_NAME);
-            if p.is_file() {
-                return Ok((p, "wbox 同目录"));
-            }
+        let path = agenterm_platform::filesystem::sibling_executable(&exe, LINUX_EXE_BASE);
+        if path.is_file() {
+            return Ok((path, "wbox 同目录"));
         }
     }
+    let executable_name = agenterm_platform::filesystem::executable_name(LINUX_EXE_BASE);
     Err(not_ready_error(format!(
-        "未找到 {}（请将 {} 与 wbox.exe 放在同一目录，或设置 {} 环境变量指向它）",
-        LINUX_EXE_NAME, LINUX_EXE_NAME, LINUX_EXE_ENV
+        "未找到 {0}（请将 {0} 与 wbox 放在同一目录，或设置 {1} 环境变量指向它）",
+        executable_name, LINUX_EXE_ENV
     )))
 }
 
 /// 统一的"后端未就绪"错误（退出码 4 = 进程创建类，语义最接近）。
 fn not_ready_error(detail: String) -> WboxError {
     WboxError::spawn(format!(
-        "Linux 后端不可用：{}。请把 wbox-linux.exe 与 wbox.exe 放在一起\
+        "Linux 后端不可用：{}。请把 {} 与 wbox 放在一起\
              （portable 分发形态就是这两个文件），或用 WBOX_LINUX 指向它",
-        detail
+        detail,
+        agenterm_platform::filesystem::executable_name(LINUX_EXE_BASE)
     ))
 }
 

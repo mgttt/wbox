@@ -208,7 +208,8 @@ PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全�
 
 - 七个第一方 workspace 包：`wbox`、`wbox-codec`、`wbox-http`、`wbox-tls`、
   `wbox-linux`、`wbox-machine` 与实验包 `wbox-hpc-lab`；
-- 固定到不可变 Git SHA、零 feature 的第一方 `agenterm-platform`；
+- 固定到不可变 Git SHA、仅启用零原生依赖 conventions 的第一方
+  `agenterm-platform`；
 - `libc` / `windows-sys` 及其 target 垫片——**平台 ABI 声明**，只是 extern
   声明，不编译任何第三方实现代码，属第一档明确允许的那类。
 
@@ -668,7 +669,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
 | R6 `[部分]` | Ubuntu 24.04 已进入 Windows 产品门禁（WU.1/WU.2）；Alpine 仍只有手工跑通证据 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
-| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS；构建图只剩七个 wbox 包、零 feature `agenterm-platform` + 平台 ABI，但系统 Wine legacy 仍阻塞全产品第二档 |
+| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS；构建图只剩七个 wbox 包、轻量 `agenterm-platform` + 平台 ABI，但系统 Wine legacy 仍阻塞全产品第二档 |
 
 **F9.37 的 `guest_workdir` 已经放进 `RunSpec`**，Q2 的镜像路径在 R4 落地时读它
 即可，不必再改结构——这是 Q3 的实现顺带给 Q2 铺的路，也是四格共用一套
@@ -3564,15 +3565,19 @@ provider 与外层隔离分开建模，避免再用 `cfg!(windows) { ... } else 
 Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能反向拥有
 wbox 的 3×3×2 路由、优先级与能力状态。
 
-`M2` 首批固定 `agenterm-platform` commit `341ae5231c5514eb28f8db876ccfc44b12afe907`，
-关闭 default features，仅用 `platform_kind()` 驱动 `wbox-machine::current_host()`。
-Windows 本机依赖图只有 `wbox-machine -> agenterm-platform`，没有传递 crate；
-`x86_64-unknown-linux-gnu` cross-check 同步通过。macOS 编译与三宿主真机 smoke 尚未
-由 wbox 门禁证明，因此保持 active。review 同时发现后续
-机制不能直接批量替换：Windows `PathLock` 对未 canonicalize/case-fold 的路径做
-lossy hash，同一对象的路径别名可能绕开互斥；`protect_private_directory()` 在
-Windows 是 no-op，只能保留调用者已有 ACL。上游修复并有跨进程/ACL 行为门禁前，
-不得替换 wbox 的生命周期锁或安全关键目录授权。
+`M2` 当前固定 `agenterm-platform` commit
+`3a6f4ef3a65c6eea248d4f378d2b63fa58063473`，关闭 default features，只启用无原生
+依赖的 `filesystem-conventions`。`platform_kind()` 驱动
+`wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
+定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
+cross-check 已随本阶段同步通过。macOS 编译与三宿主真机 smoke 尚未由 wbox 门禁
+证明，因此保持 active。
+
+此前 review 发现的两个上游阻塞已修复并有行为门禁：`PathLock` 现在规范化路径
+别名并由真实子进程验证互斥与释放；Windows `protect_private_directory()` 现在
+写入受保护、仅当前用户、向子对象继承的 DACL，并读取安全描述符验证。wbox 尚未
+启用完整 `locking`/`filesystem` feature；迁移生命周期锁或安全目录仍须先处理
+`windows-sys` 版本收敛，并逐项对照现有产品语义。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

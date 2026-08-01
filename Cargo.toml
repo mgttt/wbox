@@ -28,9 +28,13 @@ wbox-http = { path = "crates/wbox-http" }
 # 与进程内入口（src/runtime），避免两份实现慢慢漂移。
 wbox-linux = { path = "crates/wbox-linux" }
 
-# ISA、宿主硬件、guest ABI 与执行 provider 的产品级契约。它不调用平台 API，
-# 宿主身份已由零 feature agenterm-platform 提供；其余机制按门禁逐项接入。
+# ISA、宿主硬件、guest ABI 与执行 provider 的产品级契约。
+# 宿主身份和无原生依赖的可执行文件约定由 agenterm-platform 提供；
+# 其余机制按门禁逐项接入。
 wbox-machine = { path = "crates/wbox-machine" }
+
+# 只消费跨产品成立的宿主文件系统约定；状态目录与 guest 路由仍由 wbox 持有。
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "3a6f4ef3a65c6eea248d4f378d2b63fa58063473", default-features = false, features = ["filesystem-conventions"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。
