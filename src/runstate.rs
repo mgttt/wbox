@@ -407,7 +407,7 @@ pub fn reserve_detached(name: &str) -> Result<DetachedReservation> {
     }
     create_private_directory(&dir)?;
     let token = next_reservation_token();
-    std::fs::write(dir.join(DETACHED_RESERVATION), &token)
+    write_private_state(&dir.join(DETACHED_RESERVATION), token.as_bytes())
         .map_err(|e| WboxError::args(format!("写入 detached 预留令牌失败：{}", e)))?;
     Ok(DetachedReservation {
         dir,
@@ -468,7 +468,7 @@ pub fn create_pending(
                 "lifecycle".to_string(),
                 wbox_codec::json::Value::String("created".to_string()),
             );
-        std::fs::write(dir.join("meta.json"), meta.to_string())
+        write_private_state(&dir.join("meta.json"), meta.to_string().as_bytes())
             .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))?;
         std::fs::write(dir.join(CREATED_MARKER), b"")
             .map_err(|e| WboxError::args(format!("写 created 状态标记失败：{}", e)))
@@ -485,17 +485,7 @@ pub fn create_pending(
 /// 更容易被同机别的用户读到。
 fn write_run_config(path: &Path, args: &[String]) -> Result<()> {
     let config = wbox_codec::json!({ "schema": 1, "run_args": args });
-    let parent = path
-        .parent()
-        .ok_or_else(|| WboxError::args(format!("配置路径 '{}' 缺少父目录", path.display())))?;
-    agenterm_platform::filesystem::protect_private_directory(parent).map_err(|error| {
-        WboxError::args(format!(
-            "限制配置目录 '{}' 权限失败：{}",
-            parent.display(),
-            error
-        ))
-    })?;
-    agenterm_platform::filesystem::write_private_atomic(path, config.to_string().as_bytes())
+    write_private_state(path, config.to_string().as_bytes())
         .map_err(|error| WboxError::args(format!("写 {} 失败：{}", path.display(), error)))
 }
 
@@ -580,7 +570,7 @@ pub fn activate_created(name: &str) -> Result<(Vec<String>, DetachedReservation)
     replace_saved_name(&mut args, name);
     restore_created_dir(&dir);
     let token = next_reservation_token();
-    std::fs::write(dir.join(DETACHED_RESERVATION), &token)
+    write_private_state(&dir.join(DETACHED_RESERVATION), token.as_bytes())
         .map_err(|e| WboxError::args(format!("写 start 预留令牌失败：{}", e)))?;
     Ok((
         args,
@@ -635,10 +625,7 @@ pub fn startup_is_ready(dir: &Path) -> bool {
 pub fn record_startup_ready(name: &str) -> Result<()> {
     let dir = dir_for(name)?;
     let ready = startup_ready_path(&dir);
-    let temporary = dir.join(format!(".startup-ready-{}.tmp", std::process::id()));
-    std::fs::write(&temporary, b"READY\n")
-        .map_err(|e| WboxError::spawn(format!("写 detached READY 临时文件失败：{}", e)))?;
-    std::fs::rename(&temporary, &ready)
+    write_private_state(&ready, b"READY\n")
         .map_err(|e| WboxError::spawn(format!("发布 detached READY 失败：{}", e)))
 }
 
@@ -667,10 +654,7 @@ pub fn record_startup_error(name: &str, error: &WboxError) {
     let Ok(dir) = dir_for(name) else {
         return;
     };
-    let temporary = dir.join(format!(".startup-error-{}.tmp", std::process::id()));
-    if std::fs::write(&temporary, format!("{}\n", error)).is_ok() {
-        let _ = std::fs::rename(temporary, dir.join(STARTUP_ERROR));
-    }
+    let _ = write_private_state(&dir.join(STARTUP_ERROR), format!("{}\n", error).as_bytes());
 }
 
 /// supervisor 在开始 pull/prepare 前接过清理责任；若尚未完成登记就报错退出，
@@ -796,7 +780,7 @@ pub fn enforce_log_cap(dir: &Path, file: &str) {
 
 /// 在 owner 锁释放前持久化 guest 退出码，供 `wait` / `inspect` 读取。
 pub fn record_exit_code(dir: &Path, code: u32) -> Result<()> {
-    std::fs::write(dir.join(EXIT_CODE), code.to_string())
+    write_private_state(&dir.join(EXIT_CODE), code.to_string().as_bytes())
         .map_err(|e| WboxError::args(format!("写容器退出码失败：{}", e)))
 }
 
@@ -947,7 +931,7 @@ fn write_meta(
 }
 
 fn write_meta_entry(dir: &Path, entry: Entry) -> Result<()> {
-    std::fs::write(dir.join("meta.json"), entry.to_json())
+    write_private_state(&dir.join("meta.json"), entry.to_json().as_bytes())
         .map_err(|e| WboxError::args(format!("写 meta.json 失败：{}", e)))
 }
 
@@ -1136,7 +1120,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     // `ps` 还会显示旧名——目录名和记录名各说各话，比不支持改名更让人困惑。
     if let Some(mut entry) = read_meta(&to) {
         entry.name = new.to_string();
-        if let Err(e) = std::fs::write(to.join("meta.json"), entry.to_json()) {
+        if let Err(e) = write_private_state(&to.join("meta.json"), entry.to_json().as_bytes()) {
             // 目录已经改完了，这里失败不该把改名整个回滚成"什么都没发生"——
             // 那要再做一次可能同样失败的 rename。如实说明当前状态即可。
             return Err(WboxError::args(format!(
@@ -1170,6 +1154,37 @@ pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
             path.display(),
             error
         ))
+    })
+}
+
+/// Publish a small product state file through the shared host mechanism.
+///
+/// Re-applying the parent contract upgrades directories left by older wbox
+/// versions before Windows inherits their ACL for the exclusive temporary.
+fn write_private_state(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("state path '{}' has no parent", path.display()),
+        )
+    })?;
+    agenterm_platform::filesystem::protect_private_directory(parent).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "protect private state parent '{}': {error}",
+                parent.display()
+            ),
+        )
+    })?;
+    agenterm_platform::filesystem::write_private_atomic(path, bytes).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!(
+                "atomically publish private state '{}': {error}",
+                path.display()
+            ),
+        )
     })
 }
 
@@ -1286,6 +1301,21 @@ mod tests {
         );
         assert_eq!(
             std::fs::metadata(dir.join(CREATE_CONFIG))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        record_exit_code(&dir, 42).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "发布状态时必须升级旧版本遗留的目录权限"
+        );
+        assert_eq!(
+            std::fs::metadata(dir.join(EXIT_CODE))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -1477,6 +1507,7 @@ mod tests {
         let dir = reservation.dir().to_path_buf();
         assert!(!startup_is_ready(&dir));
         record_startup_ready("ready").unwrap();
+        record_startup_ready("ready").unwrap();
         assert!(startup_is_ready(&dir));
         clear_startup_ready(&dir);
         assert!(!startup_is_ready(&dir));
@@ -1494,6 +1525,7 @@ mod tests {
         {
             let _supervisor = adopt_detached("failed", &token).unwrap();
             record_startup_error("failed", &WboxError::registry("offline"));
+            record_startup_error("failed", &WboxError::registry("replacement"));
         }
         assert!(
             dir.is_dir(),
@@ -1501,7 +1533,7 @@ mod tests {
         );
         assert!(read_startup_error(&dir)
             .as_deref()
-            .is_some_and(|message| message.contains("offline")));
+            .is_some_and(|message| message.contains("replacement")));
 
         parent.rollback_after_supervisor_exit().unwrap();
         assert!(!dir.exists(), "父进程读完错误后应清理首次 run -d 记录");
@@ -1570,6 +1602,50 @@ mod tests {
         assert!(!encoded.contains("env"), "状态不应包含环境或凭证字段");
         assert!(Entry::from_json("{}").is_none());
         assert!(Entry::from_json("nonsense").is_none());
+    }
+
+    #[test]
+    fn concurrent_meta_replacement_never_exposes_partial_json() {
+        let _home = TempHome::new("meta-atomic");
+        let dir = dir_for("meta-atomic").unwrap();
+        create_private_directory(&dir).unwrap();
+        let make_entry = |name: &str, pid| Entry {
+            name: name.to_owned(),
+            pid,
+            created_unix: 1,
+            cmd: vec!["command".into(), name.to_owned()],
+            target: "native".into(),
+            stopping: false,
+            exec_context: None,
+        };
+        let left = make_entry("left", 1);
+        let right = make_entry("right", 2);
+        write_meta_entry(&dir, left.clone()).unwrap();
+
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let writer_barrier = &barrier;
+            let writer_dir = &dir;
+            let writer_left = &left;
+            let writer_right = &right;
+            scope.spawn(move || {
+                writer_barrier.wait();
+                for index in 0..64 {
+                    let entry = if index % 2 == 0 {
+                        writer_right
+                    } else {
+                        writer_left
+                    };
+                    write_meta_entry(writer_dir, entry.clone()).unwrap();
+                }
+            });
+            barrier.wait();
+            for _ in 0..256 {
+                let text = std::fs::read_to_string(dir.join("meta.json")).unwrap();
+                let entry = Entry::from_json(&text).expect("不得观察到半条 meta.json");
+                assert!(entry == left || entry == right);
+            }
+        });
     }
 
     /// 后加的 `volumes`/`ports` 字段缺失时，整条记录仍要读得出来。
@@ -1827,7 +1903,7 @@ mod kill_tests {
 #[cfg(target_os = "linux")]
 pub fn record_container_pid(name: &str, pid: u32) {
     let Ok(dir) = dir_for(name) else { return };
-    let _ = std::fs::write(dir.join(CONTAINER_PID), pid.to_string());
+    let _ = write_private_state(&dir.join(CONTAINER_PID), pid.to_string().as_bytes());
 }
 
 /// 在 restart 拉起下一代前移除旧 PID，避免短暂窗口内把新连接送进已退出甚至已

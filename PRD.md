@@ -2598,6 +2598,7 @@ TODO-WINDOW
 ├── W36 OCI pull 提交锁下沉与崩溃释放门禁                           [done] PathLock + 无 Drop 子进程
 ├── W37 状态 liveness marker/owner guard 分层                         [done] PathLock + 跨进程/别名门禁
 ├── W38 私有状态目录与配置原子发布下沉                               [done] 0700/0600 + protected DACL
+├── W39 小状态文件统一原子发布                                       [done] meta/token/READY/ERROR/PID/exit
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3573,7 +3574,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`fa53f0a1ef4ab30e94ca17f98c9d4a4560d4a747`，关闭 default features，启用
+`a2a9f5d6e9ba0d85497192a1e2b4a40583052c0c`，关闭 default features，启用
 `filesystem` 与 `locking`。`platform_kind()` 驱动
 `wbox-machine::current_host()`；`EmuBackend` 直接复用宿主可执行文件后缀与同目录
 定位约定。Windows 依赖图仍不新增传递 crate；`x86_64-unknown-linux-gnu`
@@ -3595,6 +3596,14 @@ Apple 真机 owning gate，所以 M3 尚不能标 done。
 环境的重启配置，删除 Unix “公开写后再 chmod”窗口。`locking` 已替换 OCI pull
 提交锁和状态 owner guard：产品超时、持久 marker、liveness 分类和生命周期策略
 仍归 wbox。workspace 已将四处 Windows ABI 声明收敛到单点 `windows-sys 0.61`。
+
+`W39` 删除 detached READY/ERROR 的手写 PID 临时文件与 rename，并把 restart config、
+reservation token、meta、READY/ERROR、exit-code 和 Linux container PID 统一经
+`write_private_atomic` 发布。wbox 适配层在发布前重新施加 private parent 契约，
+可升级旧版本遗留目录；文件名、payload、何时清理、ERROR best-effort 和 liveness
+判据仍归产品层。消费侧并发读 meta 门禁曾在 Windows 稳定复现 `MoveFileExW`
+`ERROR_ACCESS_DENIED`；上游现仅对 access/sharing/lock 三类瞬态错误做 32 次有界退避，
+platform 自身并发 reader 门禁重复通过，永久错误在重试耗尽后仍返回调用方。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

@@ -57,6 +57,9 @@ research；尤其不能把所有 `not(windows)` 都当成 Linux。
 Git SHA；`filesystem` 承载宿主约定、私有目录 ACL/mode 与私有原子文件发布，
 `locking` 承载 OCI pull 提交锁与状态 owner guard。状态 marker、liveness 分类、
 产品超时、目录用途和路由仍由 wbox 持有；未启用 process/UI。
+restart config、reservation token、meta、READY/ERROR、exit-code 与 Linux container
+PID 等小状态文件统一经 platform 私有原子发布；wbox 在调用前升级旧状态目录的
+private contract，但继续拥有文件 schema、生命周期、错误分类和 best-effort 策略。
 workspace 统一持有 `windows-sys` 版本，各 package 只声明自身最小 feature，避免未来
 启用通用原生机制时出现两套 Windows ABI 依赖。
 OCI 默认架构也必须消费这一宿主身份：Linux 原生 provider 跟随 target ISA，
