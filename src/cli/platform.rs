@@ -39,7 +39,7 @@ fn print_human() {
         .collect::<Vec<_>>()
         .join(",");
     println!(
-        "hardware: logical-cpus={} features={} acceleration={}/{}",
+        "hardware: process-available-cpus={} features={} acceleration={}/{}",
         hardware
             .logical_processors
             .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
@@ -55,6 +55,19 @@ fn print_human() {
             .acceleration
             .map_or("unprobed", |item| item.state().as_str()),
     );
+    match hardware.processor_topology.as_ref() {
+        Some(Ok(topology)) => println!(
+            "system-topology: logical-cpus={} physical-cores={} packages={} numa-nodes={} processor-groups={} threads-per-core={}",
+            topology.system_logical_processors,
+            optional_count(topology.physical_cores),
+            optional_count(topology.packages),
+            optional_count(topology.numa_nodes),
+            optional_count(topology.processor_groups),
+            optional_count(topology.uniform_threads_per_core()),
+        ),
+        Some(Err(error)) => println!("system-topology: failed ({error})"),
+        None => println!("system-topology: unprobed"),
+    }
     println!(
         "HOST     GUEST    ISA      ABI            FORMAT    PRIORITY  STATUS     EXECUTION                 ISOLATION"
     );
@@ -84,6 +97,81 @@ fn print_human() {
 
 fn string(value: &str) -> Value {
     Value::String(value.to_owned())
+}
+
+fn optional_count(value: Option<std::num::NonZeroUsize>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
+}
+
+fn optional_count_json(value: Option<std::num::NonZeroUsize>) -> Value {
+    value.map_or(Value::Null, |count| {
+        Value::Number(Number::PosInt(count.get() as u64))
+    })
+}
+
+fn processor_topology_json(hardware: &platform::HardwareCapabilities) -> Value {
+    let mut object = Map::new();
+    object.insert("state".to_owned(), string("unprobed"));
+    for key in [
+        "system_logical_processors",
+        "physical_cores",
+        "packages",
+        "numa_nodes",
+        "processor_groups",
+        "uniform_threads_per_core",
+        "error_kind",
+        "error_detail",
+    ] {
+        object.insert(key.to_owned(), Value::Null);
+    }
+    match hardware.processor_topology.as_ref() {
+        Some(Ok(topology)) => {
+            object.insert("state".to_owned(), string("available"));
+            object.insert(
+                "system_logical_processors".to_owned(),
+                Value::Number(Number::PosInt(
+                    topology.system_logical_processors.get() as u64
+                )),
+            );
+            object.insert(
+                "physical_cores".to_owned(),
+                optional_count_json(topology.physical_cores),
+            );
+            object.insert(
+                "packages".to_owned(),
+                optional_count_json(topology.packages),
+            );
+            object.insert(
+                "numa_nodes".to_owned(),
+                optional_count_json(topology.numa_nodes),
+            );
+            object.insert(
+                "processor_groups".to_owned(),
+                optional_count_json(topology.processor_groups),
+            );
+            object.insert(
+                "uniform_threads_per_core".to_owned(),
+                optional_count_json(topology.uniform_threads_per_core()),
+            );
+        }
+        Some(Err(error)) => {
+            object.insert("state".to_owned(), string("failed"));
+            object.insert(
+                "error_kind".to_owned(),
+                string(match error.kind() {
+                    platform::ProcessorTopologyErrorKind::Query => "query",
+                    platform::ProcessorTopologyErrorKind::InvalidValue => "invalid-value",
+                    platform::ProcessorTopologyErrorKind::MalformedNativeData => {
+                        "malformed-native-data"
+                    }
+                    _ => "unknown",
+                }),
+            );
+            object.insert("error_detail".to_owned(), string(error.detail()));
+        }
+        None => {}
+    }
+    Value::Object(object)
 }
 
 fn print_json() {
@@ -181,6 +269,10 @@ fn print_json() {
             Value::Number(Number::PosInt(count as u64))
         }),
     );
+    hardware_json.insert(
+        "processor_topology".to_owned(),
+        processor_topology_json(&hardware),
+    );
     root.insert("hardware".to_owned(), Value::Object(hardware_json));
     root.insert("routes".to_owned(), Value::Array(routes));
     println!("{}", Value::Object(root).to_string_pretty());
@@ -196,5 +288,27 @@ mod tests {
         assert_eq!(cmd_platform(&["--json".to_owned()]).unwrap(), 0);
         assert!(cmd_platform(&["--yaml".to_owned()]).is_err());
         assert!(cmd_platform(&["--json".to_owned(), "extra".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn topology_json_distinguishes_current_host_from_unprobed_hosts() {
+        let current = platform::detect_hardware(platform::current_host());
+        let Value::Object(current) = processor_topology_json(&current) else {
+            panic!("processor topology must be an object");
+        };
+        assert_eq!(current.get("state"), Some(&string("available")));
+        assert!(current.contains_key("system_logical_processors"));
+
+        let hypothetical = platform::detect_hardware(None);
+        let Value::Object(hypothetical) = processor_topology_json(&hypothetical) else {
+            panic!("processor topology must be an object");
+        };
+        assert_eq!(hypothetical.get("state"), Some(&string("unprobed")));
+        assert_eq!(
+            hypothetical.get("system_logical_processors"),
+            Some(&Value::Null)
+        );
+        assert_eq!(hypothetical.get("error_kind"), Some(&Value::Null));
+        assert_eq!(hypothetical.get("error_detail"), Some(&Value::Null));
     }
 }

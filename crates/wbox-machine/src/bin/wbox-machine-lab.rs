@@ -189,11 +189,32 @@ fn print_host() -> Result<(), String> {
         hardware.native_isa.map_or("unknown", Isa::as_str)
     );
     println!(
-        "logical_processors={}",
+        "process_available_processors={}",
         hardware
             .logical_processors
             .map_or_else(|| "unknown".to_owned(), |count| count.to_string())
     );
+    match hardware.processor_topology.as_ref() {
+        Some(Ok(topology)) => {
+            println!(
+                "system_logical_processors={}",
+                topology.system_logical_processors
+            );
+            println!("physical_cores={}", optional_count(topology.physical_cores));
+            println!("processor_packages={}", optional_count(topology.packages));
+            println!("numa_nodes={}", optional_count(topology.numa_nodes));
+            println!(
+                "processor_groups={}",
+                optional_count(topology.processor_groups)
+            );
+            println!(
+                "uniform_threads_per_core={}",
+                optional_count(topology.uniform_threads_per_core())
+            );
+        }
+        Some(Err(error)) => println!("processor_topology_error={error}"),
+        None => println!("processor_topology=unprobed"),
+    }
     println!(
         "cpu_features={}",
         hardware
@@ -216,6 +237,10 @@ fn print_host() -> Result<(), String> {
     println!("allocation_granularity={}", memory.allocation_granularity);
     println!("physical_memory_bytes={}", memory.physical_bytes);
     Ok(())
+}
+
+fn optional_count(value: Option<std::num::NonZeroUsize>) -> String {
+    value.map_or_else(|| "unknown".to_owned(), |count| count.to_string())
 }
 
 fn print_matrix() -> Result<(), String> {

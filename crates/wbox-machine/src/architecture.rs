@@ -1,5 +1,9 @@
 use crate::route::HostOs;
 
+pub use agenterm_platform::processor_topology::{
+    ProcessorTopologyError, ProcessorTopologyErrorKind, ProcessorTopologyFacts,
+};
+
 /// Processor ISA taxonomy across application processors and device cores.
 ///
 /// `Isa` below remains the two-ISA desktop guest matrix contract. Keeping the
@@ -200,7 +204,10 @@ impl AccelerationCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HardwareCapabilities {
     pub native_isa: Option<Isa>,
+    /// Parallelism available to this process after affinity and scheduler limits.
     pub logical_processors: Option<usize>,
+    /// System-wide topology for the real current host. Hypothetical hosts are unprobed.
+    pub processor_topology: Option<Result<ProcessorTopologyFacts, ProcessorTopologyError>>,
     pub cpu_features: Vec<CpuFeature>,
     pub acceleration: Option<AccelerationCapabilities>,
 }
@@ -246,6 +253,8 @@ pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
         logical_processors: processor
             .logical_processors
             .map(std::num::NonZeroUsize::get),
+        processor_topology: (host.is_some() && host == crate::route::current_host())
+            .then(agenterm_platform::processor_topology::facts),
         cpu_features: processor
             .features
             .into_iter()
@@ -322,8 +331,10 @@ mod tests {
             assert_eq!(acceleration.api(), host_acceleration_api(host));
             if Some(host) == crate::route::current_host() {
                 assert_ne!(acceleration.state(), ProbeState::Unprobed);
+                assert!(hardware.processor_topology.is_some());
             } else {
                 assert_eq!(acceleration.state(), ProbeState::Unprobed);
+                assert!(hardware.processor_topology.is_none());
             }
             assert_eq!(acceleration.api_version(), None);
         }
@@ -384,6 +395,7 @@ mod tests {
         );
         let platform = agenterm_platform::hardware::processor_facts();
         let mapped = detect_hardware(None);
+        assert!(mapped.processor_topology.is_none());
         assert_eq!(
             mapped.logical_processors,
             platform.logical_processors.map(std::num::NonZeroUsize::get)
@@ -391,6 +403,25 @@ mod tests {
         for feature in platform.features {
             if let Some(feature) = map_cpu_feature(feature) {
                 assert!(mapped.supports_cpu_feature(feature));
+            }
+        }
+    }
+
+    #[test]
+    fn current_host_preserves_system_topology_evidence() {
+        let hardware = detect_hardware(crate::route::current_host());
+        let topology = hardware
+            .processor_topology
+            .expect("current host topology was probed")
+            .expect("current host topology query succeeded");
+        let system_logical = topology.system_logical_processors.get();
+        assert!(hardware
+            .logical_processors
+            .is_none_or(|count| count <= system_logical));
+        if let Some(physical) = topology.physical_cores {
+            assert!(physical.get() <= system_logical);
+            if let Some(threads) = topology.uniform_threads_per_core() {
+                assert_eq!(physical.get() * threads.get(), system_logical);
             }
         }
     }

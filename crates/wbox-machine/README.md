@@ -3,8 +3,9 @@
 `wbox-machine` is wbox's infrastructure contract crate. It models host OS,
 guest OS, processor ISA, guest ABI, executable format, device/accelerator class,
 execution provider, isolation, and the 3 x 3 x 2 product route matrix without
-owning an OS adapter. Host identity, zero-dependency processor facts, and native
-host memory geometry come from a pinned, lightweight `agenterm-platform`;
+owning an OS adapter. Host identity, process-scoped processor facts, system CPU
+topology, and native host memory geometry come from a pinned, lightweight
+`agenterm-platform`;
 product routing, guest ISA and
 acceleration availability stay here. The broader processor taxonomy also
 reserves x86-32, ARM32, RISC-V32, and Xtensa32 outside that desktop route matrix.
@@ -23,9 +24,11 @@ cargo run -p wbox-machine --bin wbox-machine-lab -- inspect <executable>
 cargo run -p wbox-machine --bin wbox-machine-lab -- check
 ```
 
-- `host` reports native ISA, logical processors, detected CPU features, page
-  size, mapping allocation granularity, physical memory, and the host
-  acceleration API candidate. Physical memory is a host fact, not a container,
+- `host` distinguishes process-available parallelism from system logical CPUs,
+  physical cores, packages, NUMA nodes, processor groups and uniform SMT width.
+  It also reports native ISA, detected CPU features, page size, mapping
+  allocation granularity, physical memory, and the host acceleration API
+  candidate. Physical memory is a host fact, not a container,
   cgroup, Job Object, or process budget. An API candidate remains `unprobed`
   until a future OS adapter verifies device access, permissions, firmware, and
   runtime usability.

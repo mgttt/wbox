@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W60、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L33、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M17
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W61、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L34、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M18
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2608,14 +2608,14 @@ TODO-WINDOW
 ├── W16 Windows guest O_CREAT mode/umask 宿主解耦            [done] t_fd_open 86/0
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [done] handler/timer/全门禁
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
-├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 4
+├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 5
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [next] 只读依赖图
 ├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
 ├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
-├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 25 unit tests
+├── W26 `wbox-machine` ISA/硬件/provider/guest ABI crate       [done] 28 unit tests
 ├── W27 `wbox-machine-lab` 基础设施只读实验工具                  [done] 9 process tests
 ├── W28 32 位处理器与 ESP32 设备矩阵                              [active] 4 路预填，执行/传输待实现
 ├── W29 GPU/NPU/LPU 三宿主加速器矩阵                              [research] 9 路预填
@@ -2650,6 +2650,7 @@ TODO-WINDOW
 ├── W58 当前宿主用户身份下沉并统一 SID/uid/gid 消费                                  [done] SID + ACL + IPC
 ├── W59 broker 当前用户 SID 查询复用 platform 身份事实                               [done] 保留客户端授权策略
 ├── W60 宿主原生虚拟化 API 可用性事实                                                 [done] WHPX passive probe
+├── W61 系统处理器/NUMA 拓扑事实与进程预算分层                                        [done] 8T/4C/1P/1N/1G
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2660,9 +2661,10 @@ TODO-WINDOW
 `3.02x`。该结果是当前虚拟机取证，不是跨机器性能承诺。
 
 `W33` 当前只允许 research：Windows `Get-NetAdapterRdma` 未发现 adapter，VirtIO
-Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装。后续须分别
-取得 NUMA topology、RDMA-capable/enabled adapter、memory registration、peer 与
-真实 transfer 证据，不能把 OS API 或 feature 存在写成 available。
+Ethernet 报告 `RdmaCapable=false`；SMB Direct 可选组件存在但未安装。Windows NUMA
+topology 已由 W61 取得；后续仍须分别取得 RDMA-capable/enabled adapter、memory
+registration、peer 与真实 transfer 证据，不能把 OS API 或 feature 存在写成
+available。
 
 `W34` 使用可审计 kernel 计量，不从 W32 的整数 checksum 推算 FLOPS。x86-64 每
 worker 每轮执行 8 条独立 AVX2 FP64 FMA，AArch64 执行 16 条独立 NEON FP64 FMA；
@@ -3067,8 +3069,15 @@ TODO-LINUX
 ├── L30 用户主目录约定 Linux 真机验收                            [next] HOME only + 四根路径
 ├── L31 单 PID suspend/resume 与容器 pause 行为复验                 [next] platform + PZ.1–PZ.3
 ├── L32 POSIX 用户身份与 rootless 映射/限额行为复验                  [next] uid/gid/euid + G3
-└── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
+├── L33 KVM 宿主可用性事实真机验收                                  [next] /dev/kvm + API version
+└── L34 处理器/NUMA 拓扑事实 Linux 真机验收                           [next] sysconf + sysfs
 ```
+
+`L34` 在 Linux 真机运行 platform `processor-topology` 单元测试与
+`wbox-machine-lab host`，交叉核对 `_SC_NPROCESSORS_ONLN`、在线 CPU 的
+package/core sysfs 和 NUMA node。任一在线 CPU 缺少完整 package/core 元数据时必须
+返回未知，不能拿 CPU 编号猜造物理核；还要证明进程 affinity/cgroup 限制后的
+`available_parallelism` 不会被系统逻辑 CPU 数覆盖。
 
 `L32` 在 Linux 真机运行 identity-only platform 测试，交叉核对 real/effective uid/gid；
 随后复跑 rootless user namespace 的 uid_map/gid_map、overlay 探测和无 cgroup 时
@@ -3700,8 +3709,14 @@ TODO-MACOS
 ├── M14 单 PID suspend/resume macOS 真机验收                    [next] Intel/Apple Silicon
 ├── M15 file-identity 最小 feature macOS 真机验收                [next] rename/hard-link + 双 ISA
 ├── M16 POSIX real/effective uid/gid macOS 真机验收               [next] Intel/Apple Silicon
-└── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
+├── M17 Hypervisor.framework 宿主支持事实真机验收                 [next] Intel/Apple Silicon
+└── M18 处理器拓扑事实 macOS 真机验收                              [next] Intel/Apple Silicon
 ```
+
+`M18` 在 Intel 与 Apple Silicon 真机运行 platform `processor-topology` 和
+`wbox-machine-lab host`，交叉核对 `hw.logicalcpu`、`hw.physicalcpu` 与可用的
+`hw.packages`。sysctl 缺少可选字段时应报告未知；不能据逻辑/物理核比值臆造 package
+或 NUMA，双 ISA 交叉编译不能替代真机运行。
 
 `M16` 在 Intel 与 Apple Silicon 真机只启用 `user-identity`，把 real/effective uid/gid
 与系统调用结果交叉核对，并确认稳定身份使用 effective uid。该事实契约不代表 macOS
@@ -3739,9 +3754,10 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`a8de7f25733d73155dbc728c01e45da4af17cb5c`，关闭 default features，按消费包启用
+`79614389827b8d4f04de621713d24679aa06217f`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory` 与 `storage`。
+`process-image`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`processor-topology`、`virtualization-probe` 与 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
@@ -3974,6 +3990,18 @@ Arm64Support；Linux 打开 `/dev/kvm` 并要求 API version 12；macOS 读取
 `kern.hv_support`。本机 Windows 真机结果为 `whpx/unavailable`，说明 API 探测成功、
 但当前虚拟服务器未向内层暴露可用 hypervisor；该结果不改变既有 user-mode guest
 路线。Linux/macOS 真机验收仍分别由 L33/M17 跟踪。
+
+`W61` 在 platform 增加最小 `processor-topology` feature，把系统在线逻辑 CPU、物理核、
+processor package、NUMA node 和 Windows processor group 表达为产品无关事实；它与
+受 affinity、Job、容器或调度器约束的进程 `available_parallelism` 明确分层。Windows
+通过 `GetActiveProcessorCount`/`GetActiveProcessorGroupCount` 和
+`GetLogicalProcessorInformationEx` 查询；`RelationNumaNodeEx` 只作为请求关系，返回
+记录仍严格验证为 `RelationNumaNode`，不接受任意关系。本机实测为 8 个系统逻辑 CPU、
+4 个物理核、1 个 package、1 个 NUMA node、1 个 processor group，均匀 SMT 宽度为 2。
+Linux 仅在所有在线 CPU 的 package/core sysfs 完整时报告计数，macOS 的缺失 sysctl
+保持未知；五目标严格 Clippy 与 platform all-features 108 tests 已通过。wbox-machine
+只对真实当前宿主探测并保存成功或失败证据，假设矩阵宿主保持 unprobed；Linux/macOS
+真机验收分别由 L34/M18 跟踪。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

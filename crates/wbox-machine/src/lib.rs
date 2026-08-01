@@ -22,7 +22,8 @@ pub use accelerator::{
 };
 pub use architecture::{
     current_isa, detect_hardware, AccelerationApi, AccelerationCapabilities, CpuFeature,
-    HardwareCapabilities, Isa, ProbeState, ProcessorIsa,
+    HardwareCapabilities, Isa, ProbeState, ProcessorIsa, ProcessorTopologyError,
+    ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };
 pub use artifact::{inspect_artifact, ArtifactError, ArtifactIdentity};
 pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, FirmwareEnvironment};

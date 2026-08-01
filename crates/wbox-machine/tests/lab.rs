@@ -18,6 +18,12 @@ fn host_probe_reports_a_real_acceleration_state() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("host="));
     assert!(stdout.contains("native_isa="));
+    assert!(stdout.contains("process_available_processors="));
+    assert!(stdout.contains("system_logical_processors="));
+    assert!(stdout.contains("physical_cores="));
+    assert!(stdout.contains("processor_packages="));
+    assert!(stdout.contains("numa_nodes="));
+    assert!(stdout.contains("processor_groups="));
     assert!(stdout.contains("page_size="));
     assert!(stdout.contains("allocation_granularity="));
     assert!(stdout.contains("physical_memory_bytes="));
