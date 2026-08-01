@@ -6,6 +6,7 @@
 //! - 完整性级别：AppContainer 派生令牌天然为 Low IL（内核强制），无需也无法
 //!   在 attribute-list 启动路径上额外指定。
 
+use std::os::windows::io::{AsHandle, BorrowedHandle, RawHandle};
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::Isolation::{
@@ -295,6 +296,13 @@ unsafe impl Send for OwnedHandle {}
 impl OwnedHandle {
     pub fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.0
+    }
+}
+
+impl AsHandle for OwnedHandle {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        // # Safety: self owns this handle for the lifetime of the returned borrow.
+        unsafe { BorrowedHandle::borrow_raw(self.raw() as RawHandle) }
     }
 }
 

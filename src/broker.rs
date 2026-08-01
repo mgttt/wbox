@@ -455,9 +455,11 @@ impl BrokerSession {
                 );
             }
         };
-        let remote = self
-            .process
-            .duplicate_handle_into(opened.as_handle())
+        let remote =
+            agenterm_platform::adapters::windows::process_reference::duplicate_handle_into(
+                &self.process,
+                opened.as_handle(),
+            )
             .map_err(|error| {
                 WboxError::spawn(format!("向 broker 目标进程复制文件 HANDLE 失败：{error}"))
             })?;

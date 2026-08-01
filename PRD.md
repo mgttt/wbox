@@ -2,7 +2,7 @@
 
 > 本文是项目需求、范围和进度的唯一总入口，主要读者是维护代码的 LLM agents。
 > 用户用法见 `README.md`，实现原理见 `docs/architecture.md`，验证命令见
-> `docs/testing.md`。最后更新：2026-07-28。
+> `docs/testing.md`。最后更新：2026-08-02。
 
 ## 0. 内容树（导航）
 
@@ -2676,6 +2676,7 @@ TODO-WINDOW
 ├── W84 retained process 远端 HANDLE 交付凭据下沉并删除 broker DuplicateHandle          [done] commit/rollback receipt
 ├── W85 精确进程 containment membership 下沉并删除 broker IsProcessInJob                [done] retained object + Job handle
 ├── W86 已打开进程对象原始退出码下沉并删除 sandbox GetExitCodeProcess                    [done] handle-bound u32 fact
+├── W87 已打开进程对象精确终止下沉并删除 sandbox TerminateProcess                       [done] handle-bound exit code
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4654,6 +4655,22 @@ wbox sandbox 在 exact-object 无限等待成功后把同一个 Owned HANDLE 借
 3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 492.2 MiB 可再生缓存；
 release 产品门禁 WP.1-WP.27（含 WP.7B/WP.14 非零退出码）与固定 Ubuntu 24.04 digest 的
 WU.1/WU.2（WU.2 `rc=37`）通过。
+
+`W87` 在 `process-control` 增加 `ProcessTerminationHandle` 与 `terminate_handle`：强制终止
+调用方已经打开的精确进程对象，不按 PID 重开，不发现后代，也不冒充进程树所有权。Windows
+adapter 为标准 `BorrowedHandle` 实现 `TerminateProcess`，退出码由产品调用方明确选择；Linux
+pidfd 与 macOS kqueue 当前不提供同等终止契约，因此不添加伪实现。上游同时修正 W84 adapter
+迁移后仍调用旧方法、仍以旧模块路径启动 fixture 的测试回归；精确 HANDLE 以退出码 37 真机
+验证，all-features 188 tests 与严格 Clippy 通过，五个非宿主目标的最小 `process-control`
+feature 编译通过；提交为 `450afe0`、`da81671`。
+
+wbox 的 `OwnedHandle` 实现标准 `AsHandle`，sandbox 三处挂起子进程清理改为消费 platform
+精确终止 API，删除生产路径的 `TerminateProcess` 和退出码查询前的临时 raw borrow；broker
+同步消费新的 Windows adapter 自由函数。退出码 1、清理失败容忍、Job 进程树终止和
+AppContainer 创建编排仍归 wbox 产品层。Windows sandbox 36 tests（33 passed、3 ignored）、
+broker 8 tests、根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets
+通过，Quick 释放 454.4 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04
+digest 的 WU.1/WU.2（WU.2 `rc=37`）通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

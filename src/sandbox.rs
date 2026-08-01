@@ -12,12 +12,12 @@
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
-use std::os::windows::io::{BorrowedHandle, RawHandle};
+use std::os::windows::io::{AsHandle as _, BorrowedHandle, RawHandle};
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
 use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
-    TerminateProcess, UpdateProcThreadAttribute, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    UpdateProcThreadAttribute, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
 };
@@ -306,9 +306,8 @@ where
             if !pi.hProcess.is_null() {
                 let process = OwnedHandle(pi.hProcess);
                 let _thread = OwnedHandle(pi.hThread);
-                // # Safety: CreateProcessW populated a live process handle and the primary
-                // thread is still suspended, so no guest code has run.
-                unsafe { TerminateProcess(process.raw(), 1) };
+                let _ =
+                    agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
                 let _ = wait_for_process_exit(process.raw());
             }
             return Err(crate::error::WboxError::spawn(format!(
@@ -335,13 +334,12 @@ where
     if let Err(e) = job.assign(process.raw()) {
         // 子进程是 CREATE_SUSPENDED 且未入 Job：若直接返回，KILL_ON_JOB_CLOSE
         // 收割不到它，会留下一个永久挂起的孤儿进程。先主动终止再返回错误。
-        // # Safety: 进程句柄有效；子进程尚未执行用户代码，终止是安全的。
-        unsafe { TerminateProcess(process.raw(), 1) };
+        let _ = agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
         return Err(e);
     }
     if let Err(e) = on_created(process.raw(), job) {
         // 子进程仍挂起；等待终止完成，避免 broker 初始化失败后留下孤儿。
-        unsafe { TerminateProcess(process.raw(), 1) };
+        let _ = agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
         let _ = wait_for_process_exit(process.raw());
         return Err(e);
     }
@@ -359,8 +357,7 @@ where
 
     // ---- 等待退出并转发退出码 ----
     wait_for_process_exit(process.raw())?;
-    let process = unsafe { BorrowedHandle::borrow_raw(process.raw() as RawHandle) };
-    agenterm_platform::process_reference::exit_code_handle(process).map_err(|error| {
+    agenterm_platform::process_reference::exit_code_handle(process.as_handle()).map_err(|error| {
         crate::error::WboxError::spawn(format!("读取 sandbox 退出码失败：{error}"))
     })
 }
