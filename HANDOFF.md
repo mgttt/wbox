@@ -133,10 +133,11 @@ Windows 产品门禁 WP.3W 依赖的就是这一档。
   进程跑在 AppContainer + Job 里"，进程内执行会让 supervisor 和 guest 同体。
   两个 exe 都是纯 Rust，不违反 §2.2.1，只是分发上多一个文件。
 
-### 已完成（§2.2.1 第二档：第三方 crate → 第一方实现）**全部达成**
+### 已完成（核心 crate 第一方化）；全产品第二档仍被 legacy Wine 阻塞
 
-**这一轮把"Rust-only"的口径从「不许有 C」收紧到「承载产品能力的实现必须是
-第一方」，并全部落地。** 前者在删掉 `vendor/blink` 时就达成了；但
+**这一轮把核心 crate 从第三方实现迁到第一方。** 前者在删掉 `vendor/blink` 时
+就达成了；但全产品仍有系统 Wine legacy，必须由第一方 Rust Win32 runtime 替换。
+镜像链本身的第一方化已经落地：
 `serde_json` 解析 manifest、`sha2` 算 blob digest、`flate2` 解层、`tar` 解包、
 `ureq`/`rustls` 跑 registry 协议与 TLS——这些都是纯 Rust，却全都承载着
 镜像管理的核心语义。
@@ -398,11 +399,12 @@ minifilter、WSL2 的 Hyper-V VM、Podman 的 namespace、Wine 的 ABI 翻译）
 介入点，以及由此**必然**产生的差异——读它就知道哪些差距是暂时的、哪些是架构决定
 的。要点：Q1 的写重定向做不了是**介入点决定的**（用户态没有位置改写 NT 调用的
 目标）；Q2 存在的唯一理由是**不要虚拟化**，能开 WSL2 的机器上 WSL2 更好；
-Q4 不是"追赶 Wine"，而是给 Wine 加一层它本来就没有的隔离。
+Q4 的目标是能力对标 Wine：第一方 Rust 实现 PE/Win32 CLI runtime，并叠加 Linux
+隔离。当前系统 Wine 路径只是待删除 legacy，不能作为 Rust-only 完成证据。
 
 **§2.4.3「每格的下一步」**那张表
-说明哪些缺口打算补、哪些永远不补（判断原则：要装驱动 / 要常驻服务 / 要虚拟化
-的一律不补）。新立的两个条目：
+说明哪些缺口打算补、哪些永远不补。默认 portable 路径不要求驱动、常驻服务或
+虚拟化；完整虚拟化能力由第一方 Rust runtime 实现，第三方产品不进入运行链。
 
 - ~~**L5 / L5b 镜像分层存储**~~：**已全部完成**（F9.16–F9.18）——pull 保留原始
   压缩层、多层镜像原样回推 digest 不变、build 产物写成基础层+增量层且 push 时

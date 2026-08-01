@@ -12,14 +12,14 @@ CLI (`src/cli`)
         |
 产品平台契约 (`src/platform.rs`)
 ├── HostOs / GuestOs
-├── ExecutionProvider / IsolationModel
-└── available / planned / research
+├── ExecutionProvider / IsolationModel / Priority
+└── available / legacy / planned / research
         |
 目标分类与环境构造 (`src/backend`)
 ├── Windows NativeBackend
 ├── Windows EmuBackend
 ├── Linux LinuxNativeBackend
-├── Linux Wine 执行器
+├── Linux legacy Wine 执行器（待第一方 Win32 runtime 替换）
 └── macOS adapters（规划）
         |
 平台与数据层
@@ -43,13 +43,15 @@ research；尤其不能把所有 `not(windows)` 都当成 Linux。
 ```text
 wbox 产品策略（host/guest 路由、默认值、能力门禁）
     -> execution provider SPI（probe/lifecycle/exec/logs/limits/snapshot）
-        -> agenterm-platform 或宿主/第三方 provider 的具体机制
+        -> 第一方 Rust runtime + agenterm-platform/宿主平台 ABI 机制
 ```
 
-Docker/Podman 风格 CLI 不直接调用 QEMU、VMware、Parallels 等命令。适配器先探测
-版本和能力，再把生命周期映射到 provider；缺失能力返回结构化 unsupported。这样
-默认纯 Rust portable 后端、系统原生后端和可选 VM 后端可以共用上层状态模型，同时
-不会把“已安装第三方程序”误报为“wbox 已验收该九格路线”。
+Docker、Podman、Wine、QEMU、VMware、Parallels 等只作为能力和行为参照，绝不作为
+可执行 provider。所有 provider 都是仓内第一方 Rust 实现；缺失能力返回结构化
+unsupported。允许通过 Rust bindings 调用 Hyper-V/WHPX、KVM、HVF、Apple
+Virtualization.framework 等宿主平台 ABI 取得隔离或加速，但不得调用或链接第三方
+产品来补能力。这样 portable、系统原生和 VM 后端共用上层状态模型，同时保持
+Rust-only 构建与运行边界。
 
 ## 2. Windows 后端
 
@@ -117,6 +119,22 @@ guest 数字直接回退为同号宿主 fd，也不得重复翻译已转换的 f
 
 模拟器的完整架构、已验证范围、剩余缺口和运行期开关见
 `rust-rewrite.md`。
+
+### 2.3 共享 CPU 核心（规划）
+
+三宿主 × 两类核心工作负载要求异构执行层共享同一套纯 Rust CPU 语义，而不是分别
+复制解释器：
+
+```text
+第一方 Rust x86-64 CPU core
+├── ELF loader + Linux syscall/VFS personality  -> Linux OCI
+└── PE loader + NT/Win32 ABI personality         -> Windows CLI
+```
+
+当前 `crates/wbox-linux` 仍把 CPU、ELF 与 Linux syscall 放在同一 crate。抽取时先
+冻结寄存器、内存、异常、中断/投递点和 task scheduler 接口，再移动代码；不能为了
+形式拆 crate 而制造双向依赖。Apple Silicon 首版可继续解释 x86-64 guest，ARM64
+guest 是独立后续能力，OCI manifest 选择必须如实反映 runtime 支持的 ISA。
 
 ## 3. Linux 后端
 
@@ -229,13 +247,12 @@ swap）。同一条命令在不同宿主上强度不同，正是一致性要求�
 仅当语义等价时允许 rlimit 回退。例如累计 CPU 秒数不等价于 CPU 百分比；
 特权进程的 `RLIMIT_NPROC` 也不能可靠限制进程数。不能满足时明确拒绝。
 
-### 3.4 Wine
+### 3.4 Windows 兼容运行时
 
-PE 只在宿主程序模式交给 Wine，并复用上述隔离层。查找顺序受 `WBOX_WINE`
-覆盖；默认 prefix 位于 `~/.wbox/wineprefix`。镜像 rootfs 中的 PE 当前明确
-拒绝，因为宿主 Wine 及其依赖不在 pivot 后的 guest 根内。
-verbose 模式会同时打印 Wine 路径和 `wine --version` 首行；版本获取失败只显示
-“版本未知”，不阻断执行。
+目标是第一方 Rust PE loader + Win32 ABI runtime，并复用上述 Linux 隔离层。
+当前 PE 交给系统 Wine、`WBOX_WINE`、版本探测和 wineprefix 都是待删除的 legacy，
+只用于迁移期防回归，不满足 Rust-only 产品契约。第一方 runtime 达到端到端门禁后
+删除外部进程调用；镜像 rootfs 中的 PE 在此之前继续明确拒绝。
 
 ## 4. OCI 数据链
 

@@ -5,7 +5,7 @@
 //! later come from `agenterm-platform`; those mechanics must not own this
 //! product routing policy.
 
-pub const CONTRACT_REVISION: u32 = 1;
+pub const CONTRACT_REVISION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostOs {
@@ -49,8 +49,8 @@ impl GuestOs {
 pub enum ExecutionProvider {
     NativeKernel,
     UserModeEmulator,
-    CompatibilityLayer,
-    ExternalVirtualMachine,
+    CompatibilityRuntime,
+    FullSystemVirtualizer,
 }
 
 impl ExecutionProvider {
@@ -58,8 +58,8 @@ impl ExecutionProvider {
         match self {
             Self::NativeKernel => "native-kernel",
             Self::UserModeEmulator => "user-mode-emulator",
-            Self::CompatibilityLayer => "compatibility-layer",
-            Self::ExternalVirtualMachine => "external-virtual-machine",
+            Self::CompatibilityRuntime => "compatibility-runtime",
+            Self::FullSystemVirtualizer => "full-system-virtualizer",
         }
     }
 }
@@ -84,6 +84,7 @@ impl IsolationModel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
     Available,
+    Legacy,
     Planned,
     Research,
 }
@@ -92,8 +93,24 @@ impl Availability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Available => "available",
+            Self::Legacy => "legacy",
             Self::Planned => "planned",
             Self::Research => "research",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    Core,
+    Deferred,
+}
+
+impl Priority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Deferred => "deferred",
         }
     }
 }
@@ -102,6 +119,7 @@ impl Availability {
 pub struct Route {
     pub host: HostOs,
     pub guest: GuestOs,
+    pub priority: Priority,
     pub provider: ExecutionProvider,
     pub isolation: IsolationModel,
     pub availability: Availability,
@@ -109,13 +127,19 @@ pub struct Route {
 }
 
 pub const fn route(host: HostOs, guest: GuestOs) -> Route {
-    use Availability::{Available, Planned, Research};
+    use Availability::{Available, Legacy, Planned, Research};
     use ExecutionProvider::{
-        CompatibilityLayer, ExternalVirtualMachine, NativeKernel, UserModeEmulator,
+        CompatibilityRuntime, FullSystemVirtualizer, NativeKernel, UserModeEmulator,
     };
     use GuestOs::{Linux as LinuxGuest, Macos as MacosGuest, Windows as WindowsGuest};
     use HostOs::{Linux, Macos, Windows};
     use IsolationModel::{AppContainerJob, LinuxNamespaces, ProviderBoundary};
+    use Priority::{Core, Deferred};
+
+    let priority = match guest {
+        WindowsGuest | LinuxGuest => Core,
+        MacosGuest => Deferred,
+    };
 
     let (provider, isolation, availability, reason) = match (host, guest) {
         (Windows, WindowsGuest) => (
@@ -131,10 +155,10 @@ pub const fn route(host: HostOs, guest: GuestOs) -> Route {
             "wbox-linux inside AppContainer plus Job Object",
         ),
         (Windows, MacosGuest) => (
-            ExternalVirtualMachine,
+            FullSystemVirtualizer,
             ProviderBoundary,
             Research,
-            "no qualified Darwin execution provider",
+            "first-party Rust Darwin runtime is not implemented",
         ),
         (Linux, LinuxGuest) => (
             NativeKernel,
@@ -143,16 +167,16 @@ pub const fn route(host: HostOs, guest: GuestOs) -> Route {
             "rootless namespaces plus cgroup or explicit limit fallback",
         ),
         (Linux, WindowsGuest) => (
-            CompatibilityLayer,
+            CompatibilityRuntime,
             LinuxNamespaces,
-            Available,
-            "Wine inside the Linux isolation boundary",
+            Legacy,
+            "system Wine path is legacy; the first-party Rust Win32 runtime is not implemented",
         ),
         (Linux, MacosGuest) => (
-            ExternalVirtualMachine,
+            FullSystemVirtualizer,
             ProviderBoundary,
             Research,
-            "no qualified Darwin execution provider",
+            "first-party Rust Darwin runtime is not implemented",
         ),
         (Macos, MacosGuest) => (
             NativeKernel,
@@ -167,15 +191,16 @@ pub const fn route(host: HostOs, guest: GuestOs) -> Route {
             "port and qualify wbox-linux plus a macOS outer sandbox",
         ),
         (Macos, WindowsGuest) => (
-            CompatibilityLayer,
+            CompatibilityRuntime,
             ProviderBoundary,
             Planned,
-            "qualify Wine plus a macOS outer sandbox",
+            "implement a first-party Rust Win32 runtime plus a macOS outer sandbox",
         ),
     };
     Route {
         host,
         guest,
+        priority,
         provider,
         isolation,
         availability,
@@ -216,7 +241,20 @@ mod tests {
     }
 
     #[test]
-    fn only_qualified_routes_are_available() {
+    fn three_hosts_by_two_primary_guests_are_core() {
+        let core = HostOs::ALL
+            .into_iter()
+            .flat_map(|host| GuestOs::ALL.map(|guest| route(host, guest)))
+            .filter(|item| item.priority == Priority::Core)
+            .count();
+        assert_eq!(core, 6);
+        for host in HostOs::ALL {
+            assert_eq!(route(host, GuestOs::Macos).priority, Priority::Deferred);
+        }
+    }
+
+    #[test]
+    fn only_rust_only_qualified_routes_are_available() {
         let available = HostOs::ALL
             .into_iter()
             .flat_map(|host| GuestOs::ALL.map(|guest| route(host, guest)))
@@ -228,10 +266,16 @@ mod tests {
             vec![
                 (HostOs::Windows, GuestOs::Windows),
                 (HostOs::Windows, GuestOs::Linux),
-                (HostOs::Linux, GuestOs::Windows),
                 (HostOs::Linux, GuestOs::Linux),
             ]
         );
+    }
+
+    #[test]
+    fn external_wine_route_is_visible_but_not_rust_only_available() {
+        let item = route(HostOs::Linux, GuestOs::Windows);
+        assert_eq!(item.availability, Availability::Legacy);
+        assert_eq!(item.provider, ExecutionProvider::CompatibilityRuntime);
     }
 
     #[test]

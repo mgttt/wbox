@@ -1,9 +1,9 @@
 # wbox
 
-`wbox` 是一个不依赖硬件虚拟化的 portable 进程容器。它在 Windows 上使用
-AppContainer 和 Job Object 运行本机程序，也可以通过随包分发的
-`wbox-linux.exe` 执行 Linux ELF 和 OCI 镜像；Linux 宿主使用 rootless
-namespace、cgroup/rlimit，并可调用 Wine 运行 Windows CLI 程序。
+`wbox` 是一个不依赖硬件虚拟化的 portable 进程容器。近期主线是在 Windows、
+Linux、macOS 三种宿主上运行 Linux OCI 镜像与少量 Windows CLI/PE 程序。
+Windows 使用 AppContainer + Job Object，Linux 使用 rootless namespace/cgroup；
+异构程序由第一方纯 Rust CPU/ABI runtime 承载。当前系统 Wine 路径仅是待删除 legacy。
 
 项目面向 Windows 10/11/Server 等无法使用 WSL2 或 Hyper-V 的环境。默认模式
 不要求管理员权限，不安装驱动，也不启用 Windows 可选功能。它提供进程级隔离，
@@ -42,7 +42,7 @@ Portable Windows 发布包包含两个文件：
 | Windows × Windows 程序 | Sandboxie-Plus | **无任意路径写重定向、无注册表虚拟化**——原生 PE 程序发真 NT 调用，架构里没有介入点；已有默认拒绝、显式授权和 AppContainer package 私有标准目录 |
 | Windows × Linux 镜像 | WSL2 / Docker Desktop | 已有 `build` 子集+分层缓存/`--restart`；无卷挂载/端口映射/`--user`，**性能不可比** |
 | Linux × Linux 镜像 | Podman / Docker | 已有 `-v`/`-p`（仅 TCP）/`build`+分层缓存/`--restart`/`--user`（数字 id）/`--cap-add`/`--cap-drop`/`--seccomp-deny`（拒绝名单）/healthcheck/`--network container:`/overlay 可写层/`push`（原样回推，保留分层）/`diff`/`commit`/`pause`/`save`·`load`/`export`·`import`/`cp`/`stats`/`restart`/`rename`·`prune`/`logs -f`·`--tail`/`ps -q`·`rm -f`/`images -q`/**命名卷**/`--entrypoint`·`--env-file`/`ADD`/**多阶段构建**/`ps --filter`/`compose` 子集/IPC·UTS 隔离与共享；无自定义 bridge 网络与内建 DNS、镜像分层存储 |
-| Linux × Windows 程序 | Wine | 依赖宿主已装 Wine；GUI 未覆盖（wineprefix 已按容器隔离） |
+| Linux × Windows 程序 | Wine（能力基线） | 第一方 Rust PE/Win32 runtime 规划中；当前系统 Wine 路径为待删除 legacy，不计入 Rust-only 完成状态 |
 
 每格**怎么跑起来的**（两条隔离链路 × 两种程序格式）见 `PRD.md` §2.4.1；
 与四个参照物（Sandboxie-Plus / WSL2 / Podman·Docker / Wine）的**架构对照**
@@ -61,15 +61,15 @@ Portable Windows 发布包包含两个文件：
 
 ## 能力边界
 
-| 能力 | Windows 宿主 | Linux 宿主 |
-|---|---|---|
-| 运行宿主 CLI 程序 | AppContainer + Job Object | user/PID/mount namespace |
-| 运行 Linux OCI 镜像 | `wbox-linux.exe` 用户态执行 | `pivot_root` 后原生执行 |
-| 运行 Windows CLI 程序 | 原生执行 | 调用 Wine |
-| CPU/内存/进程数限制 | Job Object | cgroup v2，受限时明确回退或拒绝 |
-| 默认网络 | AppContainer 无网络 capability | 独立空 netns |
-| 进程树清理 | Job kill-on-close | namespace/PDEATHSIG |
-| 后台运行与生命周期 | `--detach` / `ps` / `logs` / `stop` / `rm` | 同左，另有 `exec` |
+| 能力 | Windows 宿主 | Linux 宿主 | macOS 宿主 |
+|---|---|---|---|
+| 运行宿主 CLI 程序 | AppContainer + Job Object | user/PID/mount namespace | 原生隔离待取证 |
+| 运行 Linux OCI 镜像 | `wbox-linux.exe` 用户态执行 | `pivot_root` 后原生执行 | `wbox-linux` + 外层隔离，规划中 |
+| 运行 Windows CLI 程序 | 原生执行 | 第一方 Rust Win32 runtime 规划中；Wine 为 legacy | 同一第一方 runtime，规划中 |
+| CPU/内存/进程数限制 | Job Object | cgroup v2，受限时明确回退或拒绝 | 待真机取证 |
+| 默认网络 | AppContainer 无网络 capability | 独立空 netns | 待真机取证 |
+| 进程树清理 | Job kill-on-close | namespace/PDEATHSIG | 待 `agenterm-platform` 机制接入 |
+| 后台运行与生命周期 | `--detach` / `ps` / `logs` / `stop` / `rm` | 同左，另有 `exec` | 规划复用同一状态模型 |
 
 后台容器：`--detach` 起，`ps` 看，`logs` 读输出（容器跑完仍可读），
 `stop` 停整棵进程树，`rm` 清记录。日志体积有上限，截断处会写明。

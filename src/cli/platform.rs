@@ -23,14 +23,15 @@ fn current_host_name() -> &'static str {
 fn print_human() {
     println!("wbox platform contract {}", platform::CONTRACT_REVISION);
     println!("current host: {}", current_host_name());
-    println!("HOST     GUEST    STATUS     EXECUTION                 ISOLATION");
+    println!("HOST     GUEST    PRIORITY  STATUS     EXECUTION                 ISOLATION");
     for host in HostOs::ALL {
         for guest in GuestOs::ALL {
             let item = platform::route(host, guest);
             println!(
-                "{:<8} {:<8} {:<10} {:<25} {}",
+                "{:<8} {:<8} {:<9} {:<10} {:<25} {}",
                 host.as_str(),
                 guest.as_str(),
+                item.priority.as_str(),
                 item.availability.as_str(),
                 item.provider.as_str(),
                 item.isolation.as_str(),
@@ -59,6 +60,7 @@ fn print_json() {
             object.insert("guest".to_owned(), string(item.guest.as_str()));
             object.insert("host".to_owned(), string(item.host.as_str()));
             object.insert("isolation".to_owned(), string(item.isolation.as_str()));
+            object.insert("priority".to_owned(), string(item.priority.as_str()));
             object.insert("provider".to_owned(), string(item.provider.as_str()));
             object.insert("reason".to_owned(), string(item.reason));
             Value::Object(object)

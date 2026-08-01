@@ -35,7 +35,7 @@ PRD
 │   ├── F3 OCI Distribution 与本地镜像缓存  F3.1–F3.10
 │   ├── F4 Windows 上执行 Linux ELF        F4.R0–F4.R8
 │   ├── F5 Linux 原生后端          F5.1–F5.8
-│   ├── F6 Linux 上执行 Windows CLI        F6.1–F6.5
+│   ├── F6 Linux/macOS 上执行 Windows CLI  F6.L1–F6.L5（legacy）/ F6.R1–F6.R7
 │   ├── F7 环境与凭证边界          F7.1–F7.5
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
@@ -114,18 +114,31 @@ wbox
 │   └── Linux ELF/OCI -> AppContainer + Job Object + wbox-linux
 ├── Linux 宿主
     ├── Linux 程序/OCI -> rootless namespace + cgroup/rlimit
-    └── Windows CLI -> 同一 Linux 隔离层 + Wine
+    └── Windows CLI -> 同一 Linux 隔离层 + 第一方 Rust Win32 兼容运行时（规划）
 └── macOS 宿主（规划）
     ├── macOS 程序 -> native sandbox provider
     ├── Linux ELF/OCI -> macOS 外层隔离 + wbox-linux
-    └── Windows 程序 -> macOS 外层隔离 + Wine
+    └── Windows 程序 -> macOS 外层隔离 + 第一方 Rust Win32 兼容运行时
 ```
 
 长期产品面是“三宿主 × 三来宾”，但路线状态不能靠愿景推断。唯一机器可读事实源
-是 `src/platform.rs`；`wbox platform [--json]` 输出九格各自的 execution provider、
-isolation model 与 `available/planned/research` 状态。当前只有既有四格可标
-`available`；macOS 三格在真机门禁建立前保持 planned，Windows/Linux 承载 macOS
-来宾则保持 research。
+是 `src/platform.rs`；`wbox platform [--json]` 输出九格各自的 priority、execution
+provider、isolation model 与 `available/legacy/planned/research` 状态。当前符合 Rust-only
+要求的三格可标 `available`；Linux -> Windows 的系统 Wine 路径是待删除的 legacy，
+不能再算合规能力。macOS 三格在真机门禁建立前保持 planned，Windows/Linux 承载
+macOS 来宾则保持 research。
+
+**近期优先级不是平均推进九格，而是三宿主 × 两类核心工作负载：**
+
+| 宿主 | Linux OCI 镜像 | Windows CLI/PE |
+|---|---|---|
+| Windows | `wbox-linux`，已有产品路径，继续补 ABI/性能 | AppContainer + Job，已有产品路径 |
+| Linux | rootless namespace/cgroup，已有产品路径 | 第一方 Rust Win32 runtime；系统 Wine 仅 legacy |
+| macOS | macOS 外层隔离 + `wbox-linux`，首批 macOS 主线 | macOS 外层隔离 + 同一第一方 Rust Win32 runtime |
+
+这六格达到产品门禁后，wbox 才算形成“跨三宿主的 Docker/Podman 核心能力 + 少量
+Windows 终端程序沙箱能力”。macOS 来宾、完整 GUI、通用整机 VM 和其它九格能力均
+保留长期目标，但不抢占这六格的 CPU、ABI、隔离与测试工作。
 
 ### 2.2 核心价值
 
@@ -134,7 +147,8 @@ isolation model 与 `available/planned/research` 状态。当前只有既有四�
 2. **默认约束**：默认断网、最小环境变量、进程树随父进程回收；限制无法生效时
    必须明确报错，不允许静默裸跑。
 3. **统一入口**：宿主程序和 OCI 镜像共用 `wbox run`、资源参数与退出码语义。
-4. **可验证**：Windows 真机、Linux、Wine 和 guest syscall 行为均有自动门禁。
+4. **可验证**：Windows 真机、Linux 和 guest syscall 行为均有自动门禁；legacy
+   Wine 门禁只用于迁移期防回归，不构成 Rust-only 完成证据。
 5. **纯 Rust**：wbox 的 CLI、沙箱、镜像管理和跨平台执行运行时全部使用 Rust
    实现。仓库与发布物不得编译、链接、打包或运行 C/C++ 实现。
 
@@ -146,6 +160,9 @@ isolation model 与 `available/planned/research` 状态。当前只有既有四�
 
 - 第一方代码和承载产品能力的第三方组件必须是 Rust；不得以 FFI、辅助进程、
   vendored 源码或预编译动态/静态库绕过。
+- Docker、Podman、Sandboxie Plus、WSL2、Wine、QEMU、VMware、VirtualBox、
+  Parallels、gVisor、Firecracker 等只提供**能力与行为参照**。不得调用、包装或
+  探测它们的可执行文件来宣称 wbox 获得对应能力。
 - 允许通过 Rust bindings 调用宿主操作系统提供的 Windows API、Linux syscall
   和系统动态加载器；这些是平台 ABI，不等于引入第三方 C/C++ 实现。
 - Rust crate 依赖必须审计其传递依赖和 `build.rs`，不得在构建时编译 C/C++，
@@ -163,7 +180,8 @@ blob digest、`flate2` 解层、`tar` 解包、`ureq`/`rustls` 跑 registry 协�
 TLS——这些都是纯 Rust，但它们承载的是**镜像管理的核心语义**，正确性与
 安全性直接决定 pull/push 的行为。这一档要求它们在本仓可读、可测、可改。
 
-**已全部达成。** 替换清单：
+除 Linux -> Windows 的系统 Wine legacy 路径外已达成；该路径必须由第一方 Rust
+PE loader + Win32 ABI 兼容运行时替换后，第二档才可重新宣称全产品达成。替换清单：
 
 | 原依赖 | 现在 |
 |---|---|
@@ -226,14 +244,14 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 端口映射、镜像构建**已被对标要求拉回范围内（见 §2.4 的差距表），因此从这里
 移出。仍然不做的是：
 
-- `[out]` **自行实现** VM monitor、CPU 硬件虚拟化、Hyper-V 或
-  Windows Container/Silo 的替代内核。wbox 的默认路径仍须在这些都不可用时成立。
-- `[research]` 对宿主已经安装的 QEMU、VMware、Parallels、Hyper-V/Virtualization
-  Framework 等提供可选 execution-provider adapter。wbox 统一其镜像、生命周期、
-  限额、日志和能力诊断，但不冒充这些 provider 的实现者，也不让它们成为默认依赖。
+- `[research]` 用第一方 Rust 实现 VM monitor、设备模型、软件 CPU 模拟与硬件
+  虚拟化控制面，对标 QEMU/VMware/Parallels 等能力；允许通过 Rust bindings 调用
+  Hyper-V/WHPX、KVM、Hypervisor.framework/Virtualization.framework 等宿主平台
+  ABI，但不得调用第三方虚拟化产品或链接其 C/C++ runtime。默认 portable 路径仍须
+  在硬件虚拟化不可用时成立。
 - `[out]` **内核驱动**（含 minifilter）。这条不只是"暂不做"：它划定了
   §2.4 中 Windows 程序沙箱的**能力上限**，见那里的说明。
-- `[out]` GUI/DirectX/COM/Windows 服务工作负载（Wine 下的 GUI 另议）。
+- `[out]` GUI/DirectX/COM/Windows 服务工作负载（第一方 Win32 运行时成熟后另议）。
 - `[out]` Kubernetes 兼容与 Docker daemon 的线协议兼容——对标的是 **CLI 与
   运行时行为**，不是做一个 drop-in 的 daemon。
 - `[out]` 未声明的弱化运行；缺少隔离前置时不得悄悄直接执行。
@@ -361,22 +379,21 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | seccomp | 部分 | F9.9：**拒绝名单**（门禁 SEC.1–SEC.6）；docker 用的是允许名单，二者边界强度不同 |
 | Docker daemon 线协议兼容 | 不做 | §2.3 非目标；对标的是 CLI 与运行时行为 |
 
-#### Q4 Linux 宿主 × Windows 程序 —— 对标 Wine
+#### Q4 Linux 宿主 × Windows 程序 —— 能力对标 Wine
 
-这一格的隔离能力**不是单独实现的**：wine 目标复用宿主程序模式的整条链路，
-因此 Q3 的 F9 能力自动适用。取证放在宿主模式（H.6–H.9）而不是 wine 用例上——
-后者缺 wine 就会 SKIP，而"缺环境时静默跳过"正是本项目吃过亏的地方（§4.9 W1）。
+目标是由 wbox 第一方 Rust PE loader 与 Win32 ABI 兼容运行时执行 Windows CLI，
+并复用 Linux 宿主程序模式的隔离链。当前系统 Wine 路径只作为迁移期 legacy 保留：
+它证明外层隔离编排，但不满足 Rust-only，不能把这一格标为 `available`。
 
 | 参照物特征能力 | wbox | 说明 |
 |---|---|---|
-| 运行 Windows CLI 程序 | 有 | 复用 Linux 隔离层调用系统 Wine |
+| 第一方 Rust 运行 Windows CLI | 规划 | PE loader、Win32 ABI、进程/线程、文件、注册表与网络兼容层尚未实现 |
+| legacy Windows CLI 路径 | legacy | 复用 Linux 隔离层调用系统 Wine；待第一方运行时替换后删除 |
 | PE 判定与误判防护 | 有 | 看完整签名而非只看 `MZ`（门禁 W.4/W.5）|
-| 在隔离内运行（Wine 本身不提供）| **有，这是 wbox 的增量** | Wine 只做 ABI 翻译，不做隔离 |
-| 自带 Wine | 无 | 依赖宿主已装；缺失时明确报错 |
-| `wineprefix` 与宿主隔离 | 有 | 用专用的 `~/.wbox/wineprefix`，不碰用户自己的 `~/.wine` |
-| `wineprefix` **容器之间**隔离 | 有 | 每容器一个 prefix，置于其状态目录内，随容器记录一并清理（§4.9 L2）|
-| GUI / DirectX / .NET | 不做 | §2.3 非目标（Wine 下 GUI 另议）|
-| 隔离/限额/身份/capability/seccomp/健康检查 | 有 | **复用 Q3 同一条 Linux 链路**：wine 目标走宿主程序模式（`wrap_if_pe` 只替换最终 argv，隔离链路一字不差），故 `--user`/`--cap-*`/`--seccomp-deny`/`--restart` 一并生效。门禁 H.6–H.9 在宿主模式上取证（不依赖装 wine，故任何机器都真的会跑）|
+| 在隔离内运行 | 外层已有 | H.6-H.12 已证明 Linux 宿主程序隔离链；第一方 Win32 runtime 接入后必须重新做产品门禁 |
+| legacy `wineprefix` 隔离 | 有 | 每容器一个 prefix，置于状态目录内；只用于迁移期防回归 |
+| GUI / DirectX / .NET | 不做 | §2.3 非目标；先完成 CLI 所需 Win32 子集 |
+| 隔离/限额/身份/capability/seccomp/健康检查 | 外层已有 | 复用 Q3 Linux 链路；不能用宿主模式门禁替代第一方 Win32 runtime 的端到端证据 |
 | overlay 可写层 | 不适用 | F9.12 只对镜像模式（换根）有意义；wine 目标不换根 |
 | `stats` | 有 | 走 `/proc` 那条路，不依赖换根也不依赖 cgroup；已实测宿主模式容器能取到 CPU/内存/进程数（F9.24）|
 | `pause` / `unpause` | 有 | 同样只需进程树，与 Q3 同一实现（F9.21）|
@@ -407,7 +424,7 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | | 原生格式 | 异构格式 |
 |---|---|---|
 | Windows 宿主 | PE 直接由内核加载（Q1） | Linux ELF 经用户态 x86-64 执行器（Q2，F4；执行器**已是纯 Rust**（`crates/wbox-linux`），见 §2.2.1；剩余的是 guest ABI 覆盖缺口，不是语言迁移） |
-| Linux 宿主 | ELF 直接由内核加载（Q3 的宿主程序模式） | PE 经系统 Wine（Q4，F6） |
+| Linux 宿主 | ELF 直接由内核加载（Q3 的宿主程序模式） | PE 目标为第一方 Rust Win32 runtime；当前系统 Wine 路径为 legacy（Q4，F6） |
 
 **四格由此得出**：
 
@@ -416,16 +433,16 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | Q1 Win×Win | F2 | 内核直接加载 PE | rootfs 要**显式授 ACE** 才读得到；没有写重定向（§2.5 天花板一） | Windows 侧 WP.* |
 | Q2 Win×Linux 镜像 | F2 | 用户态执行器跑 ELF | 双层隔离（AppContainer 套执行器）；免虚拟化是它存在的理由 | WP.*、F4.R6 产品门禁 |
 | Q3 Linux×Linux 镜像 | F5 | 内核直接加载 ELF | 换根 + rootless overlay 可写层（F9.12）；F9 全套能力在这一格 | 本仓 `scripts/test-linux-backend.sh` 绝大多数组 |
-| Q4 Linux×Win 程序 | F5 | `wrap_if_pe` 换掉最终 argv，交给系统 Wine | **隔离链路一字不差地复用 Q3 的宿主程序模式**，故 F9 的身份/限额/capability/seccomp 自动适用；每容器独立 `wineprefix` | W.1–W.5（PE 判定与执行）、H.6–H.12（能力取证） |
+| Q4 Linux×Win 程序 | F5 | 目标为第一方 Rust PE/Win32 runtime；`wrap_if_pe` + 系统 Wine 是 legacy | 外层隔离复用 Q3；第一方 runtime 尚无端到端门禁，故整格不可标 available | W.1–W.5 当前仅覆盖 legacy、H.6–H.12 仅覆盖外层隔离 |
 
 **从这张表能直接读出三件事**，省得每加一个能力都要重新论证一遍：
 
 1. **一个能力落在哪几格，取决于它依赖哪条链路的哪个原语。** 依赖 overlay 可写层的
    （`diff`/`commit`/`cp`/`export`）只在 Q3 成立，因为只有那一格换根；依赖 `/proc`
    或进程树的（`stats`/`pause`）在 Q3 与 Q4 都成立，因为两格共用 F5 那条链路。
-2. **Q4 的能力不必单独实现，但必须单独取证。** 复用不等于验证过——H.6–H.12 正是
-   在宿主程序模式上取证的，而不是在 wine 用例上（缺 wine 就会 SKIP，而"缺环境时
-   静默跳过"是本项目吃过亏的地方，见 §4.9 W1）。
+2. **Q4 的外层隔离可以复用，但 Win32 执行能力必须第一方实现并单独取证。**
+   H.6–H.12 只证明 Linux 宿主程序隔离链，系统 Wine 用例只保护 legacy 行为；两者
+   都不能替代 Rust PE/Win32 runtime 的产品门禁。
 3. **Q1/Q2 的缺口大多不是工作量问题，而是链路里没有那个原语。** Windows 侧没有
    overlay 可写层，`diff`/`commit`/`cp`/`export` 就无从谈起；没有 uid 映射，
    `--user` 就只能明确报错。这类缺口写成"不做"并给出原语层面的理由，
@@ -510,24 +527,23 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 
 | | Wine | wbox |
 |---|---|---|
-| 介入点 | **ABI 翻译**：在 POSIX 之上实现 Win32 API，自带 PE loader | **不重复造这一层**：直接调用系统 Wine 跑 PE |
-| 隔离 | **没有**。Wine 进程就是普通 Linux 进程，能读写你的整个 `$HOME` | **wbox 的增量就是这个**：PE 进程跑在 Q3 那条完整的 Linux 隔离链路里 |
-| `wineprefix` | 默认 `~/.wine`，多个程序共用 | **每容器一个**，放在容器状态目录内，随容器记录一并清理（§4.9 L2） |
+| 介入点 | **ABI 翻译**：在 POSIX 之上实现 Win32 API，自带 PE loader | 目标同层能力，但由第一方 Rust PE loader + Win32 runtime 实现 |
+| 隔离 | **没有**。Wine 进程就是普通 Linux 进程，能读写你的整个 `$HOME` | PE runtime 还要跑在 Q3 的 Linux 隔离链里 |
+| 状态目录 | 默认 `~/.wine`，多个程序共用 | 第一方 runtime 每容器独立；现有 `wineprefix` 只是 legacy 迁移状态 |
 | 限额/身份/capability/seccomp | 无 | 有——复用 Q3 同一条链路（门禁 H.6–H.12 取证） |
-| 自带 Wine | —— | **不做**：分发体积与许可都不划算，缺失时明确报错 |
+| 外部依赖 | Wine 本身 | 目标为无 Wine 依赖；当前调用系统 Wine 的代码待替换删除 |
 | GUI / DirectX / .NET | Wine 的主战场 | §2.3 非目标 |
 
-**「对标 Wine」这句话要拆开看**：ABI 翻译那一半 wbox 完全不做（做了是重复造轮子，
-而且做不过 Wine）；**隔离那一半 Wine 完全不做**，正是 wbox 补上的。所以这一格
-不是「追赶 Wine」，而是「给 Wine 加一层它本来就没有的东西」——PRD §2.4 的 Q4 表里
-「在隔离内运行（Wine 本身不提供）」那一行标的是「**有，这是 wbox 的增量**」。
+**「对标 Wine」指能力对齐，不是调用 Wine。** wbox 要在 Rust 中实现 CLI 工作负载
+所需的 PE/Win32 子集，并额外提供 Wine 本身没有的隔离。当前 legacy Wine 路径只
+保留迁移证据，不代表目标架构，也不能阻止第一方 runtime 立项。
 
 ---
 
 **现有四格合起来看，wbox 的默认路径仍是一条线**：不装驱动、不要求虚拟化、
 不起常驻守护进程，在这个前提下把各象限能兑现的部分做到位。长期九格不会抹掉
-这条 portable 路径，但可以在用户显式选择且宿主已有相应软件时，接入 VM provider
-补齐完整内核、跨 OS 与跨 ISA 能力；provider 的安装、许可和隔离边界必须如实暴露。
+这条 portable 路径；完整内核、跨 OS 与跨 ISA 能力也由第一方 Rust provider 补齐。
+宿主硬件虚拟化 ABI 可以作为加速后端，但第三方虚拟化产品不是 provider。
 
 #### 2.4.3 每格的下一步
 
@@ -547,12 +563,13 @@ DEFLATE 的理论压缩比超过 1000:1）、单个 tar 条目 4 GiB、JSON 嵌�
 | Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
 | Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
 | Q3 Podman | `update` 改运行中容器的限额 | **不做**：没设限额就没有 cgroup 可改，做出来会时灵时不灵；与 F9.21 拒绝用 freezer 同一条理由 | — |
-| Q4 Wine | 自带 Wine | **不做**：分发体积与许可都不划算，缺失时明确报错即可 | — |
+| Q4 Wine | 第一方 PE/Win32 runtime | **必须做**：按 CLI 工作负载分层实现 PE loader、NT/Win32 ABI、进程/线程、文件与注册表子集，替换 legacy 系统 Wine | 新增 F6.R*，Linux/macOS 协作 |
+| Q4 Wine | 删除系统 Wine 路径 | 第一方 runtime 达到产品门禁后删除 `wrap_if_pe` 外部调用与 wineprefix 兼容状态 | Linux agent |
 | Q4 Wine | GUI / DirectX / .NET | **不做**：§2.3 非目标 | — |
 
 判断原则：**默认 portable 后端不得要求驱动、常驻服务或硬件虚拟化**（§2.2/§2.5）；
-需要这些前提的能力只能进入显式可选 provider，缺失时不得影响默认后端，也不得
-静默降级到无隔离执行。
+硬件虚拟化只能是第一方 Rust runtime 的宿主 ABI 加速后端，缺失时不得调用第三方
+产品兜底，也不得静默降级到无隔离执行。
 portable 后端只补那些在“免安装、无服务、无驱动”前提下真能做成的。
 
 #### 2.4.4 每格的能力路线图
@@ -611,7 +628,7 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 | R5 `[部分]` | 动态 glibc、`fork`/`exec`/管道可跑；线程、`MAP_SHARED`、socket/epoll 未做 |
 | R6 `[部分]` | Ubuntu 24.04 已进入 Windows 产品门禁（WU.1/WU.2）；Alpine 仍只有手工跑通证据 |
 | R7 `[done]` | 仓库里不再有 C 依赖，§2.2.1 第一档达成 |
-| R9 `[done]` | §2.2.1 **第二档**：承载产品语义的第三方 crate 全部换成第一方，含 TLS。构建图只剩五个 wbox 包 + 平台 ABI |
+| R9 `[partial]` | 核心第三方 crate 已全部换成第一方，含 TLS，构建图只剩五个 wbox 包 + 平台 ABI；但系统 Wine legacy 仍阻塞全产品第二档 |
 
 **F9.37 的 `guest_workdir` 已经放进 `RunSpec`**，Q2 的镜像路径在 R4 落地时读它
 即可，不必再改结构——这是 Q3 的实现顺带给 Q2 铺的路，也是四格共用一套
@@ -635,21 +652,18 @@ pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`ev
 
 ##### Q4（Linux × Windows 程序）路线图
 
-**能力上已经到位**：隔离链路复用 Q3 的宿主程序模式，F9 的身份/限额/capability/
-seccomp/`stats`/`pause` 自动适用，取证在 H.6–H.12（落在宿主程序模式上，不依赖装
-wine，任何机器都真的会跑）；`wineprefix` 每容器独立（§4.9 L2）。
-
-剩下的两项都是**不做**：自带 Wine（分发体积与许可都不划算，缺失时明确报错）、
-GUI/DirectX/.NET（§2.3 非目标）。
-
-所以这一格的路线图是**空的，而且是好事**：§2.4.2 已经说清，wbox 在这格补的是
-「Wine 本来就没有的隔离」，那一半已经补完；ABI 翻译那一半交给 Wine，本就不该做。
+外层隔离能力已经到位：Q3 的身份、限额、capability、seccomp、`stats`、`pause`
+可以复用，H.6-H.12 提供机制证据。执行层尚未到位：系统 Wine 是不符合 Rust-only
+的 legacy。下一阶段必须建立 F6.R*，按 PE loader -> NT 基础对象 -> 文件/进程/线程
+-> 最小 Win32 CLI API -> 动态库加载的顺序实现第一方 runtime，并用真实 PE fixture
+建立 Linux 与 macOS 共用门禁。GUI/DirectX/.NET 继续留在 §2.3 非目标。
 
 #### 2.4.5 横向产品与能力矩阵
 
 这张矩阵用于决定“学谁的哪一层”，不是做笼统的强弱排名。容器、应用沙箱、ABI
 兼容层和整机虚拟化解决的是不同问题；wbox 的长期方向是用统一 CLI、镜像、生命周期、
-策略与诊断把这些执行层编排起来，而不是在一个 Rust 进程里重写所有 hypervisor。
+策略与诊断把第一方 Rust 执行层编排起来。对标物只定义能力目标，不进入依赖图或
+运行链；VM monitor、设备模型和兼容 runtime 也必须由 Rust 实现。
 
 | 产品/机制 | 类型 | 主要宿主 -> 来宾 | 最值得对标或复用的能力 | wbox 关系 |
 |---|---|---|---|---|
@@ -657,23 +671,23 @@ GUI/DirectX/.NET（§2.3 非目标）。
 | Podman | daemonless OCI 容器平台 | Linux -> Linux；桌面版经 machine | rootless、pod、daemonless CLI/API | Linux 默认后端主基线 |
 | Sandboxie Plus | Windows 应用沙箱 | Windows -> Windows | 文件/注册表重定向、强制入盒、恢复、策略 | Windows 原生沙箱上限参照；驱动能力不伪装成已实现 |
 | Bubblewrap | Linux 沙箱构造器 | Linux -> Linux 程序 | 最小 namespace、bind 策略、无特定镜像格式 | Linux 原生程序模式与策略拆分参照 |
-| WSL2 | 托管轻量 VM | Windows -> Linux | 完整 Linux 内核、Windows 集成、低运维 | Windows/Linux 完整 ABI 与性能参照；可选 provider 候选 |
-| Wine / CrossOver | Win32 兼容层 | Linux/macOS -> Windows 程序 | PE loader、Win32 ABI、prefix | 不重写 ABI；wbox 在外层补隔离与生命周期 |
-| QEMU | 用户态模拟器 + 整机模拟/虚拟化 | 多宿主 -> 多 ISA/多 OS | 跨 ISA、设备模型、磁盘格式、无加速回退 | `wbox-linux` 技术参照；system provider 高优先级候选 |
-| VMware | 商业整机虚拟化 | Windows/Linux/macOS -> VM | 成熟设备、快照、网络与企业运维 | 可选 provider；只经稳定 CLI/API 集成 |
-| VirtualBox | 跨平台整机虚拟化 | Windows/Linux/macOS -> VM | `VBoxManage`、快照、网络、可移植 VM | 开源/免费场景的可选 provider 候选 |
-| Parallels Desktop | macOS 整机虚拟化 | macOS -> Windows/Linux/macOS VM | Apple Silicon 集成、`prlctl`、快照 | macOS provider 高优先级候选 |
-| Apple Virtualization.framework | 系统虚拟化 API | macOS -> Linux/macOS VM | 原生 VM 生命周期、Virtio、Rosetta Linux | macOS 原生 VM provider 首选机制 |
+| WSL2 | 托管轻量 VM | Windows -> Linux | 完整 Linux 内核、Windows 集成、低运维 | 能力与体验基线，不调用 WSL |
+| Wine / CrossOver | Win32 兼容层 | Linux/macOS -> Windows 程序 | PE loader、Win32 ABI、prefix | 第一方 Rust Win32 runtime 的能力基线，不调用 Wine |
+| QEMU | 用户态模拟器 + 整机模拟/虚拟化 | 多宿主 -> 多 ISA/多 OS | 跨 ISA、设备模型、磁盘格式、无加速回退 | 第一方 Rust CPU/VM runtime 的能力基线，不调用 QEMU |
+| VMware | 商业整机虚拟化 | Windows/Linux/macOS -> VM | 成熟设备、快照、网络与企业运维 | VM 生命周期与管理体验基线，不集成其 CLI/API |
+| VirtualBox | 跨平台整机虚拟化 | Windows/Linux/macOS -> VM | CLI、快照、网络、可移植 VM | 开放格式与可移植体验基线，不调用 VBoxManage |
+| Parallels Desktop | macOS 整机虚拟化 | macOS -> Windows/Linux/macOS VM | Apple Silicon 集成、CLI、快照 | macOS VM 体验与性能基线，不调用 prlctl |
+| Apple Virtualization.framework | macOS 平台虚拟化 ABI | macOS -> Linux/macOS VM | 原生 VM 生命周期、Virtio、Rosetta Linux | 允许以 Rust bindings 作为宿主 ABI 加速后端，不引入第三方产品 |
 | gVisor | 用户态内核沙箱 | Linux -> Linux workload | syscall 拦截、OCI 接入、多租户攻击面 | 安全模型研究基线，不列首批依赖 |
 | Firecracker | KVM microVM | Linux -> Linux microVM | 极简设备模型、快速生命周期、microVM 隔离 | provider 生命周期研究基线，不列首批依赖 |
 
-能力记法：`主` = 产品主能力；`有` = 直接支持；`借` = 依赖外部 VM/兼容层；
+能力记法：`主` = 产品主能力；`有` = 直接支持；`借` = 由该产品借助 VM/兼容层实现；
 `限` = 有明确平台或语义限制；`—` = 不是该产品的目标。wbox 一栏写的是**长期产品面**，
 当前可用状态仍只能以 `wbox platform --json` 和对应宿主门禁为准。
 
 | 产品/机制 | OCI 镜像 | 单程序沙箱 | 完整来宾内核 | 跨 ISA | Windows 来宾 | Linux 来宾 | macOS 来宾 | 快照/回滚 | 统一 CLI 可接入 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| wbox（长期） | 主 | 主 | 借 | 主 | 主 | 主 | 限 | 借 | 主 |
+| wbox（长期） | 主 | 主 | 主 | 主 | 主 | 主 | 限 | 主 | 主 |
 | Docker / Podman | 主 | 有 | — | 借 | 限 | 主 | — | 镜像层 | 有 |
 | Sandboxie Plus | — | 主 | — | — | 主 | — | — | 有 | 限 |
 | Bubblewrap | — | 主 | — | — | — | 主 | — | — | 有 |
@@ -686,11 +700,12 @@ GUI/DirectX/.NET（§2.3 非目标）。
 | gVisor | 主 | 主 | 限 | — | — | 主 | — | — | API |
 | Firecracker | 限 | — | 主 | — | — | 主 | — | 限 | API |
 
-首批 provider SPI 只统一可验证的公共交集：`probe/version`、`create/start/stop/kill`、
+首批第一方 provider SPI 只统一可验证的公共交集：`capabilities/version`、`create/start/stop/kill`、
 `exec/logs/inspect`、资源限额、网络/共享目录声明、快照能力和清理。某 provider 不支持
-某项时返回结构化 `unsupported`，不能用空成功模拟。UTM 等主要作为 QEMU 或 Apple
-Virtualization.framework 的产品前端，暂不单列底层 provider；Hyper-V/KVM/HVF/WHPX
-作为加速机制挂在 WSL2/QEMU/系统 provider 下，不与用户直接选择的产品适配器混为一层。
+某项时返回结构化 `unsupported`，不能用空成功模拟。provider 必须是仓内第一方 Rust
+实现；不得探测或启动 UTM/QEMU/VMware/Parallels 等产品。Hyper-V/KVM/HVF/WHPX 与
+Apple Virtualization.framework 属宿主平台 ABI，可作为 Rust runtime 的加速机制，
+但不能把平台 ABI 后端冒充成完整 wbox provider。
 
 技术事实优先查上游资料：[Docker security](https://docs.docker.com/engine/security/)、
 [Podman 文档](https://docs.podman.io/)、[QEMU 两种执行模式](https://www.qemu.org/docs/master/about/)、
@@ -744,7 +759,8 @@ S3 在 Linux 上运行宿主程序或 Linux 镜像
 S4 在 Linux 上运行 Windows CLI
 ├── 识别 PE
 ├── 复用 S3 的隔离与限制
-└── 调用系统 Wine，不自行实现 Win32
+├── 当前系统 Wine 路径仅作 legacy 迁移基线
+└── 目标由第一方 Rust PE/Win32 runtime 执行
 ```
 
 ## 4. 功能需求树
@@ -793,8 +809,8 @@ S4 在 Linux 上运行 Windows CLI
 | F5.1-F5.5 namespace/fs/network | Linux backend | G3 | L1/H/N，CI 使用 REQUIRE |
 | F5.6/F5.7 cgroup/rlimit | `linux_limits.rs` | G3 正常路径 | C/L2；溢出、spawn 失败清理和跨后端内存语义仍有缺口 |
 | F5.8 后代清理 | `linux_ns.rs` | G3 | L3.1/L3.2 |
-| F6.1-F6.3/F6.5 PE/Wine 分派 | `wine.rs` | G3 | W.1/W.2/W.4/W.5 |
-| F6.4 隔离、网络和限额复用 | F5 + `wine.rs` | G3 部分 | W.3 覆盖网络；缺 PE workload 的资源超限行为断言 |
+| F6.L1-F6.L5 legacy PE/Wine 分派 | `wine.rs` | G3 legacy | W.1/W.2/W.4/W.5；不构成 Rust-only 完成证据 |
+| F6.R1-F6.R7 第一方 Rust Win32 runtime | 新 crate（待建） | G0 | 先建 PE loader/ABI fixture；产品门禁尚未建立 |
 | F7.1-F7.5 环境与凭证 | `backend/env.rs`、`registry.rs` | G2/G3 部分 | Rust 严格测试 + `WP.2`；Linux image 与 Windows image 路径仍随各自 G3 |
 | F8.1 状态目录与 `ps` | `runstate.rs`、`cli/ps.rs` | G3 | P.1-P.5、`WN.8`、`WNET.4` 与 `WP.5` |
 | F8.2/F8.3 detach/logs/stop/rm | `src/cli/run.rs`、`logs.rs`、`stop.rs`、`runstate.rs` | G4 Windows / G3 Linux | P.6-P.18、WP.6-WP.12；`WP.7A` 新增 detached `--rm` |
@@ -1240,18 +1256,29 @@ shell 留在同一 cgroup"影响）；父级不可写时退回 supervisor/target
 是门禁抓出来的。任何回退必须打印原因；`--cpu-pct` 等无法等价回退的限制应
 拒绝，不能忽略。
 
-### F6 Linux 上执行 Windows CLI `[active]`
+### F6 Linux/macOS 上执行 Windows CLI `[legacy/planned]`
 
 ```text
 F6
-├── F6.1 宿主模式识别 PE
-├── F6.2 查找 `WBOX_WINE`、wine64 或 wine
-├── F6.3 使用独立默认 WINEPREFIX
-├── F6.4 复用 F5 的 namespace、网络和限额
-└── F6.5 镜像模式遇到 PE 明确拒绝
+├── legacy（达到 F6.R7 后删除）
+│   ├── F6.L1 宿主模式识别 PE
+│   ├── F6.L2 查找 `WBOX_WINE`、wine64 或 wine
+│   ├── F6.L3 使用独立默认 WINEPREFIX
+│   ├── F6.L4 复用 F5 的 namespace、网络和限额
+│   └── F6.L5 镜像模式遇到 PE 明确拒绝
+└── 第一方 Rust Win32 runtime
+    ├── F6.R1 PE32+/COFF loader、重定位、导入表与 TLS directory
+    ├── F6.R2 NT 基础对象、句柄、状态码、Unicode 与虚拟内存
+    ├── F6.R3 文件、目录、管道、console 与环境/命令行
+    ├── F6.R4 进程、线程、同步、异常与时钟
+    ├── F6.R5 registry 最小子集、socket 与 CLI 所需 Win32 API
+    ├── F6.R6 Linux/macOS 宿主适配、隔离接入与真实 PE 门禁
+    └── F6.R7 删除系统 Wine 调用、WINEPREFIX 与外部版本探测
 ```
 
-验收由 `scripts/test-linux-backend.sh` 的 W 段及独立 Wine CI job 完成。
+现有 W 段及 Wine CI job 只保护 legacy。F6.R* 必须使用第一方生成或许可清晰的 PE
+fixture，分别建立纯 loader、ABI 组件和 Linux/macOS 产品门禁；任何调用 `wine*`
+可执行文件的路径都不能计入 F6.R* 证据。
 
 ### F7 环境与凭证边界 `[active]`
 
@@ -3426,8 +3453,8 @@ TODO-MACOS
 ├── M3 x86_64/aarch64 macOS 编译与 CLI 基础门禁          [planned]
 ├── M4 macOS 原生程序沙箱与资源限制取证                  [planned]
 ├── M5 macOS 上 `wbox-linux` + Linux OCI 产品路径         [planned]
-├── M6 macOS 上 Wine + Windows 程序产品路径               [planned]
-├── M7 QEMU/VMware/Parallels 等可选 provider SPI          [research]
+├── M6 macOS 上第一方 Rust Win32 runtime 产品路径          [planned]
+├── M7 对标 QEMU/VMware/Parallels 的第一方 Rust VM SPI     [research]
 └── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
 ```
 
@@ -3439,8 +3466,8 @@ wbox 的九格路由与能力状态。
 
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
-不得退化成裸 `Command::spawn`。`M7` 同理：provider adapter 必须报告可用性、版本、
-隔离责任和失败原因；“能找到某个 exe”不等于该 provider 已验收。
+不得退化成裸 `Command::spawn`。`M7` 同理：第一方 provider 必须报告能力、版本、
+隔离责任和失败原因；禁止通过找到并启动某个第三方 exe 来兑现能力。
 
 ## 5. 非功能需求
 
@@ -3492,9 +3519,9 @@ wbox 的九格路由与能力状态。
 | Windows shell 矩阵 | active | 纯 Rust runtime 已覆盖 BusyBox shell/fork/exec/管道；完整 guest ABI 缺口以 `tests/known-failures.txt` 为准 |
 | Rust 主机逻辑 | G0 complete | Windows workspace 单测与 Win32 实机模块持续进入 CI；实时数量以 runner 输出为准 |
 | Linux 原生后端 | active | 主路径 G3 已覆盖；资源溢出、失败清理和跨后端语义待补 |
-| Linux Wine 路径 | active | PE 分派/退出/网络 G3；资源超限行为待补 |
+| Linux -> Windows legacy Wine 路径 | legacy | 仅保迁移期 PE 分派/隔离回归；第一方 Rust Win32 runtime 尚未实现 |
 | 后台生命周期管理 | complete | Linux P.6-P.25 与 Windows WP.6-WP.24（含 create/start/rename、READY/ERROR、kill/top、管道 EOF）已进门禁；Windows OCI/模拟器 exec 明确不支持 |
-| Rust-only 依赖约束 | done | `Cargo.lock` 16 条 = 5 个第一方 crate + `libc`/`windows-sys` 及其 target 垫片；三条棘轮（`src/runtime/mod.rs`）盯住 C 源码、被换掉的 crate 与整棵依赖图 |
+| Rust-only 依赖约束 | partial | Cargo 构建图已第一方化；运行时仍有系统 Wine legacy，待 F6.R7 删除后才是全产品 done |
 
 上述数字是该日期的状态快照，不作为门禁配置。真实基线分别以测试 runner、
 `tests/known-failures.txt` 和 `.github/workflows/ci.yml` 为准。
