@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W51、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L27、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M10
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W52、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L28、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M11
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2613,6 +2613,7 @@ TODO-WINDOW
 ├── W49 单 PID executable path 下沉并删除 top Win32 查询                     [done] PathBuf + fallback 门禁
 ├── W50 共享映射长度失配 fail-closed                                          [done] oversized open 无指针暴露
 ├── W51 三宿主双 ISA 非宿主目标持续编译门禁                                    [done] 四目标 all-targets Clippy
+├── W52 宿主内存几何与物理容量下沉                                               [done] 4 KiB/64 KiB/64 GiB 实测
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3021,8 +3022,13 @@ TODO-LINUX
 ├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
 ├── L25 AArch64 Linux seccomp syscall 表可移植性              [done] ISA catalog + full workspace Clippy
 ├── L26 POSIX 共享内存与多进程 zero-copy Linux 真机验收       [next] shm 生命周期 + 1/2/4/8 workers
-└── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
+├── L27 单 PID executable path Linux 真机验收                  [next] proc exe + 退出/权限竞态
+└── L28 宿主内存事实 Linux 真机验收                            [next] page/physical pages + limit 边界
 ```
+
+`L28` 在 Linux 真机运行 platform `host-memory` 单元测试和
+`wbox-machine-lab host`，核对 `_SC_PAGESIZE`、`_SC_PHYS_PAGES` 乘积及非零/溢出失败。
+宿主物理总量不得冒充 cgroup memory.max 或容器可用预算；双 ISA 交叉编译只证明契约可编译。
 
 `L27` 在 Linux 真机运行 platform `process-image` 单元测试，并覆盖子进程存活、退出后
 `NotFound` 与受限 `/proc` 的类型化失败。Linux `top` 继续读取完整 cmdline 和 PPID 来
@@ -3620,8 +3626,13 @@ TODO-MACOS
 ├── M7 对标 QEMU/VMware/Parallels 的第一方 Rust VM SPI     [research]
 ├── M8 macOS 真机 CI、签名、notarization 与 portable 包   [planned]
 ├── M9 POSIX 共享内存与多进程 zero-copy macOS 真机验收    [next] Intel/Apple Silicon
-└── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
+├── M10 单 PID executable path macOS 真机验收              [next] proc_pidpath + 双 ISA
+└── M11 宿主内存事实 macOS 真机验收                         [next] sysconf + hw.memsize
 ```
+
+`M11` 在 Intel 与 Apple Silicon 真机运行 platform `host-memory` 单元测试和
+`wbox-machine-lab host`，核对页大小、映射粒度与 `hw.memsize`，并保持宿主容量和
+进程/沙箱预算分层。双 macOS ISA Clippy 不能替代该运行证据。
 
 `M1` 只冻结产品语义，不声称 macOS 已可用。`crates/wbox-machine` 把宿主、来宾、执行
 provider 与外层隔离分开建模，避免再用 `cfg!(windows) { ... } else { linux }`
@@ -3630,9 +3641,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`308232b4210abb74b4a0db60aa79aba5f4f42b14`，关闭 default features，按消费包启用
+`58ea7f38ecac52213b0dbedbade9f33322ff620d`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`、`shared-memory` 与零依赖 `hardware`。
+`process-image`、`shared-memory`、零依赖 `hardware` 与独立 `host-memory`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
 内部模块。
@@ -3779,6 +3790,16 @@ macOS 均执行 workspace all-targets Clippy 并以 warning 为错误。脚本�
 目标已安装、关闭 incremental 避免交叉目标缓存膨胀，并在退出时恢复调用者环境；CI
 以四个独立矩阵项运行，`fail-fast: false` 保留全部失败证据，且成为 release 的第十个
 前置门禁。该门禁证明类型与 lint 契约，不替代对应宿主的真机运行证据。
+
+`W52` 在 platform 增加独立 `host-memory` feature，保留 `hardware` 零依赖边界：
+Windows 使用 `GetSystemInfo`/`GlobalMemoryStatusEx`，Linux 使用页大小与物理页数，
+macOS 使用页大小与 `hw.memsize`。公共事实以 `NonZero` 表达页大小、映射 allocation
+granularity 和宿主物理总量，原生失败、零值与乘法溢出均类型化；它明确不表示动态
+available、cgroup、Job Object 或进程预算。wbox-machine 直接重导出该事实类型，lab
+不保留第二份探测。本 Windows 机器实测为 page 4096、allocation granularity 65536、
+physical 68718866432 bytes；上游五目标严格 Clippy、Windows 原生单测及 wbox-machine
+26 单测/9 进程测试、wbox Quick 301 项及完整 workspace Rust 门禁通过，Unix 真机
+交接见 L28/M11。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

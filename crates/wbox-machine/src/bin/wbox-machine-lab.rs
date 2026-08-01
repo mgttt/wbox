@@ -4,9 +4,9 @@ use std::io::Read;
 use std::path::Path;
 
 use wbox_machine::{
-    accelerator_routes, current_host, detect_hardware, esp32_routes, inspect_artifact,
-    parallel_routes, prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs,
-    Isa, ParallelRouteStatus, Priority,
+    accelerator_routes, current_host, detect_hardware, detect_host_memory, esp32_routes,
+    inspect_artifact, parallel_routes, prefilled_topology, route, wasm_machine_routes,
+    Availability, GuestOs, HostOs, Isa, ParallelRouteStatus, Priority,
 };
 
 const HEADER_READ_LIMIT: u64 = 1024 * 1024;
@@ -182,6 +182,7 @@ fn print_devices() -> Result<(), String> {
 fn print_host() -> Result<(), String> {
     let host = current_host();
     let hardware = detect_hardware(host);
+    let memory = detect_host_memory().map_err(|error| error.to_string())?;
     println!("host={}", host.map_or("unknown", HostOs::as_str));
     println!(
         "native_isa={}",
@@ -207,6 +208,9 @@ fn print_host() -> Result<(), String> {
         hardware.acceleration_api.map_or("none", |api| api.as_str()),
         hardware.acceleration_state.as_str()
     );
+    println!("page_size={}", memory.page_size);
+    println!("allocation_granularity={}", memory.allocation_granularity);
+    println!("physical_memory_bytes={}", memory.physical_bytes);
     Ok(())
 }
 

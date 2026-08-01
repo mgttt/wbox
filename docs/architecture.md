@@ -125,6 +125,9 @@ GPU、NPU、LPU 与 CPU ISA 正交，由 `HostOs × AcceleratorClass` 九格矩�
 工作负载分别预填为 parallel/tensor/language compute。当前九格全部是 research；
 设备发现与宿主 API 归 `agenterm-platform`，内存、队列、调度、隔离和执行 provider
 契约归 `wbox-machine`，未取得运行证据前不得转为 available。
+宿主页大小、映射 allocation granularity 与物理总量也由 `agenterm-platform`
+的 `host-memory` 契约提供；wbox-machine 直接重导出该事实类型。它不包含 cgroup、
+Job Object 或进程限额，资源预算和超限策略仍归具体执行 provider。
 
 点/线/面/体是分布式执行的共同拓扑：资源节点是点，带方向与 transport 的连接是线，
 调度/流水线/数据并行/task graph 是面，跨执行域的 placement、协调、一致性和故障

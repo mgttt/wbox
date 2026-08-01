@@ -18,6 +18,9 @@ fn host_probe_keeps_acceleration_state_explicit() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("host="));
     assert!(stdout.contains("native_isa="));
+    assert!(stdout.contains("page_size="));
+    assert!(stdout.contains("allocation_granularity="));
+    assert!(stdout.contains("physical_memory_bytes="));
     assert!(stdout.contains("/unprobed"));
 }
 
