@@ -41,8 +41,8 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W46、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L23、W5（历史编号）
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W47、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L25、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -2606,6 +2606,7 @@ TODO-WINDOW
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
 ├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
 ├── W46 Windows guest runner 超时工具语义探测                            [done] 正式套件 15/6/1
+├── W47 单 PID CPU/RSS 观测下沉并删除 stats `/proc` 解析                   [done] 三宿主契约 + Windows 实测
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3010,8 +3011,20 @@ TODO-LINUX
 ├── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
 ├── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
 ├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
-└── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
+├── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
+├── L24 宿主单 PID CPU/RSS Linux 真机验收                    [next] stats proc fallback + 退出竞态
+└── L25 AArch64 Linux seccomp syscall 表可移植性              [next] mknod/uselib 不能引用缺失常量
 ```
+
+`L25` 来自本阶段新增的 AArch64 Linux workspace 门禁：`src/seccomp.rs` 无条件引用
+x86 有而 AArch64 `libc` 不提供的 `SYS_mknod`、`SYS_uselib`，导致 bin/all-targets 编译
+失败；workspace library 路径及 platform `process-metrics` 本身已通过。修复应按 ISA
+构造审计过的 syscall 集合并补双 ISA 编译断言，不能伪造 syscall number 或放宽 lint。
+
+`L24` 在 Linux 真机运行 platform `process-metrics` 测试和无专属 cgroup 的
+`wbox stats`，核对 `/proc/<pid>/stat` 的累计 CPU、`statm` RSS、进程退出竞态与多成员
+饱和聚合。PID 树选择、cgroup 优先级、RSS 重复计数标签和 CPU 百分比继续归 wbox；
+Windows 实测及 Linux 交叉编译不能替代该产品门禁。
 
 `L23` 在 Linux 真机运行 platform filesystem 测试和 `t_fd_open`/`t_path`，证明
 `FileIdentity` 的 device/inode/link-count 与现有 guest Unix metadata 一致，且 rename
@@ -3595,7 +3608,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`d5522c6c8b428a83a7ebeed28bacc7c2a9c13b85`，关闭 default features，按消费包启用
+`3078edd97c9064a58b1530de7e58f8b5d5b7d6de`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
 并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
@@ -3697,6 +3710,15 @@ runner 现在优先检查当前 Bash 同目录候选，并通过“`timeout 0` �
 guest 都回归。Windows 真机使用 `/usr/bin/timeout.exe` 完成 `--skip-slow` 正式裁决：
 15 PASS、`t_exec/t_fork_mem/t_net_epoll/t_net_sockopt/t_path/t_proc` 六个既有基线失败、
 1 个 slow SKIP，整体 rc0；其中 `t_fd_open` 86/0、`t_path` 81/4。
+
+`W47` 在 platform 增加独立 `process-metrics` feature，只暴露单个宿主 PID 的累计
+CPU 时间与 resident bytes：Windows 使用 process times/working set，Linux 使用
+`/proc` stat/statm，macOS 使用 `PROC_PIDTASKINFO`。wbox 的 `stats` 删除本地 tick、
+page size 和字段偏移解析，只保留容器成员选择、逐 PID 退出容错、饱和聚合、cgroup
+优先级、采样窗口和来源标签。完整 `process` feature 仍关闭；platform feature 已在
+Windows 真机测试，并通过 Windows i686、Linux x64/AArch64、macOS x64/AArch64
+严格编译；wbox workspace 通过 Windows、Linux x64 与双 macOS ISA，AArch64 Linux
+library 通过但 bin 被既有 seccomp 常量阻塞（L25）。Linux 产品验收交接为 L24。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

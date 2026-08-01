@@ -18,7 +18,7 @@ members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", 
 # 单点冻结 Windows ABI 声明版本，各 package 仍只启用自身需要的 feature。
 windows-sys = { version = "0.61", default-features = false }
 # 单点冻结共享宿主机制，各 package 只启用自身消费的最小 feature。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "d5522c6c8b428a83a7ebeed28bacc7c2a9c13b85", default-features = false }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "3078edd97c9064a58b1530de7e58f8b5d5b7d6de", default-features = false }
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
@@ -38,9 +38,9 @@ wbox-linux = { path = "crates/wbox-linux" }
 # 宿主身份由 agenterm-platform 提供；产品矩阵与路由仍在本 crate。
 wbox-machine = { path = "crates/wbox-machine" }
 
-# 只消费跨产品成立的宿主熵、文件、锁与单进程控制机制；目录用途、进程树所有权、
+# 只消费跨产品成立的宿主熵、文件、锁与单进程控制/观测机制；目录用途、进程树所有权、
 # TLS/guest 错误策略、状态和 guest 路由仍由 wbox 持有。
-agenterm-platform = { workspace = true, features = ["entropy", "filesystem", "locking", "process-control"] }
+agenterm-platform = { workspace = true, features = ["entropy", "filesystem", "locking", "process-control", "process-metrics"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。

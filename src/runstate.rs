@@ -1899,6 +1899,10 @@ mod kill_tests {
             agenterm_platform::CapabilityStatus::Available
         );
         assert_eq!(
+            agenterm_platform::capability_status(agenterm_platform::Capability::ProcessMetrics),
+            agenterm_platform::CapabilityStatus::Available
+        );
+        assert_eq!(
             agenterm_platform::capability_status(agenterm_platform::Capability::Process),
             agenterm_platform::CapabilityStatus::Unsupported {
                 reason: std::borrow::Cow::Borrowed("feature-disabled")

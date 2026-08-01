@@ -126,17 +126,6 @@ pub fn human_bytes(v: u64) -> String {
 mod linux {
     use super::{Sample, Source};
 
-    /// 每个 tick 多少纳秒。`/proc/<pid>/stat` 的时间以 tick 计。
-    fn tick_ns() -> u64 {
-        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        if hz <= 0 {
-            // 取不到就按最常见的 100Hz。宁可用一个说得出理由的默认值，
-            // 也不要让 CPU% 变成 0 或除零。
-            return 10_000_000;
-        }
-        1_000_000_000 / hz as u64
-    }
-
     /// 容器**专属** cgroup 的目录；没有专属组时返回 `None`。
     ///
     /// 判据是"它和 wbox 自己的组不同"：没设限额时容器就待在 wbox 所在的组里，
@@ -186,35 +175,19 @@ mod linux {
 
     /// 逐进程累加。内存是 RSS 合计，共享页重复计入（调用方要如实标注来源）。
     fn from_proc(pids: &[u32]) -> Sample {
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(4096) as u64;
-        let tick = tick_ns();
         let mut cpu_ns = 0u64;
         let mut mem = 0u64;
         let mut alive = 0u32;
         for &pid in pids {
-            // 进程随时可能退出；读不到就跳过，不让整次采样失败。
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) else {
+            // 成员选择和聚合属于 wbox；单 PID 宿主计数由共享平台层读取。
+            // 进程随时可能退出，读不到就跳过，不让整次采样失败。
+            let Ok(metrics) = agenterm_platform::process_metrics::metrics(pid) else {
                 continue;
             };
-            // comm 字段可能含空格和括号，必须从**最后**一个 ')' 之后开始切
-            let Some(close) = stat.rfind(')') else {
-                continue;
-            };
-            let f: Vec<&str> = stat[close + 2..].split_whitespace().collect();
-            // 跳过 state 后，utime/stime 是第 11、12 个（0 基）
-            let utime = f.get(11).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            let stime = f.get(12).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            cpu_ns += (utime + stime) * tick;
-            if let Ok(statm) = std::fs::read_to_string(format!("/proc/{}/statm", pid)) {
-                if let Some(res) = statm
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|v| v.parse::<u64>().ok())
-                {
-                    mem += res * page;
-                }
-            }
-            alive += 1;
+            let process_cpu_ns = u64::try_from(metrics.cpu_time.as_nanos()).unwrap_or(u64::MAX);
+            cpu_ns = cpu_ns.saturating_add(process_cpu_ns);
+            mem = mem.saturating_add(metrics.resident_bytes);
+            alive = alive.saturating_add(1);
         }
         Sample {
             cpu_ns,
