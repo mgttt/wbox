@@ -38,7 +38,7 @@ wbox-linux = { path = "crates/wbox-linux" }
 wbox-machine = { path = "crates/wbox-machine" }
 
 # 只消费跨产品成立的宿主文件系统约定；状态目录与 guest 路由仍由 wbox 持有。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "3a6f4ef3a65c6eea248d4f378d2b63fa58063473", default-features = false, features = ["filesystem-conventions"] }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "a24c6e9f43469f98a1591cdd7b0b23f63594426d", default-features = false, features = ["filesystem-conventions", "locking"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。

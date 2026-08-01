@@ -7,4 +7,4 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [dependencies]
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "3a6f4ef3a65c6eea248d4f378d2b63fa58063473", default-features = false }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "a24c6e9f43469f98a1591cdd7b0b23f63594426d", default-features = false }

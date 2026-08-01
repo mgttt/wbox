@@ -8,6 +8,7 @@ use super::registry::RegistryClient;
 use super::ImageRef;
 use crate::error::{ErrKind, KindExt, WboxError};
 use crate::fault::Context;
+use agenterm_platform::locking::{LockErrorKind, PathLock};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ impl Drop for StagingDir {
 }
 
 struct PullCommitLock {
-    path: PathBuf,
+    _guard: PathLock,
 }
 
 impl PullCommitLock {
@@ -90,9 +91,9 @@ impl PullCommitLock {
         let path = sibling_path(dest, "pull.lock", false)?;
         let deadline = Instant::now() + timeout;
         loop {
-            match std::fs::create_dir(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            match PathLock::try_acquire(&path) {
+                Ok(guard) => return Ok(Self { _guard: guard }),
+                Err(error) if error.kind() == LockErrorKind::Contended => {
                     if Instant::now() >= deadline {
                         crate::bail!(
                             "等待镜像缓存提交锁超时：{}（可能有另一 pull 正在提交）",
@@ -101,15 +102,9 @@ impl PullCommitLock {
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
-                Err(e) => return Err(e.into()),
+                Err(error) => return Err(error.into()),
             }
         }
-    }
-}
-
-impl Drop for PullCommitLock {
-    fn drop(&mut self) {
-        std::fs::remove_dir(&self.path).ok();
     }
 }
 
@@ -997,8 +992,8 @@ mod tests {
         let second = PullCommitLock::acquire(&dest, Duration::from_millis(50)).unwrap();
         drop(second);
         assert!(
-            !sibling_path(&dest, "pull.lock", false).unwrap().exists(),
-            "释放提交锁后不得残留锁目录"
+            !sibling_path(&dest, "pull.lock", false).unwrap().is_dir(),
+            "提交锁不得残留会永久阻塞后续 pull 的目录哨兵"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
