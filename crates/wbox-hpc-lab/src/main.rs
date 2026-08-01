@@ -885,6 +885,27 @@ mod tests {
     }
 
     #[test]
+    fn shared_mapping_rejects_a_view_larger_than_the_object() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("wbox-hpc-size-test-{}-{nonce}", std::process::id());
+        let _creator = SharedMemory::create(&name, 4096).unwrap();
+        let error = SharedMemory::open(&name, 8192).unwrap_err();
+        #[cfg(windows)]
+        assert_eq!(
+            error.kind(),
+            agenterm_platform::shared_memory::SharedMemoryErrorKind::Map
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            error.kind(),
+            agenterm_platform::shared_memory::SharedMemoryErrorKind::SizeMismatch
+        );
+    }
+
+    #[test]
     fn arguments_include_repeat_count() {
         let args = [
             "bench".to_owned(),

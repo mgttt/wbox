@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W49、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W50、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L27、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M10
 ├── 5  非功能需求 N1–N4
@@ -2609,6 +2609,7 @@ TODO-WINDOW
 ├── W47 单 PID CPU/RSS 观测下沉并删除 stats `/proc` 解析                   [done] 三宿主契约 + Windows 实测
 ├── W48 命名共享内存下沉并展开跨宿主多进程 zero-copy                       [done] Win32 FFI 删除 + 1/2/4/8 workers
 ├── W49 单 PID executable path 下沉并删除 top Win32 查询                     [done] PathBuf + fallback 门禁
+├── W50 共享映射长度失配 fail-closed                                          [done] oversized open 无指针暴露
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3026,7 +3027,8 @@ TODO-LINUX
 
 `L26` 在 Linux 真机运行 platform `shared-memory` 的单元/跨进程测试，再运行小规模
 `wbox-hpc-lab bench`，证明排他 create、peer open、共享写可见、creator unlink、已开
-view 存活以及 1/2/4/8 worker checksum。映射名称与 RAII 归 platform；数据布局、同步、
+view 存活、oversized open 在 `mmap` 前返回 `SizeMismatch`，以及 1/2/4/8 worker
+checksum。映射名称与 RAII 归 platform；数据布局、同步、
 cache-line 槽、worker 划分和性能口径归 wbox。双 Linux ISA 交叉编译不能替代真机。
 
 `L25` 来自本阶段新增的 AArch64 Linux workspace 门禁：`src/seccomp.rs` 无条件引用
@@ -3623,7 +3625,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`38126e1449039ccecb6611b849841a88044108fe`，关闭 default features，按消费包启用
+`308232b4210abb74b4a0db60aa79aba5f4f42b14`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`、`shared-memory` 与零依赖 `hardware`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -3757,6 +3759,14 @@ ToolHelp basename 快照保留其低成本语义。wbox `top` 删除本地
 缺失 PID fallback、feature 隔离测试及完整 WP.1–WP.27 通过，其中 WP.19 证明只列 Job
 guest 且不泄露 supervisor。Windows i686、Linux 双 ISA、macOS 双 ISA 严格编译通过；
 Unix 原生验收交接为 L27/M10。
+
+`W50` 修复 POSIX 共享内存的延迟失败窗口：`mmap` 可能接受超过 shm 对象实际长度的
+范围，直到访问尾部才以 `SIGBUS` 杀死进程。platform opener 现在先 `fstat`，对象小于
+请求长度时返回类型化 `SizeMismatch` 并关闭 fd，不暴露指针；Windows 继续由
+`MapViewOfFile` 在映射阶段拒绝。wbox HPC 增加“create 4 KiB / open 8 KiB”依赖级
+回归，Windows 真机返回 `Map`，Linux/macOS 编译期固定 `SizeMismatch` 分支；POSIX
+原生行为继续在 L26/M9 验收。同期把 process-image missing-PID 测试改用 `pid_t`
+范围内的 `i32::MAX`，避免把 macOS 正确的 `IdOutOfRange` 误判成 `NotFound` 回归。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
