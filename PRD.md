@@ -41,9 +41,9 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W74、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L45、W5（历史编号）
-│       └── 4.9.3 [TODO-MACOS]    M1–M30
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W75、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L46、W5（历史编号）
+│       └── 4.9.3 [TODO-MACOS]    M1–M31
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
 ├── 7  里程碑与时间线
@@ -2664,6 +2664,7 @@ TODO-WINDOW
 ├── W72 OCI 缓存目录发布/回滚下沉并删除本地 rename 事务                              [done] typed outcome
 ├── W73 pull 崩溃后废弃 staging/backup 识别与恢复                                     [done] owner receipt + crash probe
 ├── W74 link-like 文件系统条目分类下沉并收紧目录发布/清理                              [done] junction root + publish reject
+├── W75 动态可用物理内存事实下沉并接入 machine lab                                   [done] 34.4/64.0 GiB + typed semantics
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3094,7 +3095,8 @@ TODO-LINUX
 ├── L42 逻辑目录占用 Linux 真机验收                                     [next] symlink leaf + hard-link entries
 ├── L43 可回滚目录发布 Linux 真机验收                                   [next] rename/rollback/mode-000 cleanup
 ├── L44 pull owner/backup 崩溃恢复 Linux 真机验收                       [next] flock + /proc NotFound + crash
-└── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
+├── L45 link-like 条目分类 Linux 真机验收                              [next] symlink root + publish/usage/cleanup
+└── L46 动态可用物理内存 Linux 真机验收                                [next] MemAvailable + pressure/cgroup distinction
 ```
 
 `L40` 在非 root Linux 真机创建 overlay 风格的 mode-000 `work/work`，经 platform
@@ -3129,6 +3131,12 @@ rename 行为。
 目录 symlink 的分类；随后复跑 cleanup、usage、publish 三个最小 feature，确认 symlink
 作为清理根可删除但目标保留、逻辑统计只计链接自身、发布拒绝 link-like staging/destination。
 该事实不授权遍历，也不替代 wbox 对缓存根、owner 与恢复时机的产品裁决。
+
+`L46` 在 Linux 真机仅启用 platform `host-memory`，将动态结果与同一时刻
+`/proc/meminfo` 的 `MemAvailable` 交叉核对，并验证语义固定为 `linux-mem-available`。
+必须另行记录 cgroup v1/v2 memory limit/current；不得把宿主 `MemAvailable` 当作容器、
+进程或 guest 的可分配预算。内存压力下允许数值下降乃至为零，格式错误、缺字段和乘法
+溢出必须类型化失败；交叉编译不能替代 procfs 真机行为。
 
 `L39` 在 Linux 真机运行 platform `process-spawn` 行为门禁，确认 child 的 session ID
 等于自身 PID，并复跑 `run -d`、create/start、READY/ERROR 回滚及父终端退出后的生命周期。
@@ -3809,7 +3817,8 @@ TODO-MACOS
 ├── M27 逻辑目录占用 macOS 真机验收                                   [next] symlink leaf + hard-link entries
 ├── M28 可回滚目录发布 macOS 真机验收                                 [next] APFS rename/rollback/cleanup
 ├── M29 pull owner/backup 崩溃恢复 macOS 真机验收                     [next] flock + ESRCH + APFS rename
-└── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
+├── M30 link-like 条目分类 macOS 真机验收                            [next] APFS symlink + publish/usage/cleanup
+└── M31 动态可用物理内存 macOS 真机验收                              [next] Mach free+inactive + pressure distinction
 ```
 
 `M25` 在 Intel 与 Apple Silicon 的非 root 用户下复用 L40 的 mode-000 与树外 symlink
@@ -3836,6 +3845,11 @@ Clippy 只能证明契约可编译，不能替代 flock、`proc_pidinfo` 与 APF
 `M30` 在 Intel 与 Apple Silicon 分别复用 L45 的最小 feature 门禁，确认 APFS symlink
 metadata 被归为 link-like、普通目录保持 real directory；cleanup/usage/publish 的行为必须
 与该分类一致。交叉编译只证明同一公共契约可构建，不能替代 APFS 真机对象行为。
+
+`M31` 在 Intel 与 Apple Silicon 真机运行 platform `host-memory` 和
+`wbox-machine-lab host`，交叉核对 Mach `free_count + inactive_count` 乘宿主页大小，语义
+必须为 `macos-free-plus-inactive`。该估算不等于 memory-pressure 等级，也不包含产品可用
+预算；双 ISA 交叉编译只能证明 Mach ABI 与公共类型可构建，不能替代原生计数和压力变化。
 
 `M24` 在 Intel 与 Apple Silicon 真机验证 platform `process-spawn` 建立新 session，保留
 `Child` 直到启动/退出证据完成，并确认终端关闭不会带走已 READY 的 supervisor。产品层
@@ -3904,7 +3918,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`8d39af2cc0935484dcc875d79196500ac7c94f54`，关闭 default features，按消费包启用
+`9cc8c6a6301a29929250e952e49e2fa2d5380137`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
@@ -4338,6 +4352,21 @@ wbox OCI 定向 46 tests、根 470 tests（467 passed、3 ignored）和 Quick 30
 便携门禁覆盖 Windows i686、Linux ARM64 与 macOS 双 ISA；release 产品门禁 WP.1-WP.27
 及固定 Ubuntu 24.04 fixture 的 WU.1/WU.2 通过。Linux/macOS 原生分类与组合行为分别
 交接 L45/M30。
+
+`W75` 在 platform `host-memory` 的静态页几何/物理总量之外增加独立动态快照：Windows
+使用 `GlobalMemoryStatusEx::ullAvailPhys`，Linux 使用 `/proc/meminfo` 的 `MemAvailable`，
+macOS 使用 Mach free+inactive pages；公共 `HostMemoryAvailabilitySemantics` 保留三者不同
+的可回收语义，零可用值有效，超过物理总量、格式错误和溢出均失败。该值明确不是 cgroup、
+Job Object、容器、进程或 guest 预算。
+
+`wbox-machine` 直接重导出该类型和 `detect_host_memory_availability()`，不复制宿主查询，
+也不把动态值塞入静态 `HardwareCapabilities`；lab `host` 输出字节数与语义，资源路由/限额
+仍归产品层。本 Windows VM 实测物理总量 `68718866432` bytes、可用 `36925779968` bytes，
+语义 `windows-available-physical`。platform 最小 feature 14 tests、Windows i686、Linux
+ARM64 与 macOS 双 ISA 严格编译通过；wbox-machine 39 tests、根 470 tests（467 passed、
+3 ignored）、Quick 306 项和四 portable targets 通过，Quick 释放 428.4 MiB 可再生缓存；
+release 产品门禁 WP.1-WP.27 与 Ubuntu 24.04 WU.1/WU.2 通过。Linux/macOS 真机分别
+交接 L46/M31。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

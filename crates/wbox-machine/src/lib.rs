@@ -30,7 +30,10 @@ pub use architecture::{
 pub use artifact::{inspect_artifact, ArtifactError, ArtifactIdentity};
 pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, FirmwareEnvironment};
 pub use guest::{guest_contract, BinaryFormat, GuestAbi, GuestContract, GuestOs};
-pub use memory::{detect_host_memory, HostMemoryError, HostMemoryErrorKind, HostMemoryFacts};
+pub use memory::{
+    detect_host_memory, detect_host_memory_availability, HostMemoryAvailability,
+    HostMemoryAvailabilitySemantics, HostMemoryError, HostMemoryErrorKind, HostMemoryFacts,
+};
 pub use parallel::{
     parallel_routes, DataPath, ParallelExecution, ParallelRoute, ParallelRouteStatus,
 };

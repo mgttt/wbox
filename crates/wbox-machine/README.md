@@ -4,7 +4,8 @@
 guest OS, processor ISA, guest ABI, executable format, device/accelerator class,
 execution provider, isolation, and the 3 x 3 x 2 product route matrix without
 owning an OS adapter. Host identity, process-scoped processor facts, system CPU
-topology, cache hierarchy, and native host memory geometry come from a pinned, lightweight
+topology, cache hierarchy, native host memory geometry, and typed dynamic memory availability
+come from a pinned, lightweight
 `agenterm-platform`;
 product routing, guest ISA and
 acceleration availability stay here. The broader processor taxonomy also

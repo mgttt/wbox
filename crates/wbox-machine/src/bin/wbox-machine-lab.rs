@@ -4,9 +4,10 @@ use std::io::Read;
 use std::path::Path;
 
 use wbox_machine::{
-    accelerator_routes, current_host, detect_hardware, detect_host_memory, esp32_routes,
-    inspect_artifact, parallel_routes, prefilled_topology, route, wasm_machine_routes,
-    Availability, GuestOs, HostOs, Isa, ParallelRouteStatus, Priority,
+    accelerator_routes, current_host, detect_hardware, detect_host_memory,
+    detect_host_memory_availability, esp32_routes, inspect_artifact, parallel_routes,
+    prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs, Isa,
+    ParallelRouteStatus, Priority,
 };
 
 const HEADER_READ_LIMIT: u64 = 1024 * 1024;
@@ -183,6 +184,8 @@ fn print_host() -> Result<(), String> {
     let host = current_host();
     let hardware = detect_hardware(host);
     let memory = detect_host_memory().map_err(|error| error.to_string())?;
+    let memory_availability =
+        detect_host_memory_availability().map_err(|error| error.to_string())?;
     println!("host={}", host.map_or("unknown", HostOs::as_str));
     println!(
         "native_isa={}",
@@ -291,6 +294,14 @@ fn print_host() -> Result<(), String> {
     println!("page_size={}", memory.page_size);
     println!("allocation_granularity={}", memory.allocation_granularity);
     println!("physical_memory_bytes={}", memory.physical_bytes);
+    println!(
+        "available_physical_memory_bytes={}",
+        memory_availability.available_physical_bytes
+    );
+    println!(
+        "available_physical_memory_semantics={}",
+        memory_availability.semantics.as_str()
+    );
     Ok(())
 }
 

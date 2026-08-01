@@ -35,6 +35,9 @@ fn host_probe_reports_a_real_acceleration_state() {
     assert!(stdout.contains("page_size="));
     assert!(stdout.contains("allocation_granularity="));
     assert!(stdout.contains("physical_memory_bytes="));
+    assert!(stdout.contains("available_physical_memory_bytes="));
+    assert!(stdout.contains("available_physical_memory_semantics="));
+    assert!(!stdout.contains("available_physical_memory_semantics=unprobed"));
     assert!(stdout.contains("acceleration="));
     assert!(!stdout.contains("/unprobed"));
     assert!(!stdout.contains("processor_affinity_state=unprobed"));
