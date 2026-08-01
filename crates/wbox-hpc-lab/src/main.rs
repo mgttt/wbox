@@ -1,5 +1,6 @@
 use std::env;
 use std::hint::black_box;
+#[cfg(windows)]
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ const DEFAULT_REPEAT: usize = 3;
 const DEFAULT_FLOP_ITERATIONS: u64 = 200_000_000;
 const DEFAULT_FLOP_REPEAT: usize = 5;
 const FP64_FLOPS_PER_ITERATION: u64 = 64;
+#[cfg(windows)]
 const CACHE_LINE: usize = 64;
 
 fn main() {
@@ -297,6 +299,7 @@ fn measure_float_repeated(repeat: usize, mut action: impl FnMut() -> f64) -> Flo
     results.swap_remove(results.len() / 2)
 }
 
+#[cfg(windows)]
 fn measure_result(action: impl FnOnce() -> Result<u64, String>) -> Result<Measurement, String> {
     let start = Instant::now();
     let checksum = black_box(action()?);
@@ -306,6 +309,7 @@ fn measure_result(action: impl FnOnce() -> Result<u64, String>) -> Result<Measur
     })
 }
 
+#[cfg(windows)]
 fn measure_result_repeated(
     repeat: usize,
     mut action: impl FnMut() -> Result<u64, String>,
@@ -680,16 +684,19 @@ fn worker(_args: &[String]) -> Result<(), String> {
     Err("shared-mapping workers are currently implemented only on Windows".to_owned())
 }
 
+#[cfg(windows)]
 fn parse<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, String> {
     value
         .parse()
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
+#[cfg(windows)]
 fn result_offset(items: usize) -> usize {
     (items * std::mem::size_of::<u32>() + CACHE_LINE - 1) & !(CACHE_LINE - 1)
 }
 
+#[cfg(windows)]
 fn mapping_size(items: usize, workers: usize) -> usize {
     result_offset(items) + workers * CACHE_LINE
 }
@@ -743,6 +750,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn result_region_is_cache_line_aligned() {
         for items in [1, 7, 8, 9, 1000] {
             assert_eq!(result_offset(items) % CACHE_LINE, 0);
