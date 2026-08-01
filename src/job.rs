@@ -5,6 +5,7 @@
 //! - 可选：Job 进程树总内存上限、CPU 硬性百分比上限（CPU rate control，Win8+）、最大进程数；
 //! - 不授予 breakaway 权限，子进程无法逃离 Job。
 
+use std::os::windows::io::{AsHandle, BorrowedHandle, RawHandle};
 use windows_sys::Win32::Foundation::{GetLastError, SetLastError};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
@@ -41,6 +42,13 @@ pub fn name_for_container(container_name: &str) -> String {
 pub struct Job {
     handle: Option<OwnedHandle>,
     limits: JobLimits,
+}
+
+impl AsHandle for Job {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        // Safety: the returned borrow cannot outlive `self`, which owns the live Job HANDLE.
+        unsafe { BorrowedHandle::borrow_raw(self.raw() as RawHandle) }
+    }
 }
 
 impl Job {

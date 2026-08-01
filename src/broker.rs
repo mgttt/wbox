@@ -8,8 +8,7 @@ use crate::token;
 use std::io::Write as _;
 use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, RawHandle};
 use std::time::Duration;
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
-use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(test)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -307,26 +306,25 @@ impl BrokerEndpoint {
     }
 
     pub(crate) fn register(self, process: HANDLE, job: &crate::job::Job) -> Result<BrokerSession> {
-        let mut in_job = 0;
-        if unsafe { IsProcessInJob(process, job.raw(), &mut in_job) } == 0 {
-            return Err(last_error("IsProcessInJob(broker register)"));
-        }
-        if in_job == 0 {
+        let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
+        let process =
+            agenterm_platform::process_reference::ProcessReference::duplicate_from(process)
+                .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
+        let in_job = process
+            .is_member_of(job.as_handle())
+            .map_err(|error| WboxError::spawn(format!("读取 broker Job 成员身份失败：{error}")))?;
+        if !in_job {
             return Err(WboxError::spawn(
                 "broker 拒绝注册：目标进程尚未加入容器 Job",
             ));
         }
-        let actual_sid = process_appcontainer_sid_string(process)?;
+        let actual_sid = process_appcontainer_sid_string(&process)?;
         if !actual_sid.eq_ignore_ascii_case(&self.appcontainer_sid) {
             return Err(WboxError::spawn(format!(
                 "broker 拒绝注册：目标 AppContainer SID 不匹配（期望 {}，实际 {}）",
                 self.appcontainer_sid, actual_sid
             )));
         }
-        let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
-        let process =
-            agenterm_platform::process_reference::ProcessReference::duplicate_from(process)
-                .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
         Ok(BrokerSession {
             pipe: self.pipe,
             process,
@@ -545,9 +543,10 @@ fn write_response(pipe: &mut impl std::io::Write, response: &Response) -> Result
     Ok(())
 }
 
-fn process_appcontainer_sid_string(process: HANDLE) -> Result<String> {
-    let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
-    let facts = agenterm_platform::process_security::process_handle(process)
+fn process_appcontainer_sid_string(
+    process: &agenterm_platform::process_reference::ProcessReference,
+) -> Result<String> {
+    let facts = agenterm_platform::process_security::process_handle(process.as_handle())
         .map_err(|error| WboxError::spawn(format!("读取 broker 进程安全身份失败：{error}")))?;
     let sid = facts
         .windows_app_container_sid()
@@ -574,12 +573,6 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{:02x}", byte);
     }
     out
-}
-
-fn last_error(context: &str) -> WboxError {
-    WboxError::spawn(format!("{} 失败，GetLastError={}", context, unsafe {
-        GetLastError()
-    }))
 }
 
 #[cfg(test)]

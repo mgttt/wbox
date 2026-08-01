@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W84、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W85、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2674,6 +2674,7 @@ TODO-WINDOW
 ├── W82 exact process bounded/indefinite wait 下沉并删除 sandbox 直接 WaitForSingleObject [done] handle-bound wait
 ├── W83 显式 HANDLE 继承事务下沉并删除 sandbox 本地 flag guard                         [done] restore/unwind + orphan reap
 ├── W84 retained process 远端 HANDLE 交付凭据下沉并删除 broker DuplicateHandle          [done] commit/rollback receipt
+├── W85 精确进程 containment membership 下沉并删除 broker IsProcessInJob                [done] retained object + Job handle
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4618,6 +4619,24 @@ wbox broker 删除生产路径的 `DuplicateHandle`、`DUPLICATE_SAME_ACCESS` �
 36 tests（33 passed、3 ignored）、根 469 tests（466 passed、3 ignored）、Quick 306 项和四
 portable targets 通过，Quick 释放 491.5 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与
 固定 Ubuntu 24.04 digest 的 WU.1/WU.2 通过。
+
+`W85` 在 `process-reference` 增加 `ProcessContainmentGroup` 泛型扩展和
+`ProcessReference::is_member_of`：查询绑定 retained process object，不按 PID 重开。Windows
+adapter 为借用 Job Object HANDLE 实现 `IsProcessInJob`；Linux process group、cgroup 与 macOS
+进程关系并非同一对象成员语义，所以两宿主不添加空实现或伪等价状态。Windows 真机门禁创建
+独立 Job 与长寿命子进程，先确认指定 Job membership 为 false，分配后对同一 retained process
+reference 确认为 true；最小 feature 只增加 `windows-sys` 的 Security/JobObjects ABI 声明，
+未增加 crate 依赖。process-reference 定向 10 tests、all-features 186 tests、严格 Clippy，
+以及 Windows i686/ARM64、Linux x64/ARM64、macOS x64 非宿主目标编译通过；提交为
+`0db0e24`。
+
+wbox `Job` 实现标准 `AsHandle` 借用，broker 注册改为先从 `CreateProcessW` 返回句柄保留精确
+`ProcessReference`，随后用同一对象验证目标 Job membership 和 AppContainer SID；删除生产
+路径的 `IsProcessInJob`、相关 `GetLastError` 与本地错误 helper。Job 创建、命名、限额、分配、
+终止，以及 broker 的 Job/SID 双重授权策略仍由产品层持有。Windows broker 8 tests、Job
+8 tests、根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets 通过，
+Quick 释放 492.0 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest
+的 WU.1/WU.2 通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
