@@ -107,7 +107,8 @@ t_proc
 
 
 
-# I. Windows 宿主的 stat / symlink 能力差异（不是引擎回归）
-# st_nlink 在 Windows 侧是合成值（拿不到真实硬链接数），且建 symlink 需要
-# 特权，symlink 环路（ELOOP）测不起来。Linux 宿主上本用例通过，故标 @windows。
+# I. Windows 宿主的路径能力差异（不是本轮文件身份回归）
+# 真实 volume/file identity 已让 hardlink 的 ino/nlink 断言通过；剩余差异是
+# symlink 环路映射 EINVAL、unlink(directory) 映射 EACCES，以及 Win32 不接受
+# 文件名中的双引号。Linux 宿主上本用例通过，故仍标 @windows。
 t_path @windows

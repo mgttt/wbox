@@ -79,7 +79,7 @@ guest-tests job 在 Windows 上跑 native，本地 Linux 开发也常用 native�
 
 | 用例 | 标注 | 原因 |
 |---|---|---|
-| `t_path` | `@windows` | Windows 侧 `stat` 的 `st_nlink` 是合成值（拿不到真实硬链接数）；建 symlink 需要特权，symlink 环路（ELOOP）搭不起来。Linux 宿主上通过。 |
+| `t_path` | `@windows` | volume/file identity 已让 hardlink 的 `ino/nlink` 断言通过；剩余 5 项是 symlink 环路映射 `EINVAL`、`unlink(directory)` 映射 `EACCES`，以及 Win32 不接受文件名中的双引号。Linux 宿主上通过。 |
 
 
 没有 OS 标注时这两条无解：写进基线则另一侧报"基线过期"，不写则这一侧报"回归"。

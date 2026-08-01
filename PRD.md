@@ -41,8 +41,8 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.39（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W44、R8
-│       ├── 4.9.2 [TODO-LINUX]    L1–L22、W5（历史编号）
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W45、R8
+│       ├── 4.9.2 [TODO-LINUX]    L1–L23、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M8
 ├── 5  非功能需求 N1–N4
 ├── 6  当前状态（状态快照，不是门禁配置）
@@ -2604,6 +2604,7 @@ TODO-WINDOW
 ├── W42 HPC 内核选择统一消费共享处理器事实                            [done] 无重复 feature detector；11 tests
 ├── W43 宿主 CSPRNG 契约下沉与弱 AT_RANDOM 清除                       [done] entropy；四消费点统一
 ├── W44 detached 跨进程接管令牌使用共享宿主熵                          [done] 32-byte CSPRNG + WP 全门禁
+├── W45 宿主文件对象身份下沉并删除 guest Win32 FFI                       [done] ino/nlink + rename/hardlink
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -3007,8 +3008,14 @@ TODO-LINUX
 ├── L19 signalfd 与挂起信号集合                           [done] t_signalfd 75/0，C 组整组清空
 ├── L20 MAP_SHARED 文件映射写回                           [done] t_mmap 140/0，G 组整组清空
 ├── L21 信号投递（信号帧 / rt_sigreturn / handler）        [done] t_signal_handler 10/0、t_signal_timer 36/0；见下方 L21
-└── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
+├── L22 detached CSPRNG 接管令牌 Linux 产品验收             [next] run/start/失败回滚真机门禁
+└── L23 宿主文件对象身份 Linux 真机验收                     [next] dev/ino/nlink + rename/hardlink
 ```
+
+`L23` 在 Linux 真机运行 platform filesystem 测试和 `t_fd_open`/`t_path`，证明
+`FileIdentity` 的 device/inode/link-count 与现有 guest Unix metadata 一致，且 rename
+与 hardlink 不改变对象身份。Windows 行为和 Linux 交叉编译已通过，但不能替代真实
+Linux filesystem；产品层不得因此改写 guest uid/gid/mode 或 VFS 路由。
 
 `L22` 验收 W44 的共享 runstate 路径，不重写随机源：在 Linux 真机分别跑首次
 `run -d`、create 后两轮 start、错误 workload 回滚和并发错误令牌拒绝，确认状态目录
@@ -3587,10 +3594,11 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`34d3ac1b56069dd578e5c0fb7d1ba92f02bc0552`，关闭 default features，按消费包启用
+`d5522c6c8b428a83a7ebeed28bacc7c2a9c13b85`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control` 与零依赖 `hardware`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
-不改变 fail-closed API；wbox 只依赖公共契约，不引用 adapter 内部模块。
+并增加跨 rename/hardlink 稳定的文件对象身份；wbox 只依赖公共契约，不引用 adapter
+内部模块。
 Git 来源、SHA 与默认 feature 关闭策略由 workspace 单点持有，三个子 crate 只继承并
 追加 `entropy`/`hardware`；依赖棘轮和 `cargo metadata --locked` 证明构建图只有一个
 platform package，且未启用 `full/process/window/ipc/pty`。Quick 300 项库测试与双
@@ -3669,6 +3677,17 @@ run/create/start/restart 生命周期仍由 wbox 拥有；共享层只提供失�
 与 300 项库测试、WP.1-WP.27 完整产品门禁；i686 Windows、x86-64 Linux 及双 macOS
 ISA 严格 Clippy 通过。Linux/macOS 交叉编译不等于真机运行，Linux 交接见 L22，
 macOS 继续由 M2/M3 验收。
+
+`W45` 把 Windows guest 权限表使用的文件身份下沉为 platform `FileIdentity`：
+Windows 从已打开 handle 读取 volume serial、file index 和 hard-link count，
+Linux/macOS 从 metadata 读取 device、inode 和 link count；`file_identity(File)` 是
+防路径替换竞态的主接口，`path_identity(Path)` 明确只是跟随最终 symlink 的便利入口。
+PathLock 仍使用“可不存在路径”的规范身份，两者不能互换。`wbox-linux` 删除本地
+`GetFileInformationByHandle`、共享打开常量和直接 `windows-sys` 依赖，guest mode
+表、umask、stat/statx 布局、errno 与 VFS 路由继续归产品层。Windows platform
+filesystem 8 项测试、wbox-linux 178 项测试、`t_fd_open` 86/0、Quick 300 项、
+WP.1-WP.27 及 Windows i686/Linux x64/双 macOS ISA workspace Clippy 通过；`t_path`
+现为 80/5，hardlink/`ino`/`nlink` 已通过，剩余 Windows 路径差异仍保留整文件基线。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

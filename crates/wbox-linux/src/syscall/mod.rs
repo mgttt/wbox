@@ -1716,7 +1716,7 @@ fn write_stat_with_identity(
     m: &mut Machine,
     out: u64,
     md: &std::fs::Metadata,
-    identity: Option<(u64, u64, u64)>,
+    identity: Option<agenterm_platform::filesystem::FileIdentity>,
 ) -> i64 {
     let mut b = [0u8; 144];
 
@@ -1743,13 +1743,13 @@ fn write_stat_with_identity(
             md.blocks() as i64,
         )
     };
-    // Windows 宿主：没有 inode，用合成值。guest 若靠 (dev, ino) 判断
-    // "是不是同一个文件"会失效，这是已知缺口。
+    // Windows 宿主把 volume serial/file index 映射为 guest dev/ino；该身份
+    // 跨 rename/hardlink 稳定。uid/gid 与 block accounting 仍是 guest 合成值。
     #[cfg(not(unix))]
     let (dev, ino, nlink, uid, gid, blksize, blocks) = (
-        identity.map_or(1, |v| v.0),
-        identity.map_or(1, |v| v.1),
-        identity.map_or(1, |v| v.2),
+        identity.map_or(1, |value| value.filesystem_id),
+        identity.map_or(1, |value| value.object_id),
+        identity.map_or(1, |value| value.hard_link_count),
         0u32,
         0u32,
         4096i64,
@@ -1778,7 +1778,11 @@ fn write_stat_with_identity(
     0
 }
 
-fn metadata_mode(m: &Machine, md: &std::fs::Metadata, identity: Option<(u64, u64, u64)>) -> u32 {
+fn metadata_mode(
+    m: &Machine,
+    md: &std::fs::Metadata,
+    identity: Option<agenterm_platform::filesystem::FileIdentity>,
+) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1802,61 +1806,27 @@ fn metadata_mode(m: &Machine, md: &std::fs::Metadata, identity: Option<(u64, u64
             0o644
         };
         let permissions = identity
-            .and_then(|(dev, ino, _)| m.os.file_modes.borrow().get(&(dev, ino)).copied())
+            .and_then(|value| {
+                m.os.file_modes
+                    .borrow()
+                    .get(&(value.filesystem_id, value.object_id))
+                    .copied()
+            })
             .unwrap_or(fallback);
         file_type | permissions
     }
 }
 
 #[cfg(windows)]
-fn windows_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64, u64)> {
-    use std::mem::MaybeUninit;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-    };
-
-    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // SAFETY: the raw handle remains owned by `file` for the duration of the
-    // call, and Windows initializes the complete output structure on success.
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: a successful GetFileInformationByHandle call initialized `info`.
-    let info = unsafe { info.assume_init() };
-    let ino = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
-    Ok((
-        info.dwVolumeSerialNumber as u64,
-        ino,
-        info.nNumberOfLinks as u64,
-    ))
-}
-
-#[cfg(windows)]
-fn windows_path_identity(path: &std::path::Path) -> std::io::Result<(u64, u64, u64)> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 1;
-    const FILE_SHARE_WRITE: u32 = 2;
-    const FILE_SHARE_DELETE: u32 = 4;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    windows_file_identity(&file)
-}
-
-#[cfg(windows)]
 fn remember_created_mode(m: &mut Machine, file: &std::fs::File, requested: u32) -> i64 {
-    let (dev, ino, _) = match windows_file_identity(file) {
+    let identity = match agenterm_platform::filesystem::file_identity(file) {
         Ok(identity) => identity,
         Err(e) => return host_err(&e),
     };
     let permissions = requested & !m.os.umask & 0o777;
-    m.os.file_modes.borrow_mut().insert((dev, ino), permissions);
+    m.os.file_modes
+        .borrow_mut()
+        .insert((identity.filesystem_id, identity.object_id), permissions);
     0
 }
 
@@ -1864,7 +1834,7 @@ fn sys_fstat(m: &mut Machine, fd: i32, out: u64) -> i64 {
     let (md, identity) = match m.os.fds.get(fd).map(|f| &f.kind) {
         Some(FdKind::File(f)) => {
             #[cfg(windows)]
-            let identity = match windows_file_identity(f) {
+            let identity = match agenterm_platform::filesystem::file_identity(f) {
                 Ok(identity) => Some(identity),
                 Err(e) => return host_err(&e),
             };
@@ -1951,7 +1921,7 @@ fn sys_stat_path(m: &mut Machine, dirfd: i32, path_ptr: u64, out: u64, follow: b
             let identity = if md.file_type().is_symlink() {
                 None
             } else {
-                match windows_path_identity(&host) {
+                match agenterm_platform::filesystem::path_identity(&host) {
                     Ok(identity) => Some(identity),
                     Err(e) => return host_err(&e),
                 }
@@ -3199,7 +3169,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 Some(FdKind::File(f)) => {
                     #[cfg(windows)]
                     {
-                        identity = match windows_file_identity(f) {
+                        identity = match agenterm_platform::filesystem::file_identity(f) {
                             Ok(identity) => Some(identity),
                             Err(e) => return host_err(&e),
                         };
@@ -3209,7 +3179,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
                 Some(FdKind::Dir { path, .. }) => {
                     #[cfg(windows)]
                     {
-                        identity = match windows_path_identity(path) {
+                        identity = match agenterm_platform::filesystem::path_identity(path) {
                             Ok(identity) => Some(identity),
                             Err(e) => return host_err(&e),
                         };
@@ -3232,7 +3202,7 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
             };
             #[cfg(windows)]
             if md.as_ref().is_ok_and(|md| !md.file_type().is_symlink()) {
-                identity = match windows_path_identity(&host) {
+                identity = match agenterm_platform::filesystem::path_identity(&host) {
                     Ok(identity) => Some(identity),
                     Err(e) => return host_err(&e),
                 };
@@ -3263,8 +3233,8 @@ fn sys_statx(m: &mut Machine, dirfd: i32, path_ptr: u64, flags: i32, out: u64) -
         #[cfg(not(unix))]
         {
             (
-                identity.map_or(1, |v| v.2 as u32),
-                identity.map_or(1, |v| v.1),
+                identity.map_or(1, |value| value.hard_link_count as u32),
+                identity.map_or(1, |value| value.object_id),
                 4096u32,
                 size.div_ceil(512),
                 0u32,

@@ -70,6 +70,10 @@ detached reservation token 是 wbox 产品协议：它消费 32-byte 宿主 CSPR
 exit-code 与 Linux container PID 等小状态文件统一经 platform 私有原子发布；
 wbox 在调用前升级旧状态目录的
 private contract，但继续拥有文件 schema、生命周期、错误分类和 best-effort 策略。
+宿主文件对象身份也由 platform 提供：已打开文件接口跨 rename/hardlink 稳定，路径
+便利接口跟随最终 symlink；Windows 映射 volume/file index，Unix 映射 device/inode。
+guest mode/umask、stat ABI 与 VFS 仍由 `wbox-linux` 持有。该对象身份不同于 PathLock
+对“可不存在路径”做的规范化身份，禁止用其中一个替代另一个。
 单宿主 PID 的 graceful/forceful 终止通过轻量 `process-control` feature；完整 process
 inventory、Job/process-group guard 与 pipe API 保持关闭。wbox 继续拥有容器进程树
 归属、stop/kill 超时和 Windows Job/Linux namespace 收尾策略。
