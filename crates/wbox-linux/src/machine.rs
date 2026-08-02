@@ -19,6 +19,8 @@ pub enum Exception {
     Exit(i32),
     /// guest 被信号打断且默认动作是终止（退出码 128+signo，与 shell 一致）。
     Killed { signo: i32 },
+    /// x86 core 将 Linux syscall 交给外层 personality 处理。
+    Syscall { ret_rip: u64 },
 }
 
 impl std::fmt::Display for Exception {
@@ -36,6 +38,7 @@ impl std::fmt::Display for Exception {
             Exception::Breakpoint { rip } => write!(f, "breakpoint at {rip:#x}"),
             Exception::Exit(c) => write!(f, "exit({c})"),
             Exception::Killed { signo } => write!(f, "killed by signal {signo}"),
+            Exception::Syscall { ret_rip } => write!(f, "syscall trap at {ret_rip:#x}"),
         }
     }
 }
@@ -67,6 +70,18 @@ impl Machine {
             os,
             trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
             max_insns: 0,
+        }
+    }
+
+    /// 执行一条 guest 指令，并让 Linux personality 处理 core trap。
+    ///
+    /// `exec.rs` 只实现 x86 指令语义；syscall 的编号、参数和返回值仍由
+    /// Linux ABI dispatcher 所有。这个 facade 保持既有调用者的 `step()`
+    /// 语义，同时给未来独立 x86 core 留出 `step_core()` 边界。
+    pub fn step(&mut self) -> ExecResult<()> {
+        match self.step_core() {
+            Err(Exception::Syscall { ret_rip }) => crate::syscall::dispatch(self, ret_rip),
+            result => result,
         }
     }
 

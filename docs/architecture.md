@@ -243,7 +243,7 @@ manifest 选择必须如实反映 runtime 支持的 ISA。
 
 x86-64 core（仍被 personality 反向穿透）
 ├── exec.rs      -> cpu + alu + mem + machine + sse
-│   └── 0F 05 当前直接调用 syscall::dispatch
+│   └── 0F 05 产生 Exception::Syscall；由 Machine::step 兼容 facade 分发
 └── sse.rs       -> cpu + exec decoder/Rm + machine
 
 Linux executable personality
@@ -269,6 +269,11 @@ Linux kernel/ABI personality
 1. x86 `syscall` 指令返回带 ABI 入口信息的 core trap，不直接调用 Linux dispatcher；
 2. 执行循环只拥有 CPU、AddressSpace、指令预算与 core trap，Linux personality 在外层
    处理 syscall、signal delivery、exit 与调度，再决定恢复执行或终止。
+
+第一阶段已落地：`exec.rs::step_core` 不再直接依赖 `syscall::dispatch`，`0F 05` 只产生
+带返回 RIP 的 `Exception::Syscall`；现有 Linux 调用者继续通过 `Machine::step` facade
+获得原有分发语义。这个边界仍不是独立 core crate，CPU、内存和 `Machine` 所有权的拆分
+以及其它 ISA fault 的统一契约仍由 W21/W22 后续门禁约束。
 
 `cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
 必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于

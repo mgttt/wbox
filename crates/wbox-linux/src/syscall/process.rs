@@ -69,6 +69,10 @@ fn wstatus(r: &ExecResult<i32>) -> i32 {
                 Exception::Killed { signo } => *signo,
                 // Exit 走 Ok 分支，不会到这里；兜底按 SIGKILL 记。
                 Exception::Exit(_) => 9,
+                // `Machine::step()` consumes this trap before a child result
+                // can reach here; retain a fail-closed status for malformed
+                // callers that return it directly.
+                Exception::Syscall { .. } => 4,
             };
             signo & 0x7f
         }

@@ -278,7 +278,11 @@ impl Machine {
     // ------------------------------------------------------------ 主循环
 
     /// 执行一条指令。
-    pub fn step(&mut self) -> ExecResult<()> {
+    /// Execute one instruction without dispatching Linux personality traps.
+    ///
+    /// The compatibility `Machine::step()` facade lives in `machine.rs` and
+    /// consumes the syscall trap for current Linux guest callers.
+    pub(crate) fn step_core(&mut self) -> ExecResult<()> {
         let start = self.cpu.rip;
         let mut d = Dec {
             start,
@@ -962,7 +966,7 @@ impl Machine {
     fn exec_0f(&mut self, d: &mut Dec, op: u8) -> ExecResult<()> {
         match op {
             // SYSCALL
-            0x05 => crate::syscall::dispatch(self, d.pc),
+            0x05 => Err(Exception::Syscall { ret_rip: d.pc }),
 
             0x0b => Err(self.undef(d)), // UD2：guest 主动触发，照实报
 
@@ -1318,4 +1322,26 @@ pub fn load_code(m: &mut Machine, addr: u64, code: &[u8]) {
     m.mem.write_raw(addr, code);
     m.mem.map(addr, len.max(0x1000), PROT_READ | PROT_EXEC);
     m.cpu.rip = addr;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_code;
+    use crate::{machine::Exception, machine::Machine, syscall::Os};
+
+    #[test]
+    fn syscall_instruction_emits_core_trap() {
+        let mut machine = Machine::new(Os::new());
+        load_code(
+            &mut machine,
+            0x1000,
+            &[0xb8, 39, 0, 0, 0, 0x0f, 0x05], // mov eax, getpid; syscall
+        );
+
+        machine.step_core().expect("mov must execute in the core");
+        match machine.step_core() {
+            Err(Exception::Syscall { ret_rip }) => assert_eq!(ret_rip, 0x1007),
+            result => panic!("expected syscall trap, got {result:?}"),
+        }
+    }
 }

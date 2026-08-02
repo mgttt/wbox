@@ -2666,7 +2666,7 @@ TODO-WINDOW
 ├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [done] 只读依赖图 + 反向边
 ├── W21 `MachineCore` / personality / host ABI 最小契约       [active] 首批 MachineCore/HostAbi；AddressSpace/TaskScheduler 待边界验证
-├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
+├── W22 x86-64 core 抽取前特征门禁                            [active] syscall trap 边界已落地；独立 core 抽取仍待门禁
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
