@@ -95,6 +95,8 @@ Unix/Linux/macOS 对应实现使用文件锁和 `flock`，并有目录别名与�
 - 复用 `filesystem_open::open_existing_path()` 逐组件保留父目录 fd，并在每个组件使用
   `O_DIRECTORY | O_NOFOLLOW`，因此中间目录 symlink 也不会被路径解析穿越。
 - 使用已打开 fd 的 `fchmod(0700)` 修改权限。
+- 中间 symlink 的 Unix `ELOOP` 被映射为与 Windows 一致的 `InvalidInput`，其它宿主 I/O
+  错误保持原始语义。
 - 不再对经过检查的 Unix 路径直接调用路径型 `set_permissions`。
 - 私有文件使用 `create_new + 0600`。
 

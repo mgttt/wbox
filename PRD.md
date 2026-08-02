@@ -2787,7 +2787,8 @@ filesystem-conventions` 矩阵，覆盖 Windows x86-64、Linux x86-64、macOS x8
 `W108` 将 Linux/macOS 的目录权限修改对齐到已打开对象：使用现有
 `filesystem_open::open_existing_path()` 逐组件保留父目录 fd，并在每个组件使用
 `O_DIRECTORY | O_NOFOLLOW`；最终通过 `fchmod(0700)` 修改 retained fd，而不是对
-经过检查的路径再次调用 `set_permissions`。中间目录 symlink 也会 fail closed；同时修正 `filesystem` 最小 feature 所需的
+经过检查的路径再次调用 `set_permissions`。中间目录 symlink 也会 fail closed，并将
+Unix `ELOOP` 统一映射为 public `InvalidInput`；同时修正 `filesystem` 最小 feature 所需的
 Windows `SystemServices` ABI 声明。Windows 最小 filesystem 测试 36 项通过，
 Linux/macOS 同 feature 目标编译通过。
 
