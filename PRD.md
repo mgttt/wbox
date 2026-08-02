@@ -2677,6 +2677,7 @@ TODO-WINDOW
 ├── W85 精确进程 containment membership 下沉并删除 broker IsProcessInJob                [done] retained object + Job handle
 ├── W86 已打开进程对象原始退出码下沉并删除 sandbox GetExitCodeProcess                    [done] handle-bound u32 fact
 ├── W87 已打开进程对象精确终止下沉并删除 sandbox TerminateProcess                       [done] handle-bound exit code
+├── W88 AppContainer profile/SID 生命周期原语下沉                                      [done] owned SID + explicit lifecycle
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4671,6 +4672,25 @@ AppContainer 创建编排仍归 wbox 产品层。Windows sandbox 36 tests（33 p
 broker 8 tests、根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets
 通过，Quick 释放 454.4 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04
 digest 的 WU.1/WU.2（WU.2 `rc=37`）通过。
+
+`W88` 新增 target-specific `app-container-profile` feature：platform 以
+`OwnedAppContainerSid` 精确持有 Windows 分配的 SID，安全校验 capability/SID 字节的固定头、
+sub-authority 数和精确长度，并提供类型化 HRESULT 的 profile create/derive/delete 与规范 SID
+字符串转换。profile 是否复用、何时删除、名称/描述、capability 白名单和启动编排都不下沉；
+Linux/macOS 也不添加无意义的空 profile。上游真机门禁覆盖确定性 SID、create → already-exists
+→ derive → explicit delete、NUL/短 SID 前置拒绝，最小 feature 3 tests、all-features 191 tests、
+严格 Clippy及 Windows i686/ARM64、Linux x64/ARM64、macOS x64 编译通过；提交为
+`02235cd`、`5ad75e7`。
+
+wbox 保留产品级 `AppContainerProfile` 包装器，但删除直接
+`CreateAppContainerProfile`/`DeriveAppContainerSidFromAppContainerName`/
+`DeleteAppContainerProfile`/`FreeSid`/`ConvertSidToStringSidW` 和 direct
+`Security_Isolation` feature；broker 也删除为裸 SID 转换而复制到对齐缓冲的 unsafe 路径。
+已有 profile 不删除、`--keep-profile`、删除失败警告、capability attributes 与
+`SECURITY_CAPABILITIES` 进程启动语义保持不变。Windows token 5 tests、broker 8 tests、
+根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick
+释放 475.8 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的
+WU.1/WU.2（WU.2 `rc=37`）通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

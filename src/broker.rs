@@ -4,7 +4,6 @@
 //! component-wise reparse rejection and fd-backed hostfs product gates.
 
 use crate::error::{Result, WboxError};
-use crate::token;
 use std::io::Write as _;
 use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, RawHandle};
 use std::time::Duration;
@@ -553,12 +552,8 @@ fn process_appcontainer_sid_string(
     let sid = facts
         .windows_app_container_sid()
         .ok_or_else(|| WboxError::spawn("broker 拒绝注册：目标进程不是 AppContainer"))?;
-    let mut aligned_sid = vec![0usize; sid.len().div_ceil(std::mem::size_of::<usize>())];
-    unsafe {
-        std::ptr::copy_nonoverlapping(sid.as_ptr(), aligned_sid.as_mut_ptr().cast(), sid.len());
-    }
-    token::sid_to_string(aligned_sid.as_mut_ptr().cast())
-        .map_err(|e| WboxError::spawn(format!("转换 AppContainer SID 失败：{}", e)))
+    agenterm_platform::adapters::windows::app_container::sid_string(sid)
+        .map_err(|error| WboxError::spawn(format!("转换 AppContainer SID 失败：{error}")))
 }
 
 fn hello_payload(generation: u64, nonce: [u8; 16]) -> Vec<u8> {
