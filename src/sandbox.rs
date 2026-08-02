@@ -379,24 +379,11 @@ fn wait_for_process_exit(process: HANDLE) -> Result<()> {
 /// 构造 CreateProcessW lpEnvironment 所需的 UTF-16 环境块
 /// （`KEY=VAL\0...KEY=VAL\0\0`）。非法键（空/含 '='）防御性跳过。
 fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
-    let mut s = String::new();
-    let mut has_entry = false;
-    for (k, v) in env {
-        if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
-            continue;
-        }
-        has_entry = true;
-        s.push_str(k);
-        s.push('=');
-        s.push_str(v);
-        s.push('\0');
-    }
-    // 非空块已有最后一项的 NUL；空块也必须显式形成两个 NUL。
-    if !has_entry {
-        s.push('\0');
-    }
-    s.push('\0');
-    s.encode_utf16().collect()
+    agenterm_platform::process_conventions::windows_environment_block(
+        env,
+        agenterm_platform::process_conventions::InvalidEnvironmentEntryPolicy::Skip,
+    )
+    .expect("skip policy cannot reject an environment entry")
 }
 
 /// attribute list 的 RAII 销毁器。
@@ -412,61 +399,23 @@ impl Drop for AttrListGuard {
     }
 }
 
-fn push_cmdline_arg(out: &mut String, arg: &str, force_quote: bool) {
-    let quote =
-        force_quote || arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
-    if !quote {
-        out.push_str(arg);
-        return;
-    }
-
-    out.push('"');
-    let mut backslashes = 0;
-    for c in arg.chars() {
-        if c == '\\' {
-            backslashes += 1;
-            continue;
-        }
-        for _ in 0..backslashes {
-            out.push('\\');
-        }
-        if c == '"' {
-            // A quote needs 2n+1 backslashes: n preserve the original
-            // backslashes and n+1 escape the quote.
-            for _ in 0..backslashes {
-                out.push('\\');
-            }
-            out.push('\\');
-        }
-        out.push(c);
-        backslashes = 0;
-    }
-    // Before the closing quote, 2n backslashes decode to n literal ones.
-    for _ in 0..backslashes {
-        out.push('\\');
-        out.push('\\');
-    }
-    out.push('"');
-}
-
 /// 组装传给 CreateProcessW 的命令行，按 Windows CRT /
 /// CommandLineToArgvW 规则无损编码每个参数。
 pub fn build_cmdline(cmd: &[String]) -> Result<String> {
-    if cmd.is_empty() {
-        return Err(crate::error::WboxError::args(
-            "缺少要执行的命令（-- <CMD> [ARGS...]）",
-        ));
+    match agenterm_platform::process_conventions::windows_command_line(cmd) {
+        Ok(command_line) => Ok(command_line),
+        Err(agenterm_platform::process_conventions::WindowsCommandLineError::EmptyCommand) => Err(
+            crate::error::WboxError::args("缺少要执行的命令（-- <CMD> [ARGS...]）"),
+        ),
+        Err(
+            agenterm_platform::process_conventions::WindowsCommandLineError::ArgumentContainsNul {
+                ..
+            },
+        ) => Err(crate::error::WboxError::args("命令或参数不能包含 NUL 字符")),
+        Err(error) => Err(crate::error::WboxError::args(format!(
+            "无法构造 Windows 命令行：{error}"
+        ))),
     }
-    if cmd.iter().any(|arg| arg.contains('\0')) {
-        return Err(crate::error::WboxError::args("命令或参数不能包含 NUL 字符"));
-    }
-    let mut s = String::new();
-    push_cmdline_arg(&mut s, &cmd[0], true);
-    for arg in &cmd[1..] {
-        s.push(' ');
-        push_cmdline_arg(&mut s, arg, false);
-    }
-    Ok(s)
 }
 
 #[cfg(test)]

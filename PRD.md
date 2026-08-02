@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W89、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W91、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2679,6 +2679,8 @@ TODO-WINDOW
 ├── W87 已打开进程对象精确终止下沉并删除 sandbox TerminateProcess                       [done] handle-bound exit code
 ├── W88 AppContainer profile/SID 生命周期原语下沉                                      [done] owned SID + explicit lifecycle
 ├── W89 AppContainer well-known capability SID 构造下沉                                [done] typed kind + aligned owner
+├── W90 Windows 原生进程参数编码拆为零依赖 process-conventions                         [done] argv/env block + explicit policy
+├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [next] 7.6 GiB 实测阻塞 Quick
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4711,6 +4713,26 @@ wbox 的产品包装器继续决定启用哪些网络 capability，并为进程�
 根 469 tests（466 passed、3 ignored）和 `wbox-linux` 94+22+63 tests 通过；Quick 306 项
 通过并释放 614.1 MiB 可再生缓存，四 portable targets 与 release build 通过；
 WP.1-WP.27 产品门禁和固定 Ubuntu 24.04 digest 的 WU.1/WU.2（WU.2 `rc=37`）通过。
+
+`W90` 新增零原生依赖 `process-conventions` feature，把 Windows CRT/
+`CommandLineToArgvW` 参数引用、反斜杠/引号边界和 `CreateProcessW` 双 NUL UTF-16
+环境块编码下沉到 platform。非法环境键/值由类型化错误保留原始 entry index，调用方必须
+显式选择 `Reject` 或 `Skip`；合法条目顺序和重复项不由平台擅自改写。该 feature 的
+最小 dependency tree 只有 `agenterm-platform` 自身，14 tests 与严格 Clippy 通过；
+all-features 198 tests、Windows i686/ARM64、Linux x64/ARM64、macOS x64/ARM64 编译通过，
+Windows 真机额外以 `CommandLineToArgvW` 验证复杂 argv 原样往返；上游提交为 `5f4d8dd`。
+
+wbox 删除本地 `push_cmdline_arg` 和环境块拼接算法，直接引用 platform；“空命令/含 NUL”
+映射为产品 args 错误、非法环境项防御性跳过仍明确留在 wbox。原有 21 条字节边界测试全部
+原样通过，根 469 tests（466 passed、3 ignored）、Quick 306 项、四 portable targets 与
+release build 通过；WP.1-WP.27 和固定 Ubuntu 24.04 WU.1/WU.2（WU.2 `rc=37`）通过。
+
+本轮第一次 Quick 在根测试 466/3 已通过后因 D 盘只余约 380 MiB 失败：编译器无法写入
+`.d`/`query-cache.bin`。取证显示 `target/debug` 已达 7.6 GiB，显式清空 incremental 后仍
+主要由不同 platform git revision 留下的 `deps/build` 构成；`cargo clean --profile dev`
+回收 7.6 GiB 后 Quick 通过并由常规清理器再释放 111.9 MiB。`W91` 必须在不误删当前可复用
+依赖、运行中 Cargo 或 release 产物的前提下识别陈旧 revision artifact；本轮手工回收只解除
+磁盘阻塞，不算自动清理完成。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
