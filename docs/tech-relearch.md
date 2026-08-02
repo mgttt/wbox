@@ -49,10 +49,12 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 
 当前 `agenterm-platform::filesystem::protect_private_directory()` 在 Windows 上使用：
 
-- `CreateFileW` 打开目录。
+- Rust `filesystem-open` 组件级 API，从宿主根目录开始逐级保留父目录句柄。
+- Windows `NtCreateFile` 相对句柄打开，避免中间目录组件被静默跟随。
 - `FILE_FLAG_BACKUP_SEMANTICS` 打开目录句柄。
-- `FILE_FLAG_OPEN_REPARSE_POINT` 不跟随 final reparse point。
+- `FILE_FLAG_OPEN_REPARSE_POINT`/等价 reparse 选项不跟随最终或中间 reparse point。
 - 已打开对象的 filesystem-entry 分类。
+- `READ_CONTROL`/`WRITE_DAC` 只授予最终 ACL 句柄，不向宿主根目录和中间目录传播安全描述符权限。
 - `SetEntriesInAclW` 构造当前用户 ACL。
 - `SetSecurityInfo` 按已打开 HANDLE 写入 DACL。
 - `DACL_SECURITY_INFORMATION` 和 protected DACL。
