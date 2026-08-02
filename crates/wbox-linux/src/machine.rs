@@ -1,33 +1,9 @@
-//! `Machine`：CPU + 地址空间 + OS 状态，以及执行异常的定义。
+//! Linux personality facade over ISA core state.
 
-use crate::cpu::Cpu;
-use crate::mem::{Fault, Mem};
+use crate::mem::Fault;
 use crate::syscall::Os;
 
-/// ISA core 中断执行的事件。
-#[derive(Debug, Clone)]
-pub enum CoreException {
-    /// #PF：访存越权或未映射。
-    Fault(Fault),
-    /// #UD：解码不出来或未实现的指令。
-    Undefined { rip: u64, bytes: Vec<u8> },
-    /// #DE：除零或商溢出。
-    DivideError { rip: u64 },
-    /// #BP：`int3`。
-    Breakpoint { rip: u64 },
-    /// guest 执行了 HLT；由 Linux facade 映射为退出。
-    Halt,
-    /// x86 core 将 Linux syscall 交给外层 personality 处理。
-    Syscall { ret_rip: u64 },
-}
-
-pub type CoreResult<T> = Result<T, CoreException>;
-
-impl From<Fault> for CoreException {
-    fn from(x: Fault) -> Self {
-        CoreException::Fault(x)
-    }
-}
+pub use crate::core::{CoreException, CoreResult, CoreState};
 
 /// Linux personality 对外观察到的执行事件；`Exit`/`Killed` 属于 ABI 层。
 #[derive(Debug, Clone)]
@@ -88,33 +64,6 @@ impl From<CoreException> for Exception {
 }
 
 pub type ExecResult<T> = Result<T, Exception>;
-
-/// ISA-core-owned execution state.
-///
-/// This is the first concrete ownership boundary for W21: the Linux
-/// personality remains in [`Machine`], while CPU registers, address space and
-/// execution controls can move to an independent core without changing guest
-/// ABI code.
-#[derive(Clone)]
-pub struct CoreState {
-    pub cpu: Cpu,
-    pub mem: Mem,
-    /// `WBOX_TRACE=1`：每条指令打一行寄存器转储到 stderr。
-    pub trace: bool,
-    /// 指令数上限（0 = 不限）。fork 子进程继承同一个预算。
-    pub max_insns: u64,
-}
-
-impl CoreState {
-    fn new() -> Self {
-        Self {
-            cpu: Cpu::new(),
-            mem: Mem::new(),
-            trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
-            max_insns: 0,
-        }
-    }
-}
 
 pub struct Machine {
     pub core: CoreState,

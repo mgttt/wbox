@@ -2809,9 +2809,10 @@ personality、ISA、provider、隔离模型、优先级和可用性收束为可�
 `TaskScheduler` 暂不凭空建接口；须先完成 W20 的 CPU/trap 与 Linux personality
 反向依赖审计，再确定 syscall/trap 返回边界。
 
-W21 的执行侧第一阶段已落地为 `wbox-linux::machine::CoreState`：`Machine` 现在只把
+W21 的执行侧第一阶段已落地为 `wbox-linux::core::CoreState`：`Machine` 现在只把
 `CoreState` 与 Linux `Os` 聚合，既有 `m.cpu`/`m.mem` 通过兼容性 `Deref` 保持可用；
-这只是所有权边界，不是独立 ISA core crate，也没有提前移动 CPU/内存热路径。
+`machine` 仍保留兼容重导出。这只是 crate 内所有权边界，不是独立 ISA core crate，
+也没有提前移动 CPU/内存热路径。
 
 W22 的异常侧第一阶段已落地为 `CoreException/CoreResult`：x86 执行只返回 fault、
 `Halt` 或带返回 RIP 的 syscall trap；Linux `Exit`、`Killed` 和 syscall 分发只在

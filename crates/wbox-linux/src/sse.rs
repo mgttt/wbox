@@ -19,9 +19,9 @@
 //! 影响面：glibc 的 `long double` 路径，例如 `seq` 与 `printf "%f"`。
 //! 缺口清单见 crate 文档与 `docs/rust-rewrite.md` §4。
 
+use crate::core::{CoreResult, CoreState};
 use crate::cpu::trunc;
 use crate::exec::{Dec, Rm};
-use crate::machine::{CoreResult, CoreState};
 
 /// 取 128 位操作数：xmm 寄存器或 16 字节内存。
 fn read_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm) -> CoreResult<[u8; 16]> {

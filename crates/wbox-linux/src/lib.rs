@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! main.rs      CLI：解析参数、读 ELF、装配 Machine、转发退出码
-//!   └── machine.rs  Machine = Cpu + Mem + Os，取指-译码-执行主循环
+//!   ├── core.rs     ISA core state and traps, independent of Linux ABI
+//!   └── machine.rs  Linux facade = CoreState + Os，取指-译码-执行主循环
 //!         ├── elf.rs    ELF64 加载（PT_LOAD 映射、ET_DYN 偏置、PT_INTERP）
 //!         ├── proc.rs   程序装载（elf + stack + #! 脚本），execve 与启动共用
 //!         ├── stack.rs  初始栈（argc/argv/envp/auxv）
@@ -43,6 +44,7 @@
 //!   （`O_APPEND`/`O_NONBLOCK`）；pty。
 
 pub mod alu;
+pub mod core;
 pub mod cpu;
 pub mod elf;
 pub mod env_payload;

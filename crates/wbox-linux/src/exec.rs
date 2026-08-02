@@ -9,8 +9,8 @@
 //! 绝不静默当 NOP —— 静默跳过会让 guest 以难以追查的方式跑错。
 
 use crate::alu;
+use crate::core::{CoreException, CoreResult, CoreState};
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
-use crate::machine::{CoreException, CoreResult, CoreState};
 use crate::mem::PROT_EXEC;
 
 /// 一条指令的译码状态。
@@ -1330,7 +1330,7 @@ pub fn load_code(m: &mut CoreState, addr: u64, code: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::load_code;
-    use crate::{machine::CoreException, machine::Machine, syscall::Os};
+    use crate::{core::CoreException, machine::Machine, syscall::Os};
 
     #[test]
     fn syscall_instruction_emits_core_trap() {

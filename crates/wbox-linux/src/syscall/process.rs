@@ -33,8 +33,9 @@
 //! ——正是 Linux 在达到进程数上限时给的 errno，guest 侧的 libc 认得。
 
 use super::{guest_path, E2BIG, EAGAIN, ECHILD, EFAULT, EINTR, EINVAL, ENOSYS, ESRCH, PATH_MAX};
+use crate::core::CoreState;
 use crate::cpu::{Cpu, R11, RAX, RCX};
-use crate::machine::{CoreState, Exception, ExecResult, Machine};
+use crate::machine::{Exception, ExecResult, Machine};
 use crate::mem::Mem;
 use crate::proc;
 

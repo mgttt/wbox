@@ -242,9 +242,10 @@ manifest 选择必须如实反映 runtime 支持的 ISA。
 └── mem.rs       稀疏地址空间、页权限与 Fault；当前页大小固定 4 KiB
 
 x86-64 core（仍被 personality 反向穿透）
-├── exec.rs      -> CoreState(cpu + alu + mem) + sse
+├── core.rs      -> CoreState(cpu + mem) + CoreException/CoreResult
+├── exec.rs      -> core + alu + sse
 │   └── 0F 05 产生 CoreException::Syscall；由 Machine::step 兼容 facade 分发
-└── sse.rs       -> cpu + exec decoder/Rm + CoreState
+└── sse.rs       -> cpu + exec decoder/Rm + core::CoreState
 
 Linux executable personality
 ├── elf.rs       -> mem（PT_LOAD/PT_INTERP 与 ELF64 映射）
@@ -259,7 +260,7 @@ Linux kernel/ABI personality
 └── syscall/process.rs  -> Machine + proc；fork 当前克隆 Cpu/Mem/Os 后串行运行子进程
 
 当前聚合点
-└── machine.rs = CoreState(Cpu + Mem + trace/budget) + syscall::Os
+└── machine.rs = core::CoreState(Cpu + Mem + trace/budget) + syscall::Os
     ├── CoreException 只表达 ISA fault、Halt 与 syscall trap
     └── Exception 仍表达 Linux exit 与 Linux signal termination
     └── 因 Os 是具体类型，Machine facade 不能脱离 Linux personality 编译
@@ -281,8 +282,9 @@ W21 的所有权第一阶段也已落地：`Machine` 持有 `CoreState` 与 Linu
 `Deref` 保留既有 `m.cpu`/`m.mem` 调用点。新代码应优先显式使用 `m.core`，以便未来把
 `CoreState` 替换为 ISA 无关的地址空间/执行 core，而不把 Linux ABI 状态重新带入 core。
 
-W22 的 core-only 入口也已收紧：`exec.rs`、`sse.rs` 和 `load_code` 只接收
-`CoreState`；`Machine` 仅在 `machine.rs` 的 Linux facade 和 personality 模块出现。
+W22 的 core-only 入口也已收紧：`core.rs` 独立拥有 `CoreState` 与
+`CoreException`，`exec.rs`、`sse.rs` 和 `load_code` 只接收 `CoreState`；
+`Machine` 仅在 `machine.rs` 的 Linux facade 和 personality 模块出现。
 
 `cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
 必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于
