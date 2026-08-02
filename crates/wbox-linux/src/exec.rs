@@ -9,7 +9,7 @@
 //! 绝不静默当 NOP —— 静默跳过会让 guest 以难以追查的方式跑错。
 
 use crate::alu;
-use crate::core::{CoreException, CoreResult, CoreState};
+use crate::core::{AddressSpace, CoreException, CoreResult, CoreState};
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
 use crate::mem::PROT_EXEC;
 
@@ -85,7 +85,7 @@ fn bh(d: &Dec, idx: usize, size: u8) -> bool {
     size == 1 && !d.has_rex && (4..8).contains(&idx)
 }
 
-impl CoreState {
+impl<A: AddressSpace> CoreState<A> {
     // ------------------------------------------------------------ 取指
 
     #[inline]
@@ -1327,7 +1327,7 @@ fn is_rip_rel(a: u64) -> bool {
 }
 
 /// 供测试与 `main` 使用：把一段机器码放到可执行页并跑起来。
-pub fn load_code(m: &mut CoreState, addr: u64, code: &[u8]) {
+pub fn load_code<A: AddressSpace>(m: &mut CoreState<A>, addr: u64, code: &[u8]) {
     use crate::mem::{PROT_READ, PROT_WRITE};
     let len = (code.len() as u64 + 0xfff) & !0xfff;
     m.mem.map(addr, len.max(0x1000), PROT_READ | PROT_WRITE);

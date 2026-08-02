@@ -2665,8 +2665,8 @@ TODO-WINDOW
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
 ├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [done] 只读依赖图 + 反向边
-├── W21 `MachineCore` / personality / host ABI 最小契约       [active] CoreState 所有权边界；AddressSpace/TaskScheduler 待边界验证
-├── W22 x86-64 core 抽取前特征门禁                            [active] CoreException/trap 边界已落地；独立 core 抽取仍待门禁
+├── W21 `MachineCore` / personality / host ABI 最小契约       [active] CoreState/AddressSpace 边界；TaskScheduler 待验证
+├── W22 x86-64 core 抽取前特征门禁                            [active] AddressSpace/CoreException/step 已落地；独立 crate 仍待门禁
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
 ├── W25 wbox 孵化能力下沉 Agenterm crate 的晋升协议            [planned]
@@ -2815,9 +2815,10 @@ W21 的执行侧第一阶段已落地为 `wbox-linux::core::CoreState`：`Machin
 也没有提前移动 CPU/内存热路径。
 
 W22 的异常侧第一阶段已落地为 `CoreException/CoreResult`：x86 执行只返回 fault、
-`Halt` 或带返回 RIP 的 syscall trap；`CoreState::new/step` 已成为可被外部 provider
-消费的最小 core 入口。Linux `Exit`、`Killed` 和 syscall 分发只在 `Machine::step`
-facade 出现；`exec.rs`、`sse.rs` 和 `load_code` 不再接收 `Machine`。
+`Halt` 或带返回 RIP 的 syscall trap；`CoreState::new/with_memory/step` 与
+`AddressSpace` 已成为可被外部 provider 消费的最小 core 入口。Linux `Exit`、
+`Killed` 和 syscall 分发只在 `Machine::step` facade 出现；`exec.rs`、`sse.rs`
+和 `load_code` 不再接收 `Machine`。
 现有指令、ELF 与 guest ABI 门禁保持不变。
 
 `W111` 在 Windows 真机用非 ASCII 文件名验证大小写别名仍映射到同一命名 mutex：

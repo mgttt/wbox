@@ -4,16 +4,65 @@
 //! **不依赖任何工具链**，在 Windows CI 上和 Linux 上跑的是同一批断言。
 //! 端到端跑真 ELF 的测试在 `guest_elf.rs`，那个才需要 gcc。
 
-use wbox_linux::core::CoreException;
+use wbox_linux::core::{AddressSpace, CoreException, CoreState};
 use wbox_linux::cpu::*;
 use wbox_linux::exec::load_code;
 use wbox_linux::machine::{Exception, Machine};
-use wbox_linux::mem::{PROT_READ, PROT_WRITE};
+use wbox_linux::mem::{Mem, MemResult, PROT_READ, PROT_WRITE};
 use wbox_linux::syscall::Os;
 
 const CODE: u64 = 0x1_0000;
 const STACK: u64 = 0x2_0000;
 const DATA: u64 = 0x3_0000;
+
+#[derive(Clone)]
+struct DelegatingAddressSpace(Mem);
+
+impl AddressSpace for DelegatingAddressSpace {
+    fn map(&mut self, addr: u64, len: u64, prot: u8) {
+        self.0.map(addr, len, prot);
+    }
+
+    fn write_raw(&mut self, addr: u64, buf: &[u8]) {
+        self.0.write_raw(addr, buf);
+    }
+
+    fn fetch_u8(&self, addr: u64) -> MemResult<u8> {
+        self.0.fetch_u8(addr)
+    }
+
+    fn read(&self, addr: u64, buf: &mut [u8]) -> MemResult<()> {
+        self.0.read(addr, buf)
+    }
+
+    fn write(&mut self, addr: u64, buf: &[u8]) -> MemResult<()> {
+        self.0.write(addr, buf)
+    }
+
+    fn read_u8(&self, addr: u64) -> MemResult<u8> {
+        self.0.read_u8(addr)
+    }
+
+    fn write_u8(&mut self, addr: u64, value: u8) -> MemResult<()> {
+        self.0.write_u8(addr, value)
+    }
+
+    fn read_u32(&self, addr: u64) -> MemResult<u32> {
+        self.0.read_u32(addr)
+    }
+
+    fn write_u32(&mut self, addr: u64, value: u32) -> MemResult<()> {
+        self.0.write_u32(addr, value)
+    }
+
+    fn read_sized(&self, addr: u64, size: u8) -> MemResult<u64> {
+        self.0.read_sized(addr, size)
+    }
+
+    fn write_sized(&mut self, addr: u64, size: u8, value: u64) -> MemResult<()> {
+        self.0.write_sized(addr, size, value)
+    }
+}
 
 /// 装一段代码，另外给出栈和一页可读写数据区（DATA）。
 fn mach(code: &[u8]) -> Machine {
@@ -54,6 +103,15 @@ fn public_core_step_returns_syscall_trap_without_linux_dispatch() {
         Err(CoreException::Syscall { ret_rip }) => assert_eq!(ret_rip, CODE + 7),
         other => panic!("expected core syscall trap, got {other:?}"),
     }
+}
+
+#[test]
+fn core_accepts_a_provider_owned_address_space() {
+    let mut core = CoreState::with_memory(DelegatingAddressSpace(Mem::new()));
+    load_code(&mut core, CODE, &[0xb8, 7, 0, 0, 0]);
+    core.step()
+        .expect("custom address space must support fetch");
+    assert_eq!(core.cpu.regs[RAX], 7);
 }
 
 #[test]
