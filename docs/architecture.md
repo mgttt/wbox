@@ -233,6 +233,55 @@ guest 数字直接回退为同号宿主 fd，也不得重复翻译已转换的 f
 解释 x86-64 guest，但 AArch64 从 contract revision 3 起已经拥有独立预填路线，OCI
 manifest 选择必须如实反映 runtime 支持的 ISA。
 
+#### 2.3.1 当前模块依赖图（W20）
+
+```text
+无 Linux guest ABI 的现有叶子
+├── cpu.rs       x86-64 registers/flags/XMM/FS/GS/icount
+├── alu.rs       -> cpu::Flags 与位宽辅助
+└── mem.rs       稀疏地址空间、页权限与 Fault；当前页大小固定 4 KiB
+
+x86-64 core（仍被 personality 反向穿透）
+├── exec.rs      -> cpu + alu + mem + machine + sse
+│   └── 0F 05 当前直接调用 syscall::dispatch
+└── sse.rs       -> cpu + exec decoder/Rm + machine
+
+Linux executable personality
+├── elf.rs       -> mem（PT_LOAD/PT_INTERP 与 ELF64 映射）
+├── stack.rs     -> elf::Loaded + mem（Linux argc/argv/envp/auxv）
+└── proc.rs      -> elf + stack + mem + syscall::Vfs/errno
+
+Linux kernel/ABI personality
+├── syscall/mod.rs      -> Machine + cpu ABI registers + mem + fd/signal/time state
+├── syscall/fs.rs       -> Linux fd/VFS/pipe/eventfd/timerfd/signalfd
+├── syscall/net.rs      -> fs objects + socket/epoll readiness
+├── syscall/signal.rs   -> Machine + exact x86-64 Linux signal frame
+└── syscall/process.rs  -> Machine + proc；fork 当前克隆 Cpu/Mem/Os 后串行运行子进程
+
+当前聚合点
+└── machine.rs = Cpu + Mem + syscall::Os + trace/budget
+    ├── Exception 同时混有 ISA fault、Linux exit 与 Linux signal termination
+    └── 因 Os 是具体类型，core 不能脱离 Linux personality 编译
+```
+
+由这张图得到的首个可执行边界不是“把 `cpu.rs` 移到新 crate”，而是先消除两条反向边：
+
+1. x86 `syscall` 指令返回带 ABI 入口信息的 core trap，不直接调用 Linux dispatcher；
+2. 执行循环只拥有 CPU、AddressSpace、指令预算与 core trap，Linux personality 在外层
+   处理 syscall、signal delivery、exit 与调度，再决定恢复执行或终止。
+
+`cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
+必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于
+Linux executable personality，因为 `PT_INTERP`、auxv、shebang、errno 和 VFS 路径策略已经
+交织。fd、socket、signal frame、fork/clone/wait、guest pid 与 VFS 全部是 Linux guest ABI，
+不得下沉到 `agenterm-platform`；后者只继续提供 entropy、file identity 和未来可独立验证的
+宿主对象机制。
+
+W21 定义接口时还必须保留以下事实，不能用空 trait 掩盖：地址空间目前在 fork 时深拷贝，
+`MAP_SHARED` 尚无共享 backing；调度器目前串行执行快照子进程；signal frame 是 x86-64 Linux
+布局；`Exception::Killed` 和 `Exception::Exit` 是 personality outcome，不是 ISA exception。
+在并发 task、共享映射和 AArch64 core 尚未有行为门禁前，这些能力必须继续报告 partial/planned。
+
 ## 3. Linux 后端
 
 ### 3.1 公共隔离层

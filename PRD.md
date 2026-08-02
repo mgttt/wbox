@@ -2609,7 +2609,7 @@ TODO-WINDOW
 ├── W17 Linux signal 修复的 Windows 跨宿主验收               [done] handler/timer/全门禁
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
 ├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
-├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [next] 只读依赖图
+├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [done] 只读依赖图 + 反向边
 ├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
 ├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
@@ -2736,6 +2736,13 @@ PRE-PLATFORM
 `crates/wbox-linux` 的 CPU/内存热路径。`agenterm-platform` 只按不可变 commit 和
 最小 feature 面接入，不写临时源码复制层。W25 的能力只有在脱离 OCI、guest ABI 和路由策略后仍独立成立，
 才可下沉；下沉后 wbox 必须直接引用并删除原实现，不长期复制两份。
+
+`W20` 的只读审计已写入 `docs/architecture.md` §2.3.1。当前可独立于 Linux ABI 的叶子是
+`cpu/alu/mem`，x86 core 还包括互相耦合的 `exec/sse`；阻止抽取的关键反向边是 `exec` 对
+`syscall::dispatch` 的直接调用，以及 `Machine` 对具体 `syscall::Os` 的拥有。W21 必须先让
+core 返回 syscall/trap，由外层 Linux personality 处理 syscall、signal、exit 与调度；不得先
+机械搬文件。`elf/proc/stack` 与 fd/VFS/socket/signal/fork 均继续留在 Linux personality，
+不下沉到 `agenterm-platform`。
 
 `W16` 来自 Windows `guest-tests` 的基线外回归：
 `t_fd_open/open/ocreat-mode` 以 `0604` 创建文件，`fstat` 却固定得到 `0644`。
