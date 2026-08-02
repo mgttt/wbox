@@ -206,6 +206,8 @@ workspace 当前包含：
 - `target/debug/incremental` 和 stale platform revision 清理。
 - platform 最小 feature CI：`--no-default-features --features filesystem-conventions`。
 - filesystem 最小 feature 测试：`--no-default-features --features filesystem`。
+- CI 还检查 `filesystem-conventions` 的 normal dependency tree 不含 `libc` 或
+  `windows-sys`，避免轻量 feature 被宿主原生依赖悄然污染。
 
 ## 10. 当前明确没有的能力
 
