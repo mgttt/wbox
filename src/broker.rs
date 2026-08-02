@@ -5,7 +5,9 @@
 
 use crate::error::{Result, WboxError};
 use std::io::Write as _;
-use std::os::windows::io::{AsHandle as _, AsRawHandle as _, BorrowedHandle, RawHandle};
+#[cfg(test)]
+use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
 use std::time::Duration;
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(test)]
@@ -304,11 +306,15 @@ impl BrokerEndpoint {
         self.nonce
     }
 
-    pub(crate) fn register(self, process: HANDLE, job: &crate::job::Job) -> Result<BrokerSession> {
-        let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
-        let process =
-            agenterm_platform::process_reference::ProcessReference::duplicate_from(process)
-                .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
+    pub(crate) fn register(
+        self,
+        process: &agenterm_platform::process_reference::ProcessReference,
+        job: &crate::job::Job,
+    ) -> Result<BrokerSession> {
+        let process = agenterm_platform::process_reference::ProcessReference::duplicate_from(
+            process.as_handle(),
+        )
+        .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
         let in_job = job.contains(&process)?;
         if !in_job {
             return Err(WboxError::spawn(
@@ -912,8 +918,14 @@ mod tests {
         let profile = AppContainerProfile::create(&profile_name, &[]).unwrap();
         let endpoint = BrokerEndpoint::create(&profile.sid_string().unwrap()).unwrap();
         let job = crate::job::Job::create(Limits::default()).unwrap();
+        let current = unsafe {
+            std::os::windows::io::BorrowedHandle::borrow_raw(GetCurrentProcess() as RawHandle)
+        };
+        let process =
+            agenterm_platform::process_reference::ProcessReference::duplicate_from(current)
+                .unwrap();
         let err = endpoint
-            .register(unsafe { GetCurrentProcess() }, &job)
+            .register(&process, &job)
             .err()
             .expect("当前测试进程不在新建 Job 中，必须拒绝");
         assert!(format!("{}", err).contains("Job"), "{}", err);

@@ -2,22 +2,15 @@
 //!
 //! 隔离模型（见 SPEC §0）：
 //! - AppContainer profile 提供独立的 AppContainer SID（令牌隔离边界）；
-//! - capability 白名单以 SID_AND_ATTRIBUTES 形式下发；
+//! - capability 白名单由 platform 在挂起创建边界转换为原生属性；
 //! - 完整性级别：AppContainer 派生令牌天然为 Low IL（内核强制），无需也无法
 //!   在 attribute-list 启动路径上额外指定。
 
+use crate::error::Result;
 use agenterm_platform::adapters::windows::app_container::{
     self, AppContainerCapability, AppContainerCapabilityKind, AppContainerCapabilitySid,
     AppContainerProfileErrorKind, OwnedAppContainerSid,
 };
-use std::os::windows::io::{AsHandle, BorrowedHandle, RawHandle};
-use windows_sys::Win32::Foundation::CloseHandle;
-use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
-use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
-
-use crate::error::Result;
-
-const ENABLED_ATTRIBUTES: u32 = SE_GROUP_ENABLED as u32;
 
 /// RAII 包装：AppContainer profile（命名内核隔离配置）。
 ///
@@ -44,13 +37,11 @@ impl AppContainerProfile {
         let attrs = capabilities
             .iter()
             .map(|capability| {
-                AppContainerCapability::new(capability.as_bytes(), ENABLED_ATTRIBUTES).map_err(
-                    |error| {
-                        crate::error::WboxError::profile(format!(
-                            "构造 AppContainer capability 失败：{error}"
-                        ))
-                    },
-                )
+                AppContainerCapability::enabled(capability.as_bytes()).map_err(|error| {
+                    crate::error::WboxError::profile(format!(
+                        "构造 AppContainer capability 失败：{error}"
+                    ))
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let sid = match app_container::create_profile(name, name, &description, &attrs) {
@@ -117,9 +108,8 @@ impl AppContainerProfile {
         &self.name
     }
 
-    /// AppContainer SID（原始指针，仅在本对象存活期间有效）。
-    pub fn sid(&self) -> PSID {
-        self.sid.as_raw_sid()
+    pub fn sid_bytes(&self) -> &[u8] {
+        self.sid.as_bytes()
     }
 
     /// AppContainer SID 的字符串形式（S-1-15-2-...），用于 --verbose 输出。
@@ -198,45 +188,12 @@ impl CapabilitySid {
         self.sid.as_bytes()
     }
 
-    /// Return the enabled form required for capability access checks.
-    pub fn enabled_attributes(&self) -> SID_AND_ATTRIBUTES {
-        SID_AND_ATTRIBUTES {
-            Sid: self.sid.as_raw_sid(),
-            Attributes: ENABLED_ATTRIBUTES,
-        }
-    }
-}
-
-/// UTF-8/UTF-16 转换辅助：生成 NUL 结尾宽字符缓冲区。
-pub fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// 关闭句柄的通用小工具（RAII）。
-pub struct OwnedHandle(pub windows_sys::Win32::Foundation::HANDLE);
-
-// Win32 kernel handles are process-wide and may be closed from a different thread.
-unsafe impl Send for OwnedHandle {}
-
-impl OwnedHandle {
-    pub fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
-        self.0
-    }
-}
-
-impl AsHandle for OwnedHandle {
-    fn as_handle(&self) -> BorrowedHandle<'_> {
-        // # Safety: self owns this handle for the lifetime of the returned borrow.
-        unsafe { BorrowedHandle::borrow_raw(self.raw() as RawHandle) }
-    }
-}
-
-impl Drop for OwnedHandle {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // # Safety: 句柄由本结构独占，只关闭一次。
-            unsafe { CloseHandle(self.0) };
-        }
+    pub fn process_capability(
+        &self,
+    ) -> agenterm_platform::app_container_process::AppContainerProcessCapability<'_> {
+        agenterm_platform::app_container_process::AppContainerProcessCapability::enabled(
+            self.as_bytes(),
+        )
     }
 }
 
@@ -320,8 +277,8 @@ mod real_windows_tests {
         );
         assert_eq!(cap.desc(), "INTERNET_CLIENT");
         assert_eq!(
-            cap.enabled_attributes().Attributes,
-            ENABLED_ATTRIBUTES,
+            cap.process_capability().attributes(),
+            4,
             "capability SID 必须启用后才参与访问检查"
         );
     }
@@ -342,7 +299,7 @@ mod real_windows_tests {
         ] {
             assert_eq!(app_container::sid_string(cap.as_bytes()).unwrap(), expected);
             assert_eq!(cap.desc(), desc);
-            assert_eq!(cap.enabled_attributes().Attributes, ENABLED_ATTRIBUTES);
+            assert_eq!(cap.process_capability().attributes(), 4);
         }
     }
 

@@ -1,8 +1,8 @@
 //! 进程启动编排：AppContainer attribute-list 路径。
 //!
 //! 关键取舍（对应 SPEC §2-3）：
-//! 采用 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` + `CreateProcessW`
-//! （EXTENDED_STARTUPINFO_PRESENT），**而不是** `CreateProcessAsUserW`：
+//! platform adapter 采用 AppContainer security-capabilities attribute-list 路径，
+//! **而不是** `CreateProcessAsUserW`：
 //! - attribute-list 路径由内核在创建时派生 AppContainer 子令牌，
 //!   对当前用户**不需要 SeAssignPrimaryTokenPrivilege**，普通用户可用；
 //! - CreateProcessAsUser/CreateProcessWithToken 需要该特权（或服务上下文），
@@ -12,18 +12,15 @@
 //!
 //! 流程：挂起创建 → AssignProcessToJobObject → 恢复主线程 → 等待 → 转发退出码。
 
+#[cfg(test)]
+use std::os::windows::io::AsRawHandle as _;
 use std::os::windows::io::{AsHandle as _, BorrowedHandle, RawHandle};
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
-use windows_sys::Win32::Security::{SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES};
-use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList, ResumeThread,
-    UpdateProcThreadAttribute, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
-};
+use windows_sys::Win32::Foundation::HANDLE;
+
+use agenterm_platform::app_container_process::AppContainerProcessOptions;
 
 use crate::error::Result;
-use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
+use crate::token::{AppContainerProfile, CapabilitySid};
 
 /// 启动子进程并等待退出，返回子进程退出码。
 ///
@@ -48,8 +45,7 @@ pub fn run_container(
 
 /// 与 [`run_container`] 相同，并只向子进程继承 `handles` 中列出的句柄。
 ///
-/// 句柄会在 `CreateProcessW` 的短暂窗口内设置 `HANDLE_FLAG_INHERIT`，随后按原值
-/// 恢复；`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 保证父进程的其他可继承句柄不泄漏。
+/// platform 在原生创建窗口内临时设置继承标志并恢复，只把显式 allowlist 交给子进程。
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn run_container_with_handles(
     profile: &AppContainerProfile,
@@ -87,7 +83,10 @@ pub fn run_container_with_handles_and_created_hook<F>(
     on_created: F,
 ) -> Result<u32>
 where
-    F: FnOnce(HANDLE, &mut crate::job::Job) -> Result<()>,
+    F: FnOnce(
+        &agenterm_platform::process_reference::ProcessReference,
+        &mut crate::job::Job,
+    ) -> Result<()>,
 {
     run_container_with_lifecycle_hooks_and_handles(
         profile,
@@ -143,232 +142,66 @@ fn run_container_with_lifecycle_hooks_and_handles<C, S>(
     on_started: S,
 ) -> Result<u32>
 where
-    C: FnOnce(HANDLE, &mut crate::job::Job) -> Result<()>,
+    C: FnOnce(
+        &agenterm_platform::process_reference::ProcessReference,
+        &mut crate::job::Job,
+    ) -> Result<()>,
     S: FnOnce(&mut crate::job::Job),
 {
-    let mut cmd_wide = to_wide(cmdline); // CreateProcessW 要求可写缓冲区
-    let workdir_wide = to_wide(workdir);
     let mut inherited_handles = handles.to_vec();
     inherited_handles.sort_unstable_by_key(|handle| *handle as usize);
     inherited_handles.dedup();
-    // ---- capability 属性数组（借用，生命周期覆盖整个创建过程）----
-    let mut cap_attrs: Vec<SID_AND_ATTRIBUTES> = capabilities
+    let process_capabilities = capabilities
         .iter()
-        .map(CapabilitySid::enabled_attributes)
-        .collect();
+        .map(CapabilitySid::process_capability)
+        .collect::<Vec<_>>();
 
-    let mut sec_caps = SECURITY_CAPABILITIES {
-        AppContainerSid: profile.sid(),
-        Capabilities: if cap_attrs.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            cap_attrs.as_mut_ptr()
-        },
-        CapabilityCount: cap_attrs.len() as u32,
-        Reserved: 0,
-    };
-
-    // ---- 初始化 attribute list（两次调用：先取大小，再填充）----
-    let attribute_count = if inherited_handles.is_empty() { 1 } else { 2 };
-    let mut attr_list_size: usize = 0;
-    // # Safety: 第一次调用只查询所需大小，传 null 列表指针，预期失败。
-    unsafe {
-        InitializeProcThreadAttributeList(
-            std::ptr::null_mut(),
-            attribute_count,
-            0,
-            &mut attr_list_size,
-        );
-    }
-    if attr_list_size == 0 {
-        let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!(
-            "InitializeProcThreadAttributeList(查询大小) 失败，GetLastError={}",
-            err
-        )));
-    }
-    // 用 u64 对齐的缓冲区承载 attribute list。
-    let mut attr_buf = vec![0u64; attr_list_size.div_ceil(8)];
-    let attr_list: LPPROC_THREAD_ATTRIBUTE_LIST =
-        attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
-    // # Safety: attr_buf 大小/对齐满足要求，attr_list_size 来自上一步查询。
-    let ok = unsafe {
-        InitializeProcThreadAttributeList(attr_list, attribute_count, 0, &mut attr_list_size)
-    };
-    if ok == 0 {
-        let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!(
-            "InitializeProcThreadAttributeList 失败，GetLastError={}",
-            err
-        )));
-    }
-    // RAII：离开作用域时销毁 attribute list。
-    let _attr_guard = AttrListGuard(attr_list);
-
-    // # Safety:
-    // - attr_list 已初始化且容量 >= 1 个属性；
-    // - sec_caps 及其引用的 SID / capability 数组在 CreateProcessW 返回前保持有效
-    //   （它们都在本函数栈上/由调用方持有的 profile 中）。
-    let ok = unsafe {
-        UpdateProcThreadAttribute(
-            attr_list,
-            0,
-            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-            &mut sec_caps as *mut _ as *const core::ffi::c_void,
-            std::mem::size_of::<SECURITY_CAPABILITIES>(),
-            std::ptr::null_mut(),
-            std::ptr::null(),
-        )
-    };
-    if ok == 0 {
-        let err = unsafe { GetLastError() };
-        return Err(crate::error::WboxError::spawn(format!(
-            "UpdateProcThreadAttribute(SECURITY_CAPABILITIES) 失败，GetLastError={}",
-            err
-        )));
-    }
-
-    if !inherited_handles.is_empty() {
-        // # Safety: attribute list 容量为 2；数组在 CreateProcessW 返回前保持有效；
-        // 每个句柄会由下方 platform transaction 在创建窗口内临时设为 inheritable。
-        let ok = unsafe {
-            UpdateProcThreadAttribute(
-                attr_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-                inherited_handles.as_mut_ptr() as *const core::ffi::c_void,
-                inherited_handles.len() * std::mem::size_of::<HANDLE>(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            )
-        };
-        if ok == 0 {
-            let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::spawn(format!(
-                "UpdateProcThreadAttribute(HANDLE_LIST) 失败，GetLastError={}",
-                err
-            )));
-        }
-    }
-
-    // ---- STARTUPINFOEXW：stdio 直接继承当前控制台 ----
-    let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
-    si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
-    si.lpAttributeList = attr_list;
-
-    let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-
-    // CREATE_SUSPENDED：先创建挂起的进程，分配进 Job 后再放行，
-    // 防止子进程在入 Job 之前执行代码（逃逸窗口）。
-    let flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
-
-    // 显式环境块（"KEY=VAL\0...\0\0" 的 UTF-16 形式）：白名单环境
-    // 直接交给子进程，杜绝宿主环境（含 WBOX_REGISTRY_* 等机密）直通。
-    let env_wide = build_env_block(env);
-
-    // # Safety:
-    // - cmd_wide 为可写 NUL 结尾缓冲区（CreateProcessW 会就地修改）；
-    // - si/pi 为有效栈上结构；attribute list 在调用期间有效；
-    // - env_wide 为合法的双 NUL 结尾环境块，调用期间存活；
-    //   stdout/stdin/stderr 继承。
     let borrowed_handles = inherited_handles
         .iter()
         .map(|handle| unsafe { BorrowedHandle::borrow_raw(*handle as RawHandle) })
         .collect::<Vec<_>>();
-    let spawn_result = agenterm_platform::process_spawn::with_inheritable_handles(
-        borrowed_handles.as_slice(),
-        || unsafe {
-            let ok = CreateProcessW(
-                std::ptr::null(), // 从命令行解析程序名
-                cmd_wide.as_mut_ptr(),
-                std::ptr::null(), // 进程安全属性（默认）
-                std::ptr::null(), // 线程安全属性（默认）
-                i32::from(!inherited_handles.is_empty()),
-                flags,
-                env_wide.as_ptr() as *const core::ffi::c_void, // 显式环境块
-                workdir_wide.as_ptr(),
-                &si.StartupInfo as *const _,
-                &mut pi,
-            );
-            // The transaction restores source HANDLE flags after this callback and those
-            // Win32 calls may replace the thread's last-error value. Capture CreateProcessW's
-            // error in its own API boundary instead of reading it after restoration.
-            let error = if ok == 0 { GetLastError() } else { 0 };
-            (ok, error)
+    let suspended = agenterm_platform::app_container_process::spawn_suspended_with_handles(
+        AppContainerProcessOptions {
+            app_container_sid: profile.sid_bytes(),
+            capabilities: &process_capabilities,
+            command_line: cmdline,
+            working_directory: std::path::Path::new(workdir),
+            environment: env,
+            invalid_environment_entries:
+                agenterm_platform::process_conventions::InvalidEnvironmentEntryPolicy::Skip,
         },
-    );
-    let (ok, create_error) = match spawn_result {
-        Ok(result) => result,
-        Err(error) => {
-            // The callback may have created a suspended child before restoring a source
-            // handle failed. Take ownership of both returned handles and reap that child;
-            // it has not entered the Job yet, so KILL_ON_JOB_CLOSE cannot cover this path.
-            if !pi.hProcess.is_null() {
-                let process = OwnedHandle(pi.hProcess);
-                let _thread = OwnedHandle(pi.hThread);
-                let _ =
-                    agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
-                let _ = wait_for_process_exit(process.raw());
-            }
-            return Err(crate::error::WboxError::spawn(format!(
-                "准备显式继承 HANDLE 失败：{error}"
-            )));
-        }
-    };
-    if ok == 0 {
-        let err = create_error;
-        let hint = match err {
-            2 => "（找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
-            203 => "（环境变量未找到；请确认传入的环境块格式正确）",
+        borrowed_handles.as_slice(),
+    )
+    .map_err(|error| {
+        let hint = match error.native_code() {
+            Some(2) => "（找不到程序；请确认命令在 --workdir 或 PATH 中可见）",
+            Some(203) => "（环境变量未找到；请确认传入的环境块格式正确）",
             _ => "",
         };
-        return Err(crate::error::WboxError::spawn(format!(
-            "CreateProcessW 失败，GetLastError={}{}",
-            err, hint
-        )));
-    }
-    let process = OwnedHandle(pi.hProcess);
-    let thread = OwnedHandle(pi.hThread);
+        crate::error::WboxError::spawn(format!("创建挂起的 AppContainer 进程失败：{error}{hint}"))
+    })?;
 
     // ---- 立即入 Job，然后放行主线程 ----
-    if let Err(e) = job.assign(process.as_handle()) {
-        // 子进程是 CREATE_SUSPENDED 且未入 Job：若直接返回，KILL_ON_JOB_CLOSE
-        // 收割不到它，会留下一个永久挂起的孤儿进程。先主动终止再返回错误。
-        let _ = agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
-        return Err(e);
-    }
-    if let Err(e) = on_created(process.raw(), job) {
-        // 子进程仍挂起；等待终止完成，避免 broker 初始化失败后留下孤儿。
-        let _ = agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);
-        let _ = wait_for_process_exit(process.raw());
-        return Err(e);
-    }
-    // # Safety: 线程句柄有效，线程处于挂起状态（CREATE_SUSPENDED）。
-    let prev = unsafe { ResumeThread(thread.raw()) };
-    if prev == u32::MAX {
-        let err = unsafe { GetLastError() };
-        // 进程已入 Job，KILL_ON_JOB_CLOSE 会负责收割；直接报错即可。
-        return Err(crate::error::WboxError::spawn(format!(
-            "ResumeThread 失败，GetLastError={}",
-            err
-        )));
-    }
+    job.assign(suspended.process().as_handle())?;
+    on_created(suspended.process(), job)?;
+    let process = suspended.resume().map_err(|error| {
+        crate::error::WboxError::spawn(format!("恢复 AppContainer 主线程失败：{error}"))
+    })?;
     on_started(job);
 
     // ---- 等待退出并转发退出码 ----
-    wait_for_process_exit(process.raw())?;
+    wait_for_process_exit(&process)?;
     agenterm_platform::process_reference::exit_code_handle(process.as_handle()).map_err(|error| {
         crate::error::WboxError::spawn(format!("读取 sandbox 退出码失败：{error}"))
     })
 }
 
-fn wait_for_process_exit(process: HANDLE) -> Result<()> {
-    use std::os::windows::io::{BorrowedHandle, RawHandle};
-
-    let process = unsafe { BorrowedHandle::borrow_raw(process as RawHandle) };
-    match agenterm_platform::process_reference::wait_handle(process, None).map_err(|error| {
-        crate::error::WboxError::spawn(format!("等待 sandbox 进程退出失败：{error}"))
-    })? {
+fn wait_for_process_exit(
+    process: &agenterm_platform::process_reference::ProcessReference,
+) -> Result<()> {
+    match agenterm_platform::process_reference::wait_handle(process.as_handle(), None).map_err(
+        |error| crate::error::WboxError::spawn(format!("等待 sandbox 进程退出失败：{error}")),
+    )? {
         agenterm_platform::process_reference::ProcessWait::Exited => Ok(()),
         agenterm_platform::process_reference::ProcessWait::TimedOut => {
             Err(crate::error::WboxError::spawn("sandbox 无限等待意外超时"))
@@ -378,6 +211,7 @@ fn wait_for_process_exit(process: HANDLE) -> Result<()> {
 
 /// 构造 CreateProcessW lpEnvironment 所需的 UTF-16 环境块
 /// （`KEY=VAL\0...KEY=VAL\0\0`）。非法键（空/含 '='）防御性跳过。
+#[cfg(test)]
 fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
     agenterm_platform::process_conventions::windows_environment_block(
         env,
@@ -386,17 +220,9 @@ fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
     .expect("skip policy cannot reject an environment entry")
 }
 
-/// attribute list 的 RAII 销毁器。
-struct AttrListGuard(LPPROC_THREAD_ATTRIBUTE_LIST);
-
-impl Drop for AttrListGuard {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // # Safety: 列表由 InitializeProcThreadAttributeList 初始化，只销毁一次；
-            // 底层内存由调用处的 attr_buf 持有，此处仅做内核侧清理。
-            unsafe { DeleteProcThreadAttributeList(self.0) };
-        }
-    }
+#[cfg(test)]
+fn to_wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// 组装传给 CreateProcessW 的命令行，按 Windows CRT /
@@ -643,9 +469,10 @@ mod real_windows_tests {
     use super::*;
     use crate::backend::Limits;
     use crate::job::Job;
-    use crate::token::{to_wide, AppContainerProfile, CapabilitySid, OwnedHandle};
+    use crate::token::{AppContainerProfile, CapabilitySid};
+    use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
     use windows_sys::Win32::Foundation::{
-        DuplicateHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+        DuplicateHandle, GetLastError, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
@@ -654,6 +481,21 @@ mod real_windows_tests {
     use windows_sys::Win32::System::Threading::{
         CreateEventW, GetCurrentProcess, SetEvent, WaitForSingleObject,
     };
+
+    unsafe fn owned_handle(handle: HANDLE) -> OwnedHandle {
+        assert!(!handle.is_null(), "native fixture returned a null HANDLE");
+        unsafe { OwnedHandle::from_raw_handle(handle as RawHandle) }
+    }
+
+    trait WindowsHandleExt {
+        fn raw(&self) -> HANDLE;
+    }
+
+    impl WindowsHandleExt for OwnedHandle {
+        fn raw(&self) -> HANDLE {
+            self.as_raw_handle() as HANDLE
+        }
+    }
 
     fn create_profile(name: &str, caps: &[CapabilitySid]) -> AppContainerProfile {
         AppContainerProfile::create(name, caps)
@@ -922,7 +764,7 @@ mod real_windows_tests {
             )
         };
         if status >= 0 {
-            drop(OwnedHandle(opened));
+            drop(unsafe { owned_handle(opened) });
         }
         status
     }
@@ -974,7 +816,7 @@ mod real_windows_tests {
             )
         };
         assert!(!root.is_null(), "打开 volume 根目录失败");
-        let root = OwnedHandle(root);
+        let root = unsafe { owned_handle(root) };
 
         let profile = create_profile(&unique_name("handle_profile"), &[]);
         let mut job = Job::create(Limits::default()).unwrap();
@@ -1043,7 +885,8 @@ mod real_windows_tests {
             .into_owned();
         let env = minimal_process_env();
         let cmdline = build_cmdline(std::slice::from_ref(&exe)).unwrap();
-        let source = unsafe { OwnedHandle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())) };
+        let source =
+            unsafe { owned_handle(CreateEventW(std::ptr::null(), 1, 0, std::ptr::null())) };
         assert!(!source.raw().is_null(), "CreateEventW 失败");
         let mut roundtrip = None;
 
@@ -1062,7 +905,7 @@ mod real_windows_tests {
                     DuplicateHandle(
                         current,
                         source.raw(),
-                        child_process,
+                        child_process.as_handle().as_raw_handle() as HANDLE,
                         &mut child_handle,
                         0,
                         0,
@@ -1078,7 +921,7 @@ mod real_windows_tests {
                 let mut copied_back = std::ptr::null_mut();
                 if unsafe {
                     DuplicateHandle(
-                        child_process,
+                        child_process.as_handle().as_raw_handle() as HANDLE,
                         child_handle,
                         current,
                         &mut copied_back,
@@ -1093,7 +936,7 @@ mod real_windows_tests {
                         unsafe { GetLastError() }
                     )));
                 }
-                roundtrip = Some(OwnedHandle(copied_back));
+                roundtrip = Some(unsafe { owned_handle(copied_back) });
                 Ok(())
             },
         )
@@ -1421,8 +1264,8 @@ mod real_windows_tests {
             .expect_err("应报 spawn 错误");
         let msg = format!("{}", err);
         assert!(
-            msg.contains("CreateProcessW") || msg.contains("GetLastError"),
-            "应指向 CreateProcessW 失败，实得：{}",
+            msg.contains("AppContainer") || msg.contains("working directory"),
+            "应指向 AppContainer 挂起创建失败，实得：{}",
             msg
         );
     }

@@ -18,7 +18,7 @@ members = [".", "crates/wbox-codec", "crates/wbox-hpc-lab", "crates/wbox-http", 
 # 单点冻结 Windows ABI 声明版本，各 package 仍只启用自身需要的 feature。
 windows-sys = { version = "0.61", default-features = false }
 # 单点冻结共享宿主机制，各 package 只启用自身消费的最小 feature。
-agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "653cc31d09ba640c10f42451e23b0af6d1ca151a", default-features = false }
+agenterm-platform = { git = "https://github.com/mgttt/agenterm.git", rev = "518c228aae9f730d80f171cc2011fdbac764fa09", default-features = false }
 
 [dependencies]
 # 自实现的格式/摘要原语（PRD §2.2.1）：JSON、SHA-256、Base64、DEFLATE/gzip、tar。
@@ -40,7 +40,7 @@ wbox-machine = { path = "crates/wbox-machine" }
 
 # 只消费跨产品成立的宿主熵、文件、锁、存储卷事实与单进程控制/观测机制；目录用途、进程树所有权、
 # TLS/guest 错误策略、状态和 guest 路由仍由 wbox 持有。
-agenterm-platform = { workspace = true, features = ["app-container-profile", "directory-access", "entropy", "filesystem", "filesystem-entry", "filesystem-open", "filesystem-cleanup", "filesystem-publish", "filesystem-usage", "ipc", "locking", "process-containment", "process-control", "process-conventions", "process-image", "process-metrics", "process-observation", "process-reference", "process-security", "process-spawn", "storage", "user-identity"] }
+agenterm-platform = { workspace = true, features = ["app-container-process", "app-container-profile", "directory-access", "entropy", "filesystem", "filesystem-entry", "filesystem-open", "filesystem-cleanup", "filesystem-publish", "filesystem-usage", "ipc", "locking", "process-containment", "process-control", "process-conventions", "process-image", "process-metrics", "process-observation", "process-reference", "process-security", "process-spawn", "storage", "user-identity"] }
 
 # Linux 宿主的原生容器后端（LinuxNativeBackend，见 docs/architecture.md §3）：
 # unshare / pivot_root / mount 这些没有 std 封装，必须走 libc FFI。
@@ -53,14 +53,10 @@ libc = "0.2"
 [dependencies.windows-sys]
 workspace = true
 features = [
-    # 基础类型：HANDLE、BOOL、PSID、CloseHandle 等
+    # 基础类型：HANDLE、BOOL 与测试使用的 Win32 错误码
     "Win32_Foundation",
-    # 令牌 / SID / 完整性级别 / SECURITY_CAPABILITIES / 命名管道安全属性
-    "Win32_Security",
     # 进程创建、attribute list、等待、退出码
     "Win32_System_Threading",
-    # SE_GROUP_ENABLED and other system access masks.
-    "Win32_System_SystemServices",
     # GetCurrentProcessId 等内核辅助
     "Win32_System_Kernel",
     # GetComputerNameExW 用不到；保留最小集合

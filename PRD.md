@@ -2684,7 +2684,7 @@ TODO-WINDOW
 ├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
 ├── W93 Windows 目录树有限授权下沉并删除本地 ACL FFI                                  [done] typed SID + no-follow DACL merge
 ├── W94 Windows 命名进程 containment/Job 原语下沉                                    [done] exact process + limits/lifecycle
-├── W95 AppContainer 可恢复挂起进程创建下沉                                           [next] attribute-list + exact handles
+├── W95 AppContainer 可恢复挂起进程创建下沉                                           [done] fail-closed suspended process
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4024,9 +4024,12 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`653cc31d09ba640c10f42451e23b0af6d1ca151a`，关闭 default features，按消费包启用
+`518c228aae9f730d80f171cc2011fdbac764fa09`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-observation`/`process-spawn`/`process-containment`、`filesystem-entry`/`directory-access`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-observation`/`process-spawn`/`process-containment`/
+`app-container-profile`/`app-container-process`、`filesystem-entry`/`directory-access`/
+`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖
+`hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4791,18 +4794,25 @@ x86-64/ARM64 和 macOS x86-64 交叉编译均通过；全 feature 为 205 项单
 wbox Quick 306 项、根包 `464 passed / 3 ignored`、release WP.1-WP.27 全部适用门禁及固定
 Ubuntu 24.04 WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
 
-`W95` 是下一项候选边界。当前剩余的生产级 Windows 进程 FFI 已集中在 `sandbox.rs` 的
-`SECURITY_CAPABILITIES`/attribute-list、显式 HANDLE 白名单、`CreateProcessW` 挂起创建与
-`ResumeThread`，以及 `token.rs` 仅为该链路保留的 HANDLE/SID 适配。共享层可提供
-“用 owned AppContainer SID、capability SID、显式环境和继承对象创建一个尚未执行用户代码的
-精确进程/主线程对象”，并保证 attribute-list 和继承标志在成功、错误、panic 后都恢复；
-非 Windows 宿主返回类型化 `Unsupported`，不得伪装成等价隔离。
+`W95` 将产品无关的 AppContainer 挂起启动事务下沉为轻量 `app-container-process`
+feature。platform 以 owned binary SID 构造启用的 capability，独占
+`SECURITY_CAPABILITIES`/attribute-list、显式 UTF-16 环境块、HANDLE allowlist、
+`CreateProcessW` 挂起创建与 `ResumeThread`；成功时返回精确 `ProcessReference`，尚未成功
+resume 的对象在 `Drop` 中强制终止并等待，因此 Job 分配、created hook 或 resume 失败均不
+遗留永久挂起的孤儿。源 HANDLE 的 inherit flag 在成功和失败后恢复，Linux/macOS 同一 API
+均返回类型化 `Unsupported`，不伪装成等价隔离。
 
-wbox 必须继续持有 profile 命名/保留/删除、网络 capability 产品策略、先挂起创建再加入
-containment 的顺序、broker created hook、runstate started hook、退出码和错误分类。晋升门禁至少
-覆盖创建失败无孤儿、hook 失败收割、HANDLE 白名单无泄漏、宿主环境不继承、精确进程在 resume
-前可加入 containment，以及最小 feature 不拉入完整 `process`/UI。未满足这些门禁前不删除
-本地启动链路。
+wbox 删除本地 attribute-list/CreateProcessW/ResumeThread FFI、SID attributes、HANDLE RAII
+和按裸进程 HANDLE 注册 broker 的边界，只保留 profile 命名/保留/删除、网络 capability
+产品策略、挂起进程先加入 containment 再执行 broker created hook、resume 后执行 runstate
+started hook 的顺序，以及退出码和产品错误分类。WP.23A 也从匹配内部 Win32 函数名改为匹配
+稳定的 AppContainer 创建操作语义，避免共享层重构造成假失败。
+
+platform 的最小 feature 严格 Clippy、54 项单测以及真实挂起/resume、未 resume 自动收割、
+显式 HANDLE 继承标志恢复门禁通过；Linux x86-64/ARM64 与 macOS x86-64/ARM64 严格交叉
+Clippy 通过，最小 Windows 依赖仍只有 `windows-sys`。wbox Quick 306 项、根包
+`464 passed / 3 ignored`、release WP.1-WP.27 全部适用门禁及固定 Ubuntu 24.04
+WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

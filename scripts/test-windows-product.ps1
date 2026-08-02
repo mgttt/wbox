@@ -783,7 +783,8 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
         "run", "-d", "--name", $badReadyName,
         "--workdir", "$env:SystemRoot\System32", "--", $missingProgram
     )
-    if ($badReady.ExitCode -eq 0 -or $badReady.Output -notmatch "CreateProcessW") {
+    if ($badReady.ExitCode -eq 0 -or
+        $badReady.Output -notmatch "CreateProcessW|spawn-app-container-process|找不到程序") {
         throw "WP.23A missing detached workload was reported as success: rc=$($badReady.ExitCode) output=$($badReady.Output)"
     }
     $badReadyState = & $portableWbox ps --all 2>&1 | Out-String
