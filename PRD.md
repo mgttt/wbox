@@ -4717,15 +4717,18 @@ WP.1-WP.27 产品门禁和固定 Ubuntu 24.04 digest 的 WU.1/WU.2（WU.2 `rc=37
 `W90` 新增零原生依赖 `process-conventions` feature，把 Windows CRT/
 `CommandLineToArgvW` 参数引用、反斜杠/引号边界和 `CreateProcessW` 双 NUL UTF-16
 环境块编码下沉到 platform。非法环境键/值由类型化错误保留原始 entry index，调用方必须
-显式选择 `Reject` 或 `Skip`；合法条目顺序和重复项不由平台擅自改写。该 feature 的
+显式选择 `Reject` 或 `Skip`；合法条目按 Windows 契约以 locale-independent Unicode
+uppercase key 稳定排序，折叠后同名项保留调用方顺序，因此重复项策略仍归调用方。该 feature 的
 最小 dependency tree 只有 `agenterm-platform` 自身，14 tests 与严格 Clippy 通过；
 all-features 198 tests、Windows i686/ARM64、Linux x64/ARM64、macOS x64/ARM64 编译通过，
-Windows 真机额外以 `CommandLineToArgvW` 验证复杂 argv 原样往返；上游提交为 `5f4d8dd`。
+Windows 真机额外以 `CommandLineToArgvW` 验证复杂 argv 原样往返；上游提交为 `5f4d8dd`，
+环境块排序契约修正为 `cf420d0`。
 
 wbox 删除本地 `push_cmdline_arg` 和环境块拼接算法，直接引用 platform；“空命令/含 NUL”
-映射为产品 args 错误、非法环境项防御性跳过仍明确留在 wbox。原有 21 条字节边界测试全部
-原样通过，根 469 tests（466 passed、3 ignored）、Quick 306 项、四 portable targets 与
-release build 通过；WP.1-WP.27 和固定 Ubuntu 24.04 WU.1/WU.2（WU.2 `rc=37`）通过。
+映射为产品 args 错误、非法环境项防御性跳过仍明确留在 wbox。原有 21 条字节边界测试继续
+覆盖同一产品策略，其中环境块顺序断言跟随 Windows 契约；根 469 tests（466 passed、
+3 ignored）、Quick 306 项、四 portable targets 与 release build 通过；WP.1-WP.27 和
+固定 Ubuntu 24.04 WU.1/WU.2（WU.2 `rc=37`）通过。
 
 本轮第一次 Quick 在根测试 466/3 已通过后因 D 盘只余约 380 MiB 失败：编译器无法写入
 `.d`/`query-cache.bin`。取证显示 `target/debug` 已达 7.6 GiB，显式清空 incremental 后仍

@@ -573,7 +573,7 @@ mod tests {
             ("FOO".to_string(), "bar".to_string()),
             ("BAZ".to_string(), "qux".to_string()),
         ]);
-        assert_eq!(s, "FOO=bar<NUL>BAZ=qux<NUL><NUL>");
+        assert_eq!(s, "BAZ=qux<NUL>FOO=bar<NUL><NUL>");
     }
 
     #[test]
@@ -624,7 +624,7 @@ mod tests {
             ("K=E".to_string(), "drop".to_string()),
             ("ALSO_GOOD".to_string(), "v=1".to_string()),
         ]);
-        assert_eq!(s, "GOOD=keep<NUL>ALSO_GOOD=v=1<NUL><NUL>");
+        assert_eq!(s, "ALSO_GOOD=v=1<NUL>GOOD=keep<NUL><NUL>");
     }
 
     #[test]
