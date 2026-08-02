@@ -167,6 +167,8 @@ workspace 当前包含：
   收束为可测试的最小路由值；宿主探测仍由 `agenterm-platform` 提供。
 - `wbox-hpc-lab`：CPU、共享内存和并行计算实验。
 - `agenterm-platform`：跨项目成立的宿主机制。
+- `filesystem-conventions`：纯 Rust、无原生依赖的词法路径规则；`filesystem-open`、Windows
+  `PathLock` 与 `SlotPermit` 共享同一 `lexical_normalize` 实现。
 - Windows AppContainer capability catalog 已统一覆盖网络、用户库、证书、企业认证、
   可移动存储、日历和联系人 SID；catalog 扩展不会改变 wbox 默认拒绝或自动授予策略。
 
