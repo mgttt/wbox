@@ -283,8 +283,9 @@ W21 的所有权第一阶段也已落地：`Machine` 持有 `CoreState` 与 Linu
 `CoreState` 替换为 ISA 无关的地址空间/执行 core，而不把 Linux ABI 状态重新带入 core。
 
 W22 的 core-only 入口也已收紧：`core.rs` 独立拥有 `CoreState` 与
-`CoreException`，`exec.rs`、`sse.rs` 和 `load_code` 只接收 `CoreState`；
-`Machine` 仅在 `machine.rs` 的 Linux facade 和 personality 模块出现。
+`CoreException`，并公开 `CoreState::new/step`；`exec.rs`、`sse.rs` 和
+`load_code` 只接收 `CoreState`。`Machine` 仅在 `machine.rs` 的 Linux facade
+和 personality 模块出现，Linux facade 才消费 syscall trap。
 
 `cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
 必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于

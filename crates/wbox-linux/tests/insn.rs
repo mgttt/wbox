@@ -4,6 +4,7 @@
 //! **不依赖任何工具链**，在 Windows CI 上和 Linux 上跑的是同一批断言。
 //! 端到端跑真 ELF 的测试在 `guest_elf.rs`，那个才需要 gcc。
 
+use wbox_linux::core::CoreException;
 use wbox_linux::cpu::*;
 use wbox_linux::exec::load_code;
 use wbox_linux::machine::{Exception, Machine};
@@ -39,6 +40,20 @@ fn mov_imm_and_add() {
     let mut m = mach(&[0xb8, 0x11, 0, 0, 0, 0xbb, 0x22, 0, 0, 0, 0x01, 0xd8]);
     steps(&mut m, 3);
     assert_eq!(m.cpu.regs[RAX], 0x33);
+}
+
+#[test]
+fn public_core_step_returns_syscall_trap_without_linux_dispatch() {
+    // mov $39,%eax ; syscall: the core reports the trap and does not mutate
+    // Linux personality state or dispatch the syscall itself.
+    let mut m = mach(&[0xb8, 39, 0, 0, 0, 0x0f, 0x05]);
+    m.core
+        .step()
+        .expect("mov must execute through the core API");
+    match m.core.step() {
+        Err(CoreException::Syscall { ret_rip }) => assert_eq!(ret_rip, CODE + 7),
+        other => panic!("expected core syscall trap, got {other:?}"),
+    }
 }
 
 #[test]

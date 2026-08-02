@@ -282,6 +282,15 @@ impl CoreState {
     ///
     /// The compatibility `Machine::step()` facade lives in `machine.rs` and
     /// consumes the syscall trap for current Linux guest callers.
+    /// Execute one instruction without dispatching any guest ABI trap.
+    ///
+    /// A syscall is returned as [`CoreException::Syscall`]. The Linux
+    /// personality consumes that event in `Machine::step`; other providers
+    /// may translate it into their own ABI boundary.
+    pub fn step(&mut self) -> CoreResult<()> {
+        self.step_core()
+    }
+
     pub(crate) fn step_core(&mut self) -> CoreResult<()> {
         let start = self.cpu.rip;
         let mut d = Dec {
@@ -1345,7 +1354,7 @@ mod tests {
             .core
             .step_core()
             .expect("mov must execute in the core");
-        match machine.core.step_core() {
+        match machine.core.step() {
             Err(CoreException::Syscall { ret_rip }) => assert_eq!(ret_rip, 0x1007),
             result => panic!("expected syscall trap, got {result:?}"),
         }

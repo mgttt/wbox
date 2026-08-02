@@ -44,7 +44,9 @@ pub struct CoreState {
 }
 
 impl CoreState {
-    pub(crate) fn new() -> Self {
+    /// Construct a fresh core with an empty address space and the default
+    /// execution controls.
+    pub fn new() -> Self {
         Self {
             cpu: Cpu::new(),
             mem: Mem::new(),

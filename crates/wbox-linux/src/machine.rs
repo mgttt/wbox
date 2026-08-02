@@ -96,9 +96,9 @@ impl Machine {
     ///
     /// `exec.rs` 只实现 x86 指令语义；syscall 的编号、参数和返回值仍由
     /// Linux ABI dispatcher 所有。这个 facade 保持既有调用者的 `step()`
-    /// 语义，同时给未来独立 x86 core 留出 `step_core()` 边界。
+    /// 语义，同时让 core 的 `step()` 保持在 Linux personality 外部。
     pub fn step(&mut self) -> ExecResult<()> {
-        match self.core.step_core() {
+        match self.core.step() {
             Ok(()) => Ok(()),
             Err(CoreException::Syscall { ret_rip }) => crate::syscall::dispatch(self, ret_rip),
             Err(other) => Err(Exception::from(other)),
