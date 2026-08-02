@@ -292,7 +292,8 @@ wbox 的可移植核心。
   在硬件虚拟化不可用时成立。
 - `[out]` **内核驱动**（含 minifilter）。这条不只是"暂不做"：它划定了
   §2.4 中 Windows 程序沙箱的**能力上限**，见那里的说明。
-- `[out]` GUI/DirectX/COM/Windows 服务工作负载（第一方 Win32 运行时成熟后另议）。
+- `[deferred]` GUI/DirectX/COM/Windows 服务工作负载：不进入当前 portable
+  CLI 交付，但属于第一方 Win32/设备 provider 的长期替代路线，不得从宏图删除。
 - `[out]` Kubernetes 兼容与 Docker daemon 的线协议兼容——对标的是 **CLI 与
   运行时行为**，不是做一个 drop-in 的 daemon。
 - `[out]` 未声明的弱化运行；缺少隔离前置时不得悄悄直接执行。
@@ -527,7 +528,11 @@ wbox 的可移植核心。
 
 ---
 
-##### Q2 对照 WSL2 / Docker Desktop
+##### Q2 对照 WSL1 / WSL2 / Docker Desktop
+
+WSL1 与 WSL2 是两种不同 provider：前者是 syscall translation，后者在 managed
+utility VM 中运行真实 Linux kernel。wbox 需要分别记录兼容性、性能、隔离和虚拟化
+依赖，不能把“Linux on Windows”压成一个笼统对标项。
 
 | | WSL2 | wbox |
 |---|---|---|
@@ -541,10 +546,14 @@ wbox 的可移植核心。
 
 **wbox 在这一格存在的唯一理由是「不要虚拟化」。** 目标用户是「受管 Windows 机器
 上的开发者」（§3.1）——那种机器上 Hyper-V 常被策略禁用，或者根本没有管理员权限。
-在能开 WSL2 的机器上，WSL2 更快更完整，wbox 不主张替代它。
+在能开 WSL2 的机器上，WSL2 当前更快更完整，wbox **不宣称现阶段与其功能对等**；
+长期目标仍是通过用户态 runtime、DBT、WHPX/Hyper-V provider 和完整 guest provider
+逐级覆盖同一执行场景。任何阶段都必须保留无虚拟化的 portable fallback。
 
-**由此也定了取舍的方向**：凡是要靠虚拟化才能拿到的（完整 syscall、原生性能、
-独立网络栈），一律不做；凡是用户态能做的（rootfs、镜像、隔离、限额），做到位。
+**由此也定了当前阶段的取舍**：凡是要靠虚拟化才能拿到的能力（完整 syscall、
+原生性能、独立网络栈）先标记为 provider-research，不在 portable 路径上伪造；
+凡是用户态能做的（rootfs、镜像、隔离、限额）先做到位。后续 provider 不得因为
+portable profile 当前不支持，就把该能力永久从 wbox 产品面删除。
 
 ---
 
@@ -556,8 +565,11 @@ wbox 的可移植核心。
 | 装什么 | 装 podman | 装 docker daemon（通常要 root） | 单个可执行文件 |
 | 网络 | netavark/slirp4netns，有 bridge 与内建 DNS | 同左 | **只有 namespace 级隔离**；bridge 与 DNS **不做**——它们在 rootless 下要常驻用户态网络栈，与「免安装、无服务」冲突 |
 | pause | cgroup freezer | 同左 | SIGSTOP/SIGCONT（cgroup 只在设了限额时才存在，见 F9.21）——差异已逐条写明 |
-| pod | 有 | 无 | **不做**（§4.9 L6 已评估：F9.15 补齐 IPC/UTS 后，三样共享都能单独取得） |
+| pod | 有 | 无 | portable profile 暂不提供；共享 network/IPC/UTS 的 pod provider 保留为 deferred |
 | 镜像/构建/生命周期 | 全套 | 全套 | F9.1–F9.36 覆盖绝大部分，逐条见 §2.4 的 Q3 表 |
+
+portable profile 的 bridge/DNS 仍保持当前不提供；对应 user-mode network provider
+进入 deferred/research，不得从长期 Docker/Podman 替代路线删除。
 
 **这一格差距最小，因为介入点完全相同**——都是内核 namespace。剩下的差异只有两类：
 要常驻服务的（bridge/DNS）与要更强内核特性的（freezer 需要 cgroup 存在）。
@@ -595,16 +607,16 @@ wbox 的可移植核心。
 | 象限 | 还差什么 | 打算怎么办 | 归属 |
 |---|---|---|---|
 | Q1 Sandboxie | 文件/注册表写重定向 | **已取证，不做任意路径重定向**；保留 package 私有标准目录近似 | §4.9 W3，已结 |
-| Q1 Sandboxie | 命名沙箱内容、Forced Programs | **不做**；前者缺持久 copy-on-write 层，后者需要驱动或全局钩子 | §4.9 W3，已结 |
+| Q1 Sandboxie | 命名沙箱内容、Forced Programs | portable profile 暂不提供；copy-on-write 与强制入盒进入 deferred/provider-research；驱动实现仍受约束 | §4.9 W3，当前边界 |
 | Q2 WSL2 | 卷挂载 `-v` | broker 逐项打开对象 HANDLE + 模拟器 VFS 数据面，**绕开**驱动级路径重定向 | §4.9 F9.1，Windows agent |
 | Q2 WSL2 | 端口映射 `-p` | **已取证，结论是语义不适用**：guest 绑的就是宿主端口 | §4.9 W5，已结 |
 | Q2 WSL2 | syscall 覆盖缺口 | 按 F4 逐条补（异步信号语义、glibc pthread/clone、ptrace） | Windows agent |
 | Q3 Podman | —— | F9.1–F9.40 已全部完成并各有门禁 | — |
-| Q3 Podman | pod | **已评估，不做**：F9.15 补齐 IPC/UTS 后，pod 的三样共享都能单独取得 | §4.9 L6，已结 |
+| Q3 Podman | pod | portable profile 暂不提供；共享 namespace provider 保留为 deferred | §4.9 L6，当前边界 |
 | Q3 Podman | ~~多阶段构建~~ | **已完成**（F9.39，门禁 MS.1–MS.5）：按上述做法实现——每个 `FROM` 切换产物目录，非最终阶段用临时目录，多阶段时禁用前缀缓存并出声 | — |
-| Q3 Podman | 自定义 bridge、内建 DNS | **不做**：rootless 下需常驻用户态网络栈，与 §2.2「免安装、无服务」冲突 | — |
-| Q3 Podman | `events` | **不做**：需要常驻事件流与订阅端，wbox 没有 daemon 可发事件——与上一条撞的是同一堵墙 | — |
-| Q3 Podman | `update` 改运行中容器的限额 | **不做**：没设限额就没有 cgroup 可改，做出来会时灵时不灵；与 F9.21 拒绝用 freezer 同一条理由 | — |
+| Q3 Podman | 自定义 bridge、内建 DNS | portable profile 暂不提供；user-mode network provider 保留为 deferred/research | — |
+| Q3 Podman | `events` | portable profile 暂不提供；事件 journal/订阅 provider 保留为 deferred | — |
+| Q3 Podman | `update` 改运行中容器的限额 | portable profile 暂不提供；动态 resource provider 保留为 deferred | — |
 | Q4 Wine | 第一方 PE/Win32 runtime | **必须做**：按 CLI 工作负载分层实现 PE loader、NT/Win32 ABI、进程/线程、文件与注册表子集，替换 legacy 系统 Wine | 新增 F6.R*，Linux/macOS 协作 |
 | Q4 Wine | 删除系统 Wine 路径 | 第一方 runtime 达到产品门禁后删除 `wrap_if_pe` 外部调用与 wineprefix 兼容状态 | Linux agent |
 | Q4 Wine | GUI / DirectX / .NET | **不做**：§2.3 非目标 | — |
@@ -653,7 +665,7 @@ Q1.3 已经落地了——它提醒了一件事：**「待 Windows 验证」的�
 
 ---
 
-##### Q2（Windows × Linux 镜像）路线图
+##### Q2（Windows × Linux 镜像）路线图：WSL1 / WSL2 / Docker Desktop provider
 
 **已有完整序列，见 F4**：`F4.R0` 删 Blink/C 依赖 → `R1` 纯 Rust ELF64 loader 与
 虚拟内存 → `R2` 纯 Rust x86-64 执行器 → `R3` syscall/fd/信号/进程模型 →
@@ -681,10 +693,10 @@ epoll/socket → `R6` Alpine·Ubuntu 24.04 产品门禁 → `R7` 删除 `vendor/
 ##### Q3（Linux × Linux 镜像）路线图
 
 **F9.1–F9.40 已全部完成并各有门禁**（逐条见 §2.4 的 Q3 表与 §4 的 F9 树）。
-剩下的都是**已论证的不做**：自定义 bridge 与内建 DNS（要常驻用户态网络栈）、
-pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`events`（要常驻事件
-流）、`update` 改运行中容器的限额（没设限额就没有 cgroup 可改）、`ADD` 的远程取回
-（构建期出网拿不到缓存与校验）。
+剩下的是**portable profile 当前不做、长期 provider 保留**的能力：自定义 bridge 与
+内建 DNS（需要用户态网络栈）、pod（§4.9 L6：F9.15 补齐 IPC/UTS 后可抽象）、
+`events`（需要常驻事件流）、`update` 改运行中容器的限额，以及 `ADD` 的远程取回。
+这些条目必须分别标为 `deferred` 或 `research`，不能写成 wbox 永久不具备的能力。
 
 这一格的「下一步」不再是补动词，而是**守住已有行为**：每加一个能力都要问它落在
 哪几格（§2.4.1 的判断法），并给已写进文档的差异配门禁（如 PZ.6、AF.3），
@@ -698,7 +710,8 @@ pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`ev
 可以复用，H.6-H.12 提供机制证据。执行层尚未到位：系统 Wine 是不符合 Rust-only
 的 legacy。下一阶段必须建立 F6.R*，按 PE loader -> NT 基础对象 -> 文件/进程/线程
 -> 最小 Win32 CLI API -> 动态库加载的顺序实现第一方 runtime，并用真实 PE fixture
-建立 Linux 与 macOS 共用门禁。GUI/DirectX/.NET 继续留在 §2.3 非目标。
+建立 Linux 与 macOS 共用门禁。GUI/DirectX/.NET 进入 deferred provider 路线；
+当前不承诺可用，但不得用“当前不做”把第一方 Win32/图形兼容目标永久关闭。
 
 #### 2.4.5 横向产品与能力矩阵
 
@@ -713,7 +726,8 @@ pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`ev
 | Podman | daemonless OCI 容器平台 | Linux -> Linux；桌面版经 machine | rootless、pod、daemonless CLI/API | Linux 默认后端主基线 |
 | Sandboxie Plus | Windows 应用沙箱 | Windows -> Windows | 文件/注册表重定向、强制入盒、恢复、策略 | Windows 原生沙箱上限参照；驱动能力不伪装成已实现 |
 | Bubblewrap | Linux 沙箱构造器 | Linux -> Linux 程序 | 最小 namespace、bind 策略、无特定镜像格式 | Linux 原生程序模式与策略拆分参照 |
-| WSL2 | 托管轻量 VM | Windows -> Linux | 完整 Linux 内核、Windows 集成、低运维 | 能力与体验基线，不调用 WSL |
+| WSL1 / WSL2 | 系统调用翻译 / 托管轻量 VM | Windows -> Linux | WSL1 的低开销 syscall translation；WSL2 的真 Linux kernel、systemd、VM 集成 | 两种 provider 的能力与体验基线，不调用 WSL |
+| Windows Sandbox | 临时 Windows VM/隔离环境 | Windows -> Windows | 一次性环境、丢弃式状态、宿主集成 | Windows disposable-guest provider 参照 |
 | Wine / CrossOver | Win32 兼容层 | Linux/macOS -> Windows 程序 | PE loader、Win32 ABI、prefix | 第一方 Rust Win32 runtime 的能力基线，不调用 Wine |
 | QEMU | 用户态模拟器 + 整机模拟/虚拟化 | 多宿主 -> 多 ISA/多 OS | 跨 ISA、设备模型、磁盘格式、无加速回退 | 第一方 Rust CPU/VM runtime 的能力基线，不调用 QEMU |
 | VMware | 商业整机虚拟化 | Windows/Linux/macOS -> VM | 成熟设备、快照、网络与企业运维 | VM 生命周期与管理体验基线，不集成其 CLI/API |
@@ -722,6 +736,11 @@ pod（§4.9 L6：F9.15 补齐 IPC/UTS 后三样共享都能单独取得）、`ev
 | Apple Virtualization.framework | macOS 平台虚拟化 ABI | macOS -> Linux/macOS VM | 原生 VM 生命周期、Virtio、Rosetta Linux | 允许以 Rust bindings 作为宿主 ABI 加速后端，不引入第三方产品 |
 | gVisor | 用户态内核沙箱 | Linux -> Linux workload | syscall 拦截、OCI 接入、多租户攻击面 | 安全模型研究基线，不列首批依赖 |
 | Firecracker | KVM microVM | Linux -> Linux microVM | 极简设备模型、快速生命周期、microVM 隔离 | provider 生命周期研究基线，不列首批依赖 |
+| Kata Containers | 容器与轻量 VM 融合 | Linux -> Linux OCI | 每 workload VM 边界、OCI 兼容、runtime provider | 强隔离 OCI provider 参照 |
+| crosvm | Rust VMM / ChromeOS guest | Linux/ChromeOS -> Linux/Android | Rust VMM、极简设备模型、沙箱与设备隔离 | Rust VMM 组件与 provider 参照 |
+| UTM | QEMU / Apple Virtualization 前端 | macOS/iOS -> 多 OS/ISA | emulation/virtualization 双后端、快照、脚本化 VM | macOS VM 产品体验参照，不调用 UTM |
+| Lima / Colima | macOS/Linux VM + container runtime | macOS/Linux -> Linux | daemonless/轻量 Linux VM、容器 CLI 集成 | 开发者 VM/容器融合参照 |
+| OrbStack | 商业 Linux machine/container runtime | macOS -> Linux | 快速启动、文件/网络/容器统一体验 | 开发者体验与性能参照，不依赖其运行时 |
 
 能力记法：`主` = 产品主能力；`有` = 直接支持；`借` = 由该产品借助 VM/兼容层实现；
 `限` = 有明确平台或语义限制；`—` = 不是该产品的目标。wbox 一栏写的是**长期产品面**，
@@ -759,15 +778,51 @@ Apple Virtualization.framework 属宿主平台 ABI，可作为 Rust runtime 的�
 [Sandboxie Plus](https://github.com/sandboxie-plus/Sandboxie)。产品版本变化时更新矩阵，
 但不得据文档存在某功能就把 wbox 路由标成 `available`。
 
-### 2.5 两条硬天花板
+WSL 的两代架构必须分别纳入 provider 设计：WSL1 是 syscall translation，WSL2
+是在 managed utility VM 中运行真实 Linux kernel；二者都强调 Windows 集成，但
+隔离、系统调用覆盖、文件 I/O 和虚拟化依赖不同。[WSL 版本对比](https://learn.microsoft.com/en-us/windows/wsl/compare-versions)
+因此 wbox 的 Q2 不应只回答“能否替代 WSL2”，而应提供可选择的
+`portable-user-runtime`、`accelerated-vm`、`full-kernel-guest` 三档路线。
+
+### 2.5 两条当前 portable 路径的硬天花板
 
 不说破这两条，"对标"就只是口号：
 
 1. **不装内核驱动**（§2.3）。直接后果：Q1 的文件/注册表写重定向做不到
    Sandboxie 级别的完整性，并牵连 Q2 的卷挂载。这是"免安装、不要管理员权限"
    这一产品前提的代价，不是待办事项。
-2. **无虚拟化时性能不可比**。Q2 靠用户态解释/JIT，定位是"没有 VT-x/WSL2 时
-   仍然能跑"，不是性能对标。
+2. **无虚拟化时性能不可比**。Q2 的 portable profile 靠用户态解释/JIT，定位是
+   "没有 VT-x/WSL2 时仍然能跑"；这不是 wbox 的永久性能上限。DBT、WHPX、KVM、
+   Hypervisor.framework/Virtualization.framework 和完整 VM provider 仍可在后续
+   profile 提供加速或更强 guest 语义。
+
+### 2.6 统一执行平台长期使命
+
+wbox 不是只做一个容器、沙箱或 Linux 模拟器，而是以统一的 guest、状态、能力、
+provider 和 CLI 模型，逐级覆盖 Docker/Podman、Sandboxie、Wine、QEMU、Parallels
+及同类工具的可验证执行能力。对标物不是依赖，但替代目标是真实产品路线。
+
+```text
+统一 execution substrate
+├─ guest artifacts：PE / ELF / OCI / future WASM
+├─ execution providers：native / user-mode ABI / DBT / WHPX-KVM-HVF / full VM
+├─ capability broker：文件、网络、进程、设备、IPC、凭证
+├─ state：CPU、内存、虚拟时间、随机数、fd、snapshot/rollback
+├─ VFS/storage：image、overlay、copy-on-write、remote layer
+├─ deterministic journal：replay、诊断、迁移
+└─ product personalities：sandbox / container / compatibility / VM
+```
+
+路线状态必须区分：`available`、`active`、`deferred`、`research`、`out-by-constraint`。
+`deferred`/`research` 表示尚未交付或尚未可证，不表示放弃；只有驱动、管理员权限、
+第三方闭源运行时等违反产品硬约束的实现路径才可标 `out-by-constraint`。
+
+每个 provider 至少共享 `capabilities/version`、`create/start/stop/kill`、
+`exec/logs/inspect`、资源限额、网络/共享目录声明、快照能力和清理契约；provider
+不支持的能力必须返回结构化 `unsupported`，不得用空成功伪造等价。portable provider
+保持无安装/无驱动/无虚拟化可运行，accelerated/full-VM provider 则在能力矩阵中明确
+依赖与性能收益。版本路线按“先统一状态和契约，再增加执行后端，最后补兼容性与设备”
+推进，不能因为当前首发范围较小而缩减长期产品面。
 
 ## 3. 用户与场景
 
@@ -2700,6 +2755,7 @@ TODO-WINDOW
 ├── W108 Linux/macOS private-directory 改为 no-follow fd 级保护                      [done] O_DIRECTORY/O_NOFOLLOW + fchmod
 ├── W109 filesystem 最小 feature 四目标 CI 编译门禁                                   [done] 补齐 Windows ABI 泄漏
 ├── W110 wbox-machine 非当前宿主硬件事实隔离                                       [done] 不泄漏本机 ISA/CPU/并行度
+├── W111 Windows PathLock Unicode 大小写别名门禁                                  [done] agenterm-platform 真机测试
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2748,6 +2804,11 @@ personality、ISA、provider、隔离模型、优先级和可用性收束为可�
 并从已有 `Route` 构造，不执行宿主探测、不改变路由决策。`AddressSpace` 和
 `TaskScheduler` 暂不凭空建接口；须先完成 W20 的 CPU/trap 与 Linux personality
 反向依赖审计，再确定 syscall/trap 返回边界。
+
+`W111` 在 Windows 真机用非 ASCII 文件名验证大小写别名仍映射到同一命名 mutex：
+`Å-state.lock` 与 `child/../å-STATE.LOCK` 竞争时必须返回 `Contended`，释放后
+别名才能重新取得。wbox pin 到 `agenterm-platform` `ff946dd`，不把 Unicode
+大小写等价只留在 ASCII 测试或实现意图中。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取

@@ -145,9 +145,16 @@ pub struct CapabilitySid {
 }
 
 impl CapabilitySid {
+    /// Construct an explicitly selected well-known capability from the shared
+    /// platform catalog. Callers still own the policy decision; this does not
+    /// add any capability to a default run.
+    pub fn from_kind(kind: AppContainerCapabilityKind) -> Result<Self> {
+        Self::well_known(kind, kind.as_str())
+    }
+
     /// INTERNET_CLIENT capability（S-1-15-3-1），授予后可访问网络。
     pub fn internet_client() -> Result<Self> {
-        Self::well_known(
+        Self::from_kind_with_desc(
             AppContainerCapabilityKind::InternetClient,
             "INTERNET_CLIENT",
         )
@@ -156,7 +163,7 @@ impl CapabilitySid {
     /// INTERNET_CLIENT_SERVER capability（S-1-15-3-2）。
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn internet_client_server() -> Result<Self> {
-        Self::well_known(
+        Self::from_kind_with_desc(
             AppContainerCapabilityKind::InternetClientServer,
             "INTERNET_CLIENT_SERVER",
         )
@@ -165,10 +172,16 @@ impl CapabilitySid {
     /// PRIVATE_NETWORK_CLIENT_SERVER capability（S-1-15-3-3）。
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn private_network_client_server() -> Result<Self> {
-        Self::well_known(
+        Self::from_kind_with_desc(
             AppContainerCapabilityKind::PrivateNetworkClientServer,
             "PRIVATE_NETWORK_CLIENT_SERVER",
         )
+    }
+
+    fn from_kind_with_desc(kind: AppContainerCapabilityKind, desc: &'static str) -> Result<Self> {
+        let mut capability = Self::from_kind(kind)?;
+        capability.desc = desc;
+        Ok(capability)
     }
 
     fn well_known(kind: AppContainerCapabilityKind, desc: &'static str) -> Result<Self> {
@@ -300,6 +313,18 @@ mod real_windows_tests {
             assert_eq!(app_container::sid_string(cap.as_bytes()).unwrap(), expected);
             assert_eq!(cap.desc(), desc);
             assert_eq!(cap.process_capability().attributes(), 4);
+        }
+    }
+
+    #[test]
+    fn shared_capability_catalog_can_be_selected_explicitly() {
+        for kind in AppContainerCapabilityKind::ALL {
+            let capability = CapabilitySid::from_kind(kind).unwrap();
+            assert_eq!(capability.desc(), kind.as_str());
+            assert_eq!(capability.process_capability().attributes(), 4);
+            assert!(app_container::sid_string(capability.as_bytes())
+                .unwrap()
+                .starts_with("S-1-15-3-"));
         }
     }
 
