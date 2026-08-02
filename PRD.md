@@ -2823,7 +2823,7 @@ W22 的异常侧第一阶段已落地为 `CoreException/CoreResult`：x86 执行
 
 `W111` 在 Windows 真机用非 ASCII 文件名验证大小写别名仍映射到同一命名 mutex：
 `Å-state.lock` 与 `child/../å-STATE.LOCK` 竞争时必须返回 `Contended`，释放后
-别名才能重新取得。wbox pin 到 `agenterm-platform` `5311229`，不把 Unicode
+别名才能重新取得。wbox pin 到 `agenterm-platform` `c8ace42`，不把 Unicode
 大小写等价只留在 ASCII 测试或实现意图中。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
@@ -5007,8 +5007,9 @@ wbox 只改为消费公共 facade，继续持有 profile 名称校验、已存�
 还按 `file_identity` 的 volume/object identity 加锁，使硬链接别名无法绕过互斥；
 路径锁本身仍保留，因此删除后重建或替换目标时不会丢失路径级协调。两把锁按稳定
 排序获取，避免不同别名之间形成跨进程锁顺序反转；wbox pin 到包含实现的
-`agenterm-platform` `5311229`，并由此前 `7aaed1e` Windows 真机跨进程硬链接门禁及
-`cb4e065` 删除重建目标后的路径锁门禁验证；`5311229` 还包含最小 feature 编译修复。
+`agenterm-platform` `c8ace42`，并由此前 `7aaed1e` Windows 真机跨进程硬链接门禁及
+`cb4e065` 删除重建目标后的路径锁门禁验证；`c8ace42` 还包含最小 feature 编译修复和
+三宿主 locking 原生测试门禁。
 
 `W100` 统一 `protect_private_directory` 的输入契约：Windows、Linux 和 macOS 对文件、
 不存在路径或其他非目录输入均返回 `InvalidInput`，不会把普通文件误当成私有目录修改权限。
