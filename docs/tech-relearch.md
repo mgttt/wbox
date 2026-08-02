@@ -2,6 +2,41 @@
 
 > 本文面向外部专家和 agent。内容只记录当前 Windows 工作区已经接入、运行或有测试证据的技术；“规划中”和“待探索”不会冒充已完成能力。代码、测试和 CI 与本文冲突时，以代码和测试为准。
 
+## 0. 快速索引：按证据级别
+
+| 级别 | 含义 | 当前代表 |
+| --- | --- | --- |
+| `used-tested` | Windows 代码路径已使用，并有单元、集成或真机门禁 | AppContainer、Job Object、Named Pipe、PathLock、ELF/x86-64 guest、OCI 基础链路 |
+| `probe-only` | 已有事实探测或契约矩阵，但尚无可交付后端 | WHPX、NUMA/processor topology、cache hierarchy、GPU/NPU/LPU、WASM machine |
+| `lab-only` | 可重复实验工具，不等于产品能力 | `wbox-hpc-lab` 的共享内存、并行、内存带宽、FP64 FMA/FLOPS |
+| `planned` | 已在设计或 TODO 中登记，尚未完成 | ARM64/32 位 guest、Windows PE runtime、GUI/注册表虚拟化、GPU/RDMA 后端 |
+
+### 可复核入口
+
+```powershell
+cargo run -p wbox-machine --bin wbox-machine-lab -- host
+cargo run -p wbox-machine --bin wbox-machine-lab -- matrix
+cargo run -p wbox-machine --bin wbox-machine-lab -- devices
+cargo run -p wbox-machine --bin wbox-machine-lab -- accelerators
+cargo run -p wbox-machine --bin wbox-machine-lab -- topology
+cargo run -p wbox-machine --bin wbox-machine-lab -- wasm
+cargo run -p wbox-machine --bin wbox-machine-lab -- check
+cargo run --release -p wbox-hpc-lab -- memory
+cargo run --release -p wbox-hpc-lab -- flops
+```
+
+这些命令用于观察当前宿主事实和实验结果；`probe-only`、`lab-only` 输出不能解释为已经具备对应生产后端。
+
+### 当前 crate 对照
+
+| crate | 已承担的技术边界 | 不应误解为 |
+| --- | --- | --- |
+| `wbox-machine` | ISA、宿主硬件事实、guest ABI、执行 provider、隔离模型、3x3x2 路由矩阵、设备/加速器/WASM 预填契约 | 已经实现所有 guest 或硬件后端 |
+| `wbox-hpc-lab` | Windows 共享映射、多线程/多进程、cache-line 结果槽、带宽和 FLOPS 实验 | 通用 HPC 调度器、RDMA 或 GPU runtime |
+| `wbox-linux` | Rust ELF64/x86-64 用户态执行、Linux syscall/VFS/进程与信号语义 | WSL、Linux kernel、完整 namespace/cgroup |
+| `wbox-codec` / `wbox-http` / `wbox-tls` | 第一方编码、HTTP/1.1、TLS 实验链路 | 已达到生产级密码学或网络栈成熟度 |
+| `agenterm-platform` | 可复用宿主 OS 能力：进程、隔离、文件、锁、IPC、存储、硬件探测 | wbox 的 guest ABI、OCI 产品策略或路由决策 |
+
 ## 1. 当前产品形态
 
 Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 WSL2、Hyper-V、VT-x、驱动或管理员权限。它包含两条执行路径：
