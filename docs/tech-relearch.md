@@ -74,6 +74,7 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 - `WaitForSingleObject` 实现阻塞和非阻塞竞争。
 - 进程内 reservation 防止同一进程重复取得同一身份。
 - 路径绝对化和词法归一化。
+- 词法 `..` 归一化有宿主根目录下限，`C:\\..\\x` 不会退化为盘符相对路径；同一规则同时用于 `PathLock` 与 `SlotPermit`。
 - `.`、`..`、分隔符和 UNC/长路径前缀处理。
 - 已存在路径使用 canonical identity。
 - 不存在的中间目录和目标使用 missing-tail identity。
