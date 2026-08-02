@@ -2698,6 +2698,7 @@ TODO-WINDOW
 ├── W106 filesystem-conventions 四目标最小 feature CI 编译门禁                      [done] Windows/Linux/macOS 双 ISA
 ├── W107 Windows private-directory ACL 改为 handle 级保护                           [done] no-follow reparse + SetSecurityInfo
 ├── W108 Linux/macOS private-directory 改为 no-follow fd 级保护                      [done] O_DIRECTORY/O_NOFOLLOW + fchmod
+├── W109 filesystem 最小 feature 四目标 CI 编译门禁                                   [done] 补齐 Windows ABI 泄漏
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2731,6 +2732,10 @@ filesystem-conventions` 矩阵，覆盖 Windows x86-64、Linux x86-64、macOS x8
 路径再次调用 `set_permissions`；同时修正 `filesystem` 最小 feature 所需的
 Windows `SystemServices` ABI 声明。Windows 最小 filesystem 测试 36 项通过，
 Linux/macOS 同 feature 目标编译通过。
+
+`W109` 将 `filesystem` 与 `filesystem-conventions` 一起加入 platform 的四目标
+CI 矩阵，避免完整 feature 构建掩盖 Windows ABI 泄漏；Windows 最小 filesystem
+测试 36 项、Linux/macOS 目标编译和本地 strict checks 均通过。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
