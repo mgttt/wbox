@@ -558,7 +558,7 @@ fn process_appcontainer_sid_string(
     let sid = facts
         .windows_app_container_sid()
         .ok_or_else(|| WboxError::spawn("broker 拒绝注册：目标进程不是 AppContainer"))?;
-    agenterm_platform::adapters::windows::app_container::sid_string(sid)
+    agenterm_platform::app_container_profile::sid_string(sid)
         .map_err(|error| WboxError::spawn(format!("转换 AppContainer SID 失败：{error}")))
 }
 

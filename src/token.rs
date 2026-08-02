@@ -7,9 +7,9 @@
 //!   在 attribute-list 启动路径上额外指定。
 
 use crate::error::Result;
-use agenterm_platform::adapters::windows::app_container::{
-    self, AppContainerCapability, AppContainerCapabilityKind, AppContainerCapabilitySid,
-    AppContainerProfileErrorKind, OwnedAppContainerSid,
+use agenterm_platform::app_container_profile::{
+    self as app_container, AppContainerCapability, AppContainerCapabilityKind,
+    AppContainerCapabilitySid, AppContainerProfileErrorKind, OwnedAppContainerSid,
 };
 
 /// RAII 包装：AppContainer profile（命名内核隔离配置）。
