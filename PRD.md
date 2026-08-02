@@ -2685,6 +2685,7 @@ TODO-WINDOW
 ├── W93 Windows 目录树有限授权下沉并删除本地 ACL FFI                                  [done] typed SID + no-follow DACL merge
 ├── W94 Windows 命名进程 containment/Job 原语下沉                                    [done] exact process + limits/lifecycle
 ├── W95 AppContainer 可恢复挂起进程创建下沉                                           [done] fail-closed suspended process
+├── W96 wbox 生产接口删除裸 HANDLE 往返                                               [done] BorrowedHandle + test-only ABI
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4813,6 +4814,14 @@ platform 的最小 feature 严格 Clippy、54 项单测以及真实挂起/resume
 Clippy 通过，最小 Windows 依赖仍只有 `windows-sys`。wbox Quick 306 项、根包
 `464 passed / 3 ignored`、release WP.1-WP.27 全部适用门禁及固定 Ubuntu 24.04
 WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
+
+`W96` 收紧 W95 的消费边界：sandbox 的显式继承集合直接接受标准库 `BorrowedHandle`，
+不再把 platform `NativeStream` 降级成裸 `HANDLE` 后排序、去重再恢复；去重和继承标志事务
+继续由 platform 单点负责。broker 显式复制一份 owned client handle，同时用该对象编码 guest
+可见数值并借给挂起启动事务，使 endpoint 可以在 created hook 中转移所有权而没有悬空借用。
+wbox 生产代码因此不再直接依赖 `windows-sys`，原生 Foundation/Threading/FileSystem feature
+只保留为 Windows 真机测试依赖。严格 Clippy、broker 8 项和 sandbox 12 项真机测试通过；
+3 项 ignored 仍仅要求外部网络测试环境。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

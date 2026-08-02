@@ -49,22 +49,13 @@ agenterm-platform = { workspace = true, features = ["app-container-process", "ap
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# windows-sys 只启用用到的 feature，保持编译快、二进制小。
-[dependencies.windows-sys]
+# 产品代码只通过 std handle 契约和 agenterm-platform 访问 Windows ABI；这些原生
+# feature 仅供 Windows 真机行为夹具直接构造/检查 HANDLE、文件和事件。
+[target.'cfg(windows)'.dev-dependencies.windows-sys]
 workspace = true
 features = [
-    # 基础类型：HANDLE、BOOL 与测试使用的 Win32 错误码
     "Win32_Foundation",
-    # 进程创建、attribute list、等待、退出码
     "Win32_System_Threading",
-    # GetCurrentProcessId 等内核辅助
-    "Win32_System_Kernel",
-    # GetComputerNameExW 用不到；保留最小集合
-    "Win32_System_SystemInformation",
-    "Win32_System_Memory",
-    "Win32_System_IO",
-    "Win32_System_Diagnostics_Debug",
-    # Windows OCI volume 根句柄与 AppContainer 继承探针
     "Win32_Storage_FileSystem",
 ]
 

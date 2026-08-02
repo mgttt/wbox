@@ -5,10 +5,11 @@
 
 use crate::error::{Result, WboxError};
 use std::io::Write as _;
+use std::os::windows::io::{AsHandle as _, OwnedHandle};
 #[cfg(test)]
-use std::os::windows::io::RawHandle;
-use std::os::windows::io::{AsHandle as _, AsRawHandle as _};
+use std::os::windows::io::{AsRawHandle as _, RawHandle};
 use std::time::Duration;
+#[cfg(test)]
 use windows_sys::Win32::Foundation::HANDLE;
 #[cfg(test)]
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
@@ -294,8 +295,11 @@ impl BrokerEndpoint {
         })
     }
 
-    pub(crate) fn client_handle(&self) -> HANDLE {
-        self.client.as_raw_handle() as HANDLE
+    pub(crate) fn duplicate_client_handle(&self) -> Result<OwnedHandle> {
+        self.client
+            .as_handle()
+            .try_clone_to_owned()
+            .map_err(|error| WboxError::spawn(format!("复制 broker client handle 失败：{error}")))
     }
 
     pub(crate) fn generation(&self) -> u64 {
@@ -845,6 +849,7 @@ mod tests {
         let endpoint =
             BrokerEndpoint::create_with_mounts(&profile.sid_string().unwrap(), vec![mount])
                 .unwrap();
+        let client_handle = endpoint.duplicate_client_handle().unwrap();
         let mut env = crate::backend::env::build_child_env(
             &[],
             &[],
@@ -853,7 +858,7 @@ mod tests {
         );
         env.push((
             "WBOX_TEST_BROKER_HANDLE".to_string(),
-            (endpoint.client_handle() as usize).to_string(),
+            (client_handle.as_raw_handle() as usize).to_string(),
         ));
         env.push((
             "WBOX_TEST_BROKER_GENERATION".to_string(),
@@ -877,7 +882,6 @@ mod tests {
         .unwrap();
         let mut job = crate::job::Job::create(Limits::default()).unwrap();
         let mut server = None;
-        let client_handle = endpoint.client_handle();
         let rc = sandbox::run_container_with_handles_and_created_hook(
             &profile,
             &[],
@@ -885,7 +889,7 @@ mod tests {
             &base.to_string_lossy(),
             &mut job,
             &env,
-            &[client_handle],
+            &[client_handle.as_handle()],
             |process, assigned_job| {
                 let session = endpoint.register(process, assigned_job)?;
                 server = Some(std::thread::spawn(move || session.serve_hello_ping_open()));

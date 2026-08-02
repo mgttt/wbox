@@ -14,8 +14,9 @@
 
 #[cfg(test)]
 use std::os::windows::io::AsRawHandle as _;
-use std::os::windows::io::{AsHandle as _, BorrowedHandle, RawHandle};
-use windows_sys::Win32::Foundation::HANDLE;
+#[cfg(test)]
+use std::os::windows::io::RawHandle;
+use std::os::windows::io::{AsHandle as _, BorrowedHandle};
 
 use agenterm_platform::app_container_process::AppContainerProcessOptions;
 
@@ -54,7 +55,7 @@ pub fn run_container_with_handles(
     workdir: &str,
     job: &mut crate::job::Job,
     env: &[(String, String)],
-    handles: &[HANDLE],
+    handles: &[BorrowedHandle<'_>],
 ) -> Result<u32> {
     run_container_with_handles_and_created_hook(
         profile,
@@ -79,7 +80,7 @@ pub fn run_container_with_handles_and_created_hook<F>(
     workdir: &str,
     job: &mut crate::job::Job,
     env: &[(String, String)],
-    handles: &[HANDLE],
+    handles: &[BorrowedHandle<'_>],
     on_created: F,
 ) -> Result<u32>
 where
@@ -137,7 +138,7 @@ fn run_container_with_lifecycle_hooks_and_handles<C, S>(
     workdir: &str,
     job: &mut crate::job::Job,
     env: &[(String, String)],
-    handles: &[HANDLE],
+    handles: &[BorrowedHandle<'_>],
     on_created: C,
     on_started: S,
 ) -> Result<u32>
@@ -148,18 +149,11 @@ where
     ) -> Result<()>,
     S: FnOnce(&mut crate::job::Job),
 {
-    let mut inherited_handles = handles.to_vec();
-    inherited_handles.sort_unstable_by_key(|handle| *handle as usize);
-    inherited_handles.dedup();
     let process_capabilities = capabilities
         .iter()
         .map(CapabilitySid::process_capability)
         .collect::<Vec<_>>();
 
-    let borrowed_handles = inherited_handles
-        .iter()
-        .map(|handle| unsafe { BorrowedHandle::borrow_raw(*handle as RawHandle) })
-        .collect::<Vec<_>>();
     let suspended = agenterm_platform::app_container_process::spawn_suspended_with_handles(
         AppContainerProcessOptions {
             app_container_sid: profile.sid_bytes(),
@@ -170,7 +164,7 @@ where
             invalid_environment_entries:
                 agenterm_platform::process_conventions::InvalidEnvironmentEntryPolicy::Skip,
         },
-        borrowed_handles.as_slice(),
+        handles,
     )
     .map_err(|error| {
         let hint = match error.native_code() {
@@ -472,7 +466,7 @@ mod real_windows_tests {
     use crate::token::{AppContainerProfile, CapabilitySid};
     use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
     use windows_sys::Win32::Foundation::{
-        DuplicateHandle, GetLastError, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS,
+        DuplicateHandle, GetLastError, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, HANDLE,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
@@ -839,7 +833,7 @@ mod real_windows_tests {
             &exec_dir.to_string_lossy(),
             &mut job,
             &env,
-            &[root.raw()],
+            &[root.as_handle()],
         )
         .unwrap();
         assert_eq!(rc, 0, "AppContainer HANDLE/DACL 子探针失败");
