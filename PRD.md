@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W95、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W97、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2686,6 +2686,7 @@ TODO-WINDOW
 ├── W94 Windows 命名进程 containment/Job 原语下沉                                    [done] exact process + limits/lifecycle
 ├── W95 AppContainer 可恢复挂起进程创建下沉                                           [done] fail-closed suspended process
 ├── W96 wbox 生产接口删除裸 HANDLE 往返                                               [done] BorrowedHandle + test-only ABI
+├── W97 精确目标进程 HANDLE 交付凭据提升为公共 facade                                 [done] commit/rollback receipt
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4025,7 +4026,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`518c228aae9f730d80f171cc2011fdbac764fa09`，关闭 default features，按消费包启用
+`37674d282f49a01e9e0b4ec002875187980dda8f`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-observation`/`process-spawn`/`process-containment`/
 `app-container-profile`/`app-container-process`、`filesystem-entry`/`directory-access`/
@@ -4822,6 +4823,15 @@ WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
 wbox 生产代码因此不再直接依赖 `windows-sys`，原生 Foundation/Threading/FileSystem feature
 只保留为 Windows 真机测试依赖。严格 Clippy、broker 8 项和 sandbox 12 项真机测试通过；
 3 项 ignored 仍仅要求外部网络测试环境。
+
+`W97` 将 broker 最后一项进程对象交付机制从 Windows adapter 内部模块提升到公共
+`ProcessReference::duplicate_handle_into`。返回的 `RemoteHandleTransfer` 在响应尚未成功写入时
+自动关闭目标进程中的远程 HANDLE，只有 wbox 在协议层确认数值已经交付后才显式 commit；
+按 PID 打开的最小查询引用若没有 `PROCESS_DUP_HANDLE` 权限则明确失败，不为便利扩大默认权限。
+platform 的最小 feature 严格 Clippy、22 项 Windows 测试、四个 Linux/macOS 双 ISA 严格交叉
+Clippy，以及 all-features 211 项单测和跨进程 integration 均通过；wbox 删除对应 adapter
+引用后严格 Clippy与 broker 8 项 AppContainer/Job/SID/OPEN 真机门禁通过。远程对象的产品协议、
+mount id、路径策略和 commit 时机仍由 wbox 持有。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
