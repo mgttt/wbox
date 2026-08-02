@@ -4034,7 +4034,7 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`a9fd49683b4a5192af54d4eb0ab559e58e97d5d1`，关闭 default features，按消费包启用
+`ef3e17d3f391d5cb4c21c739a5cd587a8afdb0b8`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
 `process-image`/`process-observation`/`process-spawn`/`process-containment`/
 `app-container-profile`/`app-container-process`、`filesystem-entry`/`directory-access`/
