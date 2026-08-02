@@ -7,16 +7,12 @@
 //!   在 attribute-list 启动路径上额外指定。
 
 use agenterm_platform::adapters::windows::app_container::{
-    self, AppContainerCapability, AppContainerProfileErrorKind, OwnedAppContainerSid,
+    self, AppContainerCapability, AppContainerCapabilityKind, AppContainerCapabilitySid,
+    AppContainerProfileErrorKind, OwnedAppContainerSid,
 };
 use std::os::windows::io::{AsHandle, BorrowedHandle, RawHandle};
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
-use windows_sys::Win32::Security::PSID;
-use windows_sys::Win32::Security::{
-    CreateWellKnownSid, WinCapabilityInternetClientServerSid, WinCapabilityInternetClientSid,
-    WinCapabilityPrivateNetworkClientServerSid, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
-    WELL_KNOWN_SID_TYPE,
-};
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::Security::{PSID, SID_AND_ATTRIBUTES};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_ENABLED;
 
 use crate::error::Result;
@@ -157,23 +153,24 @@ impl Drop for AppContainerProfile {
 
 /// 已知 AppContainer capability 的 SID 包装。
 pub struct CapabilitySid {
-    pub sid: PSID,
-    /// 持有 SID 底层内存，保证 `sid` 指针在本对象存活期间有效（仅所有权用途）。
-    buffer: Vec<u8>,
+    sid: AppContainerCapabilitySid,
     desc: &'static str,
 }
 
 impl CapabilitySid {
     /// INTERNET_CLIENT capability（S-1-15-3-1），授予后可访问网络。
     pub fn internet_client() -> Result<Self> {
-        Self::well_known(WinCapabilityInternetClientSid, "INTERNET_CLIENT")
+        Self::well_known(
+            AppContainerCapabilityKind::InternetClient,
+            "INTERNET_CLIENT",
+        )
     }
 
     /// INTERNET_CLIENT_SERVER capability（S-1-15-3-2）。
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn internet_client_server() -> Result<Self> {
         Self::well_known(
-            WinCapabilityInternetClientServerSid,
+            AppContainerCapabilityKind::InternetClientServer,
             "INTERNET_CLIENT_SERVER",
         )
     }
@@ -182,33 +179,18 @@ impl CapabilitySid {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn private_network_client_server() -> Result<Self> {
         Self::well_known(
-            WinCapabilityPrivateNetworkClientServerSid,
+            AppContainerCapabilityKind::PrivateNetworkClientServer,
             "PRIVATE_NETWORK_CLIENT_SERVER",
         )
     }
 
-    fn well_known(kind: WELL_KNOWN_SID_TYPE, desc: &'static str) -> Result<Self> {
-        // SECURITY_MAX_SID_SIZE = 68：任何合法 SID 的最大尺寸，直接按上限分配。
-        let mut buffer = vec![0u8; SECURITY_MAX_SID_SIZE as usize];
-        let mut size = buffer.len() as u32;
-        // # Safety: buffer/size 为有效的输入输出参数；失败后取 GetLastError。
-        let ok = unsafe {
-            CreateWellKnownSid(
-                kind,
-                std::ptr::null_mut(),
-                buffer.as_mut_ptr() as PSID,
-                &mut size,
-            )
-        };
-        if ok == 0 {
-            let err = unsafe { GetLastError() };
-            return Err(crate::error::WboxError::profile(format!(
-                "CreateWellKnownSid({desc}) 失败，GetLastError={err}"
-            )));
-        }
-        buffer.truncate(size as usize);
-        let sid = buffer.as_mut_ptr() as PSID;
-        Ok(Self { sid, buffer, desc })
+    fn well_known(kind: AppContainerCapabilityKind, desc: &'static str) -> Result<Self> {
+        let sid = AppContainerCapabilitySid::well_known(kind).map_err(|error| {
+            crate::error::WboxError::profile(format!(
+                "构造 AppContainer capability {desc} 失败：{error}"
+            ))
+        })?;
+        Ok(Self { sid, desc })
     }
 
     pub fn desc(&self) -> &'static str {
@@ -216,13 +198,13 @@ impl CapabilitySid {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.buffer
+        self.sid.as_bytes()
     }
 
     /// Return the enabled form required for capability access checks.
     pub fn enabled_attributes(&self) -> SID_AND_ATTRIBUTES {
         SID_AND_ATTRIBUTES {
-            Sid: self.sid,
+            Sid: self.sid.as_raw_sid(),
             Attributes: ENABLED_ATTRIBUTES,
         }
     }

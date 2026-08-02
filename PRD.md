@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W86、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W89、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2678,6 +2678,7 @@ TODO-WINDOW
 ├── W86 已打开进程对象原始退出码下沉并删除 sandbox GetExitCodeProcess                    [done] handle-bound u32 fact
 ├── W87 已打开进程对象精确终止下沉并删除 sandbox TerminateProcess                       [done] handle-bound exit code
 ├── W88 AppContainer profile/SID 生命周期原语下沉                                      [done] owned SID + explicit lifecycle
+├── W89 AppContainer well-known capability SID 构造下沉                                [done] typed kind + aligned owner
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4691,6 +4692,25 @@ wbox 保留产品级 `AppContainerProfile` 包装器，但删除直接
 根 469 tests（466 passed、3 ignored）、Quick 306 项和四 portable targets 通过，Quick
 释放 475.8 MiB 可再生缓存；release 产品门禁 WP.1-WP.27 与固定 Ubuntu 24.04 digest 的
 WU.1/WU.2（WU.2 `rc=37`）通过。
+
+`W89` 在同一 target-specific adapter 增加三种已用 AppContainer well-known capability
+的类型化身份与对齐所有权：`INTERNET_CLIENT`、`INTERNET_CLIENT_SERVER`、
+`PRIVATE_NETWORK_CLIENT_SERVER`。platform 内部以按字长对齐的缓冲区调用
+`CreateWellKnownSid`；接受任意 `&[u8]` 的 SID 转换/profile API 先做固定头、revision、
+sub-authority 数和精确长度校验，再复制到对齐存储，调用方即使传入偏移切片也不会把
+未对齐指针交给 Win32。Win32 与 HRESULT 错误证据分别保留。最小 feature 14 tests、
+all-features 193 tests、严格 Clippy，以及 Windows i686/ARM64、Linux x64/ARM64、
+macOS x64/ARM64 编译通过；上游提交为 `36d7cfb`。
+
+wbox 的产品包装器继续决定启用哪些网络 capability，并为进程启动设置
+`SE_GROUP_ENABLED`；它只改为持有 platform 的 `AppContainerCapabilitySid`，删除本地
+`CreateWellKnownSid`、`GetLastError`、`SECURITY_MAX_SID_SIZE`、well-known SID 常量及
+自建 `Vec<u8>` 所有权。profile 复用/删除、CLI `--allow-network` 和
+`SECURITY_CAPABILITIES` 启动策略均未下沉。Windows token、sandbox、产品与固定 Ubuntu
+24.04 门禁保持原语义。Windows token 5 tests、sandbox 36 tests（33 passed、3 ignored）、
+根 469 tests（466 passed、3 ignored）和 `wbox-linux` 94+22+63 tests 通过；Quick 306 项
+通过并释放 614.1 MiB 可再生缓存，四 portable targets 与 release build 通过；
+WP.1-WP.27 产品门禁和固定 Ubuntu 24.04 digest 的 WU.1/WU.2（WU.2 `rc=37`）通过。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
