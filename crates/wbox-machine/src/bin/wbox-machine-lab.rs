@@ -7,7 +7,7 @@ use wbox_machine::{
     accelerator_routes, current_host, detect_hardware, detect_host_memory,
     detect_host_memory_availability, esp32_routes, inspect_artifact, parallel_routes,
     prefilled_topology, route, wasm_machine_routes, Availability, GuestOs, HostOs, Isa,
-    ParallelRouteStatus, Priority,
+    MachineCore, ParallelRouteStatus, Priority,
 };
 
 const HEADER_READ_LIMIT: u64 = 1024 * 1024;
@@ -318,6 +318,7 @@ fn print_matrix() -> Result<(), String> {
         for guest in GuestOs::ALL {
             for isa in Isa::ALL {
                 let item = route(host, guest, isa);
+                let machine = MachineCore::from_route(item);
                 match item.availability {
                     Availability::Available => available += 1,
                     Availability::Legacy => legacy += 1,
@@ -325,16 +326,17 @@ fn print_matrix() -> Result<(), String> {
                     Availability::Research => research += 1,
                 }
                 println!(
-                    "{}/{}/{} abi={} format={} priority={} status={} provider={} isolation={}",
+                    "{}/{}/{} host_abi={} abi={} format={} priority={} status={} provider={} isolation={}",
                     host.as_str(),
                     guest.as_str(),
                     isa.as_str(),
-                    item.guest_contract.abi.as_str(),
-                    item.guest_contract.binary_format.as_str(),
-                    item.priority.as_str(),
-                    item.availability.as_str(),
-                    item.provider.as_str(),
-                    item.isolation.as_str(),
+                    machine.host_abi.as_str(),
+                    machine.guest_contract.abi.as_str(),
+                    machine.guest_contract.binary_format.as_str(),
+                    machine.priority.as_str(),
+                    machine.availability.as_str(),
+                    machine.provider.as_str(),
+                    machine.isolation.as_str(),
                 );
             }
         }
@@ -360,11 +362,13 @@ fn inspect_path(path: &Path) -> Result<(), String> {
     println!("isa={}", identity.isa.as_str());
     if let Some(host) = current_host() {
         let item = route(host, identity.guest_os, identity.isa);
+        let machine = MachineCore::from_route(item);
         println!("current_host={}", host.as_str());
-        println!("route_status={}", item.availability.as_str());
-        println!("provider={}", item.provider.as_str());
-        println!("isolation={}", item.isolation.as_str());
-        if item.availability != Availability::Available {
+        println!("host_abi={}", machine.host_abi.as_str());
+        println!("route_status={}", machine.availability.as_str());
+        println!("provider={}", machine.provider.as_str());
+        println!("isolation={}", machine.isolation.as_str());
+        if machine.availability != Availability::Available {
             println!("reason={}", item.reason);
         }
     } else {
