@@ -309,9 +309,7 @@ impl BrokerEndpoint {
         let process =
             agenterm_platform::process_reference::ProcessReference::duplicate_from(process)
                 .map_err(|error| WboxError::spawn(format!("保留 broker 进程引用失败：{error}")))?;
-        let in_job = process
-            .is_member_of(job.as_handle())
-            .map_err(|error| WboxError::spawn(format!("读取 broker Job 成员身份失败：{error}")))?;
+        let in_job = job.contains(&process)?;
         if !in_job {
             return Err(WboxError::spawn(
                 "broker 拒绝注册：目标进程尚未加入容器 Job",

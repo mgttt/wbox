@@ -331,7 +331,7 @@ where
     let thread = OwnedHandle(pi.hThread);
 
     // ---- 立即入 Job，然后放行主线程 ----
-    if let Err(e) = job.assign(process.raw()) {
+    if let Err(e) = job.assign(process.as_handle()) {
         // 子进程是 CREATE_SUSPENDED 且未入 Job：若直接返回，KILL_ON_JOB_CLOSE
         // 收割不到它，会留下一个永久挂起的孤儿进程。先主动终止再返回错误。
         let _ = agenterm_platform::process_control::terminate_handle(process.as_handle(), 1);

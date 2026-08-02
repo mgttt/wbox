@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W92、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W94、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2683,6 +2683,7 @@ TODO-WINDOW
 ├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [done] 4 GiB gate + exact rebuild
 ├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
 ├── W93 Windows 目录树有限授权下沉并删除本地 ACL FFI                                  [done] typed SID + no-follow DACL merge
+├── W94 Windows 命名进程 containment/Job 原语下沉                                    [done] exact process + limits/lifecycle
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4022,9 +4023,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`c85ca0cd83b92b76d5da0703becd17da7d42a24b`，关闭 default features，按消费包启用
+`653cc31d09ba640c10f42451e23b0af6d1ca151a`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`directory-access`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-observation`/`process-spawn`/`process-containment`、`filesystem-entry`/`directory-access`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4771,6 +4772,23 @@ AppContainer ACL 定向门禁继续证明 RX 允许读取但拒绝覆盖/新建�
 绕过子项 DACL。wbox Quick、根测试 `465 passed / 3 ignored`、release WP.1-WP.27 与固定
 Ubuntu 24.04 WU.1/WU.2 均通过；三个 ignored 仍分别要求公网、外部私网 peer 或 Windows
 Private 网络适配器，与目录授权无关。
+
+`W94` 将产品无关的 Windows Job Object 机制下沉为轻量 `process-containment` feature：
+公共 API 支持互斥创建/重新打开命名 containment、把已持有的精确
+`ProcessReference` 加入 containment、成员身份查询、进程 ID 快照、整组终止与显式关闭，
+并以类型化 options 表达 kill-on-last-close、breakaway、总内存、CPU hard cap 和活动进程数。
+Windows adapter 独占 Job HANDLE 与 Create/Open/Set/Assign/Query/Terminate 原生调用；
+Linux/macOS 保持同一契约并返回类型化 `Unsupported`。Agenterm 原有进程树 guard 也改为
+消费该机制，避免共享 crate 内存在第二套 Job FFI。
+
+wbox 删除本地 Job Object FFI、固定缓冲扩容和 HANDLE RAII，只保留
+`Local\\wbox.job.*` 命名、detached 发布窗口重试、kill-on-close 必开、禁止 breakaway、
+MB/百分比产品单位换算及 stop/exec/supervisor 生命周期策略。待分配进程先复制为精确
+`ProcessReference`，不允许按 PID 重新打开后再分配；broker 的成员门禁也走同一 containment
+对象。平台最小 feature 25 项单测与真实子进程跨进程门禁、严格 Clippy、Linux
+x86-64/ARM64 和 macOS x86-64 交叉编译均通过；全 feature 为 205 项单测加 integration。
+wbox Quick 306 项、根包 `464 passed / 3 ignored`、release WP.1-WP.27 全部适用门禁及固定
+Ubuntu 24.04 WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
