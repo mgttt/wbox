@@ -57,6 +57,8 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 - `READ_CONTROL`/`WRITE_DAC` 只授予最终 ACL 句柄，不向宿主根目录和中间目录传播安全描述符权限。
 - `SetEntriesInAclW` 构造当前用户 ACL。
 - `SetSecurityInfo` 按已打开 HANDLE 写入 DACL。
+- 目录树授权同样逐项 component-wise no-follow 打开，并用 `GetSecurityInfo`/`SetSecurityInfo`
+  在 HANDLE 上合并 DACL；不再以路径型 `SetNamedSecurityInfoW` 作为授权写入边界。
 - `DACL_SECURITY_INFORMATION` 和 protected DACL。
 - 子目录与子文件继承权限。
 
