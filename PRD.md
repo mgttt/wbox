@@ -2691,8 +2691,14 @@ TODO-WINDOW
 ├── W99 Windows SlotPermit 目录别名身份规范化与竞争门禁                               [done] 复用 PathLock 规范化
 ├── W100 Unix/macOS private-directory 非目录拒绝契约                              [done] 与 Windows InvalidInput 一致
 ├── W101 三宿主 private-directory link-like 路径拒绝                                  [done] symlink/reparse fail-closed
+├── W102 Unix/macOS PathLock 目录别名竞争门禁                                        [done] child/../path 与规范路径互斥
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
+
+`W102` 为 Unix/macOS 的 `PathLock` 增加真实目录别名竞争测试：`child/../state.lock`
+必须与 `state.lock` 取得同一把锁，释放后别名才能重新取得；该测试保持 Unix 大小写
+敏感语义，并与 Windows 现有路径身份门禁配套。Windows 本地验证的是公共测试和
+Linux 目标编译，Unix/macOS 真机运行仍由对应 CI/宿主门禁完成。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
