@@ -10,7 +10,7 @@
 
 use crate::alu;
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
-use crate::machine::{Exception, ExecResult, Machine};
+use crate::machine::{CoreState, Exception, ExecResult, Machine};
 use crate::mem::PROT_EXEC;
 
 /// 一条指令的译码状态。
@@ -85,7 +85,7 @@ fn bh(d: &Dec, idx: usize, size: u8) -> bool {
     size == 1 && !d.has_rex && (4..8).contains(&idx)
 }
 
-impl Machine {
+impl CoreState {
     // ------------------------------------------------------------ 取指
 
     #[inline]
@@ -1341,8 +1341,11 @@ mod tests {
             &[0xb8, 39, 0, 0, 0, 0x0f, 0x05], // mov eax, getpid; syscall
         );
 
-        machine.step_core().expect("mov must execute in the core");
-        match machine.step_core() {
+        machine
+            .core
+            .step_core()
+            .expect("mov must execute in the core");
+        match machine.core.step_core() {
             Err(Exception::Syscall { ret_rip }) => assert_eq!(ret_rip, 0x1007),
             result => panic!("expected syscall trap, got {result:?}"),
         }

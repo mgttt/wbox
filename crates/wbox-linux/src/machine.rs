@@ -111,7 +111,7 @@ impl Machine {
     /// Linux ABI dispatcher 所有。这个 facade 保持既有调用者的 `step()`
     /// 语义，同时给未来独立 x86 core 留出 `step_core()` 边界。
     pub fn step(&mut self) -> ExecResult<()> {
-        match self.step_core() {
+        match self.core.step_core() {
             Err(Exception::Syscall { ret_rip }) => crate::syscall::dispatch(self, ret_rip),
             result => result,
         }

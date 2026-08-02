@@ -242,9 +242,9 @@ manifest 选择必须如实反映 runtime 支持的 ISA。
 └── mem.rs       稀疏地址空间、页权限与 Fault；当前页大小固定 4 KiB
 
 x86-64 core（仍被 personality 反向穿透）
-├── exec.rs      -> cpu + alu + mem + machine + sse
+├── exec.rs      -> CoreState(cpu + alu + mem) + sse
 │   └── 0F 05 产生 Exception::Syscall；由 Machine::step 兼容 facade 分发
-└── sse.rs       -> cpu + exec decoder/Rm + machine
+└── sse.rs       -> cpu + exec decoder/Rm + CoreState
 
 Linux executable personality
 ├── elf.rs       -> mem（PT_LOAD/PT_INTERP 与 ELF64 映射）
