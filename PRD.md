@@ -2815,7 +2815,8 @@ W21 的执行侧第一阶段已落地为 `wbox-linux::machine::CoreState`：`Mac
 
 W22 的异常侧第一阶段已落地为 `CoreException/CoreResult`：x86 执行只返回 fault、
 `Halt` 或带返回 RIP 的 syscall trap；Linux `Exit`、`Killed` 和 syscall 分发只在
-`Machine::step` facade 出现。现有指令、ELF 与 guest ABI 门禁保持不变。
+`Machine::step` facade 出现；`exec.rs`、`sse.rs` 和 `load_code` 不再接收 `Machine`。
+现有指令、ELF 与 guest ABI 门禁保持不变。
 
 `W111` 在 Windows 真机用非 ASCII 文件名验证大小写别名仍映射到同一命名 mutex：
 `Å-state.lock` 与 `child/../å-STATE.LOCK` 竞争时必须返回 `Contended`，释放后

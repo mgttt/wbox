@@ -10,7 +10,7 @@
 
 use crate::alu;
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
-use crate::machine::{CoreException, CoreResult, CoreState, Machine};
+use crate::machine::{CoreException, CoreResult, CoreState};
 use crate::mem::PROT_EXEC;
 
 /// 一条指令的译码状态。
@@ -1318,7 +1318,7 @@ fn is_rip_rel(a: u64) -> bool {
 }
 
 /// 供测试与 `main` 使用：把一段机器码放到可执行页并跑起来。
-pub fn load_code(m: &mut Machine, addr: u64, code: &[u8]) {
+pub fn load_code(m: &mut CoreState, addr: u64, code: &[u8]) {
     use crate::mem::{PROT_READ, PROT_WRITE};
     let len = (code.len() as u64 + 0xfff) & !0xfff;
     m.mem.map(addr, len.max(0x1000), PROT_READ | PROT_WRITE);
@@ -1336,7 +1336,7 @@ mod tests {
     fn syscall_instruction_emits_core_trap() {
         let mut machine = Machine::new(Os::new());
         load_code(
-            &mut machine,
+            &mut machine.core,
             0x1000,
             &[0xb8, 39, 0, 0, 0, 0x0f, 0x05], // mov eax, getpid; syscall
         );

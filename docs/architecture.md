@@ -281,6 +281,9 @@ W21 的所有权第一阶段也已落地：`Machine` 持有 `CoreState` 与 Linu
 `Deref` 保留既有 `m.cpu`/`m.mem` 调用点。新代码应优先显式使用 `m.core`，以便未来把
 `CoreState` 替换为 ISA 无关的地址空间/执行 core，而不把 Linux ABI 状态重新带入 core。
 
+W22 的 core-only 入口也已收紧：`exec.rs`、`sse.rs` 和 `load_code` 只接收
+`CoreState`；`Machine` 仅在 `machine.rs` 的 Linux facade 和 personality 模块出现。
+
 `cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
 必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于
 Linux executable personality，因为 `PT_INTERP`、auxv、shebang、errno 和 VFS 路径策略已经

@@ -17,7 +17,7 @@ const DATA: u64 = 0x3_0000;
 /// 装一段代码，另外给出栈和一页可读写数据区（DATA）。
 fn mach(code: &[u8]) -> Machine {
     let mut m = Machine::new(Os::new());
-    load_code(&mut m, CODE, code);
+    load_code(&mut m.core, CODE, code);
     m.mem.map(STACK, 0x4000, PROT_READ | PROT_WRITE);
     m.mem.map(DATA, 0x1000, PROT_READ | PROT_WRITE);
     m.cpu.set_rsp(STACK + 0x2000);
