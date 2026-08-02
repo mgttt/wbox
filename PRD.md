@@ -2688,6 +2688,7 @@ TODO-WINDOW
 ├── W96 wbox 生产接口删除裸 HANDLE 往返                                               [done] BorrowedHandle + test-only ABI
 ├── W97 精确目标进程 HANDLE 交付凭据提升为公共 facade                                 [done] commit/rollback receipt
 ├── W98 AppContainer profile/SID/capability 提升为公共跨宿主契约                       [done] typed Unsupported
+├── W99 Windows SlotPermit 目录别名身份规范化与竞争门禁                               [done] 复用 PathLock 规范化
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4856,6 +4857,12 @@ wbox 只改为消费公共 facade，继续持有 profile 名称校验、已存�
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
 三宿主与 unknown cell 均有纯逻辑断言，用户显式 `--arch` 行为不变。
+
+`W99` 修复 Windows `SlotPermit` 的路径身份缺口：slot mutex 不能直接使用调用方的
+目录字符串，否则 `dir`、`dir\\.`、大小写别名会绕过同一限额。Windows adapter 现在复用
+`PathLock` 的绝对化、词法归一化、已有路径 canonicalize、缺失尾段和大小写折叠规则；
+新增真实目录别名竞争门禁，跨进程 PathLock 与 Unix 行为保持不变。wbox 已 pin 到包含
+该修复的平台 revision，产品策略仍由 wbox 持有。
 
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
