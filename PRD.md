@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W91、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W92、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2681,6 +2681,7 @@ TODO-WINDOW
 ├── W89 AppContainer well-known capability SID 构造下沉                                [done] typed kind + aligned owner
 ├── W90 Windows 原生进程参数编码拆为零依赖 process-conventions                         [done] argv/env block + explicit policy
 ├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [next] 7.6 GiB 实测阻塞 Quick
+├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4736,6 +4737,14 @@ wbox 删除本地 `push_cmdline_arg` 和环境块拼接算法，直接引用 pla
 回收 7.6 GiB 后 Quick 通过并由常规清理器再释放 111.9 MiB。`W91` 必须在不误删当前可复用
 依赖、运行中 Cargo 或 release 产物的前提下识别陈旧 revision artifact；本轮手工回收只解除
 磁盘阻塞，不算自动清理完成。
+
+`W92` 修复 `test-windows-product.ps1` 对 PowerShell 7/.NET Core 的隐式依赖：fixture
+文本改由 `UTF8Encoding(false)` 写入，不再使用 PowerShell 5.1 不认识的 `utf8NoBOM`
+枚举；进程启动在现代运行时使用 `ProcessStartInfo.ArgumentList`，在系统内置 Windows
+PowerShell 5.1 上按 Windows CRT 规则编码 `.Arguments`。预期失败、轮询和 best-effort
+清理由结构化 `ExitCode`/stdout/stderr 捕获承载，避免 5.1 把原生 stderr 提升为
+`NativeCommandError` 后被全局 `ErrorActionPreference=Stop` 提前终止。系统内置 PowerShell
+5.1 与 PowerShell 7.4 均完整通过 WP.1-WP.27 产品门禁。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

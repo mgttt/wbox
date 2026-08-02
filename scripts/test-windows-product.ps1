@@ -31,20 +31,92 @@ function Remove-Ansi([string]$Text) {
     return [regex]::Replace($Text, $pattern, "")
 }
 
+function Set-Utf8NoBomContent([string]$LiteralPath, [string]$Value) {
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($LiteralPath, $Value, $encoding)
+}
+
+function ConvertTo-WindowsProcessArgument([string]$Argument) {
+    if ($Argument.Length -gt 0 -and $Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    $encoded = New-Object System.Text.StringBuilder
+    [void]$encoded.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            for ($i = 0; $i -lt 2 * $backslashes + 1; $i++) {
+                [void]$encoded.Append('\')
+            }
+        } else {
+            for ($i = 0; $i -lt $backslashes; $i++) {
+                [void]$encoded.Append('\')
+            }
+        }
+        [void]$encoded.Append($character)
+        $backslashes = 0
+    }
+    for ($i = 0; $i -lt 2 * $backslashes; $i++) {
+        [void]$encoded.Append('\')
+    }
+    [void]$encoded.Append('"')
+    return $encoded.ToString()
+}
+
+function New-ProcessStartInfo([string]$FilePath, [string[]]$Arguments) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    if ($null -ne $startInfo.PSObject.Properties["ArgumentList"]) {
+        foreach ($argument in $Arguments) {
+            [void]$startInfo.ArgumentList.Add($argument)
+        }
+    } else {
+        $startInfo.Arguments = ($Arguments | ForEach-Object {
+            ConvertTo-WindowsProcessArgument $_
+        }) -join " "
+    }
+    return $startInfo
+}
+
+function Invoke-NativeResult(
+    [string]$FilePath,
+    [string[]]$Arguments,
+    [int]$TimeoutMilliseconds = 30000
+) {
+    $startInfo = New-ProcessStartInfo $FilePath $Arguments
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+        $process.Kill()
+        throw "native command timed out after ${TimeoutMilliseconds}ms: $FilePath"
+    }
+    if (-not $stdoutTask.Wait(15000) -or -not $stderrTask.Wait(15000)) {
+        throw "native command output did not reach EOF: $FilePath"
+    }
+    return New-Object PSObject -Property @{
+        ExitCode = $process.ExitCode
+        Output = $stdoutTask.Result + $stderrTask.Result
+    }
+}
+
 function Invoke-WboxCaptured(
     [string]$FilePath,
     [string[]]$Arguments,
     [string]$Label
 ) {
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $FilePath
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
+    $startInfo = New-ProcessStartInfo $FilePath $Arguments
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    foreach ($argument in $Arguments) {
-        [void]$startInfo.ArgumentList.Add($argument)
-    }
     $process = [System.Diagnostics.Process]::Start($startInfo)
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -140,12 +212,11 @@ try {
     New-Item -ItemType Directory -Force -Path `
         (Join-Path $rootfs "probe"), (Join-Path $rootfs "bin") | Out-Null
     Copy-Item -LiteralPath $busyboxSource -Destination (Join-Path $rootfs "bin\sh")
-    Set-Content -LiteralPath (Join-Path $rootfs "probe\directory-entry-ok") `
-        -Encoding utf8NoBOM -Value "ok"
+    Set-Utf8NoBomContent (Join-Path $rootfs "probe\directory-entry-ok") "ok"
 
-    Set-Content -LiteralPath (Join-Path $image "manifest.json") -Encoding utf8NoBOM -Value "{}"
-    Set-Content -LiteralPath (Join-Path $image "layers.json") -Encoding utf8NoBOM -Value "[]"
-    Set-Content -LiteralPath (Join-Path $image "config.json") -Encoding utf8NoBOM -Value @'
+    Set-Utf8NoBomContent (Join-Path $image "manifest.json") "{}"
+    Set-Utf8NoBomContent (Join-Path $image "layers.json") "[]"
+    Set-Utf8NoBomContent (Join-Path $image "config.json") @'
 {"config":{"Entrypoint":[],"Cmd":["/busybox","echo","PRODUCT_E2E_OK"],"Env":["PATH=/"],"WorkingDir":"/"}}
 '@
 
@@ -250,8 +321,9 @@ try {
     $writeBgRemoved = $false
     $writeBgRemoveOutput = ""
     foreach ($i in 1..40) {
-        $writeBgRemoveOutput = & $portableWbox rm $writeBgName 2>&1 | Out-String
-        if ($LASTEXITCODE -eq 0) {
+        $writeBgRemove = Invoke-NativeResult $portableWbox @("rm", $writeBgName)
+        $writeBgRemoveOutput = $writeBgRemove.Output
+        if ($writeBgRemove.ExitCode -eq 0) {
             $writeBgRemoved = $true
             break
         }
@@ -272,21 +344,17 @@ try {
         throw "WP.4 wbox-linux help did not identify the container CLI: $runtimeHelp"
     }
 
-    $traceInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $traceInfo.FileName = Join-Path $bundle "wbox-linux.exe"
+    $traceInfo = New-ProcessStartInfo (Join-Path $bundle "wbox-linux.exe") `
+        @("-s", "-e", "/busybox", "true")
     $traceInfo.WorkingDirectory = $rootfs
-    $traceInfo.UseShellExecute = $false
     $traceInfo.RedirectStandardOutput = $true
     $traceInfo.RedirectStandardError = $true
-    $traceInfo.Environment["BLINK_PREFIX"] = $rootfs
-    @("-s", "-e", "/busybox", "true") | ForEach-Object {
-        [void]$traceInfo.ArgumentList.Add($_)
-    }
+    $traceInfo.EnvironmentVariables["BLINK_PREFIX"] = $rootfs
     $traceProcess = [System.Diagnostics.Process]::Start($traceInfo)
     $traceStdout = $traceProcess.StandardOutput.ReadToEndAsync()
     $traceStderr = $traceProcess.StandardError.ReadToEndAsync()
     if (-not $traceProcess.WaitForExit(10000)) {
-        $traceProcess.Kill($true)
+        $traceProcess.Kill()
         throw "WP.4S wbox-linux syscall trace timed out"
     }
     $trace = $traceStdout.Result + $traceStderr.Result
@@ -403,7 +471,7 @@ try {
     $guestPidFile = Join-Path $stopWork "guest.pid"
     $childPidFile = Join-Path $stopWork "child.pid"
     $workloadScript = Join-Path $stopWork "workload.ps1"
-    Set-Content -LiteralPath $workloadScript -Encoding utf8NoBOM -Value @'
+    Set-Utf8NoBomContent $workloadScript @'
 param(
     [Parameter(Mandatory = $true)]
     [string]$GuestPidFile,
@@ -481,10 +549,9 @@ while ($true) {
     Write-Host "PASS WP.10 stop is idempotent"
 
     $missingName = "$stopName-missing-$PID"
-    $missingStop = & $portableWbox stop $missingName 2>&1 | Out-String
-    $missingStopRc = $LASTEXITCODE
-    if ($missingStopRc -eq 0) {
-        throw "WP.11 stop of unknown container unexpectedly succeeded: $missingStop"
+    $missingStop = Invoke-NativeResult $portableWbox @("stop", $missingName)
+    if ($missingStop.ExitCode -eq 0) {
+        throw "WP.11 stop of unknown container unexpectedly succeeded: $($missingStop.Output)"
     }
     Write-Host "PASS WP.11 stop rejects an unknown container name"
 
@@ -505,15 +572,11 @@ while ($true) {
     & icacls.exe $execWork /grant "*S-1-15-2-1:(OI)(CI)(M)" /T /C | Out-Null
     Assert-Exit 0 "WP.13 exec workload ACL setup"
 
-    $execLaunchInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $execLaunchInfo.FileName = $portableWbox
-    $execLaunchInfo.UseShellExecute = $false
-    $execLaunchInfo.CreateNoWindow = $true
-    @(
+    $execLaunchInfo = New-ProcessStartInfo $portableWbox @(
         "run", "-d", "--name", $execName, "--workdir", $execWork, "--",
         "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
         "-Command", "[Threading.Thread]::Sleep(120000)"
-    ) | ForEach-Object { [void]$execLaunchInfo.ArgumentList.Add($_) }
+    )
     $execLauncher = [System.Diagnostics.Process]::Start($execLaunchInfo)
     if (-not $execLauncher.WaitForExit(15000)) {
         $execLauncher.Kill()
@@ -552,15 +615,11 @@ while ($true) {
     }
     Write-Host "PASS WP.14 Windows native exec forwards the guest exit code"
 
-    $longExecInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $longExecInfo.FileName = $portableWbox
-    $longExecInfo.UseShellExecute = $false
-    $longExecInfo.CreateNoWindow = $true
-    @(
+    $longExecInfo = New-ProcessStartInfo $portableWbox @(
         "exec", $execName, "--",
         "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
         "-Command", "[Threading.Thread]::Sleep(120000)"
-    ) | ForEach-Object { [void]$longExecInfo.ArgumentList.Add($_) }
+    )
     $longExec = [System.Diagnostics.Process]::Start($longExecInfo)
     Start-Sleep -Milliseconds 800
     if ($longExec.HasExited) {
@@ -578,12 +637,12 @@ while ($true) {
     }
     Write-Host "PASS WP.15 stop terminates the shared Job and concurrent exec"
 
-    $deadExecRecords = & $portableWbox exec $execName -- cmd.exe /d /c "echo SHOULD_NOT_RUN" 2>&1
-    $deadExecRc = $LASTEXITCODE
-    $deadExec = ($deadExecRecords | ForEach-Object { $_.ToString() }) -join "`n"
-    $deadExecPlain = Remove-Ansi $deadExec
-    if ($deadExecRc -eq 0 -or $deadExecPlain -notmatch "exec") {
-        throw "WP.16 exec on an exited container was not rejected clearly: rc=$deadExecRc`n$deadExec"
+    $deadExec = Invoke-NativeResult $portableWbox @(
+        "exec", $execName, "--", "cmd.exe", "/d", "/c", "echo SHOULD_NOT_RUN"
+    )
+    $deadExecPlain = Remove-Ansi $deadExec.Output
+    if ($deadExec.ExitCode -eq 0 -or $deadExecPlain -notmatch "exec") {
+        throw "WP.16 exec on an exited container was not rejected clearly: rc=$($deadExec.ExitCode)`n$($deadExec.Output)"
     }
     & $portableWbox rm $execName 2>&1 | Out-Null
     Assert-Exit 0 "WP.16 rm exec record"
@@ -593,15 +652,11 @@ while ($true) {
     # Otherwise killing the supervisor would no longer trigger KILL_ON_JOB_CLOSE.
     $crashGuestPidFile = Join-Path $execWork "crash-guest.pid"
     $crashExecPidFile = Join-Path $execWork "crash-exec.pid"
-    $crashLaunchInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $crashLaunchInfo.FileName = $portableWbox
-    $crashLaunchInfo.UseShellExecute = $false
-    $crashLaunchInfo.CreateNoWindow = $true
-    @(
+    $crashLaunchInfo = New-ProcessStartInfo $portableWbox @(
         "run", "-d", "--name", $crashName, "--workdir", $execWork, "--",
         "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
         "[IO.File]::WriteAllText('crash-guest.pid',[string]`$PID);[Threading.Thread]::Sleep(120000)"
-    ) | ForEach-Object { [void]$crashLaunchInfo.ArgumentList.Add($_) }
+    )
     $crashLauncher = [System.Diagnostics.Process]::Start($crashLaunchInfo)
     if (-not $crashLauncher.WaitForExit(15000)) {
         $crashLauncher.Kill()
@@ -615,15 +670,11 @@ while ($true) {
         throw "WP.17 main guest did not publish its PID"
     }
 
-    $crashExecInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $crashExecInfo.FileName = $portableWbox
-    $crashExecInfo.UseShellExecute = $false
-    $crashExecInfo.CreateNoWindow = $true
-    @(
+    $crashExecInfo = New-ProcessStartInfo $portableWbox @(
         "exec", $crashName, "powershell.exe", "-NoLogo", "-NoProfile",
         "-NonInteractive", "-Command",
         "[IO.File]::WriteAllText('crash-exec.pid',[string]`$PID);[Threading.Thread]::Sleep(120000)"
-    ) | ForEach-Object { [void]$crashExecInfo.ArgumentList.Add($_) }
+    )
     $crashExecController = [System.Diagnostics.Process]::Start($crashExecInfo)
     $crashExecPid = Wait-PidFile $crashExecPidFile 15
     $crashMetaFile = Join-Path $testHome ".wbox\run\$crashName\meta.json"
@@ -647,10 +698,8 @@ while ($true) {
     # guest mutation into the output image, and leave the shared base untouched.
     $buildContext = Join-Path $sandbox "build-context"
     New-Item -ItemType Directory -Force -Path $buildContext | Out-Null
-    Set-Content -LiteralPath (Join-Path $buildContext "marker.txt") `
-        -Encoding utf8NoBOM -Value "COPY_WINDOWS_OK"
-    Set-Content -LiteralPath (Join-Path $buildContext "Dockerfile") `
-        -Encoding utf8NoBOM -Value @'
+    Set-Utf8NoBomContent (Join-Path $buildContext "marker.txt") "COPY_WINDOWS_OK"
+    Set-Utf8NoBomContent (Join-Path $buildContext "Dockerfile") @'
 FROM local.test/wbox-fixture:latest
 COPY marker.txt /probe/build-copy.txt
 RUN /busybox cp /probe/build-copy.txt /probe/build-run.txt && /busybox echo RUN_WINDOWS_OK >> /probe/build-run.txt
@@ -730,11 +779,12 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     # WP.23 detached success is not "the supervisor process exists". The
     # parent must wait until the actual workload has been created and resumed.
     $missingProgram = Join-Path $sandbox "definitely-missing-wbox.exe"
-    $badReadyOutput = & $portableWbox run -d --name $badReadyName `
-        --workdir $env:SystemRoot\System32 -- $missingProgram 2>&1 | Out-String
-    $badReadyRc = $LASTEXITCODE
-    if ($badReadyRc -eq 0 -or $badReadyOutput -notmatch "CreateProcessW") {
-        throw "WP.23A missing detached workload was reported as success: rc=$badReadyRc output=$badReadyOutput"
+    $badReady = Invoke-NativeResult $portableWbox @(
+        "run", "-d", "--name", $badReadyName,
+        "--workdir", "$env:SystemRoot\System32", "--", $missingProgram
+    )
+    if ($badReady.ExitCode -eq 0 -or $badReady.Output -notmatch "CreateProcessW") {
+        throw "WP.23A missing detached workload was reported as success: rc=$($badReady.ExitCode) output=$($badReady.Output)"
     }
     $badReadyState = & $portableWbox ps --all 2>&1 | Out-String
     if ($badReadyState -match "(?m)^$([regex]::Escape($badReadyName))\s+") {
@@ -743,16 +793,17 @@ CMD ["/busybox","cat","/probe/build-run.txt"]
     Write-Host "PASS WP.23A detached parent returns the original missing-program error"
 
     $env:WBOX_INSECURE_REGISTRY = "127.0.0.1:1"
-    $badPullOutput = & $portableWbox run -d --name $badPullName `
-        "127.0.0.1:1/wbox/definitely-missing:never" 2>&1 | Out-String
-    $badPullRc = $LASTEXITCODE
+    $badPull = Invoke-NativeResult $portableWbox @(
+        "run", "-d", "--name", $badPullName,
+        "127.0.0.1:1/wbox/definitely-missing:never"
+    )
     if ($null -eq $savedInsecureRegistry) {
         Remove-Item Env:WBOX_INSECURE_REGISTRY -ErrorAction SilentlyContinue
     } else {
         $env:WBOX_INSECURE_REGISTRY = $savedInsecureRegistry
     }
-    if ($badPullRc -eq 0 -or $badPullOutput -notmatch "127\.0\.0\.1:1") {
-        throw "WP.23B failed detached pull was reported as success: rc=$badPullRc output=$badPullOutput"
+    if ($badPull.ExitCode -eq 0 -or $badPull.Output -notmatch "127\.0\.0\.1:1") {
+        throw "WP.23B failed detached pull was reported as success: rc=$($badPull.ExitCode) output=$($badPull.Output)"
     }
     $badPullState = & $portableWbox ps --all 2>&1 | Out-String
     if ($badPullState -match "(?m)^$([regex]::Escape($badPullName))\s+") {
@@ -774,10 +825,16 @@ $packageProbe = [IO.Path]::Combine($env:TEMP, "package-probe.txt")
 [Console]::WriteLine([IO.File]::ReadAllText($stateProbe))
 [Console]::WriteLine([IO.File]::ReadAllText($packageProbe))
 '@
-    $privateTmpOutput = & $portableWbox run --name product-private-tmp --private-tmp `
-        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
-        -NonInteractive -Command $privateTmpCommand 2>&1 | Out-String
-    Assert-Exit 0 "WP.25 writable private temp" $privateTmpOutput
+    $privateTmp = Invoke-NativeResult $portableWbox @(
+        "run", "--name", "product-private-tmp", "--private-tmp",
+        "--workdir", "$env:SystemRoot\System32", "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", $privateTmpCommand
+    )
+    $privateTmpOutput = $privateTmp.Output
+    if ($privateTmp.ExitCode -ne 0) {
+        throw "WP.25 writable private temp failed: rc=$($privateTmp.ExitCode)`n$privateTmpOutput"
+    }
     if ($privateTmpOutput -notmatch "STATE_TMP_OK" -or
         $privateTmpOutput -notmatch "PACKAGE_TMP_OK") {
         throw "WP.25 private temp did not round-trip content: $privateTmpOutput"
@@ -786,14 +843,15 @@ $packageProbe = [IO.Path]::Combine($env:TEMP, "package-probe.txt")
     if ($privateTmpState -match "(?m)^product-private-tmp\s+") {
         throw "WP.25 foreground private temp left a state record: $privateTmpState"
     }
-    $privateTmpOverride = & $portableWbox run --name product-private-tmp-override `
-        --private-tmp -e TMPDIR=WBOX_EXPLICIT_TMP --workdir $env:SystemRoot\System32 -- `
-        powershell.exe -NoLogo -NoProfile -NonInteractive -Command `
-        'if ($env:TMPDIR -ne "WBOX_EXPLICIT_TMP") { exit 44 }; [Console]::WriteLine("PRIVATE_TMP_OVERRIDE_OK")' `
-        2>&1 | Out-String
-    Assert-Exit 0 "WP.25 explicit TMPDIR override" $privateTmpOverride
-    if ($privateTmpOverride -notmatch "PRIVATE_TMP_OVERRIDE_OK") {
-        throw "WP.25 explicit TMPDIR override was lost: $privateTmpOverride"
+    $privateTmpOverride = Invoke-NativeResult $portableWbox @(
+        "run", "--name", "product-private-tmp-override", "--private-tmp",
+        "-e", "TMPDIR=WBOX_EXPLICIT_TMP", "--workdir", "$env:SystemRoot\System32", "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+        'if ($env:TMPDIR -ne "WBOX_EXPLICIT_TMP") { exit 44 }; [Console]::WriteLine("PRIVATE_TMP_OVERRIDE_OK")'
+    )
+    if ($privateTmpOverride.ExitCode -ne 0 -or
+        $privateTmpOverride.Output -notmatch "PRIVATE_TMP_OVERRIDE_OK") {
+        throw "WP.25 explicit TMPDIR override was lost: rc=$($privateTmpOverride.ExitCode) $($privateTmpOverride.Output)"
     }
     Write-Host "PASS WP.25 private temp locations are writable and explicit TMPDIR wins"
 
@@ -807,10 +865,16 @@ $probe = [IO.Path]::Combine($env:LOCALAPPDATA, "wbox-product-localappdata.txt")
 [IO.File]::WriteAllText($probe, "PACKAGE_LOCALAPPDATA_OK")
 [Console]::WriteLine([IO.File]::ReadAllText($probe))
 '@
-    $localAppDataOutput = & $portableWbox run --name product-localappdata `
-        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
-        -NonInteractive -Command $localAppDataCommand 2>&1 | Out-String
-    Assert-Exit 0 "WP.27 package-local LOCALAPPDATA" $localAppDataOutput
+    $localAppData = Invoke-NativeResult $portableWbox @(
+        "run", "--name", "product-localappdata",
+        "--workdir", "$env:SystemRoot\System32", "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", $localAppDataCommand
+    )
+    $localAppDataOutput = $localAppData.Output
+    if ($localAppData.ExitCode -ne 0) {
+        throw "WP.27 package-local LOCALAPPDATA failed: rc=$($localAppData.ExitCode)`n$localAppDataOutput"
+    }
     if ($localAppDataOutput -notmatch
         'LOCALAPPDATA=<.*\\Packages\\product-localappdata\\AC>') {
         throw "WP.27 LOCALAPPDATA was not package-private: $localAppDataOutput"
@@ -842,19 +906,25 @@ try {
 }
 [Console]::WriteLine("MEMORY_LIMIT_BYPASSED blocks={0}", $blocks.Count)
 '@
-    $memoryControl = & $portableWbox run --name product-memory-control `
-        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
-        -NonInteractive -Command $memoryLimitCommand 2>&1 | Out-String
-    Assert-Exit 0 "WP.26 unlimited memory control" $memoryControl
-    if ($memoryControl -notmatch "MEMORY_LIMIT_BYPASSED blocks=24") {
-        throw "WP.26 control could not complete the allocation workload: $memoryControl"
+    $memoryControl = Invoke-NativeResult $portableWbox @(
+        "run", "--name", "product-memory-control",
+        "--workdir", "$env:SystemRoot\System32", "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", $memoryLimitCommand
+    )
+    if ($memoryControl.ExitCode -ne 0 -or
+        $memoryControl.Output -notmatch "MEMORY_LIMIT_BYPASSED blocks=24") {
+        throw "WP.26 control could not complete the allocation workload: rc=$($memoryControl.ExitCode) $($memoryControl.Output)"
     }
-    $memoryLimited = & $portableWbox run --name product-memory-limited --memory 64 `
-        --workdir $env:SystemRoot\System32 -- powershell.exe -NoLogo -NoProfile `
-        -NonInteractive -Command $memoryLimitCommand 2>&1 | Out-String
-    Assert-Exit 0 "WP.26 limited memory workload" $memoryLimited
-    if ($memoryLimited -notmatch "MEMORY_LIMIT_ENFORCED blocks=") {
-        throw "WP.26 --memory did not constrain the allocation workload: $memoryLimited"
+    $memoryLimited = Invoke-NativeResult $portableWbox @(
+        "run", "--name", "product-memory-limited", "--memory", "64",
+        "--workdir", "$env:SystemRoot\System32", "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-Command", $memoryLimitCommand
+    )
+    if ($memoryLimited.ExitCode -ne 0 -or
+        $memoryLimited.Output -notmatch "MEMORY_LIMIT_ENFORCED blocks=") {
+        throw "WP.26 --memory did not constrain the allocation workload: rc=$($memoryLimited.ExitCode) $($memoryLimited.Output)"
     }
     Write-Host "PASS WP.26 --memory enforces a real Windows Job allocation limit"
 
@@ -862,10 +932,15 @@ try {
     # the saved configuration under the new name, and exited remains restartable.
     $createGuestPidFile = Join-Path $stopWork "create-guest.pid"
     $createChildPidFile = Join-Path $stopWork "create-child.pid"
-    $created = & $portableWbox container create --name $createOldName --workdir $stopWork -- `
-        powershell.exe -NoLogo -NoProfile -NonInteractive -File $workloadScript `
-        -GuestPidFile $createGuestPidFile -ChildPidFile $createChildPidFile 2>&1 | Out-String
-    Assert-Exit 0 "WP.21 create native workload" $created
+    $created = Invoke-NativeResult $portableWbox @(
+        "container", "create", "--name", $createOldName, "--workdir", $stopWork, "--",
+        "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+        "-File", $workloadScript, "-GuestPidFile", $createGuestPidFile,
+        "-ChildPidFile", $createChildPidFile
+    )
+    if ($created.ExitCode -ne 0) {
+        throw "WP.21 create native workload failed: rc=$($created.ExitCode)`n$($created.Output)"
+    }
     if ((Test-Path -LiteralPath $createGuestPidFile -PathType Leaf) -or
         (Test-Path -LiteralPath $createChildPidFile -PathType Leaf)) {
         throw "WP.21 create executed the workload before start"
@@ -946,23 +1021,23 @@ try {
 }
 finally {
     if ($null -ne $portableWbox -and (Test-Path -LiteralPath $portableWbox -PathType Leaf)) {
-        & $portableWbox stop $stopName 2>&1 | Out-Null
-        & $portableWbox rm $stopName 2>&1 | Out-Null
-        & $portableWbox stop $execName 2>&1 | Out-Null
-        & $portableWbox rm $execName 2>&1 | Out-Null
-        & $portableWbox stop $crashName 2>&1 | Out-Null
-        & $portableWbox rm $crashName 2>&1 | Out-Null
-        & $portableWbox stop $writeBgName 2>&1 | Out-Null
-        & $portableWbox rm $writeBgName 2>&1 | Out-Null
-        & $portableWbox stop $waitName 2>&1 | Out-Null
-        & $portableWbox rm $waitName 2>&1 | Out-Null
-        & $portableWbox kill $killName 2>&1 | Out-Null
-        & $portableWbox rm $killName 2>&1 | Out-Null
-        & $portableWbox kill $createName 2>&1 | Out-Null
-        & $portableWbox rm $createName 2>&1 | Out-Null
-        & $portableWbox rm $createOldName 2>&1 | Out-Null
-        & $portableWbox rm $badReadyName 2>&1 | Out-Null
-        & $portableWbox rm $badPullName 2>&1 | Out-Null
+        [void](Invoke-NativeResult $portableWbox @("stop", $stopName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $stopName))
+        [void](Invoke-NativeResult $portableWbox @("stop", $execName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $execName))
+        [void](Invoke-NativeResult $portableWbox @("stop", $crashName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $crashName))
+        [void](Invoke-NativeResult $portableWbox @("stop", $writeBgName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $writeBgName))
+        [void](Invoke-NativeResult $portableWbox @("stop", $waitName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $waitName))
+        [void](Invoke-NativeResult $portableWbox @("kill", $killName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $killName))
+        [void](Invoke-NativeResult $portableWbox @("kill", $createName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $createName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $createOldName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $badReadyName))
+        [void](Invoke-NativeResult $portableWbox @("rm", $badPullName))
     }
     if ($null -ne $localAppDataHostProbe) {
         Remove-Item -LiteralPath $localAppDataHostProbe -Force -ErrorAction SilentlyContinue
