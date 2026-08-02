@@ -2665,7 +2665,7 @@ TODO-WINDOW
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
 ├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [done] 只读依赖图 + 反向边
-├── W21 `MachineCore` / personality / host ABI 最小契约       [active] 首批 MachineCore/HostAbi；AddressSpace/TaskScheduler 待边界验证
+├── W21 `MachineCore` / personality / host ABI 最小契约       [active] CoreState 所有权边界；AddressSpace/TaskScheduler 待边界验证
 ├── W22 x86-64 core 抽取前特征门禁                            [active] syscall trap 边界已落地；独立 core 抽取仍待门禁
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
@@ -2809,9 +2809,13 @@ personality、ISA、provider、隔离模型、优先级和可用性收束为可�
 `TaskScheduler` 暂不凭空建接口；须先完成 W20 的 CPU/trap 与 Linux personality
 反向依赖审计，再确定 syscall/trap 返回边界。
 
+W21 的执行侧第一阶段已落地为 `wbox-linux::machine::CoreState`：`Machine` 现在只把
+`CoreState` 与 Linux `Os` 聚合，既有 `m.cpu`/`m.mem` 通过兼容性 `Deref` 保持可用；
+这只是所有权边界，不是独立 ISA core crate，也没有提前移动 CPU/内存热路径。
+
 `W111` 在 Windows 真机用非 ASCII 文件名验证大小写别名仍映射到同一命名 mutex：
 `Å-state.lock` 与 `child/../å-STATE.LOCK` 竞争时必须返回 `Contended`，释放后
-别名才能重新取得。wbox pin 到 `agenterm-platform` `ff946dd`，不把 Unicode
+别名才能重新取得。wbox pin 到 `agenterm-platform` `cb4e065`，不把 Unicode
 大小写等价只留在 ASCII 测试或实现意图中。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和

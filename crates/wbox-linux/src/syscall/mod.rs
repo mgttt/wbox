@@ -3517,7 +3517,8 @@ fn sys_rt_sigprocmask(m: &mut Machine, how: i32, set: u64, old: u64, size: u64) 
     if size != 8 {
         return -EINVAL;
     }
-    if old != 0 && m.mem.write_u64(old, m.os.sig_blocked).is_err() {
+    let sig_blocked = m.os.sig_blocked;
+    if old != 0 && m.mem.write_u64(old, sig_blocked).is_err() {
         return -EFAULT;
     }
     if set == 0 {

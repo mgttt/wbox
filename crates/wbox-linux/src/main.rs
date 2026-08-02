@@ -121,7 +121,8 @@ fn run(prog: &str, argv_rest: &[String], strace: bool) -> Result<i32, String> {
 
     // 装载走的是和 `execve` 完全同一份代码（ELF、`#!` 脚本、PT_INTERP 都在里面），
     // 这样"直接启动"和"guest 自己 exec 出来"的程序不可能有行为差异。
-    let program = proc::load_into(&mut m.mem, &m.os.vfs, prog, &argv, &envp).map_err(|e| e.msg)?;
+    let program =
+        proc::load_into(&mut m.core.mem, &m.os.vfs, prog, &argv, &envp).map_err(|e| e.msg)?;
 
     m.os.exe = m.os.vfs.guest_abs(prog);
     m.mem.brk = program.loaded.brk;

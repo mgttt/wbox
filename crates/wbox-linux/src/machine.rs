@@ -51,25 +51,57 @@ impl From<Fault> for Exception {
 
 pub type ExecResult<T> = Result<T, Exception>;
 
-pub struct Machine {
+/// ISA-core-owned execution state.
+///
+/// This is the first concrete ownership boundary for W21: the Linux
+/// personality remains in [`Machine`], while CPU registers, address space and
+/// execution controls can move to an independent core without changing guest
+/// ABI code.
+#[derive(Clone)]
+pub struct CoreState {
     pub cpu: Cpu,
     pub mem: Mem,
-    pub os: Os,
     /// `WBOX_TRACE=1`：每条指令打一行寄存器转储到 stderr。
     pub trace: bool,
-    /// 指令数上限（0 = 不限）。存在 `Machine` 上而不只是 `run()` 的参数，
-    /// 是因为 `fork` 出来的子进程要继承同一个预算。
+    /// 指令数上限（0 = 不限）。fork 子进程继承同一个预算。
     pub max_insns: u64,
+}
+
+impl CoreState {
+    fn new() -> Self {
+        Self {
+            cpu: Cpu::new(),
+            mem: Mem::new(),
+            trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
+            max_insns: 0,
+        }
+    }
+}
+
+pub struct Machine {
+    pub core: CoreState,
+    pub os: Os,
+}
+
+impl std::ops::Deref for Machine {
+    type Target = CoreState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.core
+    }
 }
 
 impl Machine {
     pub fn new(os: Os) -> Self {
         Machine {
-            cpu: Cpu::new(),
-            mem: Mem::new(),
+            core: CoreState::new(),
             os,
-            trace: std::env::var_os("WBOX_TRACE").is_some_and(|v| v != "0"),
-            max_insns: 0,
         }
     }
 

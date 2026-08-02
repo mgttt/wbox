@@ -34,7 +34,7 @@
 
 use super::{guest_path, E2BIG, EAGAIN, ECHILD, EFAULT, EINTR, EINVAL, ENOSYS, ESRCH, PATH_MAX};
 use crate::cpu::{Cpu, R11, RAX, RCX};
-use crate::machine::{Exception, ExecResult, Machine};
+use crate::machine::{CoreState, Exception, ExecResult, Machine};
 use crate::mem::Mem;
 use crate::proc;
 
@@ -94,11 +94,13 @@ pub fn sys_fork(m: &mut Machine, child_stack: u64, ret_rip: u64) -> i64 {
 
     let pid = m.os.alloc_pid();
     let mut child = Machine {
-        cpu: m.cpu.clone(),
-        mem: m.mem.clone(),
+        core: CoreState {
+            cpu: m.cpu.clone(),
+            mem: m.mem.clone(),
+            trace: m.trace,
+            max_insns: m.max_insns,
+        },
         os: m.os.clone_for_fork(fds, pid),
-        trace: m.trace,
-        max_insns: m.max_insns,
     };
     // fork 的返回值：父得 pid，子得 0。syscall 指令的副作用（rcx/r11/rip）
     // 也要在子进程里补上，否则它会从 syscall 指令本身重新执行。

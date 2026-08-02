@@ -259,7 +259,7 @@ Linux kernel/ABI personality
 └── syscall/process.rs  -> Machine + proc；fork 当前克隆 Cpu/Mem/Os 后串行运行子进程
 
 当前聚合点
-└── machine.rs = Cpu + Mem + syscall::Os + trace/budget
+└── machine.rs = CoreState(Cpu + Mem + trace/budget) + syscall::Os
     ├── Exception 同时混有 ISA fault、Linux exit 与 Linux signal termination
     └── 因 Os 是具体类型，core 不能脱离 Linux personality 编译
 ```
@@ -274,6 +274,10 @@ Linux kernel/ABI personality
 带返回 RIP 的 `Exception::Syscall`；现有 Linux 调用者继续通过 `Machine::step` facade
 获得原有分发语义。这个边界仍不是独立 core crate，CPU、内存和 `Machine` 所有权的拆分
 以及其它 ISA fault 的统一契约仍由 W21/W22 后续门禁约束。
+
+W21 的所有权第一阶段也已落地：`Machine` 持有 `CoreState` 与 Linux `Os`，并通过兼容性
+`Deref` 保留既有 `m.cpu`/`m.mem` 调用点。新代码应优先显式使用 `m.core`，以便未来把
+`CoreState` 替换为 ISA 无关的地址空间/执行 core，而不把 Linux ABI 状态重新带入 core。
 
 `cpu/alu/mem/exec/sse` 可以在上述边界稳定后组成 x86-64 MachineCore；其中 decoder/Rm
 必须与 SSE 一起移动，不能让新 core 反向依赖 `wbox-linux`。`elf/proc/stack` 首批继续属于

@@ -636,7 +636,8 @@ impl Machine {
             0xc2 | 0xc3 => {
                 let extra = if op == 0xc2 { self.f16(d)? as u64 } else { 0 };
                 let ret = self.pop(8)?;
-                self.cpu.set_rsp(self.cpu.rsp().wrapping_add(extra));
+                let rsp = self.cpu.rsp().wrapping_add(extra);
+                self.cpu.set_rsp(rsp);
                 self.cpu.rip = ret;
                 Ok(())
             }
@@ -657,7 +658,8 @@ impl Machine {
             // LEAVE：mov rsp,rbp; pop rbp
             0xc9 => {
                 let size = d.stacksize();
-                self.cpu.set_rsp(self.cpu.regs[crate::cpu::RBP]);
+                let rsp = self.cpu.regs[crate::cpu::RBP];
+                self.cpu.set_rsp(rsp);
                 let v = self.pop(size)?;
                 self.cpu.set_reg(crate::cpu::RBP, size, v, false);
                 self.next(d)
@@ -1218,7 +1220,8 @@ impl Machine {
                         self.next(d)
                     }
                     (3, Rm::Mem(addr)) => {
-                        self.mem.write_u32(addr, self.cpu.mxcsr)?;
+                        let mxcsr = self.cpu.mxcsr;
+                        self.mem.write_u32(addr, mxcsr)?;
                         self.next(d)
                     }
                     (5..=7, Rm::Reg(_)) => self.next(d), // LFENCE/MFENCE/SFENCE
