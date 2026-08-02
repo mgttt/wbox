@@ -87,6 +87,7 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 - 跨进程、大小写别名、`child/../path` 别名和 missing-tail 别名均有测试。
 - Windows 真机还覆盖非 ASCII 文件名的 Unicode 大小写别名竞争，并由跨进程子进程门禁复核。
 - Windows 真机跨进程覆盖普通路径与硬链接别名的竞争，验证硬链接不能绕过现有锁。
+- Windows 真机覆盖持锁期间删除并重建目标，验证路径级锁不会因对象替换而丢失。
 
 Unix/Linux/macOS 对应实现使用文件锁和 `flock`，并有目录别名与跨进程门禁；产品层只依赖统一 `PathLock` 契约。
 
