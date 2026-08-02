@@ -78,6 +78,7 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 - Windows 大小写不敏感身份折叠。
 - `SlotPermit` 复用相同路径身份规则。
 - 跨进程、大小写别名、`child/../path` 别名和 missing-tail 别名均有测试。
+- Windows 真机还覆盖非 ASCII 文件名的 Unicode 大小写别名竞争。
 
 Unix/Linux/macOS 对应实现使用文件锁和 `flock`，并有目录别名与跨进程门禁；产品层只依赖统一 `PathLock` 契约。
 
