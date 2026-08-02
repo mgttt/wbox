@@ -2694,6 +2694,7 @@ TODO-WINDOW
 ├── W102 Unix/macOS PathLock 目录别名竞争门禁                                        [done] child/../path 与规范路径互斥
 ├── W103 PathLock 跨进程与目录别名交集门禁                                          [done] 父规范路径/子别名竞争
 ├── W104 Windows private-directory junction 拒绝与目标 ACL 不变门禁                  [done] reparse fail-closed
+├── W105 Windows PathLock 缺失尾段路径别名门禁                                      [done] 不存在目标/中间目录
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2709,6 +2710,9 @@ Linux 目标编译，Unix/macOS 真机运行仍由对应 CI/宿主门禁完成�
 `W104` 在 Windows 真机创建真实 junction，验证 `protect_private_directory()` 以
 `InvalidInput` fail-closed，并比较 junction 目标 DACL 的 protected 状态前后不变，
 避免 ACL 操作沿 reparse point 修改树外目录。
+
+`W105` 覆盖 `canonicalize_with_missing_tail` 分支：锁目标和中间目录均不存在时，
+规范路径与 `child/../missing/STATE.LOCK` 仍必须映射到同一 Windows 命名 mutex。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
