@@ -4995,7 +4995,7 @@ wbox 只改为消费公共 facade，继续持有 profile 名称校验、已存�
 还按 `file_identity` 的 volume/object identity 加锁，使硬链接别名无法绕过互斥；
 路径锁本身仍保留，因此删除后重建或替换目标时不会丢失路径级协调。两把锁按稳定
 排序获取，避免不同别名之间形成跨进程锁顺序反转；wbox pin 到包含实现的
-`agenterm-platform` `b474f8b`，并由后续 `7aaed1e` Windows 真机跨进程硬链接门禁及
+`agenterm-platform` `cb4e065`，并由后续 `7aaed1e` Windows 真机跨进程硬链接门禁及
 `cb4e065` 删除重建目标后的路径锁门禁验证。
 
 `W100` 统一 `protect_private_directory` 的输入契约：Windows、Linux 和 macOS 对文件、
