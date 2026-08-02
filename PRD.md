@@ -41,7 +41,7 @@ PRD
 │   ├── F8 运维型容器生命周期      F8.1–F8.8（含 F8.a–F8.f 设计答复）
 │   ├── F9 对标能力补齐            F9.1–F9.40（每条一个小节，按编号升序）
 │   └── 4.9 跨宿主协作交接点 ★
-│       ├── 4.9.1 [TODO-WINDOW]   W1–W94、R8
+│       ├── 4.9.1 [TODO-WINDOW]   W1–W95、R8
 │       ├── 4.9.2 [TODO-LINUX]    L1–L53、W5（历史编号）
 │       └── 4.9.3 [TODO-MACOS]    M1–M38
 ├── 5  非功能需求 N1–N4
@@ -2684,6 +2684,7 @@ TODO-WINDOW
 ├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
 ├── W93 Windows 目录树有限授权下沉并删除本地 ACL FFI                                  [done] typed SID + no-follow DACL merge
 ├── W94 Windows 命名进程 containment/Job 原语下沉                                    [done] exact process + limits/lifecycle
+├── W95 AppContainer 可恢复挂起进程创建下沉                                           [next] attribute-list + exact handles
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4789,6 +4790,19 @@ MB/百分比产品单位换算及 stop/exec/supervisor 生命周期策略。待�
 x86-64/ARM64 和 macOS x86-64 交叉编译均通过；全 feature 为 205 项单测加 integration。
 wbox Quick 306 项、根包 `464 passed / 3 ignored`、release WP.1-WP.27 全部适用门禁及固定
 Ubuntu 24.04 WU.1/WU.2 均通过；三个 ignored 仍仅要求外部网络测试环境。
+
+`W95` 是下一项候选边界。当前剩余的生产级 Windows 进程 FFI 已集中在 `sandbox.rs` 的
+`SECURITY_CAPABILITIES`/attribute-list、显式 HANDLE 白名单、`CreateProcessW` 挂起创建与
+`ResumeThread`，以及 `token.rs` 仅为该链路保留的 HANDLE/SID 适配。共享层可提供
+“用 owned AppContainer SID、capability SID、显式环境和继承对象创建一个尚未执行用户代码的
+精确进程/主线程对象”，并保证 attribute-list 和继承标志在成功、错误、panic 后都恢复；
+非 Windows 宿主返回类型化 `Unsupported`，不得伪装成等价隔离。
+
+wbox 必须继续持有 profile 命名/保留/删除、网络 capability 产品策略、先挂起创建再加入
+containment 的顺序、broker created hook、runstate started hook、退出码和错误分类。晋升门禁至少
+覆盖创建失败无孤儿、hook 失败收割、HANDLE 白名单无泄漏、宿主环境不继承、精确进程在 resume
+前可加入 containment，以及最小 feature 不拉入完整 `process`/UI。未满足这些门禁前不删除
+本地启动链路。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；
