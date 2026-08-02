@@ -2692,6 +2692,7 @@ TODO-WINDOW
 ├── W100 Unix/macOS private-directory 非目录拒绝契约                              [done] 与 Windows InvalidInput 一致
 ├── W101 三宿主 private-directory link-like 路径拒绝                                  [done] symlink/reparse fail-closed
 ├── W102 Unix/macOS PathLock 目录别名竞争门禁                                        [done] child/../path 与规范路径互斥
+├── W103 PathLock 跨进程与目录别名交集门禁                                          [done] 父规范路径/子别名竞争
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2699,6 +2700,10 @@ TODO-WINDOW
 必须与 `state.lock` 取得同一把锁，释放后别名才能重新取得；该测试保持 Unix 大小写
 敏感语义，并与 Windows 现有路径身份门禁配套。Windows 本地验证的是公共测试和
 Linux 目标编译，Unix/macOS 真机运行仍由对应 CI/宿主门禁完成。
+
+`W103` 将跨进程测试中的竞争路径改为目录别名：父进程持有规范路径，子进程使用
+`child/../STATE.LOCK`，随后继续验证释放和持有者异常退出后的回收。这样 Windows
+命名 mutex 的路径身份规则与 Unix 文件锁的跨进程行为都有直接交集证据。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
