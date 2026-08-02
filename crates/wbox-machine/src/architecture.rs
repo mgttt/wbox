@@ -255,34 +255,41 @@ pub const fn current_isa() -> Option<Isa> {
 }
 
 pub fn detect_hardware(host: Option<HostOs>) -> HardwareCapabilities {
-    let processor = agenterm_platform::hardware::processor_facts();
+    let is_current_host = host.is_some() && host == crate::route::current_host();
+    let can_probe_host_facts = host.is_none() || is_current_host;
+    let processor = can_probe_host_facts.then(agenterm_platform::hardware::processor_facts);
     let mut capabilities = HardwareCapabilities {
-        native_isa: match processor.architecture {
-            agenterm_platform::hardware::ProcessorArchitecture::X86_64 => Some(Isa::X86_64),
-            agenterm_platform::hardware::ProcessorArchitecture::Aarch64 => Some(Isa::Aarch64),
-            _ => None,
-        },
-        logical_processors: processor
-            .logical_processors
-            .map(std::num::NonZeroUsize::get),
-        processor_topology: (host.is_some() && host == crate::route::current_host())
-            .then(agenterm_platform::processor_topology::facts),
-        processor_affinity: (host.is_some() && host == crate::route::current_host())
+        native_isa: processor
+            .as_ref()
+            .and_then(|processor| match processor.architecture {
+                agenterm_platform::hardware::ProcessorArchitecture::X86_64 => Some(Isa::X86_64),
+                agenterm_platform::hardware::ProcessorArchitecture::Aarch64 => Some(Isa::Aarch64),
+                _ => None,
+            }),
+        logical_processors: processor.as_ref().and_then(|processor| {
+            processor
+                .logical_processors
+                .map(std::num::NonZeroUsize::get)
+        }),
+        processor_topology: is_current_host.then(agenterm_platform::processor_topology::facts),
+        processor_affinity: is_current_host
             .then(agenterm_platform::processor_affinity::current_process),
-        cache_hierarchy: (host.is_some() && host == crate::route::current_host())
-            .then(agenterm_platform::cache_hierarchy::facts),
+        cache_hierarchy: is_current_host.then(agenterm_platform::cache_hierarchy::facts),
         cpu_features: processor
-            .features
-            .into_iter()
-            .filter_map(map_cpu_feature)
-            .collect(),
+            .map(|processor| {
+                processor
+                    .features
+                    .into_iter()
+                    .filter_map(map_cpu_feature)
+                    .collect()
+            })
+            .unwrap_or_default(),
         // Selecting the host API is not a permission/device/firmware probe.
         acceleration: host
             .map(host_acceleration_api)
             .map(AccelerationCapabilities::unprobed),
     };
-    let probe_failed = host.is_some()
-        && host == crate::route::current_host()
+    let probe_failed = is_current_host
         && capabilities
             .apply_native_virtualization(agenterm_platform::native_virtualization::probe())
             .is_err();
@@ -347,11 +354,17 @@ mod tests {
             assert_eq!(acceleration.api(), host_acceleration_api(host));
             if Some(host) == crate::route::current_host() {
                 assert_ne!(acceleration.state(), ProbeState::Unprobed);
+                assert!(hardware.native_isa.is_some());
+                assert!(hardware.logical_processors.is_some());
+                assert!(!hardware.cpu_features.is_empty());
                 assert!(hardware.processor_topology.is_some());
                 assert!(hardware.processor_affinity.is_some());
                 assert!(hardware.cache_hierarchy.is_some());
             } else {
                 assert_eq!(acceleration.state(), ProbeState::Unprobed);
+                assert!(hardware.native_isa.is_none());
+                assert!(hardware.logical_processors.is_none());
+                assert!(hardware.cpu_features.is_empty());
                 assert!(hardware.processor_topology.is_none());
                 assert!(hardware.cache_hierarchy.is_none());
             }

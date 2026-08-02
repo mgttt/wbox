@@ -2699,6 +2699,7 @@ TODO-WINDOW
 ├── W107 Windows private-directory ACL 改为 handle 级保护                           [done] no-follow reparse + SetSecurityInfo
 ├── W108 Linux/macOS private-directory 改为 no-follow fd 级保护                      [done] O_DIRECTORY/O_NOFOLLOW + fchmod
 ├── W109 filesystem 最小 feature 四目标 CI 编译门禁                                   [done] 补齐 Windows ABI 泄漏
+├── W110 wbox-machine 非当前宿主硬件事实隔离                                       [done] 不泄漏本机 ISA/CPU/并行度
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2736,6 +2737,11 @@ Linux/macOS 同 feature 目标编译通过。
 `W109` 将 `filesystem` 与 `filesystem-conventions` 一起加入 platform 的四目标
 CI 矩阵，避免完整 feature 构建掩盖 Windows ABI 泄漏；Windows 最小 filesystem
 测试 36 项、Linux/macOS 目标编译和本地 strict checks 均通过。
+
+`W110` 修正 `wbox-machine::detect_hardware()` 的证据边界：显式非当前宿主只保留
+未探测的路线候选，不再把 Windows 当前机器的 native ISA、CPU feature、逻辑处理器
+数量带入 Linux/macOS 假想路由；`host=None` 继续保留原有的“读取当前宿主基础事实”
+兼容语义。wbox-machine 单测 30 项和 lab 集成测试通过。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
