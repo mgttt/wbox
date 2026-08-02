@@ -2695,6 +2695,7 @@ TODO-WINDOW
 ├── W103 PathLock 跨进程与目录别名交集门禁                                          [done] 父规范路径/子别名竞争
 ├── W104 Windows private-directory junction 拒绝与目标 ACL 不变门禁                  [done] reparse fail-closed
 ├── W105 Windows PathLock 缺失尾段路径别名门禁                                      [done] 不存在目标/中间目录
+├── W106 filesystem-conventions 四目标最小 feature CI 编译门禁                      [done] Windows/Linux/macOS 双 ISA
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -2713,6 +2714,10 @@ Linux 目标编译，Unix/macOS 真机运行仍由对应 CI/宿主门禁完成�
 
 `W105` 覆盖 `canonicalize_with_missing_tail` 分支：锁目标和中间目录均不存在时，
 规范路径与 `child/../missing/STATE.LOCK` 仍必须映射到同一 Windows 命名 mutex。
+
+`W106` 在 agenterm-platform CI 中独立运行 `--no-default-features --features
+filesystem-conventions` 矩阵，覆盖 Windows x86-64、Linux x86-64、macOS x86-64
+和 macOS AArch64；该门禁只验证宿主约定，不被完整 platform feature 图掩盖。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取
