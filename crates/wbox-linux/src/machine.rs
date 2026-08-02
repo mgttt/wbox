@@ -4,7 +4,32 @@ use crate::cpu::Cpu;
 use crate::mem::{Fault, Mem};
 use crate::syscall::Os;
 
-/// 中断执行的事件。名字沿用 x86 的异常，`Exit` 是 guest 主动退出。
+/// ISA core 中断执行的事件。
+#[derive(Debug, Clone)]
+pub enum CoreException {
+    /// #PF：访存越权或未映射。
+    Fault(Fault),
+    /// #UD：解码不出来或未实现的指令。
+    Undefined { rip: u64, bytes: Vec<u8> },
+    /// #DE：除零或商溢出。
+    DivideError { rip: u64 },
+    /// #BP：`int3`。
+    Breakpoint { rip: u64 },
+    /// guest 执行了 HLT；由 Linux facade 映射为退出。
+    Halt,
+    /// x86 core 将 Linux syscall 交给外层 personality 处理。
+    Syscall { ret_rip: u64 },
+}
+
+pub type CoreResult<T> = Result<T, CoreException>;
+
+impl From<Fault> for CoreException {
+    fn from(x: Fault) -> Self {
+        CoreException::Fault(x)
+    }
+}
+
+/// Linux personality 对外观察到的执行事件；`Exit`/`Killed` 属于 ABI 层。
 #[derive(Debug, Clone)]
 pub enum Exception {
     /// #PF：访存越权或未映射。
@@ -46,6 +71,19 @@ impl std::fmt::Display for Exception {
 impl From<Fault> for Exception {
     fn from(x: Fault) -> Self {
         Exception::Fault(x)
+    }
+}
+
+impl From<CoreException> for Exception {
+    fn from(x: CoreException) -> Self {
+        match x {
+            CoreException::Fault(fault) => Self::Fault(fault),
+            CoreException::Undefined { rip, bytes } => Self::Undefined { rip, bytes },
+            CoreException::DivideError { rip } => Self::DivideError { rip },
+            CoreException::Breakpoint { rip } => Self::Breakpoint { rip },
+            CoreException::Halt => Self::Exit(0),
+            CoreException::Syscall { ret_rip } => Self::Syscall { ret_rip },
+        }
     }
 }
 
@@ -112,8 +150,9 @@ impl Machine {
     /// 语义，同时给未来独立 x86 core 留出 `step_core()` 边界。
     pub fn step(&mut self) -> ExecResult<()> {
         match self.core.step_core() {
-            Err(Exception::Syscall { ret_rip }) => crate::syscall::dispatch(self, ret_rip),
-            result => result,
+            Ok(()) => Ok(()),
+            Err(CoreException::Syscall { ret_rip }) => crate::syscall::dispatch(self, ret_rip),
+            Err(other) => Err(Exception::from(other)),
         }
     }
 

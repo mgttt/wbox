@@ -243,7 +243,7 @@ manifest 选择必须如实反映 runtime 支持的 ISA。
 
 x86-64 core（仍被 personality 反向穿透）
 ├── exec.rs      -> CoreState(cpu + alu + mem) + sse
-│   └── 0F 05 产生 Exception::Syscall；由 Machine::step 兼容 facade 分发
+│   └── 0F 05 产生 CoreException::Syscall；由 Machine::step 兼容 facade 分发
 └── sse.rs       -> cpu + exec decoder/Rm + CoreState
 
 Linux executable personality
@@ -260,8 +260,9 @@ Linux kernel/ABI personality
 
 当前聚合点
 └── machine.rs = CoreState(Cpu + Mem + trace/budget) + syscall::Os
-    ├── Exception 同时混有 ISA fault、Linux exit 与 Linux signal termination
-    └── 因 Os 是具体类型，core 不能脱离 Linux personality 编译
+    ├── CoreException 只表达 ISA fault、Halt 与 syscall trap
+    └── Exception 仍表达 Linux exit 与 Linux signal termination
+    └── 因 Os 是具体类型，Machine facade 不能脱离 Linux personality 编译
 ```
 
 由这张图得到的首个可执行边界不是“把 `cpu.rs` 移到新 crate”，而是先消除两条反向边：
@@ -271,9 +272,10 @@ Linux kernel/ABI personality
    处理 syscall、signal delivery、exit 与调度，再决定恢复执行或终止。
 
 第一阶段已落地：`exec.rs::step_core` 不再直接依赖 `syscall::dispatch`，`0F 05` 只产生
-带返回 RIP 的 `Exception::Syscall`；现有 Linux 调用者继续通过 `Machine::step` facade
-获得原有分发语义。这个边界仍不是独立 core crate，CPU、内存和 `Machine` 所有权的拆分
-以及其它 ISA fault 的统一契约仍由 W21/W22 后续门禁约束。
+带返回 RIP 的 `CoreException::Syscall`；现有 Linux 调用者继续通过 `Machine::step` facade
+获得原有分发语义。`CoreException::Halt` 也只在 facade 映射为 Linux `Exit(0)`，而
+`Killed` 永远不进入 core。这个边界仍不是独立 core crate，CPU、内存与其它 ISA fault
+的最终统一契约仍由 W21/W22 后续门禁约束。
 
 W21 的所有权第一阶段也已落地：`Machine` 持有 `CoreState` 与 Linux `Os`，并通过兼容性
 `Deref` 保留既有 `m.cpu`/`m.mem` 调用点。新代码应优先显式使用 `m.core`，以便未来把

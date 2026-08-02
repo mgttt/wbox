@@ -10,7 +10,7 @@
 
 use crate::alu;
 use crate::cpu::{sext, trunc, RAX, RCX, RDX};
-use crate::machine::{CoreState, Exception, ExecResult, Machine};
+use crate::machine::{CoreException, CoreResult, CoreState, Machine};
 use crate::mem::PROT_EXEC;
 
 /// 一条指令的译码状态。
@@ -89,19 +89,19 @@ impl CoreState {
     // ------------------------------------------------------------ 取指
 
     #[inline]
-    pub(crate) fn f8(&mut self, d: &mut Dec) -> ExecResult<u8> {
+    pub(crate) fn f8(&mut self, d: &mut Dec) -> CoreResult<u8> {
         let b = self.mem.fetch_u8(d.pc)?;
         d.pc += 1;
         Ok(b)
     }
 
-    pub(crate) fn f16(&mut self, d: &mut Dec) -> ExecResult<u16> {
+    pub(crate) fn f16(&mut self, d: &mut Dec) -> CoreResult<u16> {
         let a = self.f8(d)? as u16;
         let b = self.f8(d)? as u16;
         Ok(a | (b << 8))
     }
 
-    pub(crate) fn f32(&mut self, d: &mut Dec) -> ExecResult<u32> {
+    pub(crate) fn f32(&mut self, d: &mut Dec) -> CoreResult<u32> {
         let mut v = 0u32;
         for i in 0..4 {
             v |= (self.f8(d)? as u32) << (i * 8);
@@ -109,7 +109,7 @@ impl CoreState {
         Ok(v)
     }
 
-    pub(crate) fn f64v(&mut self, d: &mut Dec) -> ExecResult<u64> {
+    pub(crate) fn f64v(&mut self, d: &mut Dec) -> CoreResult<u64> {
         let mut v = 0u64;
         for i in 0..8 {
             v |= (self.f8(d)? as u64) << (i * 8);
@@ -118,7 +118,7 @@ impl CoreState {
     }
 
     /// 按操作数宽度取立即数并符号扩展（`size==8` 时立即数仍是 32 位）。
-    pub(crate) fn imm_sext(&mut self, d: &mut Dec, size: u8) -> ExecResult<u64> {
+    pub(crate) fn imm_sext(&mut self, d: &mut Dec, size: u8) -> CoreResult<u64> {
         Ok(match size {
             1 => sext(self.f8(d)? as u64, 1),
             2 => sext(self.f16(d)? as u64, 2),
@@ -129,7 +129,7 @@ impl CoreState {
     // ------------------------------------------------------------ ModRM
 
     /// 译码 ModRM（含 SIB / 位移 / RIP-relative），返回 (reg 字段, r/m)。
-    pub(crate) fn modrm(&mut self, d: &mut Dec) -> ExecResult<(usize, Rm)> {
+    pub(crate) fn modrm(&mut self, d: &mut Dec) -> CoreResult<(usize, Rm)> {
         let m = self.f8(d)?;
         let md = m >> 6;
         let reg = ((m >> 3) & 7) as usize | (d.rex_r() << 3);
@@ -209,14 +209,14 @@ impl CoreState {
 
     // ------------------------------------------------------ 操作数读写
 
-    pub(crate) fn rm_read(&mut self, d: &Dec, rm: Rm, size: u8) -> ExecResult<u64> {
+    pub(crate) fn rm_read(&mut self, d: &Dec, rm: Rm, size: u8) -> CoreResult<u64> {
         Ok(match self.fixup(d, rm) {
             Rm::Reg(r) => self.cpu.get_reg(r, size, bh(d, r, size)),
             Rm::Mem(a) => self.mem.read_sized(a, size)?,
         })
     }
 
-    pub(crate) fn rm_write(&mut self, d: &Dec, rm: Rm, size: u8, v: u64) -> ExecResult<()> {
+    pub(crate) fn rm_write(&mut self, d: &Dec, rm: Rm, size: u8, v: u64) -> CoreResult<()> {
         match self.fixup(d, rm) {
             Rm::Reg(r) => self.cpu.set_reg(r, size, v, bh(d, r, size)),
             Rm::Mem(a) => self.mem.write_sized(a, size, v)?,
@@ -236,14 +236,14 @@ impl CoreState {
 
     // ------------------------------------------------------------ 栈
 
-    pub(crate) fn push(&mut self, size: u8, v: u64) -> ExecResult<()> {
+    pub(crate) fn push(&mut self, size: u8, v: u64) -> CoreResult<()> {
         let sp = self.cpu.rsp().wrapping_sub(size as u64);
         self.mem.write_sized(sp, size, v)?;
         self.cpu.set_rsp(sp);
         Ok(())
     }
 
-    pub(crate) fn pop(&mut self, size: u8) -> ExecResult<u64> {
+    pub(crate) fn pop(&mut self, size: u8) -> CoreResult<u64> {
         let sp = self.cpu.rsp();
         let v = self.mem.read_sized(sp, size)?;
         self.cpu.set_rsp(sp.wrapping_add(size as u64));
@@ -282,7 +282,7 @@ impl CoreState {
     ///
     /// The compatibility `Machine::step()` facade lives in `machine.rs` and
     /// consumes the syscall trap for current Linux guest callers.
-    pub(crate) fn step_core(&mut self) -> ExecResult<()> {
+    pub(crate) fn step_core(&mut self) -> CoreResult<()> {
         let start = self.cpu.rip;
         let mut d = Dec {
             start,
@@ -328,12 +328,12 @@ impl CoreState {
 
     /// 提交 RIP：正常顺序执行时指向下一条指令。
     #[inline]
-    pub(crate) fn next(&mut self, d: &Dec) -> ExecResult<()> {
+    pub(crate) fn next(&mut self, d: &Dec) -> CoreResult<()> {
         self.cpu.rip = d.pc;
         Ok(())
     }
 
-    pub(crate) fn undef(&mut self, d: &Dec) -> Exception {
+    pub(crate) fn undef(&mut self, d: &Dec) -> CoreException {
         // 把指令起始处的原始字节抓出来（最长 16 字节），便于对照 objdump。
         let mut bytes = Vec::new();
         for i in 0..16u64 {
@@ -342,7 +342,7 @@ impl CoreState {
                 Err(_) => break,
             }
         }
-        Exception::Undefined {
+        CoreException::Undefined {
             rip: d.start,
             bytes,
         }
@@ -350,7 +350,7 @@ impl CoreState {
 
     // -------------------------------------------------- 单字节 opcode
 
-    fn exec_1byte(&mut self, d: &mut Dec, op: u8) -> ExecResult<()> {
+    fn exec_1byte(&mut self, d: &mut Dec, op: u8) -> CoreResult<()> {
         match op {
             // ---- 8 组 ALU 的规则编码：ADD/OR/ADC/SBB/AND/SUB/XOR/CMP
             // 每组 6 个形式：r/m8,r8 | r/m,r | r8,r/m8 | r,r/m | al,imm8 | eax,imm
@@ -665,7 +665,7 @@ impl CoreState {
                 self.next(d)
             }
 
-            0xcc => Err(Exception::Breakpoint { rip: d.start }),
+            0xcc => Err(CoreException::Breakpoint { rip: d.start }),
 
             // CALL rel32
             0xe8 => {
@@ -687,7 +687,7 @@ impl CoreState {
                 Ok(())
             }
 
-            0xf4 => Err(Exception::Exit(0)), // HLT：用户态 guest 不该执行，按停机处理
+            0xf4 => Err(CoreException::Halt), // HLT：用户态 guest 不该执行，按停机处理
             0xf5 => {
                 self.cpu.flags.cf = !self.cpu.flags.cf;
                 self.next(d)
@@ -768,7 +768,7 @@ impl CoreState {
                         } else {
                             alu::div(hi, lo, div, size)
                         }
-                        .ok_or(Exception::DivideError { rip: d.start })?;
+                        .ok_or(CoreException::DivideError { rip: d.start })?;
                         if size == 1 {
                             self.cpu.set_reg(
                                 RAX,
@@ -832,7 +832,7 @@ impl CoreState {
     }
 
     /// 8 组规则 ALU 的公共译码。`group` 0..7，`form` 0..5。
-    fn alu_group(&mut self, d: &mut Dec, group: u8, form: u8) -> ExecResult<()> {
+    fn alu_group(&mut self, d: &mut Dec, group: u8, form: u8) -> CoreResult<()> {
         match form {
             0 | 1 => {
                 let size = if form == 0 { 1 } else { d.opsize() };
@@ -889,7 +889,7 @@ impl CoreState {
 
     /// 串操作。REP 前缀时**每次 step 只做一轮**，rcx 未归零就不推进 RIP。
     /// 这样长串拷贝可以被信号和指令计数打断，不会在一条指令里卡住主循环。
-    fn string_op(&mut self, d: &mut Dec, op: u8) -> ExecResult<()> {
+    fn string_op(&mut self, d: &mut Dec, op: u8) -> CoreResult<()> {
         let size = if op & 1 == 0 { 1 } else { d.opsize() };
         let step: i64 = if self.cpu.flags.df {
             -(size as i64)
@@ -965,10 +965,10 @@ impl CoreState {
 
     // --------------------------------------------------- 0x0f 双字节
 
-    fn exec_0f(&mut self, d: &mut Dec, op: u8) -> ExecResult<()> {
+    fn exec_0f(&mut self, d: &mut Dec, op: u8) -> CoreResult<()> {
         match op {
             // SYSCALL
-            0x05 => Err(Exception::Syscall { ret_rip: d.pc }),
+            0x05 => Err(CoreException::Syscall { ret_rip: d.pc }),
 
             0x0b => Err(self.undef(d)), // UD2：guest 主动触发，照实报
 
@@ -1235,7 +1235,7 @@ impl CoreState {
     }
 
     /// BT/BTS/BTR/BTC 公共实现。
-    fn bit_op(&mut self, d: &mut Dec, rm: Rm, size: u8, bit: u64, op: u8) -> ExecResult<()> {
+    fn bit_op(&mut self, d: &mut Dec, rm: Rm, size: u8, bit: u64, op: u8) -> CoreResult<()> {
         let bits = size as u64 * 8;
         match self.fixup(d, rm) {
             Rm::Reg(_) => {
@@ -1330,7 +1330,7 @@ pub fn load_code(m: &mut Machine, addr: u64, code: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::load_code;
-    use crate::{machine::Exception, machine::Machine, syscall::Os};
+    use crate::{machine::CoreException, machine::Machine, syscall::Os};
 
     #[test]
     fn syscall_instruction_emits_core_trap() {
@@ -1346,7 +1346,7 @@ mod tests {
             .step_core()
             .expect("mov must execute in the core");
         match machine.core.step_core() {
-            Err(Exception::Syscall { ret_rip }) => assert_eq!(ret_rip, 0x1007),
+            Err(CoreException::Syscall { ret_rip }) => assert_eq!(ret_rip, 0x1007),
             result => panic!("expected syscall trap, got {result:?}"),
         }
     }

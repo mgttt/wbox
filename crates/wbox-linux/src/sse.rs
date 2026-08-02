@@ -21,10 +21,10 @@
 
 use crate::cpu::trunc;
 use crate::exec::{Dec, Rm};
-use crate::machine::{CoreState, ExecResult};
+use crate::machine::{CoreResult, CoreState};
 
 /// 取 128 位操作数：xmm 寄存器或 16 字节内存。
-fn read_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm) -> ExecResult<[u8; 16]> {
+fn read_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm) -> CoreResult<[u8; 16]> {
     match m.fixup(d, rm) {
         Rm::Reg(r) => Ok(m.cpu.xmm[r]),
         Rm::Mem(a) => {
@@ -35,7 +35,7 @@ fn read_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm) -> ExecResult<[u8; 16]> {
     }
 }
 
-fn write_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm, v: [u8; 16]) -> ExecResult<()> {
+fn write_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm, v: [u8; 16]) -> CoreResult<()> {
     match m.fixup(d, rm) {
         Rm::Reg(r) => m.cpu.xmm[r] = v,
         Rm::Mem(a) => m.mem.write(a, &v)?,
@@ -44,7 +44,7 @@ fn write_xmm_rm(m: &mut CoreState, d: &Dec, rm: Rm, v: [u8; 16]) -> ExecResult<(
 }
 
 /// 读 n 字节操作数（`movd`/`movq`/`movss`/`movsd` 的窄形式）。
-fn read_narrow(m: &mut CoreState, d: &Dec, rm: Rm, n: usize) -> ExecResult<[u8; 16]> {
+fn read_narrow(m: &mut CoreState, d: &Dec, rm: Rm, n: usize) -> CoreResult<[u8; 16]> {
     let mut out = [0u8; 16];
     match m.fixup(d, rm) {
         Rm::Reg(r) => out[..n].copy_from_slice(&m.cpu.xmm[r][..n]),
@@ -53,7 +53,7 @@ fn read_narrow(m: &mut CoreState, d: &Dec, rm: Rm, n: usize) -> ExecResult<[u8; 
     Ok(out)
 }
 
-fn write_narrow(m: &mut CoreState, d: &Dec, rm: Rm, v: &[u8], n: usize) -> ExecResult<()> {
+fn write_narrow(m: &mut CoreState, d: &Dec, rm: Rm, v: &[u8], n: usize) -> CoreResult<()> {
     match m.fixup(d, rm) {
         Rm::Reg(r) => {
             // 寄存器目标：窄写只改低 n 字节，高位保留
@@ -154,7 +154,7 @@ fn fbinop(
 
 /// 执行一条 SSE 指令（`op` 是 0x0f 之后的字节）。
 /// 认不出来就返回 `Undefined`，由上层报错。
-pub fn exec(m: &mut CoreState, d: &mut Dec, op: u8) -> ExecResult<()> {
+pub fn exec(m: &mut CoreState, d: &mut Dec, op: u8) -> CoreResult<()> {
     match op {
         // ---- 浮点算术：add/mul/sub/min/div/max/sqrt
         0x58 | 0x59 | 0x5c | 0x5d | 0x5e | 0x5f => {
