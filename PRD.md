@@ -2752,7 +2752,7 @@ TODO-WINDOW
 ├── W105 Windows PathLock 缺失尾段路径别名门禁                                      [done] 不存在目标/中间目录
 ├── W106 filesystem-conventions 四目标最小 feature CI 编译门禁                      [done] Windows/Linux/macOS 双 ISA
 ├── W107 Windows private-directory ACL 改为 handle 级保护                           [done] no-follow reparse + SetSecurityInfo
-├── W108 Linux/macOS private-directory 改为 no-follow fd 级保护                      [done] O_DIRECTORY/O_NOFOLLOW + fchmod
+├── W108 Linux/macOS private-directory 改为 no-follow fd 级保护                      [done] retained handle + O_NOFOLLOW + fchmod
 ├── W109 filesystem 最小 feature 四目标 CI 编译门禁                                   [done] 补齐 Windows ABI 泄漏
 ├── W110 wbox-machine 非当前宿主硬件事实隔离                                       [done] 不泄漏本机 ISA/CPU/并行度
 ├── W111 Windows PathLock Unicode 大小写别名门禁                                  [done] agenterm-platform 真机测试
@@ -2784,9 +2784,10 @@ filesystem-conventions` 矩阵，覆盖 Windows x86-64、Linux x86-64、macOS x8
 `SetSecurityInfo`，并用已打开对象分类确认 ordinary directory；这样最终 ACL 修改
 绑定到已取得的对象，避免检查和修改之间再次沿路径解析。
 
-`W108` 将 Linux/macOS 的目录权限修改对齐到已打开对象：使用
-`O_DIRECTORY | O_NOFOLLOW`，通过 `fchmod(0700)` 修改 fd，而不是对经过检查的
-路径再次调用 `set_permissions`；同时修正 `filesystem` 最小 feature 所需的
+`W108` 将 Linux/macOS 的目录权限修改对齐到已打开对象：使用现有
+`filesystem_open::open_existing_path()` 逐组件保留父目录 fd，并在每个组件使用
+`O_DIRECTORY | O_NOFOLLOW`；最终通过 `fchmod(0700)` 修改 retained fd，而不是对
+经过检查的路径再次调用 `set_permissions`。中间目录 symlink 也会 fail closed；同时修正 `filesystem` 最小 feature 所需的
 Windows `SystemServices` ABI 声明。Windows 最小 filesystem 测试 36 项通过，
 Linux/macOS 同 feature 目标编译通过。
 

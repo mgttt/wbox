@@ -92,7 +92,8 @@ Unix/Linux/macOS 对应实现使用文件锁和 `flock`，并有目录别名与�
 为了让三宿主的 private-directory 语义接近：
 
 - Linux/macOS 先用 `symlink_metadata` 保持 link-like 输入错误语义。
-- 使用 `O_DIRECTORY | O_NOFOLLOW` 打开最终目录。
+- 复用 `filesystem_open::open_existing_path()` 逐组件保留父目录 fd，并在每个组件使用
+  `O_DIRECTORY | O_NOFOLLOW`，因此中间目录 symlink 也不会被路径解析穿越。
 - 使用已打开 fd 的 `fchmod(0700)` 修改权限。
 - 不再对经过检查的 Unix 路径直接调用路径型 `set_permissions`。
 - 私有文件使用 `create_new + 0600`。
