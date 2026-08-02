@@ -2790,7 +2790,8 @@ filesystem-conventions` 矩阵，覆盖 Windows x86-64、Linux x86-64、macOS x8
 经过检查的路径再次调用 `set_permissions`。中间目录 symlink 也会 fail closed，并将
 Unix `ELOOP` 统一映射为 public `InvalidInput`；同时修正 `filesystem` 最小 feature 所需的
 Windows `SystemServices` ABI 声明。Windows 最小 filesystem 测试 36 项通过，
-Linux/macOS 同 feature 目标编译通过。
+Linux/macOS 同 feature 目标编译通过；上游 CI 的 `platform-unix-tests` 还在 Ubuntu
+与 macOS runner 执行 platform 全 feature 测试。
 
 `W109` 将 `filesystem` 与 `filesystem-conventions` 一起加入 platform 的四目标
 CI 矩阵，避免完整 feature 构建掩盖 Windows ABI 泄漏；Windows 最小 filesystem
