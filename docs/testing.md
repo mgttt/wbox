@@ -32,16 +32,17 @@ OCI 解包或后端行为改动应运行完整相关层，并依赖 CI 补齐其
 
 ```powershell
 # 日常反馈：静态语法、格式、host clippy、库测试
-scripts/check.ps1 -Quick
+scripts/check.ps1 -Quick (compatibility wrapper; primary implementation is scripts/rhai/check.rhai)
 
 # 提交前：再执行 workspace 全部 Rust tests
-scripts/check.ps1
+scripts/check.ps1 (compatibility wrapper; primary implementation is scripts/rhai/check.rhai)
 
 # Linux 宿主审查 Windows 专属代码时显式加入交叉目标
 scripts/check.ps1 -Quick -WindowsTarget
 ```
 
-`scripts/lint.ps1 -Mode Static` 只检查工作树空白、PowerShell AST 和 JSON 语法，
+`scripts/lint.ps1 -Mode Static` 通过 Rhai 运行时检查工作树空白和 JSON 语法；
+PowerShell AST 检查不再作为运行时依赖，
 不获取 Cargo 构建锁，适合后台只读观察者调用。`-Mode Rust` 运行 rustfmt 与 host
 Clippy；`-WindowsTarget` 再加入 `x86_64-pc-windows-msvc` Clippy。Linux host
 不会编译 `cfg(windows)` 模块，所以跨宿主修改共享/Windows 代码时双目标都是门槛。

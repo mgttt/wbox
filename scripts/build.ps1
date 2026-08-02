@@ -35,32 +35,12 @@ $arguments = @('run', (Join-Path $PSScriptRoot 'rhai\build.rhai'),
 & $runtime @arguments
 $buildExit = $LASTEXITCODE
 
-$cleanupParams = @{
-    CargoFinished = $true
-    MaxIncrementalSizeMiB = $MaxIncrementalSizeMiB
-    MaxDebugSizeMiB = $MaxDebugSizeMiB
-    KeepIncrementalPerCrate = $KeepIncrementalPerCrate
-}
-if ($KeepIncremental) { $cleanupParams.KeepIncremental = $true }
-if ($CleanIncremental) { $cleanupParams.CleanIncremental = $true }
-$canCompactHostDebug = -not $Release -and -not $Package -and -not $Target -and
-    $ExtraArgs.Count -eq 0
-if ($buildExit -eq 0 -and $canCompactHostDebug) {
-    $cleanupParams.RequestStaleDebugCompaction = $true
-}
-
-& (Join-Path $PSScriptRoot 'cleanup-target.ps1') @cleanupParams
+$cleanupArguments = @('run', (Join-Path $PSScriptRoot 'rhai\cleanup-target.rhai'),
+    '--cwd', $repoRoot, '--project-root', $repoRoot, '--timeout-ms', '3600000', '--',
+    '--cargo-finished')
+if ($KeepIncremental) { $cleanupArguments += '--keep-incremental' }
+if ($CleanIncremental) { $cleanupArguments += '--clean-incremental' }
+& $runtime @cleanupArguments
 $cleanupExit = $LASTEXITCODE
 if ($buildExit -ne 0) { exit $buildExit }
-if ($cleanupExit -ne 75) { exit $cleanupExit }
-
-# Cargo owns profile invalidation. If cleanup detects stale platform revisions
-# in an oversized debug profile, rebuild the profile instead of deleting pieces.
-& cargo clean --profile dev
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $runtime @arguments
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-$cleanupParams.Remove('RequestStaleDebugCompaction')
-& (Join-Path $PSScriptRoot 'cleanup-target.ps1') @cleanupParams
-exit $LASTEXITCODE
+exit $cleanupExit
