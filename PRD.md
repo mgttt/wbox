@@ -3149,6 +3149,11 @@ Job 启动：子进程能读取 canary，但覆盖已有文件和创建新文件
 `INTERNET_CLIENT_SERVER`（`S-1-15-3-2`）和
 `PRIVATE_NETWORK_CLIENT_SERVER`（`S-1-15-3-3`），但 SID 正确不等于流量生效。
 
+当前 platform catalog 已扩展为 12 类 Windows well-known capability，wbox 通过
+`CapabilitySid::from_kind()` 保持显式复用；这只证明 SID 构造、所有权和属性转换
+边界，不会自动授予用户库、证书、企业认证或可移动存储权限。W8 的网络产品开关
+仍以外部 private peer 的真实流量门禁为准。
+
 Windows 真机已经排除两个错误判据：
 
 1. `TcpListener::bind(0.0.0.0:0)` 在空 capability、仅客户端、Internet server、
