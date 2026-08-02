@@ -2680,7 +2680,7 @@ TODO-WINDOW
 ├── W88 AppContainer profile/SID 生命周期原语下沉                                      [done] owned SID + explicit lifecycle
 ├── W89 AppContainer well-known capability SID 构造下沉                                [done] typed kind + aligned owner
 ├── W90 Windows 原生进程参数编码拆为零依赖 process-conventions                         [done] argv/env block + explicit policy
-├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [next] 7.6 GiB 实测阻塞 Quick
+├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [done] 4 GiB gate + exact rebuild
 ├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
@@ -4734,9 +4734,16 @@ wbox 删除本地 `push_cmdline_arg` 和环境块拼接算法，直接引用 pla
 本轮第一次 Quick 在根测试 466/3 已通过后因 D 盘只余约 380 MiB 失败：编译器无法写入
 `.d`/`query-cache.bin`。取证显示 `target/debug` 已达 7.6 GiB，显式清空 incremental 后仍
 主要由不同 platform git revision 留下的 `deps/build` 构成；`cargo clean --profile dev`
-回收 7.6 GiB 后 Quick 通过并由常规清理器再释放 111.9 MiB。`W91` 必须在不误删当前可复用
-依赖、运行中 Cargo 或 release 产物的前提下识别陈旧 revision artifact；本轮手工回收只解除
-磁盘阻塞，不算自动清理完成。
+回收 7.6 GiB 后 Quick 通过并由常规清理器再释放 111.9 MiB。`W91` 现由 Cargo dep-info
+中的精确 checkout revision 对照 `Cargo.lock`：只有 wrapper 已完成 Cargo、发现旧
+`agenterm-platform` revision 且 `target/debug` 超过默认 4 GiB 时才请求压缩。wrapper
+随后调用 `cargo clean --profile dev`，再重跑原 build/test 命令恢复当前 revision 的可复用
+产物；build 侧只允许默认宿主 debug 命令请求该流程，release、指定 package、交叉 target
+和自定义参数均不因宿主 debug 状态被重跑。不按时间猜测依赖闭包、不删除 release。真实旧
+`5f4d8dd` 取证以 1 MiB 测试阈值触发并回收 407.5 MiB，随后 Quick 306 项再次通过，
+release `wbox.exe` SHA-256 前后相同；合成旧 revision 还验证了 `build.ps1` 会重建当前
+debug `wbox.exe`。独立 fixture 在 PowerShell
+5.1/7.4 均验证 current revision 返回 0、stale revision 返回专用请求码 75。
 
 `W92` 修复 `test-windows-product.ps1` 对 PowerShell 7/.NET Core 的隐式依赖：fixture
 文本改由 `UTF8Encoding(false)` 写入，不再使用 PowerShell 5.1 不认识的 `utf8NoBOM`

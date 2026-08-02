@@ -4,8 +4,11 @@ param(
     [switch]$KeepIncremental,
     [switch]$CleanIncremental,
     [switch]$CargoFinished,
+    [switch]$RequestStaleDebugCompaction,
     [ValidateRange(1, 1048576)]
     [int]$MaxIncrementalSizeMiB = 512,
+    [ValidateRange(1, 1048576)]
+    [int]$MaxDebugSizeMiB = 4096,
     [ValidateRange(1, 100)]
     [int]$KeepIncrementalPerCrate = 1
 )
@@ -39,6 +42,8 @@ $targetPrefix = $targetRoot.TrimEnd(
 $removed = 0
 $removedFiles = 0
 $removedBytes = 0L
+$staleDebugCompactionRequired = $false
+$staleDebugCompactionExitCode = 75
 
 function Remove-TargetDirectory {
     param([Parameter(Mandatory)][System.IO.DirectoryInfo]$Directory)
@@ -245,6 +250,77 @@ foreach ($file in $temporaryFiles) {
     Remove-TargetFile -File $file
 }
 
+if ($RequestStaleDebugCompaction -and $CargoFinished) {
+    # Cargo dep-info retains the exact git checkout revision. Use it only to
+    # request a Cargo-coordinated profile rebuild; never infer an artifact
+    # dependency closure and delete individual deps/fingerprints here.
+    $lockPath = Join-Path $repoRoot "Cargo.lock"
+    $debugRoot = Join-Path $targetRoot "debug"
+    $depsRoot = Join-Path $debugRoot "deps"
+    if ((Test-Path -LiteralPath $lockPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $depsRoot -PathType Container)) {
+        $lockText = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8
+        $platformRevision = $null
+        foreach ($package in [regex]::Matches(
+                $lockText,
+                '(?ms)^\[\[package\]\]\r?\n(?<body>.*?)(?=^\[\[package\]\]|\z)'
+            )) {
+            $body = $package.Groups["body"].Value
+            if ($body -match '(?m)^name = "agenterm-platform"\s*$' -and
+                $body -match '(?m)^source = "git\+[^"#]+(?:\?[^"#]*)?#(?<revision>[0-9a-fA-F]{40})"\s*$') {
+                $platformRevision = $Matches["revision"].ToLowerInvariant()
+                break
+            }
+        }
+
+        if ($platformRevision) {
+            $staleRevisions = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($depInfo in @(
+                    Get-ChildItem -LiteralPath $depsRoot -File `
+                        -Filter "agenterm_platform-*.d" -Force
+                )) {
+                try {
+                    $depText = Get-Content -LiteralPath $depInfo.FullName -Raw -ErrorAction Stop
+                } catch {
+                    continue
+                }
+                foreach ($checkout in [regex]::Matches(
+                        $depText,
+                        '[\\/]git[\\/]checkouts[\\/][^\\/]+[\\/](?<revision>[0-9a-fA-F]{7,40})[\\/]crates[\\/]agenterm-platform[\\/]'
+                    )) {
+                    $revision = $checkout.Groups["revision"].Value.ToLowerInvariant()
+                    if (-not $platformRevision.StartsWith(
+                            $revision,
+                            [System.StringComparison]::OrdinalIgnoreCase
+                        )) {
+                        [void]$staleRevisions.Add($revision)
+                    }
+                }
+            }
+
+            if ($staleRevisions.Count -gt 0) {
+                $debugBytes = (Get-ChildItem -LiteralPath $debugRoot -File -Recurse -Force `
+                        -ErrorAction SilentlyContinue |
+                    Measure-Object -Property Length -Sum).Sum
+                if ($null -eq $debugBytes) {
+                    $debugBytes = 0L
+                }
+                $maxDebugBytes = [long]$MaxDebugSizeMiB * 1MB
+                if ([long]$debugBytes -gt $maxDebugBytes) {
+                    $staleDebugCompactionRequired = $true
+                    $compactionMessage = (
+                        "target cleanup: debug is {0:N1} MiB and contains stale " +
+                        "agenterm-platform revision(s) {1}; requesting Cargo-coordinated compaction"
+                    ) -f ($debugBytes / 1MB), (($staleRevisions | Sort-Object) -join ",")
+                    Write-Host $compactionMessage
+                }
+            }
+        }
+    }
+}
+
 $released = if ($removedBytes -ge 1GB) {
     "{0:N2} GiB" -f ($removedBytes / 1GB)
 } elseif ($removedBytes -ge 1MB) {
@@ -253,4 +329,7 @@ $released = if ($removedBytes -ge 1GB) {
     "{0:N1} KiB" -f ($removedBytes / 1KB)
 }
 Write-Host "target cleanup: removed $removed regenerable director$(if ($removed -eq 1) { 'y' } else { 'ies' }) and $removedFiles temporary file$(if ($removedFiles -eq 1) { '' } else { 's' }); released $released"
+if ($staleDebugCompactionRequired) {
+    exit $staleDebugCompactionExitCode
+}
 exit 0
