@@ -2689,6 +2689,7 @@ TODO-WINDOW
 ├── W97 精确目标进程 HANDLE 交付凭据提升为公共 facade                                 [done] commit/rollback receipt
 ├── W98 AppContainer profile/SID/capability 提升为公共跨宿主契约                       [done] typed Unsupported
 ├── W99 Windows SlotPermit 目录别名身份规范化与竞争门禁                               [done] 复用 PathLock 规范化
+├── W100 Unix/macOS private-directory 非目录拒绝契约                              [done] 与 Windows InvalidInput 一致
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4863,6 +4864,11 @@ wbox 只改为消费公共 facade，继续持有 profile 名称校验、已存�
 `PathLock` 的绝对化、词法归一化、已有路径 canonicalize、缺失尾段和大小写折叠规则；
 新增真实目录别名竞争门禁，跨进程 PathLock 与 Unix 行为保持不变。wbox 已 pin 到包含
 该修复的平台 revision，产品策略仍由 wbox 持有。
+
+`W100` 统一 `protect_private_directory` 的输入契约：Windows、Linux 和 macOS 对文件、
+不存在路径或其他非目录输入均返回 `InvalidInput`，不会把普通文件误当成私有目录修改权限。
+公共 filesystem 测试覆盖文件输入，Windows 真机与 Unix 编译路径均通过；目录权限、ACL
+继承和原子发布的具体策略仍由各宿主 adapter 实现。
 
 `M4` 是 M5/M6 的共同前置：仅有 `setpgid/killpg` 只能回收进程树，不构成文件、
 网络或凭证隔离。找不到可公开分发且可持续门禁的系统机制时必须保持 planned，
