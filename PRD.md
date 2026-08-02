@@ -2682,6 +2682,7 @@ TODO-WINDOW
 ├── W90 Windows 原生进程参数编码拆为零依赖 process-conventions                         [done] argv/env block + explicit policy
 ├── W91 不同 platform git revision 的陈旧 debug deps/build 回收                        [done] 4 GiB gate + exact rebuild
 ├── W92 Windows 产品门禁兼容系统内置 PowerShell 5.1                                   [done] UTF-8 + argv/stderr fallback
+├── W93 Windows 目录树有限授权下沉并删除本地 ACL FFI                                  [done] typed SID + no-follow DACL merge
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4021,9 +4022,9 @@ Linux namespace。Agenterm 的 platform crate 到位后接在机制层，不能�
 wbox 的 3×3×2 路由、优先级与能力状态。
 
 `M2` 当前固定 `agenterm-platform` commit
-`dd13b01b521ecd69c37fb958106e44b87931946e`，关闭 default features，按消费包启用
+`c85ca0cd83b92b76d5da0703becd17da7d42a24b`，关闭 default features，按消费包启用
 `entropy`、`filesystem`、`locking`、轻量 `process-control`/`process-metrics`、
-`process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
+`process-image`/`process-observation`/`process-spawn`、`filesystem-entry`/`directory-access`/`filesystem-cleanup`/`filesystem-publish`/`filesystem-usage`、`shared-memory`、零依赖 `hardware`、独立 `host-memory`、
 `cache-hierarchy`、`processor-topology`、`processor-affinity`、`virtualization-probe` 与
 `storage`。
 该 revision 将 entropy 的公共 facade 与 Windows/Linux/macOS 原生 adapter 分离，
@@ -4752,6 +4753,24 @@ PowerShell 5.1 上按 Windows CRT 规则编码 `.Arguments`。预期失败、轮
 清理由结构化 `ExitCode`/stdout/stderr 捕获承载，避免 5.1 把原生 stderr 提升为
 `NativeCommandError` 后被全局 `ErrorActionPreference=Stop` 提前终止。系统内置 PowerShell
 5.1 与 PowerShell 7.4 均完整通过 WP.1-WP.27 产品门禁。
+
+`W93` 将产品无关的 Windows 目录树授权下沉为独立 `directory-access` feature：公共
+facade 以二进制 SID 或类型化 `ALL APPLICATION PACKAGES` principal 接收
+`ReadExecute`/`ModifyContents`，Windows adapter 验证 SID、保留原 DACL 后合并有限 ACE，
+拒绝 link-like 根并跳过 link-like 子项；`ModifyContents` 明确不含 `WRITE_DAC`/
+`WRITE_OWNER`。Linux/macOS 保持同一 API，对 Windows SID 返回类型化 `Unsupported`，
+不把 Unix mode bits 冒充等价 ACL。最小 feature 只引入 `windows-sys`，Windows 16 tests、
+严格 Clippy、全 feature `201 passed` 以及 Linux/macOS 交叉编译通过；junction fixture
+证明树外目标不被遍历，既有 protected/current-user-only private-directory ACL 门禁也保持
+通过。
+
+wbox 删除 `ConvertStringSidToSidW`、DACL FFI、LocalFree guard、本地 reparse 判断和权限
+掩码，只保留“共享镜像给全部 AppContainer RX、私有 rootfs/tmp 只给目标 profile
+modify”的产品策略；profile SID 直接以 owned binary SID 传递，不再字符串往返。原有
+AppContainer ACL 定向门禁继续证明 RX 允许读取但拒绝覆盖/新建，继承目录 HANDLE 也不能
+绕过子项 DACL。wbox Quick、根测试 `465 passed / 3 ignored`、release WP.1-WP.27 与固定
+Ubuntu 24.04 WU.1/WU.2 均通过；三个 ignored 仍分别要求公网、外部私网 peer 或 Windows
+Private 网络适配器，与目录授权无关。
 
 第二个消费点已把 OCI 默认架构从 `cfg!(windows)` 收敛为显式 HostOs/provider
 策略：Windows/macOS 模拟路线默认 `amd64`，Linux 原生路线按 target ISA 映射；

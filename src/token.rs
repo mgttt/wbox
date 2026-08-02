@@ -92,16 +92,13 @@ impl AppContainerProfile {
         })
     }
 
-    /// 在不创建 profile 的情况下派生其确定性 SID 字符串。
+    /// 在不创建 profile 的情况下派生其确定性 SID。
     ///
     /// Windows OCI 私有 rootfs 必须在启动 AppContainer 前完成 ACL 授权；
     /// profile 名到 SID 的映射是确定性的，因此可先派生并只向该实例授权。
-    pub(crate) fn derived_sid_string(name: &str) -> Result<String> {
+    pub(crate) fn derived_sid(name: &str) -> Result<OwnedAppContainerSid> {
         crate::backend::validate_container_name(name)?;
-        let sid = Self::derive_sid(name)?;
-        sid.string().map_err(|error| {
-            crate::error::WboxError::profile(format!("转换 AppContainer SID 失败：{error}"))
-        })
+        Self::derive_sid(name)
     }
 
     /// 打开运行中容器已经注册的 profile，不创建或删除系统注册项。`exec`
