@@ -79,11 +79,14 @@ Windows 侧的 wbox 是 Rust 实现的 portable 进程容器，默认不依赖 W
 - 词法 `..` 归一化有宿主根目录下限，`C:\\..\\x` 不会退化为盘符相对路径；同一规则同时用于 `PathLock` 与 `SlotPermit`。
 - `.`、`..`、分隔符和 UNC/长路径前缀处理。
 - 已存在路径使用 canonical identity。
+- 已存在目标同时使用规范化路径 identity 与 `file_identity` 的 volume/object identity：
+  路径锁覆盖删除后重建，object 锁合并硬链接别名；两者按稳定顺序获取，避免别名锁反转。
 - 不存在的中间目录和目标使用 missing-tail identity。
 - Windows 大小写不敏感身份折叠。
 - `SlotPermit` 复用相同路径身份规则。
 - 跨进程、大小写别名、`child/../path` 别名和 missing-tail 别名均有测试。
 - Windows 真机还覆盖非 ASCII 文件名的 Unicode 大小写别名竞争，并由跨进程子进程门禁复核。
+- Windows 真机覆盖普通路径与硬链接别名的竞争，验证硬链接不能绕过现有锁。
 
 Unix/Linux/macOS 对应实现使用文件锁和 `flock`，并有目录别名与跨进程门禁；产品层只依赖统一 `PathLock` 契约。
 

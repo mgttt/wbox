@@ -2756,6 +2756,7 @@ TODO-WINDOW
 ├── W109 filesystem 最小 feature 四目标 CI 编译门禁                                   [done] 补齐 Windows ABI 泄漏
 ├── W110 wbox-machine 非当前宿主硬件事实隔离                                       [done] 不泄漏本机 ISA/CPU/并行度
 ├── W111 Windows PathLock Unicode 大小写别名门禁                                  [done] agenterm-platform 真机测试
+├── W112 Windows PathLock 硬链接与替换双重身份门禁                               [done] 路径锁 + file identity 锁
 └── R8 是否合并成单一 wbox.exe                            [待决] 见本节下方；不是 Rust-only 的阻塞项
 ```
 
@@ -4989,6 +4990,12 @@ wbox 只改为消费公共 facade，继续持有 profile 名称校验、已存�
 `PathLock` 的绝对化、词法归一化、已有路径 canonicalize、缺失尾段和大小写折叠规则；
 新增真实目录别名竞争门禁，跨进程 PathLock 与 Unix 行为保持不变。wbox 已 pin 到包含
 该修复的平台 revision，产品策略仍由 wbox 持有。
+
+`W112` 补齐 Windows `PathLock` 的两类身份语义：已存在目标除了保留规范化路径锁，
+还按 `file_identity` 的 volume/object identity 加锁，使硬链接别名无法绕过互斥；
+路径锁本身仍保留，因此删除后重建或替换目标时不会丢失路径级协调。两把锁按稳定
+排序获取，避免不同别名之间形成跨进程锁顺序反转；wbox pin 到
+`agenterm-platform` `b474f8b`，并由 Windows 真机硬链接门禁验证。
 
 `W100` 统一 `protect_private_directory` 的输入契约：Windows、Linux 和 macOS 对文件、
 不存在路径或其他非目录输入均返回 `InvalidInput`，不会把普通文件误当成私有目录修改权限。
