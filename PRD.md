@@ -2610,7 +2610,7 @@ TODO-WINDOW
 ├── W18 guest known-failure 收紧到能力级                     [done] t_signalfd 75/0 在基线外
 ├── W19 3×3×2 路线、优先级与机器契约                         [done] contract revision 7
 ├── W20 `wbox-linux` CPU/内存/ELF/Linux ABI 耦合审计          [done] 只读依赖图 + 反向边
-├── W21 `MachineCore` / personality / host ABI 最小契约       [planned] 先文档后接口
+├── W21 `MachineCore` / personality / host ABI 最小契约       [active] 首批 MachineCore/HostAbi；AddressSpace/TaskScheduler 待边界验证
 ├── W22 x86-64 core 抽取前特征门禁                            [planned] 禁止先移动代码
 ├── W23 AArch64 预填路线的工具链、fixture 与门禁设计           [planned]
 ├── W24 运行状态 schema v2：ISA/provider/artifact 身份         [planned]
@@ -2742,6 +2742,12 @@ CI 矩阵，避免完整 feature 构建掩盖 Windows ABI 泄漏；Windows 最�
 未探测的路线候选，不再把 Windows 当前机器的 native ISA、CPU feature、逻辑处理器
 数量带入 Linux/macOS 假想路由；`host=None` 继续保留原有的“读取当前宿主基础事实”
 兼容语义。wbox-machine 单测 30 项和 lab 集成测试通过。
+
+`W21` 首批冻结 `wbox_machine::MachineCore` 与 `HostAbi`：它把宿主 ABI、guest
+personality、ISA、provider、隔离模型、优先级和可用性收束为可复制的纯 Rust 值，
+并从已有 `Route` 构造，不执行宿主探测、不改变路由决策。`AddressSpace` 和
+`TaskScheduler` 暂不凭空建接口；须先完成 W20 的 CPU/trap 与 Linux personality
+反向依赖审计，再确定 syscall/trap 返回边界。
 
 `W32` 由 `wbox-hpc-lab` 提供 scalar oracle、显式 AVX2、共享借用线程、AVX2×线程和
 三宿主命名共享映射多进程实验；所有路线校验和相同，进程启动计入耗时，重复样本取

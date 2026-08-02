@@ -159,6 +159,8 @@ workspace 当前包含：
 - `wbox-tls`：第一方 TLS 实验实现。
 - `wbox-linux`：纯 Rust ELF/CPU/syscall guest runtime。
 - `wbox-machine`：ISA、硬件、guest ABI、执行 provider 和三宿主矩阵契约。
+- `MachineCore`：将宿主 ABI、guest personality、ISA、provider 和 isolation
+  收束为可测试的最小路由值；宿主探测仍由 `agenterm-platform` 提供。
 - `wbox-hpc-lab`：CPU、共享内存和并行计算实验。
 - `agenterm-platform`：跨项目成立的宿主机制。
 

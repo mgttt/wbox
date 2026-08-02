@@ -7,6 +7,7 @@
 mod accelerator;
 mod architecture;
 mod artifact;
+mod core;
 mod device;
 mod guest;
 mod memory;
@@ -28,6 +29,7 @@ pub use architecture::{
     ProcessorTopologyError, ProcessorTopologyErrorKind, ProcessorTopologyFacts,
 };
 pub use artifact::{inspect_artifact, ArtifactError, ArtifactIdentity};
+pub use core::{host_abi, HostAbi, MachineCore};
 pub use device::{esp32_routes, DeviceFamily, DeviceRoute, DeviceRouteStatus, FirmwareEnvironment};
 pub use guest::{guest_contract, BinaryFormat, GuestAbi, GuestContract, GuestOs};
 pub use memory::{
